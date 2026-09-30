@@ -429,7 +429,7 @@ async fn open_producer(
                 .get(&name)
                 .unwrap_or_else(|| panic!("client '{name}' must be connected"))
                 .clone();
-            let opened = tokio::time::timeout(
+            let opened = nervix_primitives::time::timeout(
                 PRODUCER_EXPECTATION_TIMEOUT,
                 client.open_ingestor(domain, ingestor, fields, limits),
             )
@@ -525,7 +525,7 @@ async fn open_named_producer(
             Instant::now() < deadline,
             "producer '{producer}' was still refused after {within:?}: {refused:?}"
         );
-        tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+        nervix_primitives::time::sleep(PRODUCER_POLL_INTERVAL).await;
     }
 }
 
@@ -561,7 +561,7 @@ async fn refused_open_with(
         let endpoint_starting = refused.refusal == ClientProducerRefusal::EndpointUnavailable
             && expected != ClientProducerRefusal::EndpointUnavailable.as_ref();
         if endpoint_starting && Instant::now() < deadline {
-            tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+            nervix_primitives::time::sleep(PRODUCER_POLL_INTERVAL).await;
             continue;
         }
         assert_eq!(
@@ -961,7 +961,7 @@ async fn then_batch_remains_pending(world: &mut ScenarioWorld, batch: String, du
         .unwrap_or_else(|| panic!("batch '{batch}' was not submitted"));
     match &submission.state {
         SubmissionState::Native(native) => {
-            tokio::time::sleep(duration).await;
+            nervix_primitives::time::sleep(duration).await;
             assert!(
                 native.answered.is_none()
                     && native.wait.as_ref().is_some_and(|wait| !wait.is_finished()),
@@ -1013,7 +1013,7 @@ async fn answered(world: &mut ScenarioWorld, batch: &str) -> Answered {
             let Some(wait) = native.wait.as_mut() else {
                 panic!("nobody waits for batch '{batch}' any more");
             };
-            let joined = tokio::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, wait)
+            let joined = nervix_primitives::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, wait)
                 .await
                 .unwrap_or_else(|_| panic!("batch '{batch}' was not answered in time"));
             let result = joined.unwrap_or_else(|error| panic!("batch '{batch}' task: {error}"));
@@ -1133,10 +1133,12 @@ async fn submission_id(world: &ScenarioWorld, batch: &str) -> SubmissionId {
         panic!("only the Rust client's batches carry a submission identity");
     };
     let mut id = native.id.clone();
-    let identified =
-        tokio::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, id.wait_for(|id| id.is_some()))
-            .await
-            .unwrap_or_else(|_| panic!("the producer did not take batch '{batch}' in time"));
+    let identified = nervix_primitives::time::timeout(
+        PRODUCER_EXPECTATION_TIMEOUT,
+        id.wait_for(|id| id.is_some()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the producer did not take batch '{batch}' in time"));
     let identified = identified.unwrap_or_else(|_| panic!("batch '{batch}' was never taken"));
     identified.expect("the wait ended on an identity")
 }
@@ -1221,7 +1223,7 @@ async fn then_producer_reports_admission(
                 "producer '{producer}' reports admission {:?}, not {expected:?}",
                 native.admission()
             );
-            tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+            nervix_primitives::time::sleep(PRODUCER_POLL_INTERVAL).await;
         },
         ScenarioProducer::Raw {
             session,
@@ -1282,7 +1284,7 @@ async fn then_producer_ends(world: &mut ScenarioWorld, producer: String, expecte
                         Instant::now() < deadline,
                         "producer '{producer}' did not end in time"
                     );
-                    tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+                    nervix_primitives::time::sleep(PRODUCER_POLL_INTERVAL).await;
                 }
             }
         },
@@ -1327,9 +1329,10 @@ async fn when_producer_is_closed(world: &mut ScenarioWorld, producer: String) {
                     continue;
                 };
                 if let Some(wait) = state.wait.take() {
-                    let joined = tokio::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, wait)
-                        .await
-                        .unwrap_or_else(|_| panic!("a batch of '{producer}' was not answered"));
+                    let joined =
+                        nervix_primitives::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, wait)
+                            .await
+                            .unwrap_or_else(|_| panic!("a batch of '{producer}' was not answered"));
                     let result = joined.unwrap_or_else(|error| panic!("a batch task: {error}"));
                     let answered =
                         result.unwrap_or_else(|error| panic!("a batch of '{producer}': {error}"));
@@ -1338,7 +1341,7 @@ async fn when_producer_is_closed(world: &mut ScenarioWorld, producer: String) {
             }
             let native = StdArc::try_unwrap(native)
                 .unwrap_or_else(|_| panic!("producer '{producer}' is still shared"));
-            tokio::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, native.close())
+            nervix_primitives::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, native.close())
                 .await
                 .unwrap_or_else(|_| panic!("producer '{producer}' was not closed in time"))
                 .unwrap_or_else(|error| panic!("producer '{producer}' close failed: {error:?}"));
@@ -1422,6 +1425,6 @@ async fn then_leader_describes_ingestor_with(
             Instant::now() < deadline,
             "DESCRIBE INGESTOR {ingestor} never reported {missing:?}; last output:\n{output}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }

@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -18,6 +18,7 @@ use nervix_primitives::{
         blocking::Mutex,
     },
     thread,
+    time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use rdkafka::{

@@ -705,12 +705,13 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use fjall::Database;
     use futures_util::FutureExt as _;
     use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
     use tempfile::tempdir;
-    use tokio::time::Duration;
     use triomphe::Arc;
 
     use super::*;

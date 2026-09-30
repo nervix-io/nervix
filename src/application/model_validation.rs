@@ -7,6 +7,8 @@
 //! - **Depends on.** The registry's active graph, the resource store and the VM's type inference.
 //! - **Must not know.** How a validated model is scheduled or executed.
 
+use std::time::Duration;
+
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
@@ -19,7 +21,6 @@ use ort::{
     session::Session,
     value::{TensorElementType, ValueType},
 };
-use tokio::time::Duration;
 
 use super::{
     session_service::SessionServiceImpl,
@@ -528,7 +529,7 @@ impl SessionServiceImpl {
         let path = path.to_path_buf();
         let processor_name = processor.name.clone();
         let processor_file = processor.file.clone();
-        let model_metadata = tokio::time::timeout(
+        let model_metadata = nervix_primitives::time::timeout(
             Duration::from_secs(30),
             nervix_primitives::task::spawn_blocking(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -38,11 +38,12 @@ use hickory_proto::{
 };
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
+    net::UdpSocket,
     sync::{blocking::Mutex, oneshot},
     task::JoinHandle,
+    time::timeout,
 };
 use nervix_recovery::Discarded as _;
-use tokio::{net::UdpSocket, time::timeout};
 
 /// The distinct names whose questions the authority counts one by one.
 pub const MAX_COUNTED_NAMES: usize = 1_024;

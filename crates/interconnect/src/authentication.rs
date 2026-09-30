@@ -11,14 +11,12 @@ use std::{net::SocketAddr, sync::Arc as StdArc, time::Duration};
 
 use error_stack::Report;
 use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_primitives::time::{Instant, timeout};
 use rustls::{
     pki_types::{CertificateDer, ServerName},
     time_provider::{DefaultTimeProvider, TimeProvider},
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time::{Instant, timeout},
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::{TlsAcceptor, TlsConnector, client, server};
 
 use super::{TlsConfigBundle, TlsConfigError, TransportError};

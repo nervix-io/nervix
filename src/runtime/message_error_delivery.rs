@@ -619,7 +619,7 @@ mod tests {
             .expect("message-error task must accept delivery");
 
         assert_eq!(
-            tokio::time::timeout(
+            nervix_primitives::time::timeout(
                 REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
@@ -688,7 +688,7 @@ mod tests {
         runtime.force_flush_domain(&domain);
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+            nervix_primitives::time::timeout(Duration::from_secs(2), completion.wait())
                 .await
                 .expect("a force flush must publish a message error its cadence still holds"),
             AckOutcome::Ack
@@ -753,13 +753,13 @@ mod tests {
             .expect("the replacement route accepts its error");
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), first_completion.wait())
+            nervix_primitives::time::timeout(Duration::from_secs(2), first_completion.wait())
                 .await
                 .expect("the preceding route drains on replacement"),
             AckOutcome::Ack
         );
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), second_completion.wait())
+            nervix_primitives::time::timeout(Duration::from_secs(2), second_completion.wait())
                 .await
                 .expect("the replacement applies its immediate cadence"),
             AckOutcome::Ack
@@ -805,7 +805,7 @@ mod tests {
             .expect("message-error task must accept delivery");
 
         assert_eq!(
-            tokio::time::timeout(
+            nervix_primitives::time::timeout(
                 REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )

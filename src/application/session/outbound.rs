@@ -411,7 +411,7 @@ mod tests {
     use nervix_client_wire::{
         NoticeLevel, ServerEvent, ServerMessage, ServerNotice, SessionLimits, VerifiedFrame,
     };
-    use tokio::time::timeout;
+    use nervix_primitives::time::timeout;
 
     use super::*;
 

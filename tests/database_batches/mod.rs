@@ -628,9 +628,9 @@ async fn batch_table_records_writes(
             "timed out waiting for {sink:?} table {table} to record writes of {expected:?} rows; \
              observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
-    tokio::time::sleep(STABLE_READ_DELAY).await;
+    nervix_primitives::time::sleep(STABLE_READ_DELAY).await;
     let observed = sink.recorded_writes(world, &table).await;
     assert_eq!(
         observed, expected,
@@ -674,9 +674,9 @@ async fn batch_table_holds_exactly_these_rows(
             "timed out waiting for {sink:?} table {table} to hold exactly {expected:?}; observed \
              {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
-    tokio::time::sleep(STABLE_READ_DELAY).await;
+    nervix_primitives::time::sleep(STABLE_READ_DELAY).await;
     let observed = sink.rows(world, &table, &columns).await;
     assert_eq!(
         observed, expected,
@@ -705,6 +705,6 @@ async fn batch_table_holds_rows(
             "timed out waiting for {sink:?} table {table} to hold {expected} rows; observed \
              {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }

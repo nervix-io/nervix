@@ -72,64 +72,65 @@ impl Client {
             expected_fields,
             limits,
         });
-        let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                nervix_primitives::task::consume_budget().await;
-                let exchange = self.inner.exchange.lock().await.requests();
-                let (answer, answered) = oneshot::channel();
-                let request = request.clone();
-                nervix_primitives::task::spawn(async move {
-                    let result = async {
-                        let reply =
-                            request_on_exchange(&exchange, request, RequestKind::OpenEmitter)
-                                .await?;
-                        let ReplyBody::OpenEmitter(outcome) = reply.body else {
-                            return Err(Report::new(ClientError::unexpected_reply(
-                                RequestKind::OpenEmitter,
-                                reply.body,
-                            )));
-                        };
-                        let description = match outcome.disposition {
-                            OpenEmitterDisposition::Opened(opened) => *opened,
-                            OpenEmitterDisposition::Refused(refusal) => {
-                                return Err(Report::new(ClientError::ConsumerRefused {
-                                    refusal,
-                                    message: outcome.message,
-                                }));
-                            }
-                        };
-                        Ok(EmitterConsumer {
-                            inner: Arc::new(ConsumerInner {
-                                id: ConsumerId::opened_by(reply.request_id),
-                                description,
-                                exchange,
-                                closed: AtomicBool::new(false),
-                            }),
-                        })
+        let opened =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    let exchange = self.inner.exchange.lock().await.requests();
+                    let (answer, answered) = oneshot::channel();
+                    let request = request.clone();
+                    nervix_primitives::task::spawn(async move {
+                        let result = async {
+                            let reply =
+                                request_on_exchange(&exchange, request, RequestKind::OpenEmitter)
+                                    .await?;
+                            let ReplyBody::OpenEmitter(outcome) = reply.body else {
+                                return Err(Report::new(ClientError::unexpected_reply(
+                                    RequestKind::OpenEmitter,
+                                    reply.body,
+                                )));
+                            };
+                            let description = match outcome.disposition {
+                                OpenEmitterDisposition::Opened(opened) => *opened,
+                                OpenEmitterDisposition::Refused(refusal) => {
+                                    return Err(Report::new(ClientError::ConsumerRefused {
+                                        refusal,
+                                        message: outcome.message,
+                                    }));
+                                }
+                            };
+                            Ok(EmitterConsumer {
+                                inner: Arc::new(ConsumerInner {
+                                    id: ConsumerId::opened_by(reply.request_id),
+                                    description,
+                                    exchange,
+                                    closed: AtomicBool::new(false),
+                                }),
+                            })
+                        }
+                        .await;
+                        if let Err(Ok(consumer)) = answer.send(result) {
+                            drop(consumer);
+                        }
+                    });
+                    let attempt = answered
+                        .await
+                        .unwrap_or_else(|_| Err(Report::new(ClientError::SessionClosed)));
+                    let report = match attempt {
+                        Ok(consumer) => return Ok(consumer),
+                        Err(report) => report,
+                    };
+                    if !report.current_context().retryable_session_failure() {
+                        return Err(report);
                     }
-                    .await;
-                    if let Err(Ok(consumer)) = answer.send(result) {
-                        drop(consumer);
+                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                        SessionRecovery::Ready => {}
+                        SessionRecovery::Unavailable => return Err(report),
                     }
-                });
-                let attempt = answered
-                    .await
-                    .unwrap_or_else(|_| Err(Report::new(ClientError::SessionClosed)));
-                let report = match attempt {
-                    Ok(consumer) => return Ok(consumer),
-                    Err(report) => report,
-                };
-                if !report.current_context().retryable_session_failure() {
-                    return Err(report);
                 }
-                match self.recover_session(RecoveryMode::IfClosed).await? {
-                    SessionRecovery::Ready => {}
-                    SessionRecovery::Unavailable => return Err(report),
-                }
-            }
-            Err(Report::new(ClientError::SessionClosed))
-        })
-        .await;
+                Err(Report::new(ClientError::SessionClosed))
+            })
+            .await;
         opened.unwrap_or_else(|_| Err(Report::new(ClientError::RetryDeadline)))
     }
 }

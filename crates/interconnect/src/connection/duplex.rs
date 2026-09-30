@@ -24,8 +24,10 @@ use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
-use tokio::time::{Instant, timeout};
+use nervix_primitives::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Instant, timeout},
+};
 use triomphe::Arc;
 
 use super::{

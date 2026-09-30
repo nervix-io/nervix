@@ -433,7 +433,7 @@ impl RelayStateTask {
         grace: Duration,
     ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
-        match tokio::time::timeout(grace, &mut self.task).await {
+        match nervix_primitives::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
                 task: RelayTaskKind::State,
@@ -456,7 +456,7 @@ impl RelayOwnerTask {
         grace: Duration,
     ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
-        match tokio::time::timeout(grace, &mut self.task).await {
+        match nervix_primitives::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
                 task: RelayTaskKind::Owner,

@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -27,16 +22,9 @@ nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 pulsar = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "time",
-], optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["net", "sync"] }
 tokio-util = { workspace = true, features = ["codec"] }

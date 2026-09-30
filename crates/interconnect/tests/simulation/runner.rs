@@ -19,16 +19,19 @@ use std::{
     panic,
     panic::{AssertUnwindSafe, PanicHookInfo},
     sync::Arc as StdArc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::{
-    atomic::{AtomicU64, Ordering},
-    blocking::{
-        Mutex, Once, mpsc,
-        mpsc::{Receiver, RecvTimeoutError, SyncSender},
+use nervix_primitives::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        blocking::{
+            Mutex, Once, mpsc,
+            mpsc::{Receiver, RecvTimeoutError, SyncSender},
+        },
     },
+    unmodeled::time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use rustls::{pki_types::UnixTime, time_provider::TimeProvider};

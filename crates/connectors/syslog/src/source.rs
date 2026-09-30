@@ -19,14 +19,12 @@ use nervix_connector::{
 };
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
+    net::{TcpListener, UdpSocket},
     sync::{mpsc, watch},
     task::JoinSet,
 };
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    net::{TcpListener, UdpSocket},
-};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_rustls::TlsAcceptor;
 use tracing::debug;
 

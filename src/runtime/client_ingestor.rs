@@ -1675,7 +1675,8 @@ async fn await_client_acknowledgement(
 ) -> ClientAcknowledgement {
     loop {
         nervix_primitives::task::consume_budget().await;
-        let progress = tokio::time::timeout(ack_timeout, completion.wait_for_progress()).await;
+        let progress =
+            nervix_primitives::time::timeout(ack_timeout, completion.wait_for_progress()).await;
         match progress {
             Ok(AckProgress::Alive) => {}
             Ok(AckProgress::Complete(AckOutcome::Ack)) => {

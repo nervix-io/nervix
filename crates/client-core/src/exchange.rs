@@ -568,7 +568,7 @@ impl Exchange {
         let (frames, outbound) = mpsc::channel(REQUEST_FRAME_CAPACITY);
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
-        let response = tokio::time::timeout(connector.connect_timeout(), async {
+        let response = nervix_primitives::time::timeout(connector.connect_timeout(), async {
             client.ready().await.map_err(ClientError::ConnectServer)?;
             client
                 .streaming(

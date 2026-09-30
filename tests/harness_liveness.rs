@@ -66,6 +66,7 @@ mod tests {
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
     use nervix_primitives::{
+        net::TcpListener,
         stream::wrappers::{ReceiverStream, TcpListenerStream},
         sync::{
             CancellationToken, Notify,
@@ -74,15 +75,12 @@ mod tests {
             mpsc, oneshot,
         },
         task::JoinHandle,
+        time::{Instant, timeout},
     };
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::AppError;
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tempfile::TempDir;
-    use tokio::{
-        net::TcpListener,
-        time::{Instant, timeout},
-    };
     use tonic::{
         Request, Response, Status, Streaming,
         body::Body,
@@ -1270,7 +1268,7 @@ mod tests {
         let late = STATUS_WAIT_BUDGET
             .checked_sub(Duration::from_secs(1))
             .assured("the status wait budget is longer than one second");
-        tokio::time::advance(late).await;
+        nervix_primitives::time::advance(late).await;
         assert_eq!(
             phase.nested(STATUS_REQUEST_TIMEOUT).budget(),
             Duration::from_secs(1)
@@ -2013,7 +2011,7 @@ mod tests {
         assert_eq!(queued.identity.scenario, "phase ages");
 
         // A scenario that has not reached its first step ages in the phase it is waiting in.
-        tokio::time::advance(Duration::from_secs(30)).await;
+        nervix_primitives::time::advance(Duration::from_secs(30)).await;
         let waiting = published(&scenario);
         assert_eq!(waiting.phase, ScenarioPhase::Queued);
         assert_eq!(waiting.phase_age(), Duration::from_secs(30));
@@ -2023,7 +2021,7 @@ mod tests {
         assert_eq!(started.phase, ScenarioPhase::Body);
         assert_eq!(started.phase_age(), Duration::ZERO);
         assert_eq!(started.age(), Duration::from_secs(30));
-        tokio::time::advance(Duration::from_secs(5)).await;
+        nervix_primitives::time::advance(Duration::from_secs(5)).await;
         let running = published(&scenario);
         assert_eq!(running.phase, ScenarioPhase::Body);
         assert_eq!(running.phase_age(), Duration::from_secs(5));
@@ -2797,7 +2795,7 @@ mod tests {
             ],
         );
         let stalled_before_the_budget = Duration::from_secs(7);
-        tokio::time::advance(stalled_before_the_budget).await;
+        nervix_primitives::time::advance(stalled_before_the_budget).await;
 
         let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
 
@@ -3093,14 +3091,12 @@ mod tests {
 mod http_receiver_tests {
     use std::{
         net::{Ipv4Addr, SocketAddr},
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use meticulous::{OptionExt as _, ResultExt as _};
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpStream,
-    };
+    use nervix_primitives::{net::TcpStream, time::Instant};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::http_receiver::{
         ClientCertificatePolicy, HttpReceiver, RECEIVER_CONNECTION_STOP_BUDGET, ReceiverFault,
@@ -3140,7 +3136,7 @@ mod http_receiver_tests {
             .await
             .assured("the receiver reads what a client writes");
         let mut response = Vec::new();
-        tokio::time::timeout(WITHIN, stream.read_to_end(&mut response))
+        nervix_primitives::time::timeout(WITHIN, stream.read_to_end(&mut response))
             .await
             .assured("the receiver closes a connection its script ends")
             .assured("reading from a loopback connection succeeds");
@@ -3297,7 +3293,7 @@ mod http_receiver_tests {
                 .parse()
                 .assured("the released response is valid"),
         );
-        let released = tokio::time::timeout(WITHIN, held)
+        let released = nervix_primitives::time::timeout(WITHIN, held)
             .await
             .assured("the release answers the held request")
             .assured("the held client does not panic")
@@ -3435,12 +3431,12 @@ mod http_receiver_tests {
             started.elapsed() < RECEIVER_CONNECTION_STOP_BUDGET,
             "held connections observe the stop: {stop}"
         );
-        let held = tokio::time::timeout(WITHIN, held)
+        let held = nervix_primitives::time::timeout(WITHIN, held)
             .await
             .assured("the held client sees the connection close")
             .assured("the held client does not panic");
         assert!(held.is_empty(), "a held response writes nothing");
-        let body = tokio::time::timeout(WITHIN, body)
+        let body = nervix_primitives::time::timeout(WITHIN, body)
             .await
             .assured("the stalled body ends when the receiver stops")
             .assured("the stalled body reader does not panic");
@@ -3507,7 +3503,7 @@ mod http_receiver_tests {
         let mut head = Vec::new();
         let mut byte = [0_u8; 1];
         while !head.ends_with(b"\r\n\r\n") {
-            let read = tokio::time::timeout(WITHIN, stream.read(&mut byte))
+            let read = nervix_primitives::time::timeout(WITHIN, stream.read(&mut byte))
                 .await
                 .assured("the receiver writes a response head")
                 .assured("reading from a loopback connection succeeds");
@@ -3811,8 +3807,8 @@ mod grpc_receiver_tests {
 
     use bytes::Bytes;
     use meticulous::ResultExt as _;
+    use nervix_primitives::net::TcpStream;
     use nervix_recovery::Discarded as _;
-    use tokio::net::TcpStream;
 
     use crate::{
         grpc_receiver::{GrpcAnswer, GrpcReceiver, MAX_REQUEST_MESSAGE_BYTES},
@@ -3883,7 +3879,7 @@ mod grpc_receiver_tests {
         stream
             .send_data(body, true)
             .assured("an open call accepts its request");
-        let response = tokio::time::timeout(WITHIN, response)
+        let response = nervix_primitives::time::timeout(WITHIN, response)
             .await
             .assured("the receiver ends every call it does not hold");
         let Ok(response) = response else {
@@ -4083,13 +4079,13 @@ mod redis_client_tests {
     use std::{net::Ipv4Addr, time::Duration};
 
     use meticulous::ResultExt as _;
-    use nervix_primitives::sync::oneshot;
-    use redis::{AsyncCommands as _, Value};
-    use tokio::{
-        io::AsyncWriteExt as _,
+    use nervix_primitives::{
         net::TcpListener,
+        sync::oneshot,
         time::{sleep, timeout},
     };
+    use redis::{AsyncCommands as _, Value};
+    use tokio::io::AsyncWriteExt as _;
 
     use crate::redis_client::{REDIS_REQUEST_BUDGET, TestRedisClient};
 

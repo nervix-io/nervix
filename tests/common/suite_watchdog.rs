@@ -36,12 +36,13 @@
 //! [`SUITE_CLEANUP_RESERVE`] after its budget expires. What is left is the budget, and a healthy
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
 
-use std::{collections::BTreeMap, fmt, future::Future, io::Write as _, sync::Arc as StdArc};
+use std::{
+    collections::BTreeMap, fmt, future::Future, io::Write as _, sync::Arc as StdArc, time::Duration,
+};
 
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::blocking::{LazyLock, Mutex};
 use nervix_recovery::Reported as _;
-use tokio::time::Duration;
 
 use super::{
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,

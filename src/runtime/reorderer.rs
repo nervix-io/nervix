@@ -177,9 +177,11 @@ pub(super) async fn flush_branch_reorderer_output(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use arrow_array::BinaryArray;
     use nervix_models::{ParseAsType, Timestamp};
-    use tokio::time::{Duration, timeout};
+    use nervix_primitives::time::timeout;
     use triomphe::Arc;
 
     use super::*;

@@ -1237,13 +1237,17 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_models::{
         AckMode, CreateReingestor, ErrorPolicies, ModelKind, NodeRef, ParseAsType, ProcessorInputs,
         ProcessorOutputs, ReingestorName, RelayName,
     };
-    use nervix_primitives::sync::{Mutex, mpsc, watch};
-    use tokio::time::{Duration, timeout};
+    use nervix_primitives::{
+        sync::{Mutex, mpsc, watch},
+        time::timeout,
+    };
     use triomphe::Arc;
 
     use super::*;

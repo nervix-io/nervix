@@ -13,6 +13,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::Arc as StdArc,
+    time::Duration,
 };
 
 use blake3::Hasher;
@@ -24,7 +25,10 @@ use nervix_interconnect::{
 #[cfg(not(feature = "testing"))]
 use nervix_models::ClusterNodeName;
 use nervix_models::{ClusterSchedule, DomainName, ResourceId, ResourceName, VhostName};
-use nervix_primitives::sync::{CancellationToken, Mutex as AsyncMutex, blocking::RwLock};
+use nervix_primitives::{
+    sync::{CancellationToken, Mutex as AsyncMutex, blocking::RwLock},
+    time::interval,
+};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -33,7 +37,6 @@ use rustls::{
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
 use thiserror::Error;
-use tokio::time::{Duration, interval};
 use tonic::transport::{Identity as TonicIdentity, ServerTlsConfig};
 use tracing::{info, warn};
 use triomphe::Arc;
@@ -106,7 +109,7 @@ pub(in crate::application) async fn reload_interconnect_tls(
     let mut pending_fingerprint = None;
     let mut reported_failure = None;
     let mut ticker = interval(INTERCONNECT_TLS_RELOAD_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
 
     loop {
         nervix_primitives::task::consume_budget().await;

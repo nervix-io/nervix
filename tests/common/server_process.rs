@@ -34,8 +34,10 @@ use nervix_client_wire::{
 };
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_primitives::{
+    net::TcpStream,
     sync::{CancellationToken, watch},
     task::AbortOnDropHandle,
+    time::{sleep, timeout},
 };
 use nervix_recovery::Discarded as _;
 use nix::{
@@ -43,11 +45,7 @@ use nix::{
     unistd::Pid,
 };
 use tempfile::TempDir;
-use tokio::{
-    net::TcpStream,
-    process::{Child, Command},
-    time::{sleep, timeout},
-};
+use tokio::process::{Child, Command};
 
 use super::{
     cluster::{

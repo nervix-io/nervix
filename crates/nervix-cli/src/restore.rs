@@ -228,7 +228,8 @@ impl ProgressLine {
             let state = state.clone();
             let source = source.to_string();
             drawing = Some(nervix_primitives::task::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+                let mut interval =
+                    nervix_primitives::time::interval(std::time::Duration::from_millis(200));
                 loop {
                     interval.tick().await;
                     if state.finished.load(Ordering::Relaxed) {

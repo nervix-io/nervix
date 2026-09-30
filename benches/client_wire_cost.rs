@@ -7,9 +7,7 @@
 //! - **Depends on.** The public wire views and the server's benchmark-only Arrow fixture.
 //! - **Must not know.** Session scheduling, registry state or transport implementation internals.
 
-use std::{
-    collections::BTreeMap, fs, hint::black_box, num::NonZeroUsize, path::PathBuf, time::Instant,
-};
+use std::{collections::BTreeMap, fs, hint::black_box, num::NonZeroUsize, path::PathBuf};
 
 use bytes::{Bytes, BytesMut};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -17,6 +15,7 @@ use nervix_client_wire::{
     CellView, EncodedFrame, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionLimits,
     SubscriptionRows, VerifiedFrame,
 };
+use nervix_primitives::time::Instant;
 use nervix_server::subscription_row::benchmark::SubscriptionRowBenchmark;
 use serde::Serialize;
 use tikv_jemalloc_ctl::{epoch, stats, thread};

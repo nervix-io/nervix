@@ -21,6 +21,7 @@ use nervix_connector::{
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, PulsarSubscriptionName, TopicName};
+use nervix_primitives::time::{Instant, sleep_until};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
     SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
@@ -28,7 +29,6 @@ use pulsar::{
     proto::MessageIdData,
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
 use tracing::warn;
 
 const PULSAR: &str = "pulsar";

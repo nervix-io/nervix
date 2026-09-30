@@ -11,9 +11,6 @@
 //!   connector implementation. The pool it borrows from is leased by the host, which owns the
 //!   interest that keeps it open and the wait it records while a connection is handed over.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 #[cfg(test)]
 mod test_fixture;
@@ -504,10 +501,10 @@ mod tests {
                 .await
                 .map(|answers| answers.collect::<Vec<_>>())
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        nervix_primitives::time::timeout(Duration::from_secs(2), async {
             while fixture.authority.questions_for(name) == 0 {
                 nervix_primitives::task::consume_budget().await;
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -519,7 +516,7 @@ mod tests {
         };
         assert!(stopped.is_cancelled());
         fixture.answer(name, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
-        let addresses: Vec<_> = tokio::time::timeout(
+        let addresses: Vec<_> = nervix_primitives::time::timeout(
             Duration::from_secs(3),
             RedisDns(fixture.dns).resolve(name, 6379),
         )

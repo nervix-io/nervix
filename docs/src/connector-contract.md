@@ -34,6 +34,14 @@ through their sessions; it has no connector crate, because the session protocol 
 and its host is the client ingestor endpoint described under
 [Integration-specific boundaries](#integration-specific-boundaries).
 
+The contract and every integration crate take their execution-sensitive primitives from
+`nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
+backoff are measured with, and every socket a connector opens itself. A modeled build therefore
+selects them for the whole graph, as [Data-Plane Concurrency](./data-plane-concurrency.md)
+describes. The sockets and timers a driver library creates inside itself stay the driver's and are
+outside that selection, and a connector never resolves a name through the operating system: it
+resolves through the node's resolver, as the sections below describe.
+
 ### DNS for HTTP and Iceberg
 
 The node loads and validates one `nervix-dns` resolver at startup. Composition passes its handle

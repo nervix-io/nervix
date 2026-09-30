@@ -7,7 +7,7 @@
 //! - **Depends on.** The runtime relay boundary and its test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
-use std::sync::Arc as StdArc;
+use std::{sync::Arc as StdArc, time::Duration};
 
 use ahash::HashMap;
 use arrow_array::Array;
@@ -17,9 +17,11 @@ use nervix_models::{
     CreateSchema, DomainName, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType,
     RelayBranching, RelayName, RemoteAckRegistration, SchemaName, Timestamp,
 };
-use nervix_primitives::sync::watch;
+use nervix_primitives::{
+    sync::watch,
+    time::{sleep, timeout},
+};
 use nonzero_ext::nonzero;
-use tokio::time::{Duration, sleep, timeout};
 use triomphe::Arc;
 
 use super::*;

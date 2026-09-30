@@ -9,9 +9,13 @@
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
 
+use std::time::Duration;
+
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::{CancellationToken, watch};
-use tokio::time::{Duration, Instant};
+use nervix_primitives::{
+    sync::{CancellationToken, watch},
+    time::Instant,
+};
 use tracing::info;
 use triomphe::Arc;
 
@@ -52,7 +56,7 @@ impl ShutdownDeadline {
     where
         F: Future,
     {
-        let bounded = tokio::time::timeout(self.remaining(), work).await;
+        let bounded = nervix_primitives::time::timeout(self.remaining(), work).await;
         match bounded {
             Ok(output) => BeforeDeadline::Finished(output),
             Err(_) => BeforeDeadline::Expired,
@@ -433,14 +437,14 @@ mod tests {
             panic!("the first stop request must start shutdown");
         };
 
-        tokio::time::advance(Duration::from_secs(10)).await;
+        nervix_primitives::time::advance(Duration::from_secs(10)).await;
         let repeated = coordinator.request_stop();
 
         assert_eq!(repeated, ShutdownRequestOutcome::AlreadyRequested(first));
         assert_eq!(first.deadline().remaining(), Duration::from_secs(20));
         assert!(!first.deadline().has_passed());
 
-        tokio::time::advance(Duration::from_secs(20)).await;
+        nervix_primitives::time::advance(Duration::from_secs(20)).await;
         let after_the_deadline = coordinator.request_stop();
 
         assert_eq!(
@@ -472,7 +476,7 @@ mod tests {
 
         let finished = deadline
             .bound(async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                nervix_primitives::time::sleep(Duration::from_secs(1)).await;
                 7
             })
             .await;
@@ -511,7 +515,7 @@ mod tests {
             ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline),
             ShutdownPhaseOutcome::Completed
         );
-        tokio::time::advance(Duration::from_secs(5)).await;
+        nervix_primitives::time::advance(Duration::from_secs(5)).await;
         assert_eq!(
             ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline),
             ShutdownPhaseOutcome::Forced

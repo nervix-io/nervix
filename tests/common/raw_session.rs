@@ -49,8 +49,7 @@ use nervix_models::{
     RestoreArchive, SubscriptionName, TransactionPosition, TransactionStatus,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
-use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
-use tokio::time::Instant;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc, time::Instant};
 use tonic::{
     Request, Status, Streaming,
     codec::{Codec, EncodeBuf, Encoder},
@@ -423,7 +422,7 @@ pub(crate) async fn download_backup(
     let mut chunks = 0_usize;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let next = tokio::time::timeout(DOWNLOAD_FRAME_TIMEOUT, frames.message())
+        let next = nervix_primitives::time::timeout(DOWNLOAD_FRAME_TIMEOUT, frames.message())
             .await
             .map_err(|_| io::Error::other("a download frame did not arrive within a minute"))?;
         let frame = match next {
@@ -530,7 +529,7 @@ pub(crate) async fn send_restore(
     let Some(chunks) = restore.abandon_after_chunks else {
         let request = authorized(nervix_primitives::stream::iter(frames))?;
         let call = client.client_streaming(request, path, codec);
-        let response = match tokio::time::timeout(RESTORE_REPLY_TIMEOUT, call).await {
+        let response = match nervix_primitives::time::timeout(RESTORE_REPLY_TIMEOUT, call).await {
             Ok(Ok(response)) => response,
             Ok(Err(status)) => return Ok(TestRestoreEnd::Status(Box::new(status))),
             Err(_) => {
@@ -556,7 +555,7 @@ pub(crate) async fn send_restore(
     );
     let request = authorized(parts)?;
     let call = client.client_streaming(request, path, codec);
-    match tokio::time::timeout(RESTORE_ABANDON_HOLD, call).await {
+    match nervix_primitives::time::timeout(RESTORE_ABANDON_HOLD, call).await {
         Ok(Ok(response)) => {
             let reply = RestoreReply::decode(response.get_ref()).map_err(io::Error::other)?;
             Ok(TestRestoreEnd::Replied(reply))
@@ -886,7 +885,7 @@ impl TestSession {
             if let Some(frame) = self.pending_clock_frames.pop_front() {
                 return Ok(Some(frame));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -936,7 +935,7 @@ impl TestSession {
             if let Some(reply) = self.replies.remove(&request_id) {
                 return Ok(reply);
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => {
@@ -1280,7 +1279,7 @@ impl TestSession {
             if let Some(event) = self.pending_subscriptions.pop_front() {
                 return Ok(Some(event));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -1317,7 +1316,7 @@ impl TestSession {
             if let Some(ended) = self.pending_subscription_ends.pop_front() {
                 return Ok(Some(ended));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -1336,7 +1335,7 @@ impl TestSession {
         let deadline = Instant::now() + duration;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             match read {
                 Ok(open) => {
                     if !open? {
@@ -1358,7 +1357,7 @@ impl TestSession {
             if let Some(event) = self.pending_server_errors.pop_front() {
                 return Ok(Some(event));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -1383,7 +1382,7 @@ impl TestSession {
             if let Some(status) = &self.ended {
                 return Ok(status.clone());
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             match read {
                 Ok(open) => {
                     open?;

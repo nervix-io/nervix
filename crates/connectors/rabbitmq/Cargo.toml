@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 async-rs = { workspace = true }
@@ -29,11 +24,6 @@ nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "time",
-], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 url = { workspace = true }

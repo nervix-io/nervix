@@ -589,6 +589,10 @@ target cannot provide is a compile error rather than another implementation.
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
 | Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
 | `block_in_place` | `task` | Tokio's | Unavailable | Real: Tokio's, outside every model |
+| Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
+| Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | Tokio's, following the clock of the runtime that polls them: the operating system's, a test's paused clock, or the simulated host's under Turmoil | Shuttle's: a sleep or an interval's tick is one scheduling point that takes no time, and a timeout expires only when a check triggers it; `Instant::now` reads the operating system's clock | Real: Tokio's, outside every model |
+| Controls of a paused clock: `pause`, `advance` and `resume` | `time`, with the `test-util` capability | Tokio's | Shuttle's, which take no time | Real: Tokio's, outside every model |
+| Sockets: TCP listeners and streams with their owned halves, UDP and local sockets | `net` | Tokio's over the operating system's network; under Turmoil, Turmoil's simulated sockets and `lookup_host`, which answers from the simulated DNS table, and no local socket or socket configured before it connects | Real: Tokio's, outside every model. A Shuttle execution has no Tokio reactor, so a socket created inside a check panics and fails it | Real: Tokio's, outside every model |
 | The runtime, `#[nervix_primitives::test]`, `#[nervix_primitives::main]`, `select!` | `runtime`, crate root | Tokio's | Shuttle's runtime and `select!`; the attributes build Shuttle's runtime | Real: Tokio's, outside every model |
 | Streams over channels | `stream` | Tokio Stream's | Shuttle's Tokio Stream | Real: Tokio Stream's, outside every model |
 | Atomic reference publication and its cache | `publication` | ArcSwap's | Opaque, with a yield before and after each load, store, compare-and-swap and read-copy-update | Real: ArcSwap's, outside every model |
@@ -616,9 +620,25 @@ such family in Loom model code, a module compiled only for Loom, so a model neve
 primitive; what an owner a model drives uses internally is excluded from that model's claim.
 `just test-primitives` shows each mode's selection.
 
-Turmoil runs the ordinary primitives on the simulated host that runs the caller. Its timers,
-sockets and bounded CPU work are the interconnect simulation's, described in
+Turmoil replaces the network and the clock, not synchronization. A Turmoil build runs the ordinary
+primitives on the simulated host whose task uses them: `net` selects Turmoil's sockets, and
+`net::lookup_host`, which only that mode has, answers from the simulated DNS table; the timers and
+instants of `time` follow the host's simulated clock; and `task::spawn_cpu` runs an admitted CPU job
+as one task of the host's scheduler, so its synchronous body is one scheduling step. What the
+simulated hosts run, and what the simulation establishes, belong to
 [Deterministic interconnect simulation](./interconnect-simulation.md).
+
+The boundary supplies mechanisms and decides no policy. `net` never decides what a name means: a
+node resolves through its own resolver in `nervix-dns`, no mode but Turmoil's offers a lookup, and
+the boundary check rejects `tokio::net::lookup_host` and the `ToSocketAddrs` traits, which resolve
+through the operating system. `time` grants no clock permission: actual UTC and physical deadlines
+keep the owners `scripts/check_clock_boundaries.py` declares, and a logical deadline stays in the
+domain clock's coordinate, as [Domain Clock](./domain-clock.md) describes. `task::spawn_cpu` belongs
+to the bounded executor, which admits, charges and cancels every job; the boundary check rejects it
+in any file but the executor's worker pools, so it is no way around admission. `pause`, `advance`
+and `resume` exist only with the `test-util` capability, which ordinary tests of elapsed-time
+behavior enable and no production graph has, because a clock that can be paused is checked on every
+read.
 
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
@@ -645,6 +665,8 @@ unverified:
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
 | The application unit-test fixtures | Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test | Nothing a check claims; no model builds the fixtures |
 | The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own primitives are modeled |
+| The Turmoil runner's real-time bound and the scenario driver's attempt deadline | A run's bound must expire even when a host blocks the scheduler thread and simulated time stops advancing, and the driver kills an attempt process that outlived its bound; both read the operating system's monotonic clock | Nothing a scenario claims: they decide only when a run fails, never how a simulated request proceeds |
+| The integration-test harness's port pool and the benchmark driver | They reserve free ports from the operating system for real node processes and containers, synchronously and before anything binds them, with the standard library's blocking listener | Nothing a check claims; the ports carry the traffic of real processes |
 
 A real primitive never carries the protocol under test, chooses its branches, supplies its wakeups
 or establishes an ordering an assertion relies on.
@@ -660,14 +682,21 @@ a `static`.
 
 `just validate-primitive-boundary` rejects every other path to a governed family however it is
 spelled: a direct, renamed, grouped or glob import, a fully qualified path, an attribute, a renamed
-crate, an imported `sync` module, or a path in a macro body or an inactive `cfg` branch. Each
-rejection names the approved path. It also rejects an unmodeled use without its permission, a
-permission nothing uses, and a dependency on a library whose family the boundary selects from any
-package but the boundary. It rejects a `static`, including one a `thread_local!` declares, whose
-declared type names a selected atomic, directly or through a wrapper, an array, a reference, a module
-path or a local type alias, and a `static` or `const` initializer, `const fn` or `const` block that
-constructs one. It reads declared types and constructions, so a struct holding an atomic that a
-static builds lazily is left to review. `just validate-loom-dependencies` keeps Loom out of every
+crate, an imported `sync`, `time` or `net` module, or a path in a macro body or an inactive `cfg`
+branch. That covers Tokio's `time` and `net` modules, Turmoil's `net`, and the standard library's
+`Instant` and sockets. Each rejection names the approved path; `tokio::net::lookup_host` and the
+`ToSocketAddrs` traits name the node's resolver instead. It also rejects an unmodeled use without its
+permission, a permission nothing uses, a dependency on a library whose family the boundary selects
+from any package but the boundary, and `task::spawn_cpu` in any file but the executor's worker
+pools. Turmoil is a runner as well as the network the boundary selects, so beside the boundary, a
+package whose harness drives a simulation may depend on it, only as an optional dependency its own
+`turmoil` feature enables. Tokio's unstable runtime controls belong to the Turmoil build: the check
+rejects `--cfg tokio_unstable` in any `justfile` recipe but a Turmoil one, and in Cargo
+configuration, a workflow or a build script. It rejects a `static`, including one a
+`thread_local!` declares, whose declared type names a selected atomic, directly or through a
+wrapper, an array, a reference, a module path or a local type alias, and a `static` or `const`
+initializer, `const fn` or `const` block that constructs one. It reads declared types and
+constructions, so a struct holding an atomic that a static builds lazily is left to review. `just validate-loom-dependencies` keeps Loom out of every
 ordinary dependency graph, and `just validate-execution-mode-conflicts` requires the combined-mode
 diagnostic.
 
@@ -677,9 +706,7 @@ then keeps the behavior this chapter describes:
 
 | Family | Current access path |
 | --- | --- |
-| Monotonic scheduling | Tokio's timers and instants, within the existing clock permissions; a Shuttle build selects Shuttle's timers through the one accepted `extern crate shuttle_tokio as tokio` alias in the crates that use them |
-| Networking | Tokio's sockets, or Turmoil's when the interconnect's `turmoil` feature is enabled |
-| Edge I/O | Tokio's I/O, filesystem, process and signal modules, which are real in every mode |
+| Edge I/O | Tokio's I/O traits, filesystem, process and signal modules, which are real in every mode |
 | Shared ownership | `triomphe::Arc`, and `std::sync::Arc` where an external API such as a Tokio semaphore requires it; opaque in every mode |
 | The browser console | `futures-channel` and the browser's executor, in a target no execution mode runs |
 
@@ -695,21 +722,25 @@ a stale generation without depending on which OS thread happened to run first. A
 failed check. The model is the surrounding schedule and test data; the protocol under test is the
 same type used by the data plane, not a copied implementation of it.
 
-Shuttle does not model elapsed time. A wrapped sleep yields once; wrapped timeouts do not measure
-their deadlines and fire only when a test triggers them by task label. `Instant::now` still reads
-the wall clock, while paused-time controls do not advance a simulated clock. Checks of deadline
-ordering therefore use an already-passed or far-future instant and explicitly choose whether the
-timeout wins. Tokio paused-time tests retain responsibility for actual timer behavior. No
-concurrency check uses a wall-clock bound, sleep poll, or `recv_timeout` to establish progress.
+Shuttle does not model elapsed time. Under Shuttle the boundary's `time` family is Shuttle's: a
+sleep yields once, and a timeout does not measure its deadline and fires only when a check triggers
+it by task label through `nervix_primitives::time::trigger_timeouts`. `Instant::now` still reads the
+operating system's monotonic clock, while paused-time controls do not advance a simulated clock.
+Checks of deadline ordering therefore use an already-passed or far-future instant and explicitly
+choose whether the timeout wins. Ordinary tests on a paused Tokio clock retain responsibility for
+actual timer behavior. No concurrency check uses a wall-clock bound, sleep poll, or `recv_timeout`
+to establish progress.
 
 Only scheduler-visible operations create interleavings. In a Shuttle build the primitive
 boundary selects every family from Shuttle or from its own adapters, as the table above shows, and
 every package that owns the feature forwards it to the boundary, so the synchronization inside
 vocabulary types such as `AtomicTimestamp`, inside dependencies such as the execution crate's
-cancellation, and inside every connector is Shuttle's too. The feature changes the test execution
-environment, not the public protocol. Edge I/O, networking, filesystem access, and signals remain
-real and are outside a Shuttle schedule. A check's own records use unmodeled atomics on purpose,
-under the permissions above, so that recording an operation adds no scheduling point to it.
+cancellation, and inside every connector is Shuttle's too, and so are the timers of every crate in
+the graph. The feature changes the test execution environment, not the public protocol. Edge I/O,
+sockets, filesystem access, and signals remain real and are outside a Shuttle schedule. A Shuttle
+execution has no Tokio reactor, so a socket created inside a check panics and fails it rather than
+reaching the network unobserved. A check's own records use unmodeled atomics on purpose, under the
+permissions above, so that recording an operation adds no scheduling point to it.
 
 Some primitives are opaque to Shuttle: `arc-swap`, `concurrent-queue` and `triomphe` have no modeled
 implementation. The boundary runs each `ArcSwap` and `ArcSwapOption` load and store, each `ArcSwap`
