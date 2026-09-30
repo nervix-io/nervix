@@ -1223,7 +1223,7 @@ impl RelayBoundaryServices {
                 continue;
             }
             let registration =
-                dispatcher.register_pending_ack(RemoteDispatcher::forwarded_ack(ack));
+                dispatcher.register_pending_ack(&owner_node, RemoteDispatcher::forwarded_ack(ack));
             remote_acks.push(Some(registration));
         }
         let admission_result = dispatcher
@@ -1253,6 +1253,7 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         }
+        dispatcher.admit_pending_acks(&remote_acks);
         Ok(())
     }
 
@@ -1373,7 +1374,9 @@ impl RelayBoundaryServices {
                 remote_batch
                     .acks
                     .iter()
-                    .map(|ack| Some(dispatcher.register_pending_ack(ack.clone())))
+                    .map(|ack| {
+                        Some(dispatcher.register_pending_ack(&consumer.node_id, ack.clone()))
+                    })
                     .collect::<Vec<_>>()
             } else {
                 vec![None; remote_batch.acks.len()]
@@ -1395,7 +1398,9 @@ impl RelayBoundaryServices {
                 .await;
 
             match (consumer.mode, result) {
-                (AckMode::Attached, Ok(())) => {}
+                (AckMode::Attached, Ok(())) => {
+                    dispatcher.admit_pending_acks(&remote_acks);
+                }
                 (AckMode::Attached, Err(error)) => {
                     let reason = error.to_string();
                     for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {

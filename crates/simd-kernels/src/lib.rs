@@ -2,14 +2,15 @@
 //!
 //! Layer: primitives.
 //!
-//! - **Owns.** Runtime SIMD selection, exact byte masks, and exact elapsed-time histograms for
-//!   callers with contiguous buffers.
+//! - **Owns.** Runtime SIMD selection, exact byte masks, bitmask words packed from per-lane flags,
+//!   and exact elapsed-time histograms for callers with contiguous buffers.
 //! - **Depends on.** `fearless_simd`, pointer-width conversions, and self-contained error values.
 //! - **Must not know.** Arrow, Nervix models, codecs, metric recorders, or the consumers of a
 //!   classified buffer.
 
 mod admission;
 mod elapsed;
+mod flags;
 mod window;
 
 use error_stack::Report;
@@ -28,6 +29,7 @@ pub use crate::{
         ElapsedBucket, ElapsedHistogram, ElapsedLayout, ElapsedLayoutError, elapsed_nanos,
         latest_instant,
     },
+    flags::{FlagPacker, WORD_LANES, lane_mask},
 };
 
 static LEVEL: OnceLock<Level> = OnceLock::new();

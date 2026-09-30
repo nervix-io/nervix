@@ -623,6 +623,9 @@ rstest = "0.26.1"
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
   "use-rustls-aws-lc",
 ] }
+# The per-address TCP dialer the rumqttc-next line builds on, which applies the driver's network
+# options; its TLS selection stays the facade's.
+rumqttc-core = { package = "rumqttc-core-next", version = "0.34.0", default-features = false }
 # Workspace-wide Rustls policy: AWS-LC only, apart from the dev-only Playwright exception.
 rustls = { version = "0.23", default-features = false, features = [
   "aws_lc_rs",

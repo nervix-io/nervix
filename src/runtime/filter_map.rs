@@ -5,6 +5,8 @@
 //! - **Depends on.** Compiled programs, Arrow batches and explicit execution timestamps.
 //! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
 
+use arrow_buffer::BooleanBufferBuilder;
+
 use super::*;
 
 #[cfg(test)]
@@ -433,18 +435,9 @@ pub(super) async fn plan_filter_map_messages(
         }
     };
 
-    let mut selected_rows = vec![false; acks.len()];
-    for row in result.selected_rows.iter() {
-        if row < selected_rows.len() {
-            selected_rows[row] = true;
-        }
-    }
-    for (row, selected) in selected_rows.iter().enumerate() {
-        if !selected {
-            acks[row].ack_success();
-        }
-    }
+    acknowledge_dropped_rows(&result.selected_rows, &mut acks);
 
+    let invalid_outputs = InvalidOutputRows::new(&result.batch);
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
@@ -500,7 +493,7 @@ pub(super) async fn plan_filter_map_messages(
             ));
             continue;
         }
-        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             let record =
                 batch
@@ -589,6 +582,27 @@ pub(super) async fn plan_filter_map_messages(
     })
 }
 
+/// Acknowledges every row of `acks` that the program's `WHERE` dropped. The kept rows are set in
+/// a bitmap directly from the selection, so the dropped rows are its clear bits, and a selection
+/// of every row drops none.
+fn acknowledge_dropped_rows(selection: &nervix_vm::RowSelection, acks: &mut [AckSet]) {
+    let nervix_vm::RowSelection::Selected(rows) = selection else {
+        return;
+    };
+    let mut kept = BooleanBufferBuilder::new(acks.len());
+    kept.append_n(acks.len(), false);
+    for &row in rows {
+        // A row outside the batch holds no ACK here to keep.
+        if row < acks.len() {
+            kept.set_bit(row, true);
+        }
+    }
+    let dropped = !&kept.finish();
+    for row in dropped.set_indices() {
+        acks[row].ack_success();
+    }
+}
+
 pub(super) struct EmitterFilterMapPlan {
     pub(super) batch: Option<RelayRecordBatch>,
     pub(super) headers: Option<Vec<EmitterHeaders>>,
@@ -623,18 +637,9 @@ pub(super) async fn plan_emitter_filter_map_batch(
     let mut acks = body_result.acks;
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
 
-    let mut selected_rows = vec![false; acks.len()];
-    for row in body_result.selected_rows.iter() {
-        if row < selected_rows.len() {
-            selected_rows[row] = true;
-        }
-    }
-    for (row, selected) in selected_rows.iter().enumerate() {
-        if !selected {
-            acks[row].ack_success();
-        }
-    }
+    acknowledge_dropped_rows(&body_result.selected_rows, &mut acks);
 
+    let invalid_outputs = InvalidOutputRows::new(&body_result.batch);
     let mut successful_output_rows = Vec::new();
     let mut successful_input_rows = Vec::new();
     let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
@@ -720,7 +725,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                     continue;
                 }
             };
-        let invalid_fields = invalid_output_fields(&body_result.batch, output_row);
+        let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             let source_record = source_record("FILTER-MAP validation error")?;
             let partial_output = program

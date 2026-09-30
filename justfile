@@ -797,6 +797,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
         --package nervix-connector-redis \
+        --package nervix-connector-mqtt \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -820,6 +821,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
     run_scenario tests/features/runtime/redis_dns_resolution.feature 'Redis'
+    run_scenario tests/features/runtime/mqtt_dns_resolution.feature 'MQTT'
     run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
@@ -844,6 +846,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
         --package nervix-connector-redis \
+        --package nervix-connector-mqtt \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -988,6 +991,12 @@ bench-wasm-checkpoint *args:
 # group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
 bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Build the VM Criterion binary for the x86-64-v3 payload the Docker image ships, in its own target
+# directory, so the checked lanes and their failure packing can be inspected with objdump without
+# the host's native CPU tuning.
+build-vm-bench-x86-64-v3:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/vm-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-vm --bench vm --no-run
 
 # Run the same VM Criterion harness with one-shot allocation and output-size probes. The
 # instrumentation is compiled only for this recipe; use `bench-vm` for timing comparisons.
@@ -1278,9 +1287,9 @@ validate-dns-dependencies:
             exit 1
         fi
     done
-    # Syslog, WebSocket and Redis transports resolve through the node resolver, even when each
+    # Syslog, WebSocket, Redis and MQTT transports resolve through the node resolver, even when each
     # connector is built without the server's feature graph.
-    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis; do
+    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis nervix-connector-mqtt; do
         graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
         if ! rg -q '^nervix-dns v' <<< "${graph}" || \
             ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
@@ -1292,6 +1301,14 @@ validate-dns-dependencies:
     if ! rg -q '^redis v1\.[0-9]+\.[0-9]+ .*tokio-rustls-comp' <<< "${graph}" || \
         rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
         echo "nervix-connector-redis lacks Redis's AWS-LC TLS path" >&2
+        exit 1
+    fi
+    # MQTT dials each resolved address with rumqttc's own per-address dialer from rumqttc-core,
+    # and the driver still completes TLS on the stream, on AWS-LC alone.
+    graph="$(cargo tree --package nervix-connector-mqtt --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^rumqttc-v5-next v[^ ]+ (.*,)?use-rustls-aws-lc(,|$)' <<< "${graph}" || \
+        rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-mqtt lacks rumqttc's AWS-LC TLS path" >&2
         exit 1
     fi
     # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector

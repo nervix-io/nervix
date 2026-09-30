@@ -89,6 +89,14 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) fn loses_remote_acknowledgement(
+        &self,
+        _resolver: &ClusterNodeName,
+        _registrar: &ClusterNodeName,
+    ) -> bool {
+        false
+    }
+
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
     }
 

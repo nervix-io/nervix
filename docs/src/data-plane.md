@@ -94,6 +94,13 @@ fails those acknowledgements instead of completing them, and the source redelive
 the current routes. See
 [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
 
+A node that sent a record's acknowledgement to another node waits for it only while that node keeps
+reporting it. When the other node reports nothing about it for fifteen seconds after admitting the
+batch, because its outcome was lost on the way back or its process ended, the acknowledgement fails
+and the source redelivers the record. An acknowledgement lost between two nodes on a record's path
+therefore fails the source attempt instead of keeping it waiting. See
+[Record Acknowledgements The Receiver Stops Reporting](interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
+
 ACK guards, tokens, and maps remain in memory. They do not record a transactional per-sink commit
 ledger. After source redelivery, every attached path processes the record again. This is why an
 already successful non-idempotent sink can receive a duplicate after a sibling path fails. See

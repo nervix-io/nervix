@@ -76,14 +76,30 @@ pub struct ClickHouseSink {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("ClickHouse insert failed: {0}")]
-struct ClickHouseWriteError(ClickHouseError);
+enum ClickHouseWriteError {
+    #[error("ClickHouse rejected an insert")]
+    Response { name: Option<&'static str> },
+    #[error("ClickHouse insert failed: {0}")]
+    Driver(#[source] ClickHouseError),
+}
 
 impl ClickHouseWriteError {
-    fn record_error_name(&self) -> Option<&'static str> {
-        let ClickHouseError::BadResponse(response) = &self.0 else {
-            return None;
+    fn report(error: ClickHouseError) -> Report<Self> {
+        // ClickHouse may quote a rejected row in BadResponse. Keep only its safe classification.
+        let failure = match error {
+            ClickHouseError::BadResponse(response) => Self::Response {
+                name: Self::response_error_name(&response),
+            },
+            error => Self::Driver(error),
         };
+        if let Some(lookup) = failure.lookup_failure().cloned() {
+            Report::new(lookup).change_context(failure)
+        } else {
+            Report::new(failure)
+        }
+    }
+
+    fn response_error_name(response: &str) -> Option<&'static str> {
         if response.contains("413 Payload Too Large")
             || response.contains("413 Request Entity Too Large")
         {
@@ -102,6 +118,13 @@ impl ClickHouseWriteError {
         .find(|name| response.contains(&format!("({name})")))
     }
 
+    fn record_error_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Response { name } => *name,
+            Self::Driver(_) => None,
+        }
+    }
+
     fn is_record_error(&self) -> bool {
         self.record_error_name().is_some()
     }
@@ -115,7 +138,7 @@ impl ClickHouseWriteError {
 
     /// The failed lookup of the ClickHouse host, when resolving it is what failed the request.
     fn lookup_failure(&self) -> Option<&DnsLookupError> {
-        let ClickHouseError::Network(error) = &self.0 else {
+        let Self::Driver(ClickHouseError::Network(error)) = self else {
             return None;
         };
         DnsLookupError::find_in(error.as_ref())
@@ -126,7 +149,7 @@ impl ClickHouseWriteError {
     /// Those causes describe the connection, never a row, and carry no credentials. A response from
     /// ClickHouse is not described this way, because its text can repeat values of the rows.
     fn transport_failure(&self) -> Option<String> {
-        let ClickHouseError::Network(error) = &self.0 else {
+        let Self::Driver(ClickHouseError::Network(error)) = self else {
             return None;
         };
         let mut description = error.to_string();
@@ -139,22 +162,21 @@ impl ClickHouseWriteError {
         Some(description)
     }
 
-    fn into_report(self) -> Report<SinkPublishError> {
+    fn into_report(report: Report<Self>) -> Report<SinkPublishError> {
+        let error = report.current_context();
         let publish = SinkPublishError::Publish { sink: CLICKHOUSE };
-        if let Some(lookup) = self.lookup_failure() {
+        if let Some(lookup) = error.lookup_failure() {
             let reason = format!("ClickHouse insert request failed: {lookup}");
-            return Report::new(lookup.clone())
-                .change_context(publish)
-                .attach_printable(reason);
+            return report.change_context(publish).attach_printable(reason);
         }
-        let reason = if let Some(name) = self.record_error_name() {
+        let reason = if let Some(name) = error.record_error_name() {
             format!("ClickHouse insert request failed with {name}")
-        } else if let Some(transport) = self.transport_failure() {
+        } else if let Some(transport) = error.transport_failure() {
             format!("ClickHouse insert request failed: {transport}")
         } else {
             "ClickHouse insert request failed".to_string()
         };
-        Report::new(publish).attach_printable(reason)
+        report.change_context(publish).attach_printable(reason)
     }
 }
 
@@ -322,13 +344,16 @@ impl ClickHouseSink {
         table: &str,
         body: Bytes,
         request_timeout: Option<Duration>,
-    ) -> Result<(), ClickHouseWriteError> {
+    ) -> error_stack::Result<(), ClickHouseWriteError> {
         let sql = format!("INSERT INTO {table} FORMAT JSONEachRow");
         let mut insert = client
             .insert_formatted_with(sql)
             .with_timeouts(request_timeout, request_timeout);
-        insert.send(body).await.map_err(ClickHouseWriteError)?;
-        insert.end().await.map_err(ClickHouseWriteError)
+        insert
+            .send(body)
+            .await
+            .map_err(ClickHouseWriteError::report)?;
+        insert.end().await.map_err(ClickHouseWriteError::report)
     }
 }
 
@@ -406,7 +431,7 @@ impl RowSink for ClickHouseSink {
                 // A record-specific failure of a multi-row insert is isolated by inserting each of
                 // its rows alone, so healthy rows land and only the rejected ones follow the error
                 // policy.
-                Err(error) if error.is_record_error() && written.len() > 1 => {
+                Err(error) if error.current_context().is_record_error() && written.len() > 1 => {
                     for index in written {
                         nervix_primitives::task::consume_budget().await;
                         let member = members[index];
@@ -422,30 +447,30 @@ impl RowSink for ClickHouseSink {
                         .await;
                         match inserted {
                             Ok(()) => outcome.deliver(rows.position(member)),
-                            Err(error) if error.is_record_error() => {
+                            Err(error) if error.current_context().is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
                                     rows.position(member),
                                     rows.occurred_at(member),
-                                    error.record_reason(),
+                                    error.current_context().record_reason(),
                                 ));
                             }
                             Err(error) => {
-                                outcome.fail(error.into_report());
+                                outcome.fail(ClickHouseWriteError::into_report(error));
                                 return outcome;
                             }
                         }
                     }
                 }
-                Err(error) if error.is_record_error() => {
+                Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
                     outcome.reject(RejectedSinkRecord::external(
                         rows.position(member),
                         rows.occurred_at(member),
-                        error.record_reason(),
+                        error.current_context().record_reason(),
                     ));
                 }
                 Err(error) => {
-                    outcome.fail(error.into_report());
+                    outcome.fail(ClickHouseWriteError::into_report(error));
                     return outcome;
                 }
             }
@@ -496,29 +521,29 @@ mod tests {
             "TOO_LARGE_STRING_SIZE",
             "VIOLATED_CONSTRAINT",
         ] {
-            let error = ClickHouseWriteError(ClickHouseError::BadResponse(format!(
+            let report = ClickHouseWriteError::report(ClickHouseError::BadResponse(format!(
                 "Code: 1. DB::Exception: rejected ({name})"
             )));
             assert!(
-                error.is_record_error(),
+                report.current_context().is_record_error(),
                 "{name} should be a definitive record error"
             );
         }
-        let oversized = ClickHouseWriteError(ClickHouseError::BadResponse(
+        let oversized = ClickHouseWriteError::report(ClickHouseError::BadResponse(
             "413 Payload Too Large".to_string(),
         ));
-        assert!(oversized.is_record_error());
+        assert!(oversized.current_context().is_record_error());
         for name in [
             "NETWORK_ERROR",
             "TABLE_IS_DROPPED",
             "TIMEOUT_EXCEEDED",
             "TOO_MANY_REQUESTS",
         ] {
-            let error = ClickHouseWriteError(ClickHouseError::BadResponse(format!(
+            let report = ClickHouseWriteError::report(ClickHouseError::BadResponse(format!(
                 "Code: 1. DB::Exception: rejected ({name})"
             )));
             assert!(
-                !error.is_record_error(),
+                !report.current_context().is_record_error(),
                 "{name} requires infrastructure retry"
             );
         }
@@ -716,7 +741,10 @@ mod tests {
         .expect_err("the non-responsive endpoint should time out");
 
         assert!(
-            matches!(result.0, ClickHouseError::TimedOut),
+            matches!(
+                result.current_context(),
+                ClickHouseWriteError::Driver(ClickHouseError::TimedOut)
+            ),
             "unexpected ClickHouse insert error: {result:?}"
         );
     }
