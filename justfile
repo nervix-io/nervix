@@ -1459,6 +1459,8 @@ validate-execution-mode-dependencies:
 validate-execution-mode-conflicts:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The diagnostics are read as text, so Cargo must not color them even where the caller asks.
+    export CARGO_TERM_COLOR=never
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
     expect_failure() {

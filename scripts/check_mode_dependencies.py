@@ -215,6 +215,10 @@ def graph(commands: Commands, root: Root) -> list[Node]:
                 "none",
                 "--format",
                 "{p} {f}",
+                # The environment may ask Cargo for color, as CI does, which would wrap markers such
+                # as `(*)` in escape sequences the graph lines are read without.
+                "--color",
+                "never",
             ]
         )
     )

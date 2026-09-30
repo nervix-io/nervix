@@ -132,7 +132,10 @@ class CheckTests(unittest.TestCase):
 
         with redirect_stdout(io.StringIO()):
             self.assertEqual(main(["--root", "/repository"], commands_for=Recording), 0)
-        selections = {tuple(call[2 : call.index("--edges")]) for call in calls if "tree" in call}
+        trees = [call for call in calls if "tree" in call]
+        for call in trees:
+            self.assertEqual(call[-2:], ["--color", "never"])
+        selections = {tuple(call[2 : call.index("--edges")]) for call in trees}
         self.assertIn(("--workspace",), selections)
         self.assertIn(("--workspace", "--no-default-features"), selections)
         for package in PACKAGES:
