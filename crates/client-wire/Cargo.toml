@@ -34,6 +34,7 @@ meticulous = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 futures-util = { workspace = true }
+nervix-arbitrary = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true }
 tokio-tungstenite = { workspace = true }

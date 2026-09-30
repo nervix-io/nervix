@@ -346,6 +346,32 @@ async fn when_active_session_sends_split_cursor(
     world.session_requests.insert(name, request_id);
 }
 
+#[when(expr = "the active session sends request {string} completing with invalid page size {int}")]
+async fn when_active_session_sends_invalid_page_size(
+    world: &mut ScenarioWorld,
+    name: String,
+    page_size: u8,
+) {
+    assert!(page_size == 0 || page_size > 100);
+    let session = active_session(world);
+    let request_id = session.reserve_request_id();
+    let domain = session.domain().cloned();
+    let suggestion = |size| ClientMessage {
+        request_id,
+        request: ClientRequest::Suggest(
+            SuggestRequest::new("SHOW ".to_owned(), 5, domain.clone())
+                .assured("the cursor is at the end of the literal ASCII input")
+                .with_page(size, None)
+                .assured("one and two are valid completion page sizes"),
+        ),
+    };
+    session
+        .send_altered(&suggestion(1), &suggestion(2), &[page_size])
+        .await
+        .assured("the connected scenario session sends the altered page size");
+    world.session_requests.insert(name, request_id);
+}
+
 #[then(expr = "request {string} is rejected as an invalid request naming {string}")]
 async fn then_request_is_rejected_naming(world: &mut ScenarioWorld, name: String, field: String) {
     let body = reply_to_named(world, &name).await;

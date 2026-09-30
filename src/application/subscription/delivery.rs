@@ -82,6 +82,7 @@ enum DeliveryStop {
 
 /// The part of a generation's delivery that outlives its relay receiver and interest lease.
 struct ActiveDelivery {
+    executor: nervix_execution::Executor,
     clock: Result<
         crate::runtime::DomainClockLifecycle,
         Report<crate::runtime::DomainClockAccessError>,
@@ -122,7 +123,9 @@ impl SubscriptionDelivery {
                 .session_subscription_dropped_rows(&domain, &relay),
         };
         let clock = service.inner.runtime.domain_clock_lifecycle(&domain);
+        let executor = service.inner.runtime.executor().clone();
         let mut delivery = ActiveDelivery {
+            executor,
             clock,
             domain,
             relay,
@@ -213,11 +216,11 @@ impl ActiveDelivery {
     /// longer deliver.
     async fn deliver_batch(&mut self, batch: &RelayRecordBatch) -> Result<(), LaneClosed> {
         let selection = select_subscription_rows(
-            self.service.inner.runtime.executor(),
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,
             &self.service.inner.subscription_sampler,
+            &self.executor,
             &self.clock,
         )
         .await;

@@ -533,3 +533,194 @@ random_iterations = 256
 source = "src/runtime/entity_gate.rs"
 test = "runtime::entity_gate::tests::bolero_freeze_sequences_publish_exact_coordination_owners"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
+domain_version = 1
+features = []
+id = "client-requests"
+invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas and opaque payloads."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/properties/requests.rs"
+test = "tests::properties::requests::bolero_client_requests_keep_complete_values"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
+domain_version = 1
+features = []
+id = "client-replies"
+invariant = "Every current reply family decodes to the complete original typed value, including dispositions, diagnostics, metadata and client I/O."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/properties/replies.rs"
+test = "tests::properties::replies::bolero_replies_keep_complete_values"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
+domain_version = 1
+features = []
+id = "client-events"
+invariant = "Every unsolicited event preserves complete values; borrowed graph views retain exact bytes after their original frame is dropped."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/properties/events.rs"
+test = "tests::properties::events::bolero_events_keep_complete_values_and_owned_views"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_stream_frames_keep_values_and_chunk_ownership/corpus"
+domain_version = 1
+features = []
+id = "client-streams"
+invariant = "Every upload, restore and backup stream root preserves complete typed values and retained chunk ownership."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/properties/streams.rs"
+test = "tests::properties::streams::bolero_stream_frames_keep_values_and_chunk_ownership"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_reply_transfers_keep_exact_bytes_and_reject_without_effects/corpus"
+domain_version = 1
+features = []
+id = "client-reply-transfer"
+invariant = "Reply segmentation preserves exact encoded bytes and the complete reply; wrong identities and duplicate parts leave assembly progress unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/properties/streams.rs"
+test = "tests::properties::streams::bolero_reply_transfers_keep_exact_bytes_and_reject_without_effects"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__rows__bolero_row_views_keep_complete_cells_and_buffer_ownership/corpus"
+domain_version = 1
+features = []
+id = "client-row-views"
+invariant = "Production Row views preserve exact cells, nested lists, nulls, redaction, schema, branch, identity and float bits after original owners drop."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/properties/rows.rs"
+test = "tests::properties::rows::bolero_row_views_keep_complete_cells_and_buffer_ownership"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_arbitrary_frames_verify_and_decode_within_limits/corpus"
+domain_version = 1
+features = []
+id = "client-arbitrary-frames"
+invariant = "Arbitrary bounded bytes reach all eight frame roots and either decode deterministically or return a typed bounded failure."
+manifest = "Cargo.toml"
+max_input_bytes = 16385
+package = "nervix-client-wire"
+random_iterations = 256
+source = "crates/client-wire/src/tests/properties/malformed.rs"
+test = "tests::properties::malformed::bolero_arbitrary_frames_verify_and_decode_within_limits"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_current_frame_corruption_is_bounded/corpus"
+domain_version = 1
+features = []
+id = "client-frame-corruption"
+invariant = "Truncation, offset, length, bit and size mutations of current valid frames decode deterministically or fail within verification and collection budgets."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-client-wire"
+random_iterations = 256
+source = "crates/client-wire/src/tests/properties/malformed.rs"
+test = "tests::properties::malformed::bolero_current_frame_corruption_is_bounded"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_discriminators_are_validated_before_use/corpus"
+domain_version = 1
+features = []
+id = "client-discriminators"
+invariant = "Client request discriminators are structurally verified and unsupported tags fail with the owning typed union error before use."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-client-wire"
+random_iterations = 256
+source = "crates/client-wire/src/tests/properties/malformed.rs"
+test = "tests::properties::malformed::bolero_discriminators_are_validated_before_use"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/subscription_row/__fuzz__/subscription_row__properties__bolero_arrow_rows_preserve_exact_values_or_explicit_redaction/corpus"
+domain_version = 1
+features = ["testing"]
+id = "client-arrow-rows"
+invariant = "Arrow selection and frame segmentation preserve original logical values and validity with exact float bits, schema, branches and explicit sensitivity redaction."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/subscription_row/properties.rs"
+test = "subscription_row::properties::bolero_arrow_rows_preserve_exact_values_or_explicit_redaction"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/subscription_row/__fuzz__/subscription_row__properties__bolero_invalid_arrow_selection_has_no_partial_emission/corpus"
+domain_version = 1
+features = ["testing"]
+id = "client-arrow-selection"
+invariant = "Invalid row order, bounds and branch alignment fail as a whole without partial emission or affecting subsequent valid encoding."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 128
+source = "src/subscription_row/properties.rs"
+test = "subscription_row::properties::bolero_invalid_arrow_selection_has_no_partial_emission"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__properties__bolero_shared_binding_keeps_complete_cells_and_retained_frames/corpus"
+domain_version = 1
+features = []
+id = "client-binding-rows"
+invariant = "Shared-binding column states, native scalar bits, variable offsets and retained frame bytes agree with complete production Row views."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-ffi"
+random_iterations = 128
+source = "crates/client-ffi/src/tests/properties.rs"
+test = "tests::properties::bolero_shared_binding_keeps_complete_cells_and_retained_frames"
+test_target = "lib"

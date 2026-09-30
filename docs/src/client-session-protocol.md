@@ -194,6 +194,15 @@ extreme values, nested lists, and every refusal of a domain clock attachment, to
 `just test-client-wire` checks that the checked-in bytes are exactly what the encoder writes, and
 `just update-client-wire-corpus` regenerates them for review.
 
+The registered client representation properties also compare complete generated current values
+through the production codecs. Separate targets verify malformed bytes under fixed limits; Arrow
+properties compare selected logical values and validity with decoded Row cells, using float bits
+and explicit redaction, while binding properties check column copies and retained frame lifetime.
+The [client representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
+records their schema coverage and ownership boundaries. Both ordinary corpus replay and
+sanitizer-backed fuzzing run the same assertions through the
+[property target inventory](./property-testing-and-fuzzing.md#target-and-representation-register).
+
 ## Transports, Endpoints, And Authentication
 
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
@@ -1843,7 +1852,8 @@ counts are exported by the node that executes the client ingestor, not per sessi
 A subscription generation retains its domain lifecycle when delivery starts. Filtered batches read
 the currently installed clock through that capability, including a domain started after the
 subscription opened. Unavailable-clock skipped-row outcomes remain unchanged.
-Predicate execution receives the serving node's bounded executor separately from the retained clock.
+The generation also retains the node's bounded executor and submits predicate evaluation through
+that same executor, alongside its retained clock capability.
 Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
 public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
 These internal ownership rules change neither session framing nor client recovery behavior.

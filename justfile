@@ -13,40 +13,49 @@ help:
 install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
+# Server-owned properties compile the library that embeds the current console assets.
+# Build those assets without starting services or the scenario harness.
+bolero-deps: build-web-console
+
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="":
+test-bolero filter="": bolero-deps
     python3 scripts/bolero.py test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
-fuzz-list:
+fuzz-list: bolero-deps
     python3 scripts/bolero.py list
 
 # Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
-fuzz target duration="30":
+fuzz target duration="30": bolero-deps
     python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
 
+# Prepare the same instrumented harness on a shared host before a bounded campaign.
+# This records build preparation only; fuzz must still execute and complete separately.
+prepare-bolero target: bolero-deps
+    python3 scripts/bolero.py prepare {{ quote(target) }}
+
 # Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
-fuzz-all duration="30":
+fuzz-all duration="30": bolero-deps
     python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
 
 # Replay the exact saved input through its ordinary property assertion.
-fuzz-replay target failure:
+fuzz-replay target failure: bolero-deps
     python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
-fuzz-reduce target failure:
+fuzz-reduce target failure: bolero-deps
     python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
 
 # Compare the inventory, package declarations, test harness and compiled Bolero targets.
-validate-bolero:
+validate-bolero: bolero-deps
     python3 scripts/bolero.py validate
 
-# Check the dedicated PR and campaign workflow with the pinned Actions linter.
+# Check the property and validation workflows with the pinned Actions linter.
 validate-bolero-workflow:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml .github/workflows/check.yaml
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
-qualify-bolero:
+qualify-bolero: bolero-deps
     python3 scripts/bolero.py qualify
 
 # Exercise the inventory and runner's validation and failure paths.
@@ -59,17 +68,17 @@ coverage-bolero-runner:
     set -euo pipefail
     mkdir -p target/bolero
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
-coverage-bolero duration="2":
+coverage-bolero duration="2": bolero-deps
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
     "${coverage[@]}" run --branch -a scripts/bolero.py test
     "${coverage[@]}" run --branch -a scripts/bolero.py fuzz-all {{ quote(duration) }}
     "${coverage[@]}" run --branch -a scripts/bolero.py qualify
@@ -1764,10 +1773,7 @@ client *args: build-deps
     cargo run --package nervix-cli -- {{ args }}
 
 build-web-console:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd crates/web-console
-    env -u NO_COLOR trunk build --release
+    python3 scripts/build_web_console.py
 
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server

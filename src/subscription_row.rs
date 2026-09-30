@@ -1266,6 +1266,9 @@ pub enum SubscriptionRowEncodingError {
 }
 
 #[cfg(test)]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use std::{
         num::{NonZeroU32, NonZeroUsize},

@@ -25,7 +25,7 @@ jobs:
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,11 +40,6 @@ jobs:
         with:
           tool: just,toml-cli,trunk
 
-      - name: Install server build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
-
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -55,6 +50,11 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+
+      - name: Install native server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -95,15 +95,16 @@ jobs:
 
       - name: Run runner tests and every ordinary Bolero property
         run: |
-          just build-web-console
           just test-bolero-runner
           just test-bolero
 
   bolero-fuzz:
     name: bolero-fuzz
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Include cold ordinary and sanitizer builds before all bounded target campaigns.
-    timeout-minutes: 120
+    # Cold sanitizer builds precede the full per-target campaign and qualification.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 180 || 360 }}
+    env:
+      CARGO_BUILD_JOBS: "1"
     permissions:
       contents: read
       id-token: write
@@ -126,11 +127,6 @@ jobs:
         with:
           tool: just,toml-cli,trunk
 
-      - name: Install server build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
-
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -144,6 +140,11 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+
+      - name: Install native server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -185,9 +186,13 @@ jobs:
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
 
+      - name: Prepare the registered server sanitizer harnesses
+        run: |
+          just prepare-bolero endpoint-route-table
+          just prepare-bolero client-arrow-rows
+
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |
-          just build-web-console
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             budget=30
           else

@@ -226,18 +226,19 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
 
 
 def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
+    """Authored package sources stop at nested manifests and Cargo build output."""
+    excluded = {ROOT / "target", ROOT / ".git", manifest.parent / "target"}
+    if target_dir := os.environ.get("CARGO_TARGET_DIR"):
+        excluded.add(pathlib.Path(target_dir).resolve())
     for directory, children, files in os.walk(manifest.parent):
-        parent = pathlib.Path(directory)
-        # Nested Cargo packages own their Rust, including a workspace's qualification crate.
-        # Build output and Git metadata are not authored sources of the package being checked.
+        path = pathlib.Path(directory)
         children[:] = sorted(
             child for child in children
-            if child not in {".git", "target"}
-            and not (parent / child / "Cargo.toml").is_file()
+            if path / child not in excluded and not (path / child / "Cargo.toml").is_file()
         )
-        for name in sorted(files):
-            if name.endswith(".rs"):
-                yield parent / name
+        for filename in sorted(files):
+            if filename.endswith(".rs"):
+                yield path / filename
 
 
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
@@ -337,7 +338,10 @@ def cargo_target_args(test_target: str) -> list[str]:
     return ["--test", test_target.removeprefix("test:")]
 
 
-def listed_tests(package: str, test_target: str, *, ignored: bool, manifest: pathlib.Path | None = None) -> list[str]:
+def listed_tests(
+    package: str, test_target: str, *, ignored: bool, features: tuple[str, ...],
+    manifest: pathlib.Path | None = None,
+) -> list[str]:
     args = [
         "cargo",
         "test",
@@ -345,6 +349,8 @@ def listed_tests(package: str, test_target: str, *, ignored: bool, manifest: pat
         package,
         *cargo_target_args(test_target),
     ]
+    if features:
+        args.extend(["--features", ",".join(features)])
     if manifest:
         args.extend(["--manifest-path", str(manifest)])
     args.extend(["bolero_", "--"])
@@ -354,7 +360,10 @@ def listed_tests(package: str, test_target: str, *, ignored: bool, manifest: pat
     return TEST_LINE.findall(command(args).stdout)
 
 
-def compiled_targets(package: str, test_target: str, manifest: pathlib.Path | None = None) -> list[dict[str, Any]]:
+def compiled_targets(
+    package: str, test_target: str, *, features: tuple[str, ...],
+    manifest: pathlib.Path | None = None,
+) -> list[dict[str, Any]]:
     args = [
         "cargo",
         "test",
@@ -362,6 +371,8 @@ def compiled_targets(package: str, test_target: str, manifest: pathlib.Path | No
         package,
         *cargo_target_args(test_target),
     ]
+    if features:
+        args.extend(["--features", ",".join(features)])
     if manifest:
         args.extend(["--manifest-path", str(manifest)])
     args.extend(["bolero_", "--", "--nocapture"])
@@ -405,11 +416,17 @@ def discover(inventory: Inventory) -> None:
             if target.package == package
         }
         for test_target in sorted(test_targets):
-            names = listed_tests(package, test_target, ignored=False, manifest=manifest)
-            ignored = listed_tests(package, test_target, ignored=True, manifest=manifest)
+            features = tuple(sorted({
+                feature
+                for target in inventory.targets
+                if target.package == package and target.test_target == test_target
+                for feature in target.features
+            }))
+            names = listed_tests(package, test_target, ignored=False, features=features, manifest=manifest)
+            ignored = listed_tests(package, test_target, ignored=True, features=features, manifest=manifest)
             if ignored:
                 raise BoleroError(f"{package}: ignored Bolero targets: {ignored}")
-            targets = compiled_targets(package, test_target, manifest=manifest)
+            targets = compiled_targets(package, test_target, features=features, manifest=manifest)
             if Counter(names) != Counter(item["test_name"] for item in targets):
                 raise BoleroError(
                     f"{package}: listed Bolero tests {names} differ from compiled targets "
@@ -521,8 +538,15 @@ def metadata(
 def test_targets(inventory: Inventory, selected: tuple[Target, ...]) -> None:
     executed = 0
     completed = 0
+    prepared: set[tuple[str, ...]] = set()
     for target in selected:
-        args = cargo_test_args(target) + ["--", "--exact", target.test, "--nocapture"]
+        args = cargo_test_args(target)
+        harness = tuple(args)
+        if harness not in prepared:
+            print(f"{target.id}: ordinary build deadline 1800s", flush=True)
+            command(args + ["--no-run"], timeout=1800)
+            prepared.add(harness)
+        args += ["--", "--exact", target.test, "--nocapture"]
         env = {
             "BOLERO_RANDOM_ITERATIONS": str(target.random_iterations),
             "BOLERO_RANDOM_MAX_LEN": str(target.max_input_bytes),
@@ -593,6 +617,26 @@ def verify_tool(inventory: Inventory) -> None:
     command(["rustup", "run", inventory.nightly, "rustc", "--version"])
 
 
+def scoped_build_env(target: Target, path: pathlib.Path) -> dict[str, str]:
+    """Scope cargo-bolero's pinned Rustup Cargo calls to the registered test harness."""
+    rustup = shutil.which("rustup")
+    if rustup is None:
+        raise BoleroError("rustup is required for the pinned sanitizer toolchain")
+    directory = path / "scope-bin"
+    directory.mkdir()
+    adapter = directory / "rustup"
+    adapter.write_text(
+        f"#!{sys.executable}\n"
+        "import os,sys\n"
+        "args=sys.argv[1:]\n"
+        "if len(args)>=4 and args[0]=='run' and args[2:4]==['cargo','test']:\n"
+        f"    args[4:4]={cargo_target_args(target.test_target)!r}\n"
+        f"os.execv({rustup!r},[{rustup!r},*args])\n"
+    )
+    adapter.chmod(0o700)
+    return {"PATH": str(directory) + os.pathsep + os.environ["PATH"]}
+
+
 def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, str]:
     """Read Cargo's current target identity and source root for binary selection."""
     manifest = target.manifest or package_manifests()[target.package]
@@ -628,11 +672,11 @@ def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, st
 
 
 def build_instrumented(
-    inventory: Inventory, target: Target, path: pathlib.Path
+    inventory: Inventory, target: Target, path: pathlib.Path, *, timeout: int | None = None
 ) -> pathlib.Path:
     budget_name = "BOLERO_BUILD_TIMEOUT_SECONDS"
     try:
-        build_timeout = int(os.environ.get(budget_name, "1800"))
+        build_timeout = int(os.environ.get(budget_name, "1800")) if timeout is None else timeout
     except ValueError as error:
         raise BoleroError(f"{budget_name} must be a positive integer") from error
     positive_int(build_timeout, budget_name)
@@ -651,7 +695,9 @@ def build_instrumented(
         target.test,
     ]
     print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
-    build = command(args, timeout=build_timeout, log=path / "build.log")
+    build = command(
+        args, env=scoped_build_env(target, path), timeout=build_timeout, log=path / "build.log"
+    )
     executables = EXECUTABLE.findall(build.stdout)
     matches = [
         ROOT / executable
@@ -663,6 +709,21 @@ def build_instrumented(
     if len(matches) != 1 or not matches[0].is_file():
         raise BoleroError(f"{target.id}: expected one instrumented {target.test_target} binary")
     return matches[0]
+
+
+def prepare_target(inventory: Inventory, target: Target) -> None:
+    """Prepare the identical sanitizer build without claiming campaign completion."""
+    verify_tool(inventory)
+    path = run_dir(target)
+    started = time.monotonic()
+    args = bolero_args(inventory, target)
+    try:
+        build_instrumented(inventory, target, path, timeout=7200)
+    except BoleroError:
+        metadata(path, target, args, "failed preparation", time.monotonic() - started)
+        raise
+    metadata(path, target, args, "prepared build", time.monotonic() - started)
+    print(f"{target.id}: build prepared; run just fuzz {target.id}; artifacts: {path}")
 
 
 def run_instrumented(
@@ -984,6 +1045,8 @@ def main() -> int:
     subparsers.add_parser("validate")
     subparsers.add_parser("list")
     subparsers.add_parser("qualify")
+    prepare = subparsers.add_parser("prepare")
+    prepare.add_argument("target")
     test = subparsers.add_parser("test")
     test.add_argument("filter", nargs="?")
     fuzz = subparsers.add_parser("fuzz")
@@ -1006,6 +1069,9 @@ def main() -> int:
         return 0
     if args.action == "qualify":
         qualify(inventory)
+        return 0
+    if args.action == "prepare":
+        prepare_target(inventory, exact_target(inventory, args.target))
         return 0
     if args.action == "test":
         test_targets(inventory, select(inventory, args.filter))
