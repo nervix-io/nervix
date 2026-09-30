@@ -808,7 +808,15 @@ The whole-attempt report retains a transport driver or pool cause beneath `SinkP
 rejection keeps the destination's safe SQLSTATE, error code, or named rejection reason. These
 context changes do not alter request grouping, successful delivery, retries, or ACK ownership.
 
-The host owns ingestor and emitter metric updates, transient status, and runtime events. Source
+The host owns ingestor and emitter metric updates, transient status, and runtime events.
+Source and sink tasks retain one immutable error/retry publication, so successful operations read
+and clear only an actual failure. DESCRIBE observes error and retry together; retry state still
+counts toward a drain when the payload buffer is empty. Pooled Redis and SQL sinks retain one wait
+slot per sink and publish it only after a connection borrow returns Pending. Its guard clears on
+completion, error or cancellation; sink teardown removes its own registration. Confirmation
+attempts retain the emitter's startup counter. Quiesced payload and client outcome metrics use
+children resolved with their owning task. See [Data-Plane Concurrency](./data-plane-concurrency.md#retained-task-dependencies)
+for publication and lifetime rules. Source
 open, resume, suspend, and close transitions have lifecycle logs; publish, retry, and commit
 failures carry connector identity without sensitive payload values. For metric names and
 `DESCRIBE` fields, use [Metrics And Observability](./metrics-and-observability.md). A client

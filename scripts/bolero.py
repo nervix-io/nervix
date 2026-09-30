@@ -587,6 +587,12 @@ def verify_tool(inventory: Inventory) -> None:
 def build_instrumented(
     inventory: Inventory, target: Target, path: pathlib.Path
 ) -> pathlib.Path:
+    budget_name = "BOLERO_BUILD_TIMEOUT_SECONDS"
+    try:
+        build_timeout = int(os.environ.get(budget_name, "1800"))
+    except ValueError as error:
+        raise BoleroError(f"{budget_name} must be a positive integer") from error
+    positive_int(build_timeout, budget_name)
     empty_corpus = path / "build-corpus"
     empty_crashes = path / "build-crashes"
     empty_corpus.mkdir()
@@ -600,7 +606,8 @@ def build_instrumented(
         str(empty_crashes),
         target.test,
     ]
-    build = command(args, timeout=1800, log=path / "build.log")
+    print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
+    build = command(args, timeout=build_timeout, log=path / "build.log")
     executables = EXECUTABLE.findall(build.stdout)
     matches = []
     if target.test_target == "lib":

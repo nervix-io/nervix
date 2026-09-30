@@ -7,8 +7,8 @@
 //!   queueing them as its delivery behavior asks, reporting the rows it skipped or dropped, ending
 //!   it with a typed reason when its relay closes, and releasing the relay receiver and the
 //!   interest lease it holds.
-//! - **Depends on.** The runtime's relay receiver, subscription predicate and domain time, the Row
-//!   encoder, the session's subscription lane, the interest lease, and the schedule it reads an
+//! - **Depends on.** The runtime's relay receiver, subscription predicate, domain time and executor,
+//!   the Row encoder, the session's subscription lane, the interest lease, and the schedule it reads an
 //!   end reason from.
 //! - **Must not know.** Requests, replies, or how a transport writes frames.
 //!
@@ -29,6 +29,7 @@ use nervix_client_wire::{
     EncodedFrame, ServerFrame, SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionRowsSkipped, WireEncodeError,
 };
+use nervix_execution::Executor;
 use nervix_models::{DomainName, RelayName, SubscriptionDeliveryBehavior};
 use nervix_primitives::sync::oneshot;
 use nervix_recovery::NoReceiver as _;
@@ -40,7 +41,6 @@ use crate::{
         session::outbound::{LaneClosed, LaneRefusal, SubscriptionLane},
         session_service::SessionServiceImpl,
     },
-    metrics::RuntimeMetrics,
     runtime::{CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionReceiver},
     subscription_row::{SubscriptionRowEncoder, SubscriptionRowFrame, SubscriptionRowSelection},
 };
@@ -83,6 +83,11 @@ enum DeliveryStop {
 
 /// The part of a generation's delivery that outlives its relay receiver and interest lease.
 struct ActiveDelivery {
+    executor: Executor,
+    clock: Result<
+        crate::runtime::DomainClockLifecycle,
+        Report<crate::runtime::DomainClockAccessError>,
+    >,
     domain: DomainName,
     relay: RelayName,
     predicate: Option<CompiledSubscriptionPredicate>,
@@ -112,11 +117,17 @@ impl SubscriptionDelivery {
         } = self;
         let announcement = wait_for_announcement(&lane, &mut receiver, announced).await;
         let losses = DeliveryLosses {
-            metrics: service.inner.runtime.metrics(),
-            domain: domain.clone(),
-            relay: relay.clone(),
+            dropped: service
+                .inner
+                .runtime
+                .metrics()
+                .session_subscription_dropped_rows(&domain, &relay),
         };
+        let clock = service.inner.runtime.domain_clock_lifecycle(&domain);
+        let executor = service.inner.runtime.executor().clone();
         let mut delivery = ActiveDelivery {
+            executor,
+            clock,
             domain,
             relay,
             predicate,
@@ -206,12 +217,12 @@ impl ActiveDelivery {
     /// longer deliver.
     async fn deliver_batch(&mut self, batch: &RelayRecordBatch) -> Result<(), LaneClosed> {
         let selection = select_subscription_rows(
+            &self.executor,
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,
             &self.service.inner.subscription_sampler,
-            &self.service.inner.runtime,
-            &self.domain,
+            &self.clock,
         )
         .await;
         if let Some(skipped) = selection.skipped {
@@ -300,9 +311,7 @@ struct SubscriptionSender {
 
 /// Where a dropping subscription records the rows it discards, for the node's operators.
 struct DeliveryLosses {
-    metrics: RuntimeMetrics,
-    domain: DomainName,
-    relay: RelayName,
+    dropped: prometheus::IntCounter,
 }
 
 impl SubscriptionSender {
@@ -402,13 +411,7 @@ impl SubscriptionSender {
             "the count restarts at every report, and no session drops 2^64 rows between two: at a \
              billion rows a second that takes centuries",
         );
-        self.losses
-            .metrics
-            .increment_session_subscription_dropped_rows(
-                &self.losses.domain,
-                &self.losses.relay,
-                rows,
-            );
+        self.losses.dropped.inc_by(rows);
     }
 }
 
@@ -491,9 +494,12 @@ mod tests {
             behavior,
             dropped_rows: 0,
             losses: DeliveryLosses {
-                metrics: crate::runtime::Runtime::default().metrics(),
-                domain: named::<DomainName>("default"),
-                relay: named::<RelayName>("events"),
+                dropped: crate::runtime::Runtime::default()
+                    .metrics()
+                    .session_subscription_dropped_rows(
+                        &named::<DomainName>("default"),
+                        &named::<RelayName>("events"),
+                    ),
             },
         };
         (sender, frames, outbound)

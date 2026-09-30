@@ -468,3 +468,31 @@ random_iterations = 256
 source = "src/registry/storage.rs"
 test = "registry::storage::tests::bolero_registry_archived_models_round_trip"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__task_status__tests__bolero_status_sequences_publish_complete_transitions/corpus"
+domain_version = 1
+features = []
+id = "task-status-transitions"
+invariant = "Every status transition publishes the complete failure and retry, and retained observations remain immutable."
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/task_status.rs"
+test = "runtime::task_status::tests::bolero_status_sequences_publish_complete_transitions"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__entity_gate__tests__bolero_freeze_sequences_publish_exact_coordination_owners/corpus"
+domain_version = 1
+features = []
+id = "entity-freeze-transitions"
+invariant = "Every engagement and release publishes exactly its active coordination owners and every retained watch sees that publication."
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/entity_gate.rs"
+test = "runtime::entity_gate::tests::bolero_freeze_sequences_publish_exact_coordination_owners"
+test_target = "lib"

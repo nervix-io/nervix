@@ -91,7 +91,7 @@ coverage-bolero-runner:
     set -euo pipefail
     mkdir -p target/bolero
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
@@ -177,6 +177,10 @@ bench-checked-lanes-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
 
 test-admission-runtime *args: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
+# Focused ordinary-mode regressions for runtime owners.
+test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 # Measure the endpoint's actual request routing and per-thread allocations on the same host.
@@ -830,7 +834,7 @@ coverage-lib output *args:
 
 # Measure the count adapter through vocabulary properties, production storage codecs, language
 # archives and window snapshots. These ordinary tests need no external services or containers.
-coverage-archive-counts output="target/archive-counts.lcov": build-web-console download-onnxruntime
+coverage-archive-counts output="target/archive-counts.lcov": tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -843,6 +847,9 @@ coverage-archive-counts output="target/archive-counts.lcov": build-web-console d
         registry::storage::tests
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
         runtime::window_state::tests
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/runtime/session_subscription_options.feature \
+        --name Blocking.sampled.session --retry 0
     cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
         --package nervix-models --package nervix-arbitrary --package nervix-consensus \
         --package nervix-interconnect --package nervix-server
@@ -859,6 +866,10 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
     cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
         --package nervix-models --package nervix-arbitrary --package nervix-consensus \
         --package nervix-interconnect --package nervix-server
+
+# Measure the server owner regressions with the same dependencies and environment as test-runtime.
+coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
 
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
@@ -1097,6 +1108,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
@@ -1106,6 +1118,10 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Exercise the admission benchmark's current emitter context while measuring its line coverage.
+coverage-admitted-work output="target/admitted-work.lcov": build-web-console
+    cargo llvm-cov --bench admitted_work --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --test
 
 # Run only the relay-interaction Criterion suite, including the delivery a node input records for
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
@@ -2030,3 +2046,18 @@ kube-cli:
 
 kube-cli-command command:
     bash scripts/kube_cli.sh --command "{{ command }}"
+
+# Record timing and allocations for every repaired recurring task dependency.
+bench-task-handles output="target/task-handles.json": build-web-console
+    cargo bench --package nervix-server --bench task_handles --features benchmarks -- {{ quote(output) }}
+
+coverage-task-handles output="target/task-handles.lcov" report="target/task-handles-coverage.json":
+    cargo llvm-cov --bench task_handles --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
+
+# Inspect a benchmark harness from an existing successful instrumented run without rebuilding it.
+coverage-task-handles-export executable profile output="target/task-handles-benchmark.lcov": llvm-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+    "${llvm_bin}/llvm-profdata" merge -sparse {{ quote(profile) }} -o target/task-handles-benchmark.profdata
+    "${llvm_bin}/llvm-cov" export {{ quote(executable) }} --instr-profile=target/task-handles-benchmark.profdata --format=lcov > {{ quote(output) }}
