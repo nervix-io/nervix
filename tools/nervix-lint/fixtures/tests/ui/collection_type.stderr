@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+ --> tests/ui/collection_type.rs:2:18
+  |
+2 |     let _: u32 = nervix_lint_fixtures::CustomCollection;
+  |            ---   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `CustomCollection`
+  |            |
+  |            expected due to this

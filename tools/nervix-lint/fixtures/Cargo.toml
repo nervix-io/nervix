@@ -1,0 +1,24 @@
+[package]
+edition = "2024"
+name = "nervix-lint-fixtures"
+version = "0.1.0"
+
+[workspace]
+
+[features]
+default = []
+loom = ["nervix-primitives/loom"]
+shuttle = ["nervix-primitives/shuttle"]
+turmoil = ["nervix-primitives/turmoil"]
+
+[dependencies]
+indexmap = "2"
+nervix-lint-fixture-macros = { path = "../fixture-macros" }
+nervix-primitives = { path = "../../../crates/primitives", features = [
+  "native",
+] }
+serde_json = "1"
+triomphe = "0.1"
+
+[dev-dependencies]
+trybuild = "=1.0.121"

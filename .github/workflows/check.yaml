@@ -35,8 +35,9 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 60
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Cold validation includes Clippy, compiled discovery and the complete compiler matrix.
+    timeout-minutes: 120
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
@@ -117,11 +118,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-
-      # Runs before the build: the counts are a text scan, so a change that raises one is named in
-      # seconds rather than after the toolchain has warmed up.
-      - name: Debt ratchet
-        run: just ratchet
 
       - name: Configure kache daemon remote
         env:
@@ -524,7 +520,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios]
+    needs: [tests, scenarios, extra-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -559,6 +555,12 @@ jobs:
           name: coverage-scenarios
           path: coverage-inputs/scenarios
 
+      - name: Download native extra coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-native-extras
+          path: coverage-inputs/native-extras
+
       - name: Merge coverage and check CRAP
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
@@ -567,6 +569,10 @@ jobs:
           lcov --add-tracefile coverage-inputs/tests/lcov.info \
             --add-tracefile coverage-inputs/scenarios/lcov.info \
             --output-file lcov.info
+          while IFS= read -r report; do
+            lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
+            lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
+          done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
           cargo crap --lcov lcov-workspace.info --min 30 --threshold 30
 
       - name: Upload coverage to Codecov
@@ -747,11 +753,10 @@ jobs:
   # coverage from that same run.
   extra-tests:
     name: extra-tests
-    # Half the suite job's cores on purpose. The smaller runner saves capacity, but cold
-    # compilation and the full modeled suite can outlast the scenario job. A 45-minute bound
-    # cancelled Shuttle checks before primitive, Loom, and completion checks could start.
+    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation and
+    # all modeled builds; each check retains its own bounded runner contract.
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 75
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -870,6 +875,17 @@ jobs:
       - name: Native coverage collector
         run: just test-native-coverage
 
+      - name: Compiler synchronization qualification
+        run: just coverage-native-extras test-typed-ratchet
+
+      - name: Setup uv for compiler runner coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Compiler cache and runner qualification
+        run: |
+          just qualify-typed-ratchet-cache
+          just coverage-typed-ratchet-python
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
@@ -910,6 +926,8 @@ jobs:
             target/native-coverage/**/lcov.info
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
+            target/typed-ratchet/python.lcov
+            target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 
       - name: Publish kache report
