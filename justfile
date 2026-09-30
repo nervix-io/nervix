@@ -53,6 +53,15 @@ qualify-bolero:
 test-bolero-runner:
     python3 -m unittest scripts.tests.test_bolero
 
+# Measure runner edits without launching unrelated product fuzz campaigns.
+coverage-bolero-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/bolero
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
+
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
 coverage-bolero duration="2":
@@ -125,6 +134,10 @@ bench-window-admission *args:
     cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
 test-admission-runtime *args: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
+# Focused ordinary-mode regressions for runtime owners.
+test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 test-web-console:
@@ -755,6 +768,10 @@ coverage-visual-create-report output="target/visual-create.lcov":
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
 
+# Measure the server owner regressions with the same dependencies and environment as test-runtime.
+coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
+
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
     #!/usr/bin/env bash
@@ -982,6 +999,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
@@ -1905,3 +1923,18 @@ kube-cli:
 
 kube-cli-command command:
     bash scripts/kube_cli.sh --command "{{ command }}"
+
+# Record timing and allocations for every repaired recurring task dependency.
+bench-task-handles output="target/task-handles.json": build-web-console
+    cargo bench --package nervix-server --bench task_handles --features benchmarks -- {{ quote(output) }}
+
+coverage-task-handles output="target/task-handles.lcov" report="target/task-handles-coverage.json":
+    cargo llvm-cov --bench task_handles --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
+
+# Inspect a benchmark harness from an existing successful instrumented run without rebuilding it.
+coverage-task-handles-export executable profile output="target/task-handles-benchmark.lcov": llvm-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+    "${llvm_bin}/llvm-profdata" merge -sparse {{ quote(profile) }} -o target/task-handles-benchmark.profdata
+    "${llvm_bin}/llvm-cov" export {{ quote(executable) }} --instr-profile=target/task-handles-benchmark.profdata --format=lcov > {{ quote(output) }}

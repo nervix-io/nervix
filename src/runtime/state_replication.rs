@@ -1422,10 +1422,12 @@ impl Runtime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn ownership_handoff_entity_is_frozen(&self, entity: &DomainNodeRef) -> bool {
         self.inner
             .frozen_ownership_handoff_entities
-            .contains_key(entity)
+            .get(entity)
+            .is_some_and(|state| state.is_frozen())
     }
 
     pub(crate) fn ownership_handoff_entity_is_frozen_by(

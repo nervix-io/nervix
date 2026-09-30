@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import contextlib
 import io
+import os
 import pathlib
 import subprocess
 import sys
@@ -26,6 +27,8 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "task-status-transitions",
+            "entity-freeze-transitions",
             "client-emitter-wire",
             "nspl-expression",
             "nspl-model",
@@ -58,6 +61,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
+            "nervix-server",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
@@ -221,6 +225,24 @@ class DiscoveryTests(unittest.TestCase):
             "target": {"cfg(unix)": {"dev-dependencies": {"bolero": "0.13.4"}}}
         }))
 
+    def test_workspace_root_source_scan_keeps_package_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = root / "Cargo.toml"
+            manifest.write_text("[package]\nname = 'host'\n")
+            source = root / "src" / "owner.rs"
+            source.parent.mkdir()
+            source.write_text("fn bolero_host() { bolero::check!(); }")
+            for relative in ("crates/connector", "tests/qualification"):
+                package = root / relative
+                package.mkdir(parents=True)
+                (package / "Cargo.toml").write_text("[package]\nname = 'nested'\n")
+                (package / "lib.rs").write_text("fn bolero_nested() { bolero::check!(); }")
+            generated = root / "target" / "generated.rs"
+            generated.parent.mkdir()
+            generated.write_text("fn bolero_generated() { bolero::check!(); }")
+            self.assertEqual(bolero.static_targets(manifest), {"bolero_host": source})
+
     def test_source_scan_rejects_unregistered_macro_shapes(self) -> None:
         cases = (
             ("bolero::check!();", "no owning function"),
@@ -350,6 +372,31 @@ class ExecutionTests(unittest.TestCase):
                     bolero.build_instrumented(self.inventory, integration_target, again),
                     integration,
                 )
+
+    def test_build_deadline_changes_only_the_compilation_budget(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-nspl-format")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_nspl_format-1111"
+            library.write_bytes(b"")
+            output = f"  Executable unittests src/lib.rs ({library})\n"
+            result = subprocess.CompletedProcess([], 0, output, "")
+            with mock.patch.dict(os.environ, {"BOLERO_BUILD_TIMEOUT_SECONDS": "7200"}), \
+                    mock.patch.object(bolero, "command", return_value=result) as build:
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
+                args = build.call_args.args[0]
+                self.assertEqual(build.call_args.kwargs["timeout"], 7200)
+                self.assertEqual(args[args.index("--timeout") + 1], "10s")
+                self.assertEqual(args[args.index("--runs") + 1], "0")
+
+    def test_build_deadline_refuses_invalid_bounds_before_starting_cargo(self) -> None:
+        for budget in ("0", "-1", "invalid"):
+            with self.subTest(budget=budget), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.dict(os.environ, {"BOLERO_BUILD_TIMEOUT_SECONDS": budget}), \
+                    mock.patch.object(bolero, "command") as build:
+                with self.assertRaisesRegex(bolero.BoleroError, "positive integer"):
+                    bolero.build_instrumented(self.inventory, self.target, pathlib.Path(directory))
+                build.assert_not_called()
 
     def test_feature_and_integration_test_target_arguments(self) -> None:
         target = dataclasses.replace(self.target, test_target="test:property_suite",

@@ -420,11 +420,14 @@ pub(super) fn publish_state_identity(
     if kind == ModelKind::WasmProcessor {
         wasm_state_generations = Some(nervix_models::WasmStateGenerations::first());
     }
-    runtime.inner.state_identities.insert(
+    runtime.publish_state_assignment(
         nervix_models::DomainNodeRef::node_in(domain.clone(), kind, identifier.into()),
-        super::ScheduledStateIdentity {
-            schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
-            wasm_state_generations,
+        ScheduledStateAssignment {
+            identity: super::ScheduledStateIdentity {
+                schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                wasm_state_generations,
+            },
+            checkpoint_owners: None,
         },
     );
 }
@@ -991,7 +994,7 @@ pub(super) fn install_test_domain_execution(
             domain_clock: test_domain_clock(domain),
             shutdown,
             routing: runtime.stage_domain_routing(domain, routing),
-            message_error_plans: Arc::default(),
+
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
@@ -1137,11 +1140,18 @@ pub(super) fn input_value(batch: &RelayRecordBatch) -> i64 {
 
 pub(super) fn sink_context() -> EmitterSinkContext {
     let domain = DomainName::parse("emitter_tests").expect("valid domain");
+    let runtime = Runtime::default();
+    let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
+    let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
     EmitterSinkContext {
-        runtime: Runtime::default(),
+        routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+        metrics_dirty: BranchMetricsMark::default(),
+        status: runtime.emitter_status(&key),
+        confirmation_waits: runtime.emitter_confirmation_counter(&key),
+        runtime,
         clock: test_domain_clock(&domain),
         domain,
-        emitter: EmitterName::parse("output").expect("valid emitter name"),
+        emitter,
         error_policies: ErrorPolicies::handled_by_log(),
         udfs: None,
     }

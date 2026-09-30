@@ -46,6 +46,7 @@ pub(super) type RoutedEndpointsByDomain = HashMap<DomainName, RoutedEndpoint>;
 /// endpoint publishes while the ingestor's endpoint source runs.
 #[derive(Clone)]
 pub(super) struct EndpointIngestBinding {
+    pub(super) handles: IngestTaskHandles,
     pub(super) runtime_key: DomainNodeRef,
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) domain: DomainName,
@@ -288,6 +289,7 @@ impl Runtime {
                 let metadata = [payload.first_metadata_row()];
                 let dispatch_result = self
                     .dispatch_ingested_records(IngestGroupDispatch {
+                        handles: &binding.handles,
                         collector: &mut collector,
                         domain: &binding.domain,
                         ingestor: &binding.ingestor,

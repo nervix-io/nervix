@@ -665,6 +665,30 @@ impl Runtime {
     /// scheduled node has no identity, and a placement resolved in that window cannot address the
     /// state the node owns. Relocation rebuilds these while the relocating node's own state task is
     /// still reading them, which is exactly when that window is observed.
+    pub(in crate::runtime) fn state_assignment(
+        &self,
+        node: &DomainNodeRef,
+    ) -> SharedStateAssignment {
+        if let Some(slot) = self.inner.state_identities.get(node) {
+            return slot.clone();
+        }
+        // Schedule application is the single registration owner; tasks bind only after publication.
+        let slot = Arc::new(ArcSwapOption::empty());
+        self.inner
+            .state_identities
+            .insert(node.clone(), slot.clone());
+        slot
+    }
+
+    pub(in crate::runtime) fn publish_state_assignment(
+        &self,
+        node: DomainNodeRef,
+        assignment: ScheduledStateAssignment,
+    ) {
+        self.state_assignment(&node)
+            .store(Some(StdArc::new(assignment)));
+    }
+
     pub(in crate::runtime) fn install_state_identities(&self, revision: &ExecutionRevision) {
         self.install_state_identities_from_nodes(&revision.domain, revision.nodes.values());
     }
@@ -682,11 +706,24 @@ impl Runtime {
         for node in nodes {
             let node_ref =
                 DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
-            self.inner.state_identities.insert(
+            let executors = node
+                .assigned_nodes
+                .iter()
+                .filter(|owner| node.executes_on(owner))
+                .cloned()
+                .collect();
+            let replicas = node.replica_nodes().into_iter().cloned().collect();
+            self.publish_state_assignment(
                 node_ref.clone(),
-                ScheduledStateIdentity {
-                    schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
-                    wasm_state_generations: node.wasm_state_generations().cloned(),
+                ScheduledStateAssignment {
+                    identity: ScheduledStateIdentity {
+                        schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
+                        wasm_state_generations: node.wasm_state_generations().cloned(),
+                    },
+                    checkpoint_owners: Some(WasmCheckpointOwners {
+                        executors,
+                        replicas,
+                    }),
                 },
             );
             scheduled.insert(node_ref);
@@ -728,17 +765,19 @@ impl Runtime {
             let node_ref =
                 DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
             let schema_fingerprint = Self::state_schema_fingerprint(node, start_version);
-            if let Some(mut identity) = self.inner.state_identities.get_mut(&node_ref) {
-                identity.schema_fingerprint = schema_fingerprint;
-            } else {
-                self.inner.state_identities.insert(
-                    node_ref.clone(),
-                    ScheduledStateIdentity {
+            let slot = self.state_assignment(&node_ref);
+            let mut assignment = match slot.load_full() {
+                Some(current) => (*current).clone(),
+                None => ScheduledStateAssignment {
+                    identity: ScheduledStateIdentity {
                         schema_fingerprint,
                         wasm_state_generations: None,
                     },
-                );
-            }
+                    checkpoint_owners: None,
+                },
+            };
+            assignment.identity.schema_fingerprint = schema_fingerprint;
+            slot.store(Some(StdArc::new(assignment)));
             active.insert(node_ref);
         }
         self.retain_state_identities(domain, &active);
@@ -791,6 +830,9 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for key in stale {
+            if let Some(slot) = self.inner.state_identities.get(&key) {
+                slot.store(None);
+            }
             self.inner.state_identities.remove(&key);
         }
     }
@@ -821,7 +863,12 @@ impl Runtime {
             | RuntimeStateKind::WindowProcessor
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
-                let Some(identity) = self.inner.state_identities.get(&node) else {
+                let assignment = self
+                    .inner
+                    .state_identities
+                    .get(&node)
+                    .and_then(|slot| slot.load_full());
+                let Some(assignment) = assignment else {
                     return Err(Report::new(
                         StateIdentityError::SchemaFingerprintUnpublished {
                             domain: domain.clone(),
@@ -831,7 +878,7 @@ impl Runtime {
                     ));
                 };
                 let branch = branch_key.as_ref().map(BranchKey::fingerprint);
-                let Some(state) = identity.state_of(state, branch.as_ref()) else {
+                let Some(state) = assignment.identity.state_of(state, branch.as_ref()) else {
                     return Err(Report::new(StateIdentityError::GenerationUnpublished {
                         domain: domain.clone(),
                         kind,
@@ -864,7 +911,10 @@ impl Runtime {
         let Some(identity) = self.inner.state_identities.get(&node) else {
             return false;
         };
-        identity.names(placement.state, branch.as_ref())
+        let Some(assignment) = identity.load_full() else {
+            return false;
+        };
+        assignment.identity.names(placement.state, branch.as_ref())
     }
 
     pub(in crate::runtime) fn purge_stale_runtime_state(
@@ -978,7 +1028,11 @@ impl Runtime {
                 .iter()
                 .filter_map(|entry| {
                     let key = entry.key();
-                    (&key.domain == domain).then(|| (key.node.clone(), entry.value().clone()))
+                    if &key.domain != domain {
+                        return None;
+                    }
+                    let assignment = entry.load_full()?;
+                    Some((key.node.clone(), assignment.identity.clone()))
                 })
                 .collect::<HashMap<_, _>>();
             store.purge_stale_state_identities(domain, &current)?;

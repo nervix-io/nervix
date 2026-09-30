@@ -206,6 +206,7 @@ impl Runtime {
             branched.shutdown().await;
         }
 
+        self.inner.ingestor_statuses.remove(&key);
         self.clear_ingestor_readiness(domain, ingestor);
         // A client ingestor's producers outlive this execution until the endpoint learns whether a
         // restart keeps their contract.
@@ -304,6 +305,12 @@ impl Runtime {
         Ok(BoundIngestor {
             input,
             dependencies: IngestorDependencies {
+                handles: self
+                    .ingest_task_handles(domain, &ingestor.name)
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?,
                 output_routes: programs.routes,
                 filter_where: programs.filter_where,
                 branched_templates,

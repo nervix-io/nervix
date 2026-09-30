@@ -1045,6 +1045,11 @@ Its limits:
 - Provisioning a Kafka topic's partitions and waiting for a consumer group's members query the
   broker synchronously on the runner task, for up to 5 seconds per query, and every scenario of the
   run waits while one of those queries runs.
+- Kafka committed-offset assertions query on a blocking worker with a one-second request timeout.
+  A query error retries within the assertion's original deadline; persistent errors fail rather
+  than count as an offset observation. An offset that crosses a forbidden threshold fails
+  immediately, and a below-threshold assertion completes only after a successful observation at
+  the end of its window.
 - The watchdog runs no after hooks, so a node held by a fault its scenario injected can outlast the
   cleanup window and is aborted with the run.
 - The time a scenario spends queued for permits and closing the browser have no budget of their own,

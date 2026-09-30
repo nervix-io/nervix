@@ -251,30 +251,25 @@ impl Runtime {
                 placement: placement.clone(),
             })
         };
-        if !self.runtime_state_placement_is_current(placement) {
+        let assignment = state.assignment.load();
+        let Some(assignment) = assignment.as_ref() else {
+            return Err(superseded());
+        };
+        let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+        if !assignment.identity.names(placement.state, branch.as_ref()) {
             return Err(superseded());
         }
         let dispatcher = self.inner.remote_dispatcher.load();
-        // A runtime that has not joined a cluster executes every node it runs, with no replicas.
         let Some(dispatcher) = dispatcher.as_deref() else {
             return Ok(WasmCheckpointBoundary::LocalStorage);
         };
-        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+        let Some(owners) = assignment.checkpoint_owners.as_ref() else {
             return Err(superseded());
         };
-        let node = NodeRef::new(placement.kind, placement.identifier.clone());
-        let Some(scheduled) = execution.revision.nodes.get(&node) else {
-            return Err(superseded());
-        };
-        if !scheduled.executes_on(dispatcher.local_node_id()) {
+        if !owners.executors.contains(dispatcher.local_node_id()) {
             return Err(superseded());
         }
-        let replicas = scheduled
-            .replica_nodes()
-            .into_iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        Ok(WasmCheckpointBoundary::assigned(replicas))
+        Ok(WasmCheckpointBoundary::assigned(owners.replicas.clone()))
     }
 
     /// Write a captured checkpoint to this node's stable storage, and offer it to the replicas its
@@ -391,6 +386,11 @@ impl Runtime {
         let state = Arc::new(ReplicatedWasmProcessorState::new(
             placement.clone(),
             initial,
+            self.state_assignment(&DomainNodeRef::node_in(
+                placement.domain.clone(),
+                placement.kind,
+                placement.identifier.clone(),
+            )),
         ));
         self.inner
             .replicated_wasm_processor_states

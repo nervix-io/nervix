@@ -879,6 +879,7 @@ impl Runtime {
                     domain,
                     DomainRoutingSnapshot {
                         passive_only: false,
+                        message_error_plans,
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,
@@ -891,7 +892,6 @@ impl Runtime {
                         processor_plans,
                     },
                 ),
-                message_error_plans,
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,
@@ -1064,6 +1064,7 @@ impl Runtime {
                 domain,
                 DomainRoutingSnapshot {
                     passive_only: true,
+                    message_error_plans,
                     relay_schemas,
                     relay_services,
                     lookups,
@@ -1076,7 +1077,6 @@ impl Runtime {
                     processor_plans: HashMap::default(),
                 },
             ),
-            message_error_plans,
             branched_entrypoints: HashMap::default(),
             endpoint_routes,
             node_tasks: HashMap::default(),

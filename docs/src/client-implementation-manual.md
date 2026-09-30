@@ -875,3 +875,11 @@ A client built on this protocol MUST NOT tell its users that:
   assembled it;
 - a restore whose outcome is unknown changed nothing, or that a restore which failed at a step
   undid the steps before it.
+
+## Subscription Clock Lifetime
+
+A filtered subscription reads the currently installed domain clock through its retained lifecycle,
+so opening before START does not prevent later filtering. Clients continue
+to handle domain-time-unavailable skipped-row notices and generation termination using the existing
+subscription protocol. Internal clock and metric handle retention introduces no additional client
+request, capability negotiation or recovery step.

@@ -1145,7 +1145,7 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                message_error_plans: Arc::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),

@@ -18,7 +18,7 @@ import sys
 import time
 import tomllib
 from collections import Counter
-from typing import Any
+from typing import Any, Iterator
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tests/bolero-targets.toml"
@@ -217,9 +217,24 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
     return False
 
 
+def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
+    for directory, children, files in os.walk(manifest.parent):
+        parent = pathlib.Path(directory)
+        # Nested Cargo packages own their Rust, including a workspace's qualification crate.
+        # Build output and Git metadata are not authored sources of the package being checked.
+        children[:] = sorted(
+            child for child in children
+            if child not in {".git", "target"}
+            and not (parent / child / "Cargo.toml").is_file()
+        )
+        for name in sorted(files):
+            if name.endswith(".rs"):
+                yield parent / name
+
+
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
     found = {}
-    for source in manifest.parent.rglob("*.rs"):
+    for source in package_rust_sources(manifest):
         content = source.read_text()
         for macro in MACRO.finditer(content):
             preceding = list(FUNCTION.finditer(content, 0, macro.start()))
@@ -572,6 +587,12 @@ def verify_tool(inventory: Inventory) -> None:
 def build_instrumented(
     inventory: Inventory, target: Target, path: pathlib.Path
 ) -> pathlib.Path:
+    budget_name = "BOLERO_BUILD_TIMEOUT_SECONDS"
+    try:
+        build_timeout = int(os.environ.get(budget_name, "1800"))
+    except ValueError as error:
+        raise BoleroError(f"{budget_name} must be a positive integer") from error
+    positive_int(build_timeout, budget_name)
     empty_corpus = path / "build-corpus"
     empty_crashes = path / "build-crashes"
     empty_corpus.mkdir()
@@ -585,7 +606,8 @@ def build_instrumented(
         str(empty_crashes),
         target.test,
     ]
-    build = command(args, timeout=1800, log=path / "build.log")
+    print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
+    build = command(args, timeout=build_timeout, log=path / "build.log")
     executables = EXECUTABLE.findall(build.stdout)
     matches = []
     if target.test_target == "lib":

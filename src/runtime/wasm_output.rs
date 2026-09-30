@@ -1085,9 +1085,9 @@ pub(super) async fn dispatch_wasm_output_route(
         .branch
         .runtime
         .handle_planned_message_errors_with_policy(
+            context.branch.routing_snapshot.as_deref(),
             &context.branch.domain,
-            context.node_kind,
-            context.processor,
+            NodeRef::new(context.node_kind, context.processor.clone()),
             Some(&output.relay),
             &output.message_error_policy,
             planned_errors,
@@ -1277,6 +1277,7 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
                 .runtime
                 .handle_message_error_with_policy(
                     MessageErrorSourceContext {
+                        routing: branch.routing_snapshot.as_deref(),
                         domain: &branch.domain,
                         node_kind,
                         node: processor,

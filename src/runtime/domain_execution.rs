@@ -31,9 +31,10 @@ pub(super) enum DomainRoutingError {
 /// field that can change together during a schedule apply lives in this one value, so readers
 /// observe either the preceding revision or its complete replacement.
 #[derive(Clone)]
-#[cfg_attr(test, derive(Default))]
+#[cfg_attr(any(test, feature = "benchmarks"), derive(Default))]
 pub(crate) struct DomainRoutingSnapshot {
     pub(super) passive_only: bool,
+    pub(super) message_error_plans: Arc<BoundMessageErrorRoutes>,
     pub(super) relay_schemas: HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) lookups: HashMap<LookupName, Arc<LookupRuntime>>,
@@ -116,8 +117,6 @@ pub(super) struct DomainExecution {
     pub(super) domain_clock: DomainClock,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) routing: DomainRouting,
-    /// Fully bound error routes installed as one revision before failed records can use them.
-    pub(super) message_error_plans: Arc<BoundMessageErrorRoutes>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
@@ -291,6 +290,9 @@ impl Runtime {
                 }
                 self.inner.domain_instantiation_errors.remove(&domain);
                 self.inner.in_flight_by_domain.remove(&domain);
+                self.inner
+                    .frozen_ownership_handoff_entities
+                    .retain(|key, _| key.domain != domain);
                 self.inner
                     .in_flight_by_ingestor
                     .retain(|key, _| key.domain != domain);
@@ -685,6 +687,7 @@ impl Runtime {
                     domain,
                     DomainRoutingSnapshot {
                         passive_only: false,
+                        message_error_plans,
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,
@@ -697,7 +700,6 @@ impl Runtime {
                         processor_plans,
                     },
                 ),
-                message_error_plans,
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,

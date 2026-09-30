@@ -1055,6 +1055,7 @@ pub(super) async fn enqueue_correlator_output(
                     .runtime
                     .handle_message_error_with_policy(
                         MessageErrorSourceContext {
+                            routing: branch.routing_snapshot.as_deref(),
                             domain: &branch.domain,
                             node_kind,
                             node: processor,
@@ -1232,6 +1233,7 @@ pub(super) async fn handle_correlator_timeout_action(
                         .runtime
                         .handle_message_error(
                             MessageErrorSourceContext {
+                                routing: branch.routing_snapshot.as_deref(),
                                 domain: &branch.domain,
                                 node_kind,
                                 node: processor,

@@ -53,6 +53,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v1 | 256 | 4096 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
+| `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
+| `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent
@@ -121,6 +123,17 @@ recorded boundary, not a claim:
   it may land one unit in the last place away. Its text and archived forms keep every bit.
 
 ## Commands And Enforcement
+
+The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
+server package uses optimization level one and no debug output to keep its instrumented build
+within the compilation budget. Both profiles retain debug assertions, overflow checks,
+AddressSanitizer and libFuzzer coverage feedback; ordinary and release builds are unchanged.
+
+An instrumented build has a 1,800-second deadline. On a loaded development host,
+`BOLERO_BUILD_TIMEOUT_SECONDS=7200 just fuzz <id> 30` grants compilation more time. The override
+must be a positive integer and affects only compilation; the inventory's case limit and the
+requested campaign duration remain enforced. CI uses the default deadline. The runner prints the
+effective compilation deadline alongside the build command and retains timeout evidence.
 
 Install the dated sanitizer nightly named in the inventory and the pinned CLI:
 
