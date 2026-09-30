@@ -28,6 +28,7 @@ struct ExecutorInner {
     limits: OperationLimits,
     control_cpu: WorkerPool,
     data_cpu: WorkerPool,
+    extension_cpu: WorkerPool,
     bulk_cpu: WorkerPool,
     consensus_storage: WorkerPool,
     filesystem_storage: WorkerPool,
@@ -43,6 +44,7 @@ struct ExecutorInner {
 pub struct ExecutorSnapshot {
     pub control_cpu: WorkerClassSnapshot,
     pub data_cpu: WorkerClassSnapshot,
+    pub extension_cpu: WorkerClassSnapshot,
     pub bulk_cpu: WorkerClassSnapshot,
     pub consensus_storage: WorkerClassSnapshot,
     pub filesystem_storage: WorkerClassSnapshot,
@@ -50,6 +52,18 @@ pub struct ExecutorSnapshot {
     pub commands_memory: MemoryBudgetSnapshot,
     pub relay_memory: MemoryBudgetSnapshot,
     pub bulk_memory: MemoryBudgetSnapshot,
+}
+
+impl ExecutorSnapshot {
+    /// What one CPU class is doing.
+    pub fn cpu_class(&self, class: CpuClass) -> WorkerClassSnapshot {
+        match class {
+            CpuClass::Control => self.control_cpu,
+            CpuClass::Data => self.data_cpu,
+            CpuClass::Extension => self.extension_cpu,
+            CpuClass::Bulk => self.bulk_cpu,
+        }
+    }
 }
 
 impl Default for Executor {
@@ -77,6 +91,11 @@ impl Executor {
                 data_cpu: WorkerPool::new(
                     CpuClass::Data.into(),
                     validated.workers.data_cpu,
+                    validated.workers.pending_jobs,
+                ),
+                extension_cpu: WorkerPool::new(
+                    CpuClass::Extension.into(),
+                    validated.workers.extension_cpu,
                     validated.workers.pending_jobs,
                 ),
                 bulk_cpu: WorkerPool::new(
@@ -205,6 +224,7 @@ impl Executor {
         ExecutorSnapshot {
             control_cpu: self.inner.control_cpu.snapshot(),
             data_cpu: self.inner.data_cpu.snapshot(),
+            extension_cpu: self.inner.extension_cpu.snapshot(),
             bulk_cpu: self.inner.bulk_cpu.snapshot(),
             consensus_storage: self.inner.consensus_storage.snapshot(),
             filesystem_storage: self.inner.filesystem_storage.snapshot(),
@@ -228,6 +248,7 @@ impl Executor {
         match class {
             CpuClass::Control => &self.inner.control_cpu,
             CpuClass::Data => &self.inner.data_cpu,
+            CpuClass::Extension => &self.inner.extension_cpu,
             CpuClass::Bulk => &self.inner.bulk_cpu,
         }
     }

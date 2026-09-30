@@ -137,7 +137,10 @@ archive; see [Restore Streams](#restore-streams).
   `Authorization: Basic` header or in the `auth` query parameter, percent-encoded, because the
   server decodes the query as a form and would read a raw `+` as a space.
 - **T-5.** On `UNAUTHENTICATED`, or `401` for the WebSocket, a client MUST NOT retry with the same
-  credentials automatically. The server paces a user's attempts after a failure.
+  credentials automatically. The server paces a user's attempts after a failure. `UNAVAILABLE`, or
+  `503` for the WebSocket, means the node could not verify the credentials now and judged nothing,
+  so a client MAY retry with the same credentials after backing off, as it does after any other
+  transport failure.
 - **T-6.** A client MUST NOT resend a frame that ended its call with `OUT_OF_RANGE` or `INTERNAL`,
   because the server found the frame oversized or malformed.
 - **T-7.** A WebSocket client MUST expect its session to end with a `SessionEnding` whose reason is

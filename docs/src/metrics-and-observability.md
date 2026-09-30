@@ -212,8 +212,8 @@ identity, a domain, or an operation identifier.
 
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`
-for memory, and `control_cpu`, `data_cpu`, `bulk_cpu`, `consensus_storage`, `filesystem_storage` for
-workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
+for memory, and `control_cpu`, `data_cpu`, `extension_cpu`, `bulk_cpu`, `consensus_storage`,
+`filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
 Transport pools:
@@ -252,7 +252,7 @@ Relay admission:
 Execution admission:
 
 - `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
-  transient interconnection memory reserved for one class, and what it is currently holding
+  transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
   charges granted and charges refused outright
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how

@@ -190,6 +190,9 @@ use crate::{
     task_shutdown::JoinShutdown as _,
 };
 
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod admitted_work_benchmark;
 mod branch_aggregated_state;
 mod branch_buffering;
 mod branch_key;
@@ -388,7 +391,7 @@ use entrypoint_routes::{
 pub(in crate::runtime) use events::RuntimeEvents;
 use filter_map::{
     ExecutedFilterMap, FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors,
-    VmUninitializedInput, append_filter_map_nested_value, evaluate_filter_map_on_batch,
+    ProgramRun, VmUninitializedInput, append_filter_map_nested_value, evaluate_filter_map_on_batch,
     evaluate_output_branch_program, execute_filter_map_program_on_batch,
     expression_reads_sensitive_source, plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
@@ -406,8 +409,8 @@ pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    RawIngestDispatch, branched_branch_filter_blocking, branched_branch_plan_blocking,
-    branched_entrypoint_batch_from_inputs_blocking, decode_ingested_payload,
+    PayloadDecodeError, RawIngestDispatch, decode_ingested_payload,
+    prepare_branched_entrypoint_input,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{
@@ -553,6 +556,8 @@ use test_fixtures::{
     wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
     window_outputs, window_plan, with_inherit_all,
 };
+#[cfg(test)]
+pub(crate) use test_fixtures::{FilledCpuClass, single_worker_executor};
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
     MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,

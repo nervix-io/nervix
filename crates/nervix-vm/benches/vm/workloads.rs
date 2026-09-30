@@ -71,14 +71,14 @@ fn repeat_program() -> Arc<CompiledProgram> {
 
 fn measure_batch(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &nervix_primitives::runtime::Runtime,
+    runtime: &BenchmarkRuntime,
     name: &str,
     shape: &str,
     program: &Arc<CompiledProgram>,
     batch: &TypedBatch,
 ) {
     runtime
-        .block_on(execute_benchmark_program(program, batch))
+        .execute(program, batch)
         .assured("the benchmark fixture and compiled output schema agree");
     #[cfg(feature = "benchmark-allocations")]
     allocation_probe::measure(runtime, name, shape, program, batch);
@@ -87,10 +87,7 @@ fn measure_batch(
         bencher.iter(|| {
             black_box(
                 runtime
-                    .block_on(execute_benchmark_program(
-                        black_box(program),
-                        black_box(input),
-                    ))
+                    .execute(black_box(program), black_box(input))
                     .assured("the validated benchmark fixture executes successfully"),
             )
         });

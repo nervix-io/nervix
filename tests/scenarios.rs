@@ -345,6 +345,8 @@ struct ScenarioWorld {
     saved_relocation_plan: Option<String>,
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
+    /// The node whose bulk workers and bulk wait queue a scenario filled, until it releases them.
+    saturated_bulk_node: Option<String>,
     broker_observer: Option<BrokerObserver>,
     /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
@@ -471,6 +473,7 @@ impl fmt::Debug for ScenarioWorld {
                 "last_auth_attempts_elapsed",
                 &self.last_auth_attempts_elapsed,
             )
+            .field("saturated_bulk_node", &self.saturated_bulk_node)
             .field(
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
@@ -14922,7 +14925,7 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(30),
-        fault_injection.occupy_bulk_execution(&node_name),
+        fault_injection.occupy_execution(&node_name, nervix_execution::CpuClass::Bulk),
     )
     .await
     .unwrap_or_else(|error| {
@@ -14930,12 +14933,75 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill every bulk worker and every place in the bulk wait queue on the leader, so the next bulk
+/// job the leader is handed is refused rather than queued.
+#[when("bulk execution on the leader node is saturated")]
+async fn when_bulk_execution_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        fault_injection.saturate_execution(
+            &crate::common::cluster::node_name(&leader),
+            nervix_execution::CpuClass::Bulk,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("bulk execution on '{leader}' never filled its workers and wait queue: {error}")
+    });
+    world.saturated_bulk_node = Some(leader);
+}
+
+#[when("the saturated bulk execution is released")]
+async fn when_the_saturated_bulk_execution_is_released(world: &mut ScenarioWorld) {
+    let node_id = world
+        .saturated_bulk_node
+        .take()
+        .expect("an earlier step saturated bulk execution on a node");
+    world
+        .fault_injection
+        .release_execution(&crate::common::cluster::node_name(&node_id));
+}
+
+/// Fill every extension worker and every place in the extension wait queue on every node, so the
+/// next operator-supplied program any node is handed is refused rather than queued.
+#[when("extension execution is saturated on every node")]
+async fn when_extension_execution_is_saturated_on_every_node(world: &mut ScenarioWorld) {
+    let fault_injection = world.fault_injection.clone();
+    for node_id in world.cluster().node_ids() {
+        nervix_primitives::time::timeout(
+            Duration::from_secs(60),
+            fault_injection.saturate_execution(
+                &crate::common::cluster::node_name(&node_id),
+                nervix_execution::CpuClass::Extension,
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "extension execution on '{node_id}' never filled its workers and wait queue: \
+                 {error}"
+            )
+        });
+    }
+}
+
+#[when("extension execution is released on every node")]
+async fn when_extension_execution_is_released_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_execution(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
 #[when(expr = "bulk execution on node {string} is released")]
 async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world
         .fault_injection
-        .release_bulk_execution(&crate::common::cluster::node_name(&node_id));
+        .release_execution(&crate::common::cluster::node_name(&node_id));
 }
 
 /// Run NSPL on a node and require it to finish inside a bound, which is how a scenario states that

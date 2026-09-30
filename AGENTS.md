@@ -322,6 +322,17 @@ choose a backend.
   as one task of the simulated host's scheduler under Turmoil; only the executor's worker pools may
   name it. Pausing, advancing and resuming a runtime's clock needs the `test-util` capability,
   which only tests of elapsed-time behavior enable.
+- Work a node runs off its async workers goes through the bounded executor in `nervix-execution`:
+  it takes the CPU or storage class of its work, charges the memory class it allocates in, and
+  checks its `Cancellation` between bounded units. Operator-supplied code the node cannot bound,
+  such as a UDF call or a JAQ transformation, takes the extension class. A refusal from the
+  executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
+  stays retryable rather than becoming a decode, encode or authentication failure.
+  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other
+  file that names it needs a permission in `crates/primitives/blocking-permissions.toml` stating
+  its owner, why that owner stays outside the executor, and what bounds its work instead, such as
+  a client tool that is not a node or an external driver that waits on the network. A use without
+  a permission and a permission nothing uses both fail.
 - Tokio's unstable runtime controls belong to the Turmoil build: only a Turmoil recipe in the
   `justfile` passes `--cfg tokio_unstable`, never Cargo configuration, a workflow or a build
   script. Turmoil is also a runner: beside `nervix-primitives`, a package whose harness drives a

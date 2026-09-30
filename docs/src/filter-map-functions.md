@@ -47,7 +47,7 @@ Use the smallest extension tier that fits the operation:
 | Tier | Trust required | Statefulness | Unit of work | Execution | Failure containment |
 | --- | --- | --- | --- | --- | --- |
 | Builtins | None beyond Nervix itself | Stateless | One expression call | Async-safe runtime execution | Per-row error channel |
-| Roto UDFs | Operator-trusted native code | Stateless | Vectorized column function with 1–8 arguments | Blocking worker pool | Per-row errors, whole-batch errors, and a post-return watchdog |
+| Roto UDFs | Operator-trusted native code | Stateless | Vectorized column function with 1–8 arguments | The node's extension workers | Per-row errors, whole-batch errors, and a post-return watchdog |
 | WASM processors | Isolation suitable for third-party code | Branch-local guest state | Batch-and-route processor with guest-owned emission | One guest instance per branch | Message errors, global errors, and guest traps |
 
 Tenant-supplied or potentially non-terminating logic belongs on the WASM processor path. Roto UDF
@@ -1963,8 +1963,8 @@ Two measured facts, from the [VM batch-size sweep](nspl-overview.md) and from th
 workloads below, shape what an expression costs:
 
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
-  Batches above 1,024 messages execute on the blocking worker pool, whose hand-off costs more than
-  a small batch does to execute.
+  Batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
+  cost more than a small batch does to execute.
 - An expression costs what its functions do for the messages that evaluate them. Inside a
   conditional arm, some operations run only for the messages that select the arm, so their cost
   follows the share of messages it selects:

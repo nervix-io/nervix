@@ -506,6 +506,7 @@ impl CompiledHttpRequestFields {
     /// when a later write replaces its value. A rejected row sends no part of its request.
     pub(in crate::runtime) async fn prepare(
         &self,
+        executor: &Executor,
         emitter: &EmitterName,
         mut published: RelayRecordBatch,
         input: HttpRequestInput,
@@ -541,6 +542,10 @@ impl CompiledHttpRequestFields {
             ],
         };
         let executed = execute_filter_map_program_on_batch(
+            ProgramRun {
+                executor,
+                now: execution_now,
+            },
             "emitter",
             emitter,
             &self.program,
@@ -551,7 +556,6 @@ impl CompiledHttpRequestFields {
                 side_inputs,
                 ingest_metadata: None,
             },
-            execution_now,
             acks,
             None,
         )
@@ -1182,6 +1186,7 @@ mod tests {
 
         let prepared = compiled
             .prepare(
+                &Executor::default(),
                 &named("deliver"),
                 batch,
                 HttpRequestInput::Published,
@@ -1373,6 +1378,7 @@ mod tests {
 
         let prepared = compiled
             .prepare(
+                &Executor::default(),
                 &named("deliver"),
                 published,
                 HttpRequestInput::Source {

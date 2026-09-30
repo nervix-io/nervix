@@ -145,6 +145,7 @@ fn executor(pending_jobs: usize) -> Executor {
         workers: WorkerCounts {
             control_cpu: NonZeroUsize::MIN,
             data_cpu: NonZeroUsize::MIN,
+            extension_cpu: NonZeroUsize::MIN,
             bulk_cpu: NonZeroUsize::MIN,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::MIN,
@@ -261,6 +262,7 @@ impl HostBounds {
         for workers in [
             executor.control_cpu,
             executor.data_cpu,
+            executor.extension_cpu,
             executor.bulk_cpu,
             executor.consensus_storage,
             executor.filesystem_storage,

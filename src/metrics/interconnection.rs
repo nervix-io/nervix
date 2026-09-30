@@ -744,6 +744,10 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             workers: executor.data_cpu,
         },
         WorkerClassSample {
+            class: "extension_cpu",
+            workers: executor.extension_cpu,
+        },
+        WorkerClassSample {
             class: "bulk_cpu",
             workers: executor.bulk_cpu,
         },

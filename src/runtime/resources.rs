@@ -1,7 +1,14 @@
+use error_stack::ResultExt as _;
 use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, render_client_config_template};
 use nervix_connector_websockets::{CompiledSignalingProtocol, SignalingProtobufDescriptors};
+use nervix_execution::{CpuClass, MemoryClass};
 
 use super::*;
+
+/// What compiling one resource's protobuf sources is charged. The parser's memory is bounded by the
+/// installed sources, which the resource store's limits bound, so the charge only admits the
+/// compilation onto the bulk workers.
+const PROTOBUF_COMPILE_RESERVATION_BYTES: u64 = 1;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum RuntimeResourceError {
@@ -342,20 +349,29 @@ impl Runtime {
             ));
         };
         let compile_config = ProtobufDescriptorCompileConfig::from_entries(config)?;
-        let task_resource = id.identifier.clone();
-        let task_version = id.version;
+        let not_completed = || RuntimeResourceError::ProtobufTask {
+            resource: id.identifier.clone(),
+            version: id.version,
+        };
+        let executor = self.executor();
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, PROTOBUF_COMPILE_RESERVATION_BYTES)
+            .await
+            .change_context_lazy(not_completed)?;
         let descriptor_id = id.clone();
-        let file_descriptor_set = nervix_primitives::task::spawn_blocking(move || {
-            compile_config.compile_descriptor_set(&store, &descriptor_id)
-        })
-        .await
-        .map_err(|error| {
-            Report::new(RuntimeResourceError::ProtobufTask {
-                resource: task_resource,
-                version: task_version,
+        let compiled = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(RuntimeResourceError::ProtobufTask {
+                        resource: descriptor_id.identifier.clone(),
+                        version: descriptor_id.version,
+                    })?;
+                compile_config.compile_descriptor_set(&store, &descriptor_id)
             })
-            .attach_printable(error)
-        })??;
+            .await
+            .change_context_lazy(not_completed)?;
+        let file_descriptor_set = compiled?;
 
         ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set).map_err(|error| {
             Report::new(RuntimeResourceError::InvalidProtobufDescriptorSet {
@@ -504,7 +520,7 @@ impl Runtime {
         mut programs: Vec<UdfProgram>,
     ) -> error_stack::Result<CompiledDomainUdfs, nervix_roto::UdfError> {
         programs.sort_by(|left, right| left.name.cmp(&right.name));
-        let executor = UdfExecutor::compile(programs.clone()).await?;
+        let executor = UdfExecutor::compile(self.executor(), programs.clone()).await?;
         Ok(CompiledDomainUdfs { programs, executor })
     }
 

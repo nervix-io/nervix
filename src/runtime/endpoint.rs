@@ -281,7 +281,7 @@ impl Runtime {
         let mut collector =
             IngestRouteCollector::new(IngestMetadataKind::Headers, 1, binding.metrics.clone());
         match collector
-            .decode_payload(&binding.codec, payload.payload())
+            .decode_payload(self.executor(), &binding.codec, payload.payload())
             .await
         {
             Ok(()) => {
@@ -324,6 +324,22 @@ impl Runtime {
                 }
             }
             Err(error) => {
+                if let PayloadDecodeError::NotAdmitted = error.current_context() {
+                    self.inner.events.report_error(format!(
+                        "the node could not take {protocol} message for ingestor '{}' in domain \
+                         '{}' now: {error:?}",
+                        binding.ingestor.as_str(),
+                        binding.domain.as_str(),
+                    ));
+                    warn!(
+                        domain = binding.domain.as_str(),
+                        ingestor = binding.ingestor.as_str(),
+                        error = ?error,
+                        protocol,
+                        "the node could not take an endpoint message"
+                    );
+                    return;
+                }
                 self.inner.events.report_error(format!(
                     "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
                     binding.ingestor.as_str(),

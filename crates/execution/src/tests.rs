@@ -20,6 +20,7 @@ fn small_executor() -> Executor {
         workers: WorkerCounts {
             control_cpu: one(),
             data_cpu: one(),
+            extension_cpu: one(),
             bulk_cpu: one(),
             consensus_storage: one(),
             filesystem_storage: one(),
@@ -42,6 +43,7 @@ fn queued_executor(pending_jobs: usize) -> Executor {
             ..WorkerCounts {
                 control_cpu: one(),
                 data_cpu: one(),
+                extension_cpu: one(),
                 bulk_cpu: one(),
                 consensus_storage: one(),
                 filesystem_storage: one(),
@@ -310,6 +312,7 @@ mod shuttle_checks {
         for (class, workers) in [
             ("control_cpu", snapshot.control_cpu),
             ("data_cpu", snapshot.data_cpu),
+            ("extension_cpu", snapshot.extension_cpu),
             ("bulk_cpu", snapshot.bulk_cpu),
             ("consensus_storage", snapshot.consensus_storage),
             ("filesystem_storage", snapshot.filesystem_storage),

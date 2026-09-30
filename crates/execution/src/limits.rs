@@ -21,9 +21,16 @@ pub enum CpuClass {
     /// bulk work cannot take the slot a heartbeat, a vote, an acknowledgement or an administrative
     /// reply needs. The slot is not a reserved thread; see the crate documentation.
     Control,
-    /// Per-message data-plane work: relay body encoding and decoding, validation and hashing.
+    /// Per-message data-plane work the node bounds itself: relay body encoding and decoding,
+    /// validation and hashing, expression programs over large batches, branch preparation and
+    /// model inference.
     Data,
-    /// Whole-transfer work: resource archives, snapshots and other large read results.
+    /// Operator-supplied code the node runs but cannot bound: user-defined function calls and
+    /// codec transformations. Its share of admission is its own, so a program that never returns
+    /// holds only this class's workers and leaves the data class its whole capacity.
+    Extension,
+    /// Whole-transfer work: resource archives, snapshots and other large read results, and the
+    /// whole-file compilations and hashes that are not per message.
     Bulk,
 }
 
@@ -72,6 +79,7 @@ impl WorkerClassName {
         match self {
             Self::Cpu(CpuClass::Control) => "control_cpu",
             Self::Cpu(CpuClass::Data) => "data_cpu",
+            Self::Cpu(CpuClass::Extension) => "extension_cpu",
             Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
             Self::Storage(StorageClass::Consensus) => "consensus_storage",
             Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
@@ -96,6 +104,7 @@ impl From<StorageClass> for WorkerClassName {
 pub struct WorkerCounts {
     pub control_cpu: NonZeroUsize,
     pub data_cpu: NonZeroUsize,
+    pub extension_cpu: NonZeroUsize,
     pub bulk_cpu: NonZeroUsize,
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
@@ -105,15 +114,17 @@ pub struct WorkerCounts {
 }
 
 impl Default for WorkerCounts {
-    /// One reserved control and consensus worker each, data and bulk concurrency at the greater of
-    /// one and the available CPU count minus one, and two workers for ordinary filesystem work.
+    /// One reserved control and consensus worker each, data, extension and bulk concurrency at the
+    /// greater of one and the available CPU count minus one, and two workers for ordinary
+    /// filesystem work.
     fn default() -> Self {
         let available = match nervix_primitives::thread::available_parallelism() {
             Ok(available) => available.get(),
             Err(_) => 1,
         };
         // One CPU is reserved for control and consensus work; a single-CPU node still runs one
-        // data and one bulk worker, because refusing to run either is not a useful bound.
+        // data, one extension and one bulk worker, because refusing to run any is not a useful
+        // bound.
         let data = match available.checked_sub(1) {
             Some(remaining) => match NonZeroUsize::new(remaining) {
                 Some(data) => data,
@@ -124,6 +135,7 @@ impl Default for WorkerCounts {
         Self {
             control_cpu: NonZeroUsize::MIN,
             data_cpu: data,
+            extension_cpu: data,
             bulk_cpu: data,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),

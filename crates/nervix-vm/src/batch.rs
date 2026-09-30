@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
     Int32Array, Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray,
@@ -68,6 +69,16 @@ macro_rules! declare_typed_arrays {
                     Self::Generic(array) => array.clone(),
                     Self::Uninitialized { data_type, len } => new_null_array(data_type, *len),
                 }
+            }
+
+            /// The bytes the array's values and validity hold, not the capacity its buffers were
+            /// allocated with, or `None` when Arrow cannot measure its layout. An uninitialized
+            /// column holds nothing yet.
+            pub fn payload_bytes(&self) -> Option<usize> {
+                if let Self::Uninitialized { .. } = self {
+                    return Some(0);
+                }
+                self.as_array().to_data().get_slice_memory_size().ok()
             }
 
             pub(crate) fn as_array(&self) -> &dyn Array {
@@ -245,6 +256,19 @@ impl TypedBatch {
 
     pub fn row_count(&self) -> usize {
         self.row_count
+    }
+
+    /// The bytes the batch's columns hold, which is also the usual order of what a program builds
+    /// from them, or `None` when Arrow cannot measure one of them.
+    pub fn payload_bytes(&self) -> Option<u64> {
+        let mut total = 0_u64;
+        for column in &self.columns {
+            let column_bytes: u64 = column.payload_bytes()?.arch_into();
+            total = total
+                .checked_add(column_bytes)
+                .assured("the columns of one batch hold far less than u64::MAX bytes");
+        }
+        Some(total)
     }
 
     /// The rows on which some required field holds no value, because no route initialized it or

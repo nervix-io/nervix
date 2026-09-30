@@ -32,31 +32,35 @@ depth depends on arrivals during the system-owned 100 µs window. See the
 WASM code compilation is shared while mutable guest state is not. See
 [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory).
 
-UDF-bearing expressions run on the process-wide blocking worker pool. Heavy UDF use and the
-maximum number of concurrent UDF-bearing paths are blocking-pool sizing inputs. A native UDF that
-never returns permanently occupies one worker. See the
+UDF-bearing expressions and JAQ transformations run on the node's extension workers, which
+nothing else uses. Heavy UDF or JAQ use and the number of concurrent paths that run them are
+extension sizing inputs. A native UDF that never returns permanently occupies one extension worker,
+and never a worker another class needs. See the
 [UDF watchdog consequences](udfs.md#nulls-errors-and-volatility).
 
 ## Bounded Execution And Transient Memory
 
-Every variable-size encode, decode, validation and hash a node performs is admitted into one of
-five bounded classes rather than run on the asynchronous runtime, and is charged against a reserved
-byte budget before it allocates. Each class has its own admission, so work saturating one cannot
-take the slots another is entitled to.
+Every variable-size encode, decode, validation, hash, compilation and program execution a node
+runs off its asynchronous runtime is admitted into one of six bounded classes, and is charged
+against a reserved byte budget before it allocates. Each class has its own admission, so work
+saturating one cannot take the slots another is entitled to.
 
 | Class | Concurrent jobs | Work |
 | --- | --- | --- |
 | Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
-| Data | available CPUs − 1 | Per-message relay body encoding, decoding and validation |
-| Bulk | available CPUs − 1 | Whole-transfer work: resource archives and large read results |
+| Data | available CPUs − 1 | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, ingest branch preparation and model inference |
+| Extension | available CPUs − 1 | Operator-supplied code the node cannot bound: UDF-bearing expressions and JAQ transformations |
+| Bulk | available CPUs − 1 | Whole-transfer work: resource archives, large read results, password hashing, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
-| Filesystem storage | 2 | Every other synchronous filesystem and database operation |
+| Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
 
-These counts bound admission, not threads. Jobs run on the process-wide blocking pool that the
-node's other blocking work also uses, so a class's count is the number of its jobs that may be on
-that pool at once. A class is guaranteed its share of admission; it is not guaranteed an idle
-thread. Size the blocking pool for the sum of these counts plus whatever else the node offloads —
-connector flushes, model inference and UDF execution among them.
+These counts bound admission, not threads. Jobs run on the process-wide blocking pool, so a
+class's count is the number of its jobs that may be on that pool at once. A class is guaranteed its
+share of admission; it is not guaranteed an idle thread. Apart from the classes, only work that
+waits rather than computes uses the pool: a Kafka producer's final drain and partition
+inspection, which wait on the broker, and the one read of the resolver configuration at startup.
+Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that is refused, and
+the work that submitted it reports the refusal as its own failure.
 
 Transient memory is 256 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work and 32 MiB for

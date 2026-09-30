@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** Executing compiled VM programs against typed Arrow batches and calling injected
 //!   functions with one explicit execution context.
-//! - **Depends on.** Compiled VM IR, Arrow kernels and vocabulary timestamps.
+//! - **Depends on.** Compiled VM IR, Arrow kernels, vocabulary timestamps, and the node's bounded
+//!   executor, which admits, charges and cancels an execution that leaves the caller's task.
 //! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
 
 use std::{
@@ -55,8 +56,8 @@ use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
+use nervix_execution::{Cancellation, CpuClass, ExecutionError, Executor, MemoryClass};
 use nervix_models::Timestamp;
-use nervix_primitives::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
@@ -735,48 +736,94 @@ impl ExecutionContext {
 /// A construction-capable program cannot be passed through this entry point:
 ///
 /// ```compile_fail
+/// use nervix_execution::Executor;
 /// use nervix_vm::{CompiledProgram, ExecutionContext, TypedBatch, execute_predicate_in_context};
 ///
-/// async fn execute(program: &CompiledProgram, batch: &TypedBatch, context: &ExecutionContext) {
-///     let _ = execute_predicate_in_context(program, batch, context).await;
+/// async fn execute(
+///     executor: &Executor,
+///     program: &CompiledProgram,
+///     batch: &TypedBatch,
+///     context: &ExecutionContext,
+/// ) {
+///     let _ = execute_predicate_in_context(executor, program, batch, context).await;
 /// }
 /// ```
 pub async fn execute_predicate_in_context(
+    executor: &Executor,
     predicate: &CompiledPredicate,
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> error_stack::Result<PredicateExecutionResult, RuntimeError> {
     let result =
-        execute_program_with_selection_in_context(predicate.program(), batch, context).await?;
+        execute_program_with_selection_in_context(executor, predicate.program(), batch, context)
+            .await?;
     Ok(PredicateExecutionResult {
         selected_rows: result.selected_rows,
         errors: result.batch.errors().clone(),
     })
 }
 
+/// Executes `program` over `batch`, deciding where it runs.
+///
+/// A small batch whose program calls no function that must leave the caller's task runs inline.
+/// A program that calls operator-supplied code, which the node cannot bound, is admitted onto the
+/// node's extension workers whatever the batch size, so code that never returns cannot take the
+/// data workers. Any other large batch is admitted onto the data workers. Either way it runs
+/// through `executor` under a relay charge of the bytes the batch's columns hold, which is the
+/// usual order of what the program builds from them. The charge never exceeds what one relay batch
+/// may decode into, so a program over any batch the node accepted can be admitted, and a batch
+/// Arrow cannot measure is charged that bound. An admitted execution checks between its
+/// instructions whether its caller stopped waiting, and stops there if it did.
 pub async fn execute_program_with_selection_in_context(
+    executor: &Executor,
     program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> error_stack::Result<ExecutionResult, RuntimeError> {
-    if batch.row_count() <= SPAWN_BLOCKING_ROW_THRESHOLD
-        && !program_requires_spawn_blocking(program, context)
-    {
-        return execute_program_with_selection_in_context_sync(program, batch, context);
+    let calls_extension = program_requires_spawn_blocking(program, context);
+    if batch.row_count() <= SPAWN_BLOCKING_ROW_THRESHOLD && !calls_extension {
+        return execute_program_with_selection_in_context_sync(program, batch, context, None);
     }
+    let class = if calls_extension {
+        CpuClass::Extension
+    } else {
+        CpuClass::Data
+    };
 
+    let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
+    let charge = match batch.payload_bytes() {
+        Some(bytes) => bytes.min(decoded_limit),
+        None => decoded_limit,
+    };
+    let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
+        Ok(reservation) => reservation,
+        Err(error) => return Err(error.change_context(RuntimeError::ExecutionNotAdmitted)),
+    };
     let program = program.clone();
     let batch = batch.clone();
     let context = context.clone();
-    task::spawn_blocking(move || {
-        execute_program_with_selection_in_context_sync(&program, &batch, &context)
-    })
-    .await
-    .map_err(|error| {
-        Report::new(RuntimeError::BlockingExecutionFailed {
-            message: error.to_string(),
+    let executed = executor
+        .run_cpu(class, reservation, move |_charge, cancellation| {
+            execute_program_with_selection_in_context_sync(
+                &program,
+                &batch,
+                &context,
+                Some(cancellation),
+            )
         })
-    })?
+        .await;
+    match executed {
+        Ok(result) => result,
+        Err(error) => {
+            let failure = match error.current_context() {
+                ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
+                    RuntimeError::ExecutionNotAdmitted
+                }
+                ExecutionError::JobPanicked { .. } => RuntimeError::ExecutionPanicked,
+            };
+            Err(error.change_context(failure))
+        }
+    }
 }
 
 fn program_requires_spawn_blocking(program: &CompiledProgram, context: &ExecutionContext) -> bool {
@@ -815,7 +862,7 @@ mod test_execution {
         batch: &TypedBatch,
         context: &ExecutionContext,
     ) -> error_stack::Result<ExecutionResult, RuntimeError> {
-        execute_program_with_selection_in_context_sync(program, batch, context)
+        execute_program_with_selection_in_context_sync(program, batch, context, None)
     }
 
     pub(super) fn execute_program_with_selection_sync(
@@ -823,7 +870,7 @@ mod test_execution {
         batch: &TypedBatch,
     ) -> error_stack::Result<ExecutionResult, RuntimeError> {
         let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
-        execute_program_with_selection_in_context_sync(program, batch, &context)
+        execute_program_with_selection_in_context_sync(program, batch, &context, None)
     }
 }
 
@@ -832,10 +879,14 @@ use test_execution::{
     execute_program_in_context_sync, execute_program_sync, execute_program_with_selection_sync,
 };
 
+/// Runs `program` to completion on the calling thread. An admitted execution passes the
+/// `cancellation` its worker checks between instructions; an inline one has none, because its
+/// caller is the task running it.
 fn execute_program_with_selection_in_context_sync(
     program: &CompiledProgram,
     batch: &TypedBatch,
     context: &ExecutionContext,
+    cancellation: Option<&Cancellation>,
 ) -> error_stack::Result<ExecutionResult, RuntimeError> {
     if batch.schema().as_ref() != program.input_schema.as_ref() {
         return Err(Report::new(RuntimeError::SchemaMismatch));
@@ -851,6 +902,13 @@ fn execute_program_with_selection_in_context_sync(
     let mut arm: Option<ArmSelection> = None;
 
     for instruction in &program.instructions {
+        // Each instruction is one bounded pass over the batch, so a caller that stopped waiting
+        // costs at most the instruction already running.
+        if let Some(cancellation) = cancellation
+            && cancellation.is_cancelled()
+        {
+            return Err(Report::new(RuntimeError::ExecutionCancelled));
+        }
         let rows = match instruction.selection {
             None => &every_row,
             Some(mask) => {
@@ -5876,6 +5934,10 @@ fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
 mod list_tests;
 
 #[cfg(test)]
+#[path = "runtime_admission_tests.rs"]
+mod admission_tests;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -9050,6 +9112,7 @@ mod tests {
         .expect("batch must build");
         let compiled = triomphe::Arc::new(compiled);
         let (release_tx, release_rx) = mpsc::channel();
+        let executor = Executor::default();
         let context = ExecutionContext {
             now: Timestamp::from_unix_nanos(1),
             injector: Some(triomphe::Arc::new(Box::new(BlockingPolicyInjector {
@@ -9058,7 +9121,7 @@ mod tests {
         };
 
         let (result, ()) = tokio::join!(
-            execute_program_with_selection_in_context(&compiled, &batch, &context),
+            execute_program_with_selection_in_context(&executor, &compiled, &batch, &context),
             async move {
                 nervix_primitives::task::yield_now().await;
                 release_tx

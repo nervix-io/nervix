@@ -221,8 +221,12 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                             trace.record("worker", format!("{cpu:?} job ran on the scheduler"));
                         }
                         let snapshot = executor.snapshot();
-                        for workers in [snapshot.control_cpu, snapshot.data_cpu, snapshot.bulk_cpu]
-                        {
+                        for workers in [
+                            snapshot.control_cpu,
+                            snapshot.data_cpu,
+                            snapshot.extension_cpu,
+                            snapshot.bulk_cpu,
+                        ] {
                             assert_eq!(workers.running, 0);
                             assert_eq!(workers.pending, 0);
                         }

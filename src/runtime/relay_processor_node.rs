@@ -327,12 +327,15 @@ impl RelayProcessorNode {
             return None;
         };
         let plan = match plan_filter_map_messages(
+            ProgramRun {
+                executor: branch.runtime.executor(),
+                now: execution_now,
+            },
             self.kind.as_str(),
             &self.processor,
             kind.error_operation(),
             &program,
             batch,
-            execution_now,
             materialized_state,
         )
         .await
@@ -500,6 +503,7 @@ impl RelayProcessorNode {
                         }
                     };
                     let key_result = execute_program_with_selection_in_context(
+                        branch.runtime.executor(),
                         &key_program.program,
                         &vm_batch,
                         &VmExecutionContext {
@@ -646,6 +650,7 @@ impl RelayProcessorNode {
                     };
                     // Every route's aggregate arguments are evaluated over the whole batch once.
                     let evaluated = evaluate_window_arguments(
+                        branch.runtime.executor(),
                         plan,
                         compiled_aggregates,
                         first_message.record.batch(),
@@ -846,6 +851,7 @@ impl RelayProcessorNode {
                         }
                     };
                     let key_result = execute_program_with_selection_in_context(
+                        branch.runtime.executor(),
                         &program.program,
                         &vm_batch,
                         &VmExecutionContext {
@@ -1064,13 +1070,16 @@ impl RelayProcessorNode {
                             materialized_state: materialized_state.clone(),
                         };
                         match correlate_incoming_message(
+                            ProgramRun {
+                                executor: branch.runtime.executor(),
+                                now: execution_now,
+                            },
                             &self.processor,
                             where_program,
                             side,
                             *match_policy,
                             state,
                             incoming,
-                            execution_now,
                         )
                         .await
                         {
@@ -1171,6 +1180,7 @@ impl RelayProcessorNode {
                             pair_acks.iter().map(AckSet::attached).collect()
                         };
                         let outcomes = match evaluate_correlator_output_batch(
+                            branch.runtime.executor(),
                             &self.processor,
                             output_program,
                             &matched,

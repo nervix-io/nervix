@@ -235,6 +235,7 @@ pub(super) async fn flush_ready_window_processor(
                 }
             };
             let output_batch = match evaluate_window_aggregate(
+                branch.runtime.executor(),
                 compiled_aggregate,
                 state,
                 &output_schema,
@@ -797,6 +798,7 @@ nervix_primitives::thread_local! {
 /// Evaluate every aggregate argument of the window's routes over `carrier` once, and find the rows
 /// whose arguments cannot be admitted.
 pub(super) async fn evaluate_window_arguments(
+    executor: &Executor,
     plan: &WindowAccumulatorPlan,
     programs: &[CompiledWindowAggregateProgram],
     carrier: &RuntimeRecordBatch,
@@ -807,7 +809,7 @@ pub(super) async fn evaluate_window_arguments(
     let mut row_failures: Vec<Option<Report<WindowProcessorError>>> = Vec::new();
     for program in programs {
         nervix_primitives::task::consume_budget().await;
-        let result = evaluate_route_arguments(program, carrier, execution_now).await?;
+        let result = evaluate_route_arguments(executor, program, carrier, execution_now).await?;
         for demand in &program.route.demands {
             let columns = demand
                 .arguments
@@ -881,6 +883,7 @@ fn is_argument_output_field(field: &str) -> bool {
 
 /// Run one route's argument program over every row of `carrier`.
 async fn evaluate_route_arguments(
+    executor: &Executor,
     program: &CompiledWindowAggregateProgram,
     carrier: &RuntimeRecordBatch,
     execution_now: Timestamp,
@@ -917,6 +920,7 @@ async fn evaluate_route_arguments(
     #[cfg(test)]
     WINDOW_ARGUMENT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
+        executor,
         argument_program,
         &input,
         &VmExecutionContext {
@@ -1083,6 +1087,7 @@ impl VmFunctionInjector for WindowAggregateResults {
 
 /// Build the one-row output batch of one route from the window's accumulators.
 pub(super) async fn evaluate_window_aggregate(
+    executor: &Executor,
     program: &CompiledWindowAggregateProgram,
     state: &WindowProcessorState,
     output_schema: &CompiledSchema,
@@ -1119,6 +1124,7 @@ pub(super) async fn evaluate_window_aggregate(
                     .get(*index)
                     .verified("field assignments index the route's own assignments");
                 let column = evaluate_window_value(
+                    executor,
                     &assignment.value,
                     &assignment.field,
                     field.data_type(),
@@ -1152,6 +1158,7 @@ pub(super) async fn evaluate_window_aggregate(
 
 /// Evaluate one assigned value as a one-row array of `data_type`.
 fn evaluate_window_value<'a>(
+    executor: &'a Executor,
     value: &'a CompiledWindowExpr,
     target_field: &'a str,
     data_type: &'a ArrowDataType,
@@ -1172,6 +1179,7 @@ fn evaluate_window_value<'a>(
                 )
                 .change_context(WindowProcessorError::AggregateExprInput)?;
                 let result = execute_program_with_selection_in_context(
+                    executor,
                     program,
                     &input,
                     &VmExecutionContext {
@@ -1202,6 +1210,7 @@ fn evaluate_window_value<'a>(
                 for item in items {
                     values.push(
                         evaluate_window_value(
+                            executor,
                             item,
                             target_field,
                             element.data_type(),
@@ -1413,6 +1422,7 @@ mod tests {
                     .expect("the test batch should be a valid relay batch"),
             );
             let mut evaluated = evaluate_window_arguments(
+                &Executor::default(),
                 &self.plan,
                 std::slice::from_ref(&self.compiled),
                 &carrier,
@@ -1457,8 +1467,14 @@ mod tests {
         }
 
         async fn emit(&self) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
-            evaluate_window_aggregate(&self.compiled, &self.state, &self.output_schema, at(42))
-                .await
+            evaluate_window_aggregate(
+                &Executor::default(),
+                &self.compiled,
+                &self.state,
+                &self.output_schema,
+                at(42),
+            )
+            .await
         }
 
         async fn emitted(&self) -> RuntimeRecordBatch {

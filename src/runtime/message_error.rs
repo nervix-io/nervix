@@ -807,13 +807,16 @@ impl Runtime {
                 })?
         };
         let dlq_record = Self::execute_message_error_set_program(
+            ProgramRun {
+                executor: self.executor(),
+                now: execution_now,
+            },
             &route_plan.program,
             message,
             error,
             partial_output,
             materialized_state,
             ingest_metadata,
-            execution_now,
         )
         .await?;
         let key = preserved_message_error_branch(
@@ -857,13 +860,13 @@ impl Runtime {
     }
 
     pub(in crate::runtime) async fn execute_message_error_set_program(
+        run: ProgramRun<'_>,
         program: &CompiledProgramWithMaterializedInterest,
         message: &RelayMessage,
         error: &StructuredMessageError,
         partial_output: Option<&RuntimeRecordBatch>,
         materialized_state: &HashMap<String, RuntimeValue>,
         ingest_metadata: Option<&IngestFilterMapMetadata>,
-        execution_now: Timestamp,
     ) -> error_stack::Result<RuntimeRow, MessageErrorHandlingError> {
         let carrier = message.record.one_row_batch();
         let keys = vec![message.key.clone()];
@@ -909,6 +912,7 @@ impl Runtime {
             RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
         );
         let lookup_columns = compute_lookup_hash_map_columns(
+            run.executor,
             program,
             &FilterMapBatchInputs {
                 carrier: &carrier,
@@ -917,7 +921,7 @@ impl Runtime {
                 side_inputs: &side_inputs,
                 ingest_metadata,
             },
-            execution_now,
+            run.now,
             None,
         )
         .await
@@ -962,10 +966,11 @@ impl Runtime {
             )
         })?;
         let result = execute_program_with_selection_in_context(
+            run.executor,
             &program.compiled,
             &batch,
             &VmExecutionContext {
-                now: execution_now,
+                now: run.now,
                 injector: Some(IngestHeaderFunctionInjector::from_metadata(
                     ingest_metadata,
                     batch.row_count(),
@@ -1324,13 +1329,16 @@ mod tests {
         )
         .expect("message-error SET should compile through the VM");
         let output = Runtime::execute_message_error_set_program(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: occurred_at,
+            },
             &program,
             &message,
             &error,
             Some(&partial_output),
             &materialized_state,
             None,
-            occurred_at,
         )
         .await
         .expect("message-error SET should execute through the VM");
@@ -1401,13 +1409,16 @@ mod tests {
         };
 
         let failure = Runtime::execute_message_error_set_program(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::now(),
+            },
             &program,
             &message,
             &original_error,
             None,
             &HashMap::default(),
             None,
-            Timestamp::now(),
         )
         .await
         .expect_err("a failing error-route SET must stop record construction");

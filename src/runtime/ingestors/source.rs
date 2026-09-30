@@ -731,9 +731,18 @@ impl RuntimeSourceHost {
         let mut metadata = Vec::with_capacity(batch.messages.len());
         for message in batch.messages {
             nervix_primitives::task::consume_budget().await;
-            if let Err(error) = collector.decode_payload(&self.codec, message.payload).await {
+            if let Err(error) = collector
+                .decode_payload(self.runtime.executor(), &self.codec, message.payload)
+                .await
+            {
                 collector.discard_undispatched_payloads();
-                return Err(Report::new(error).change_context(SourceIntakeError::Decode));
+                // A payload the node could not take now was never judged, so it is not a decode
+                // failure: the batch failed to dispatch.
+                let failure = match error.current_context() {
+                    PayloadDecodeError::Codec(_) => SourceIntakeError::Decode,
+                    PayloadDecodeError::NotAdmitted => SourceIntakeError::Dispatch,
+                };
+                return Err(error.change_context(failure));
             }
             metadata.push(message.metadata);
         }
