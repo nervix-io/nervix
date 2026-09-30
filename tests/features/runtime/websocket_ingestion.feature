@@ -38,15 +38,18 @@ Feature: Websocket endpoint ingestion
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    And websocket message is published to host "ws-{{test_id}}.example.com" path "/ws"
+    And websocket frames are exchanged with host "ws-{{test_id}}.example.com" path "/ws"
       """
-      {"user_id":42}
+      SEND {"user_id":42}
+      SEND {"user_id":43}
+      SEND BASE64 eyJ1c2VyX2lkIjo0Mn0=
       """
-    Then the relay subscription receives a payload
+    Then within "10s" the relay subscription receives exactly one payload for each fragment set
       """
-      {"user_id":42}
+      key={"user_id":42} | payload={"user_id":42}
+      key={"user_id":43} | payload={"user_id":43}
+      key={"user_id":42} | payload={"user_id":42}
       """
-    And the last relay subscription payload contains key fragment '{"user_id":42}'
 
     Examples:
       | cluster_size | replica_count |

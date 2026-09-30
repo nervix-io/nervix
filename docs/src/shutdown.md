@@ -202,6 +202,13 @@ during a resumable hold — a model alteration, a domain pause, or memory-pressu
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
+
+Endpoint source close and terminal table clearing end each exact intake lifetime before withdrawing
+its binding. HTTP requests and WebSocket sessions that retained a route then see absent intake on
+later admission; a replacement source does not reopen that retained lifetime. A request already
+holding an intake lease may finish within the existing shutdown deadline. Endpoint definitions and
+intake leases are volatile publications and are reconstructed from the installed revision on startup.
+
 Payloads already admitted continue through their routes.
 Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
 change wait compares against that publication after registering the waiter, so a shutdown or

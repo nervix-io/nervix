@@ -7488,6 +7488,7 @@ dependencies = [
  "base64 0.22.1",
  "base64-simd",
  "blake3",
+ "bolero",
  "bytes",
  "chitchat",
  "chrono",
