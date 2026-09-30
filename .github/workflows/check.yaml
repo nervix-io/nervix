@@ -125,10 +125,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -144,11 +145,12 @@ jobs:
           max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Validate
         run: just validate-ci
@@ -247,10 +249,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -266,11 +269,12 @@ jobs:
           max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Start runner load recorder
         run: |
@@ -417,10 +421,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -436,11 +441,12 @@ jobs:
           max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Start runner load recorder
         run: |
@@ -683,10 +689,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -702,11 +709,12 @@ jobs:
           max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Client conformance
         run: just test-client-conformance
@@ -819,10 +827,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -838,11 +847,12 @@ jobs:
           max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Runtime state capability checks
         run: just test-runtime-state-capabilities
@@ -996,10 +1006,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -1015,11 +1026,12 @@ jobs:
           max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Turmoil simulations
         run: just test-turmoil

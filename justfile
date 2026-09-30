@@ -1922,6 +1922,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
     fi
     : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
     : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
+    : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"
     : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}"
     : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
     docker buildx build \
@@ -1934,6 +1935,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         --build-arg LLVM_VERSION={{ llvm_version }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
         --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
+        --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
         ${cache_from_flag} \
