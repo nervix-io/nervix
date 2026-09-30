@@ -81,6 +81,9 @@ OpenTelemetry trace export is optional and uses the existing `tracing` instrumen
 - `--otel-service-name` or `NERVIX_OTEL_SERVICE_NAME` sets the OpenTelemetry service name, defaulting to `nervix`
 - `--otel-trace-sample-ratio` or `NERVIX_OTEL_TRACE_SAMPLE_RATIO` sets parent-based trace sampling from `0.0` through `1.0`
 
+The node's trace exporter shares its configured name resolver. Startup, timeout and transport
+behavior are described in [Node Trace Export](./name-resolution.md#node-trace-export).
+
 The `just deps` stack includes Quickwit and Jaeger for local trace storage and viewing. Quickwit receives OTLP traces on host port `4317`, and the Jaeger dashboard at `http://127.0.0.1:16686` is configured to query Quickwit as its trace backend.
 
 The observability listener exposes health and graph metrics:
