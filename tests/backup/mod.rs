@@ -205,7 +205,7 @@ async fn then_background_backup_finishes(world: &mut ScenarioWorld) {
 
 #[then(expr = "the background CLI backup remains pending for {string}")]
 async fn then_background_backup_remains_pending(world: &mut ScenarioWorld, duration: String) {
-    let duration = humantime::parse_duration(&duration).expect("a valid duration");
+    let duration = nervix_models::parse_duration_text(&duration).expect("a valid duration");
     nervix_primitives::time::sleep(duration).await;
     assert!(
         !world

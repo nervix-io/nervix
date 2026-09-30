@@ -190,7 +190,7 @@ enum Command {
         #[arg(long)]
         without_pause: bool,
         /// Maximum time to drain a running domain before its state cut
-        #[arg(long, value_parser = humantime::parse_duration, conflicts_with_all = ["without_state", "without_pause"])]
+        #[arg(long, value_parser = nervix_models::parse_duration_text, conflicts_with_all = ["without_state", "without_pause"])]
         timeout: Option<std::time::Duration>,
         /// How the backup's report is printed
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
