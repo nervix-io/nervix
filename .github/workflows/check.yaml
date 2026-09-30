@@ -866,8 +866,13 @@ jobs:
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
+      # Every registered Shuttle check under its exploration and under the nondeterminism detector,
+      # each in its own process, then the proof that a failing schedule persists and replays.
       - name: Shuttle concurrency checks
         run: just test-shuttle
+
+      - name: Shuttle schedule replay
+        run: just test-shuttle-replay-check
 
       # The primitive boundary's conformance in every execution mode, the ordinary one collected
       # for coverage, then every registered Loom model of a production owner explored to
@@ -1042,5 +1047,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: turmoil-failures
-          path: target/turmoil-failures
+          path: |
+            target/turmoil-failures
+            target/turmoil-suite
           if-no-files-found: ignore
