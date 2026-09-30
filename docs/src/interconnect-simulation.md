@@ -123,8 +123,8 @@ DNS packet, so a fault scenario cannot escape to the real network and no resolve
 between hosts. The layers above the socket, `tokio-rustls`, `h2`, the envelope codec, and Arrow IPC,
 are the production code. These scenarios exercise the transport over simulated names; Hickory's DNS
 protocol, cache, and failure handling are checked by the resolver crate's own tests against local
-DNS authorities outside the simulation, as described in [Peer Name
-Resolution](./interconnect.md#peer-name-resolution).
+DNS authorities outside the simulation, as [Name Resolution](./name-resolution.md#evidence)
+describes.
 
 ### Bounded CPU Execution
 
@@ -513,7 +513,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | peer resolution | `peer_resolution_uses_simulated_dns` | 41 | 1 s / 200 / 3 s | A peer endpoint resolves to its simulated address through Turmoil DNS |
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
 | typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request and a relay payload |
-| multiple authenticated peers | `transport::multiple_peers_and_invalid_authentication_use_production_transport_contract` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges with two peers, and a dial under a DNS identity the certificate does not name is rejected |
+| multiple authenticated peers | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges with two peers, and a dial under a DNS identity the certificate does not name is rejected |
 | partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
 | one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
 | held authenticated exchange | The same | 63 | 85 s / 100,000 / 90 s | A one-second liveness probe and a two-second request expire while held; release restores service |

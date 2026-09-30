@@ -21,8 +21,8 @@ asks the configured name servers for everything else through Hickory's asynchron
 IPv6 together. Every lookup runs inside the budget its caller gives it, at most 64 run at once, and
 answers are cached for their TTL, at most one hour for an address and thirty seconds for a negative
 answer. A configuration that cannot be read or names no name server fails startup; nothing falls
-back to a public resolver or to the C library. [Peer Name
-Resolution](../docs/src/interconnect.md#peer-name-resolution) is the public account.
+back to a public resolver or to the C library. [Name Resolution](../docs/src/name-resolution.md)
+is the public account.
 
 ## Path matrix
 
@@ -52,17 +52,13 @@ Resolution](../docs/src/interconnect.md#peer-name-resolution) is the public acco
 | Pulsar (`pulsar` 6.9.0, Nervix fork) | Driver calls `Url::socket_addrs` on a blocking worker for broker and proxy endpoints, then dials the resulting addresses through Tokio | Residual driver boundary | `pulsar::connection::Connection::new` owns resolution and reconnect; no supported resolver injection |
 | Kafka (`rdkafka` 0.39.0, librdkafka 2.12.1) | Native librdkafka resolves bootstrap and broker hosts | Residual native boundary | Rust connector passes broker names into librdkafka; no Rust async resolver hook in the native client |
 | ZeroMQ (`zeromq` 0.4.1) | Driver transport calls `TcpStream::connect((host, port))`, which uses Tokio's system resolver | Residual driver boundary | `zeromq::transport::tcp::connect` owns the dial and exposes no socket injection hook |
+| The node's own OTLP trace export (`opentelemetry-otlp` 0.31.1, Tonic 0.14.6) | Tonic's default `HttpConnector`, whose resolver runs the C library on Tokio's blocking pool | Residual Nervix-owned boundary | `init_tracing` in `src/application/tracing_setup.rs` builds the exporter with `with_tonic().with_endpoint(...)` when the process starts, before the node loads its resolver |
 | Web console | The browser | Browser-owned | Outside the node |
 
 ## Deployment limits
 
-The node resolver implements the `resolv.conf` and hosts-file behavior the public chapter describes
-and nothing else of the operating system's name service. It does not read `nsswitch.conf`, load NSS
-modules such as LDAP, NIS, `mdns` or `myhostname`, answer `.local` names by multicast DNS, or apply
-the `rotate`, `single-request`, `use-vc`, `no-aaaa` or `trust-ad` options, and a platform split-DNS
-policy reaches it only through the name server its configuration names. Docker's embedded DNS,
-Kubernetes cluster DNS, and the `systemd-resolved` stub are reached through the `resolv.conf` those
-platforms write.
+[Deployment Limits](../docs/src/name-resolution.md#deployment-limits) is the account of what the
+node resolver implements of the operating system's name service and what it does not.
 
 ## Hickory DNS 01 acceptance
 
@@ -116,6 +112,25 @@ host as `localhost`, so the connector reads the host with the URL grammar.
 | Numeric IPv4 and IPv6 endpoints, typed DNS failures, TLS failures and the budget | `hosts_are_read_with_the_url_grammar`, `ipv6_literals_are_dialled_as_written`, `names_that_do_not_resolve_keep_their_dns_failure`, `amqps_handshakes_that_fail_or_stall_are_tls_failures`, `invalid_addresses_and_ca_files_are_configuration_failures`, `failed_connections_keep_their_typed_cause_and_leave_the_source_to_resume` |
 | No leaked connections or threads | A connection that fails before the AMQP handshake has started no Lapin thread; the stand-in brokers of the connector checks observe the client close its socket once the handshake fails; the outage scenarios count consumers exactly |
 | The isolated connector and the server select the node resolver, keep AWS-LC, and keep production free of simulation schedulers | `just validate-dns-dependencies`, `just validate-shuttle-dependencies`, `just validate-turmoil-dependencies`; `just check-package nervix-connector-rabbitmq` |
+
+## Hickory DNS 04 acceptance
+
+Syslog senders and WebSocket client sources resolve through the node resolver for every new
+connection and share one 30-second budget between the lookup, the ordered address attempts and,
+for TLS, the handshake; a WebSocket attempt also completes the opening upgrade. Syslog UDP binds a
+socket in each answer's family and sends to the first whose setup succeeds. TLS verifies the
+configured host, and the WebSocket upgrade keeps the configured URL's authority, path and query.
+The source host cancels a pending resume when shutdown or a quiesce change arrives.
+
+| Acceptance item | Evidence |
+| --- | --- |
+| Syslog UDP, TCP with octet framing, and TLS with mutual TLS reach a fixture name, and TLS verifies the fixture hostname | `runtime/syslog_dns_resolution.feature`: *Syslog UDP emitter reaches an endpoint named by the node DNS fixture*, *Syslog TCP emitter reaches a fixture-named listener with octet framing* and *Syslog TLS emitter verifies the fixture hostname and mutual TLS identity*, one and three nodes |
+| Syslog output waits out a name that does not exist or a silent name server and delivers through the next answer | *Syslog output waits for name recovery before delivery*: `DESCRIBE EMITTER` shows `resolving 'syslog.nervix.test' failed`, and the record arrives once the name resolves, one and three nodes, name not found and silence |
+| WebSocket clients dial the answer that connects, follow changed answers, and recover from no addresses, a name that does not exist and silence | `runtime/websocket_dns_resolution.feature`: *WebSocket clients reconnect through a changed DNS answer*, one node with name not found and three nodes with silence |
+| Existing WebSocket client and resource-mounted TLS behavior through fixture names | `runtime/websocket_client_ingestion.feature` and `runtime/websocket_client_tls_resource_mounts.feature` |
+| Ordered answers, hosts-file names, typed missing-name failures, literal IPv6 endpoints, the URL authority and default ports | `just test-package-lib nervix-connector-syslog`: `tcp_tries_dns_answers_in_order_and_writes_to_the_reachable_address`, `tcp_uses_the_hosts_file_before_dns`, `missing_name_is_an_initialization_failure_with_the_dns_cause`; `just test-package-lib nervix-connector-websockets`: `resume_tries_the_next_address_and_preserves_host_path_and_query`, `resume_connects_to_a_literal_ipv6_endpoint_without_a_dns_question`, `source_plan_uses_url_default_ports_and_rejects_other_schemes` |
+| Shutdown and quiesce cancel a pending resume with its lookup, dial and handshake | `just test-lib`: `source_shutdown_cancels_pending_resume_and_closes_the_source`, `source_quiesce_change_cancels_pending_resume_before_retrying` |
+| The isolated connectors select the node resolver | `just validate-dns-dependencies` |
 
 ## Hickory DNS 05 acceptance
 
@@ -197,3 +212,20 @@ neither the driver's proxy nor its WebSocket transport.
 | Ordered answers, a changed answer on the next connection, and stop/restart | *MQTT connections dial the answer that connects, follow a changed answer and resolve again after a restart*, whose emitter publishes at QoS 0: a restarted QoS 1 or 2 emitter cannot reconnect while the broker retains its persistent session, because the driver rejects a resumed session it holds no local state for, however the broker was resolved; `just test-package-lib nervix-connector-mqtt`: `a_connection_dials_the_answers_in_order_until_one_accepts`, `an_address_that_never_answers_leaves_time_for_the_next`, `no_answer_that_accepts_ends_within_the_budget_with_the_last_failure` |
 | Typed lookup failures, IPv4 and IPv6 answers and literals, the driver's network options and its event loop | `names_that_do_not_resolve_keep_their_typed_lookup_failure`, `a_name_with_both_address_families_reaches_its_ipv6_answer`, `literal_addresses_are_dialled_without_a_lookup`, `every_attempt_applies_the_drivers_network_options`, `the_event_loop_connects_through_the_node_resolver`, `an_event_loop_whose_broker_does_not_resolve_reports_the_lookup`, and the source's and sink's resume and event-loop checks |
 | The isolated connector selects the node resolver | `just validate-dns-dependencies`; `just check-package nervix-connector-mqtt` |
+
+## Hickory DNS 08 acceptance
+
+[Name Resolution](../docs/src/name-resolution.md) is the consolidated architecture account of this
+matrix: resolver ownership and lifetime, configuration, resolution order, cache and bounds, lookup
+outcomes, every call site and client-library hook, dialling policy, connection identity, failure
+ownership, dependency selection, residual resolution, deployment limits, build modes, evidence,
+operator diagnostics and recovery. The interconnect, connector, session, shutdown, simulation and
+test-lifecycle chapters keep their own facts and link to it. Consolidation audited the source
+against this matrix and recorded one path it did not list, the node's own OTLP trace export, as a
+residual boundary above.
+
+| Acceptance item | Evidence |
+| --- | --- |
+| The chapter is registered as the authoritative reference and reachable from the book | `AGENTS.md`, `docs/src/SUMMARY.md` and the Architecture And Internals index; `just book dev` |
+| Operator diagnostics are the product's own | The startup messages, the `info` line and the CLI's lookup failure quoted by the chapter were captured from `nervix-server` and `nervix-cli` built from this source |
+| The feature graph matches the chapter | `just validate-dns-dependencies`; the server's normal dependency graph enables only `default`, `system-config` and `tokio` on Hickory 0.26.3 and 0.25.2, so no DNSSEC or encrypted DNS transport is compiled |

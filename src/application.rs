@@ -423,8 +423,8 @@ pub struct Args {
         long,
         env = "NERVIX_DNS_RESOLVER_CONFIG",
         default_value = nervix_dns::SYSTEM_RESOLVER_CONFIGURATION,
-        help = "A resolv.conf-format file naming the name servers, search list and options peer \
-                names resolve with"
+        help = "A resolv.conf-format file naming the name servers, search list and options the \
+                node's resolver uses for peers, connectors and sessions"
     )]
     pub dns_resolver_config: PathBuf,
     #[arg(

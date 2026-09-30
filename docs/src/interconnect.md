@@ -127,46 +127,25 @@ the on-demand bulk connection.
 
 ## Peer Name Resolution
 
-A node resolves every host name the interconnect dials through one resolver, owned by the
-`nervix-dns` crate and loaded once when the node starts. The resolver is Hickory's asynchronous DNS
-client: lookups never occupy Tokio's blocking pool and never call the C library resolver. It reads
-its configuration from three server options:
-
-| Option | Environment variable | Default | Meaning |
-| --- | --- | --- | --- |
-| `--dns-resolver-config` | `NERVIX_DNS_RESOLVER_CONFIG` | `/etc/resolv.conf` | A `resolv.conf`-format file: its `nameserver` lines, its last `search` or `domain` line, and the `ndots`, `timeout`, `attempts`, and `edns0` options |
-| `--dns-hosts-file` | `NERVIX_DNS_HOSTS_FILE` | `/etc/hosts` | A hosts-format file consulted before DNS |
-| `--dns-name-server` | `NERVIX_DNS_NAME_SERVERS` | none | A name server address with its port, repeatable or comma-separated, that replaces the resolver configuration's `nameserver` lines while the rest of that file still applies |
-
-A `nameserver` line names a server on port 53, asked over UDP and, for a truncated answer, over
-TCP. `attempts` counts tries of each server, as the C library counts them, and `timeout` bounds each
-try. When the file has neither a `search` nor a `domain` line, the domain of the host's own name is
-the search list, as the C library does. Lines the grammar cannot read are logged as warnings and
-ignored. Both files are read once, on the blocking pool; a changed file takes effect when the node
-next starts. Startup fails with `failed to load the name resolver configuration` when either file
-cannot be read, when no name server remains, or when a search domain is not a valid DNS name. There
-is no fallback to a public resolver or to the C library.
-
-A host resolves in this order:
-
-1. A literal IPv4 or IPv6 address, bracketed or not, is its own answer and sends no query.
-2. A name the hosts file lists, compared exactly and without case, answers with every address the
-   file gives it in either family, and nothing is asked of DNS for it.
-3. Any other name is asked of the name servers for IPv4 and IPv6 addresses together, completed by
-   the search list according to `ndots`. A name with a trailing dot is fully qualified and asked
-   exactly as written. The answer lists IPv4 addresses first, then IPv6 addresses, each in the
-   order the server gave them.
+A node resolves every host name the interconnect dials through the node's resolver.
+[Name Resolution](./name-resolution.md) owns that resolver: its configuration options, the order in
+which it answers literal addresses, hosts-file names and DNS names, its cache and TTL bounds, its
+limit on concurrent lookups, its failures, and what it does not implement of the operating system's
+name service. This section describes where and when the interconnect asks it, and what a failed
+lookup means for a peer.
 
 ### Where The Interconnect Resolves
 
 At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
 its gossip identity address, and its configured bootstrap endpoint, every address of which becomes a
-gossip seed. Each lookup has the connection setup timeout, five seconds by default; failure of
-either required lookup fails startup. It also resolves the recovered Raft members' advertised
-endpoints in parallel. Their successful answers become additional gossip seeds; an unavailable
-recovered endpoint is reported and skipped so it does not prevent the node from starting or using
-another reachable member. Once gossip discovers a live peer, the interconnect replaces the
-recovery hint with that peer's current advertised endpoint.
+gossip seed. Each lookup has the connection setup timeout, five seconds; failure of either required
+lookup fails startup with `failed to start cluster membership`. It also resolves the recovered Raft
+members' advertised endpoints in parallel. Their successful answers become additional gossip seeds;
+an unavailable recovered endpoint is logged at `warn` and skipped so it does not prevent the node
+from starting or using another reachable member. These startup answers are not looked up again:
+gossip keeps dialling the seed addresses they produced, and the gossip identity address stays the
+one resolved at startup. Once gossip discovers a live peer, the interconnect replaces the recovery
+hint with that peer's current advertised endpoint.
 
 A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
@@ -174,50 +153,28 @@ deadline. The attempt dials the resolved addresses in order, giving each an equa
 that remains, so an address that refuses or never answers leaves time for the next one. The
 connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
 outbound connector transports; interconnect retains its socket and peer failure classification.
-The first address that accepts carries the TLS handshake. The advertised host stays the TLS server
+The first address that accepts carries the TLS handshake, HTTP/2 and the connection hello, inside
+the same deadline; a failure there fails the attempt. The advertised host stays the TLS server
 name, which the peer's certificate must name, and the authority of every request on the connection;
 a literal IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it
 dials the exact seed address it was given, and the node it authenticates is dialled there until
 discovery publishes the node's own endpoint.
 
-Answers are cached for their DNS TTL, bounded above by one hour for addresses and thirty seconds for
-a name that does not exist or has no address, in a cache of 4,096 entries; an expired answer is
-asked again on the next attempt. Pool connections are keyed by the advertised endpoint rather than
-by an address, so a changed answer or an expired TTL never retires an established connection. Only
-the next connection attempt, after a connection ends, uses the new answer. A changed advertised
-host or port is a different endpoint and retires the old one, as described in
+Pool connections are keyed by the advertised endpoint rather than by an address, so a changed answer
+or an expired TTL never retires an established connection. Only the next connection attempt, after
+a connection ends, uses the new answer once the resolver's cached one has expired. A changed
+advertised host or port is a different endpoint and retires the old one, as described in
 [Connection And Credential Lifecycle](#connection-and-credential-lifecycle).
 
-At most 64 lookups run at once on a node; a lookup beyond that waits for a slot inside its own
-deadline. The resolver configuration's `timeout` and `attempts` bound each query, the connection
-setup deadline bounds the lookup, and the pool slot's reconnect backoff is the only retry around it,
-so DNS retries never multiply the transport's own.
-
-A lookup ends in an address list or in one of these failures: the name does not exist, the name has
-no address, no answer arrived in time, a name server refused or failed the query, no name server
-could be reached, or the host is not a valid DNS name. A failed lookup is a connection setup
-failure: the slot retries with its backoff, the attempt is counted with reason `resolution` in
-`nervix_interconnect_connection_failures_total`, and the failure is logged at `debug` with the
-endpoint and its kind. A peer whose name does not resolve stays a health target, and its probes
-fail as they would for a peer that cannot be reached.
-
-### Resolver Limits
-
-The resolver implements the `resolv.conf` and hosts-file behavior above and nothing else of the
-operating system's name service. It does not consult `nsswitch.conf`, so the hosts file always
-answers before DNS; it does not load NSS modules, so names served only by LDAP, NIS, `mdns`, or
-`myhostname` do not resolve; it does not answer `.local` names by multicast DNS; and it ignores the
-`rotate`, `single-request`, `use-vc`, `no-aaaa`, and `trust-ad` options. A platform split-DNS policy
-applies only as far as the name server the configuration names applies it, for example the
-`systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
-their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
-
-The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP and gRPC, Iceberg REST
-and object-store clients, RabbitMQ sources and sinks, Redis command pools and Pub/Sub sources, MQTT
-sources and sinks, Syslog emission, WebSocket client ingestion, ClickHouse emission, SQS sources
-and sinks, and the node's client session calls to a peer's session service during shutdown drain. Other connectors still resolve through their own drivers. Native
-CLI and SDK sessions load their own Hickory resolver or reuse one supplied by their owner. The
-ledger in `tests/dns-resolution-ledger.md` records each boundary and its current owner.
+The connection setup deadline bounds each lookup, and the pool slot's reconnect backoff, described
+in [Connection And Credential Lifecycle](#connection-and-credential-lifecycle), is the only retry
+around it, so DNS retries never multiply the transport's own. A failed lookup is a connection setup failure: the slot retries with its
+backoff, the attempt is counted with reason `resolution` in
+`nervix_interconnect_connection_failures_total`, and the failure is logged at `debug` as
+`interconnect pool connection failed` with the peer's node, endpoint, pool class and slot. Only
+outbound pool connections are counted; the startup lookups and the bootstrap exchange are not. A
+peer whose name does not resolve stays a health target, and its probes fail as they would for a peer
+that cannot be reached.
 
 ## Peer Identity And Authentication
 
