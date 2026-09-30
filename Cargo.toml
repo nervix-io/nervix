@@ -87,6 +87,7 @@ fjall = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
+http = { workspace = true }
 http-body-util = { workspace = true }
 humantime = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
@@ -160,6 +161,7 @@ ort = { workspace = true, features = [
   "tracing",
   "webgpu",
 ] }
+otel-tonic = { workspace = true }
 petgraph = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -186,6 +188,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
 tonic = { workspace = true }
+tower-service = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
@@ -210,7 +213,6 @@ cucumber = { workspace = true, features = ["libtest"] }
 flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 h2 = { workspace = true }
-http = { workspace = true }
 httparse = { workspace = true }
 iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }

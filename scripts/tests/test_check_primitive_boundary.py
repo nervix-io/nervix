@@ -1299,6 +1299,79 @@ class LoomModuleFileTests(CheckTestCase):
         )
         self.assertIn("Loom model code names `nervix_primitives::sync::blocking::Mutex::new`", report)
 
+    def test_a_module_a_loom_build_excludes_is_not_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]\n'
+                    '#[path = "lib_tests.rs"]\nmod tests;\n'
+                ),
+                "crates/engine/src/lib_tests.rs": (
+                    "use nervix_primitives::sync::watch;\n"
+                    "fn wait() { nervix_primitives::time::sleep(DELAY); }\n"
+                ),
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_module_an_ordinary_build_also_compiles_is_not_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(any(test, feature = "loom"))]\n'
+                    "mod shared { fn wait() { nervix_primitives::time::sleep(DELAY); } }\n"
+                ),
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_nested_condition_that_still_requires_loom_is_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(not(not(feature = "loom")))]\nmod doubled;\n'
+                    '#[cfg(all(test, any(feature = "loom", all(feature = "loom", test)),))]\n'
+                    "mod grouped { fn wait() { nervix_primitives::time::sleep(DELAY); } }\n"
+                ),
+                "crates/engine/src/doubled.rs": "use nervix_primitives::sync::Notify;\n",
+            }
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/engine/src/doubled.rs:1: primitive boundary: Loom model code names "
+            "`nervix_primitives::sync::Notify`",
+            report,
+        )
+        self.assertIn("Loom model code names `nervix_primitives::time::sleep`", report)
+
+    def test_a_module_whose_condition_cannot_be_read_is_rejected(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(all(test, feature = loom))]\nmod declared;\n'
+                    '#[cfg(not(test, feature = "loom"))]\nmod inline {}\n'
+                    '#[cfg(test & feature = "loom")]\nmod joined {}\n'
+                ),
+                "crates/engine/src/declared.rs": "fn ordinary() {}\n",
+            }
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/engine/src/lib.rs:5: primitive boundary: cannot read "
+            '`cfg(test & feature = "loom")`',
+            report,
+        )
+        self.assertIn(
+            "crates/engine/src/lib.rs:1: primitive boundary: cannot read "
+            "`cfg(all(test, feature = loom))`",
+            report,
+        )
+        self.assertIn(
+            "crates/engine/src/lib.rs:3: primitive boundary: cannot read "
+            '`cfg(not(test, feature = "loom"))`',
+            report,
+        )
+
     def test_a_path_attribute_and_a_nested_declaration_are_followed(self) -> None:
         status, report = self.check(
             {

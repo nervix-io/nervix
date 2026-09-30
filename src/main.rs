@@ -16,6 +16,9 @@ fn main() -> Result<(), Report<AppError>> {
         .build()
         .change_context(AppError::BuildRuntime)?;
 
-    let _tracing_guard = init_tracing(&args)?;
-    runtime.block_on(run_cli(args, termination_signals))
+    let tracing_guard = {
+        let _entered = runtime.enter();
+        init_tracing(&args)?
+    };
+    runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
 }

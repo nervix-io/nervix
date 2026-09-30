@@ -734,7 +734,10 @@ collection or publication, so a Loom build, in which the server and consensus co
 of their owners, takes the ordinary library for each of those, outside every model.
 `just validate-primitive-boundary` rejects every such family in Loom model code, an inline module or
 a module file whose declaration compiles it only for Loom, so a model never names a real primitive
-silently; what an owner a model drives uses internally is excluded from that model's claim. Model
+silently; what an owner a model drives uses internally is excluded from that model's claim. The check
+reads each `cfg` of a module through its `all`, `any` and `not`: a module is Loom model code when one
+of them is false in every build without the `loom` feature, and a module whose `cfg` the check
+cannot read is rejected. Model
 code may name shared ownership and a permitted unmodeled primitive, because each says it is real.
 `just test-primitives` shows each mode's selection.
 

@@ -42,6 +42,7 @@ is the public account.
 | SQS source and sink, default-root and custom-CA clients (Smithy HTTP client) | Node resolver injected through Smithy's `ResolveDns` with `build_with_resolver` on every new connection, in both the default-root client, which keeps the SDK default's proxy environment, and the custom-CA client; static credentials and region leave `aws-config`'s default provider chains unused, and its SSO token chain, never asked by SigV4 SQS, shares the same client | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | `runtime/sqs_dns_resolution.feature`, one and three nodes; `just test-package-lib nervix-connector-sqs`; `just validate-dns-dependencies` |
 | Native CLI and SDK sessions (Tonic) | Hickory resolver loaded once from the system or explicit client configuration; a server-internal session shares its node's resolver. Tonic's custom eager connector resolves each new connection and retains the original URI authority and TLS name | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | `tools/cli_session.feature`: hostname HTTP/HTTPS and wrong-name TLS cases; `runtime/client_wire_qualification.feature`: named-seed subscription and transaction recovery; `nervix-client-core`'s `native_session_` tests |
 | OTEL gRPC export (Tonic) | Node resolver through Tonic's custom lazy connector, asked only when an export needs a connection | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | `runtime/otel_emission.feature`: hostname log, trace and metric exports, DNS failure and recovery, ordered addresses; `nervix-connector-otel`'s lazy channel test |
+| The node's own OTLP trace export (`opentelemetry-otlp` 0.31.1, Tonic 0.14.6) | A lazy custom connector waits for the node's shared resolver; the export timeout bounds DNS/TCP after installation and requests | [Hickory DNS 09](https://app.clickup.com/t/86bc9yev3) | `cluster/node_trace_dns_resolution.feature`, one and three server processes; focused tracing setup tests |
 | Redis command pool (`redis` 1.7.1) | Node resolver through `AsyncConnectionConfig::set_dns_resolver` on every new physical `bb8` connection; Redis keeps the configured URL, auth, database, protocol and TLS policy | [Hickory DNS 07](https://app.clickup.com/t/86bc7zpnn) | `runtime/redis_dns_resolution.feature`, one and three nodes, plain and TLS; `just test-package-lib nervix-connector-redis` |
 | Redis Pub/Sub subscription | Node resolver before every dedicated connection or resume; ordered address attempts within a shared DNS/TCP/TLS budget, then the stream and original settings go to `PubSub::new` | Hickory DNS 07 | `runtime/redis_dns_resolution.feature`, one and three nodes, plain and TLS, outage and changed-answer recovery; `runtime/redis_tls_resource_mounts.feature` |
 | MQTT source and sink (`rumqttc-v5-next` 0.34.0) | Node resolver through `MqttOptions::set_socket_connector` on every connection the event loop opens, first and after each lost connection: every answer dialled in order with the driver's `connect_socket_addr`, which applies its `NetworkOptions`, within the driver's five-second connect timeout; the driver still completes TLS against the configured host and the MQTT handshake over the stream | [Hickory DNS 07a](https://app.clickup.com/t/86bc9jd87) | `runtime/mqtt_dns_resolution.feature`, one and three nodes, plain and TLS; `just test-package-lib nervix-connector-mqtt`; `just validate-dns-dependencies` |
@@ -52,7 +53,6 @@ is the public account.
 | Pulsar (`pulsar` 6.9.0, Nervix fork) | Driver calls `Url::socket_addrs` on a blocking worker for broker and proxy endpoints, then dials the resulting addresses through Tokio | Residual driver boundary | `pulsar::connection::Connection::new` owns resolution and reconnect; no supported resolver injection |
 | Kafka (`rdkafka` 0.39.0, librdkafka 2.12.1) | Native librdkafka resolves bootstrap and broker hosts | Residual native boundary | Rust connector passes broker names into librdkafka; no Rust async resolver hook in the native client |
 | ZeroMQ (`zeromq` 0.4.1) | Driver transport calls `TcpStream::connect((host, port))`, which uses Tokio's system resolver | Residual driver boundary | `zeromq::transport::tcp::connect` owns the dial and exposes no socket injection hook |
-| The node's own OTLP trace export (`opentelemetry-otlp` 0.31.1, Tonic 0.14.6) | Tonic's default `HttpConnector`, whose resolver runs the C library on Tokio's blocking pool | Residual Nervix-owned boundary | `init_tracing` in `src/application/tracing_setup.rs` builds the exporter with `with_tonic().with_endpoint(...)` when the process starts, before the node loads its resolver |
 | Web console | The browser | Browser-owned | Outside the node |
 
 ## Deployment limits
@@ -220,12 +220,20 @@ matrix: resolver ownership and lifetime, configuration, resolution order, cache 
 outcomes, every call site and client-library hook, dialling policy, connection identity, failure
 ownership, dependency selection, residual resolution, deployment limits, build modes, evidence,
 operator diagnostics and recovery. The interconnect, connector, session, shutdown, simulation and
-test-lifecycle chapters keep their own facts and link to it. Consolidation audited the source
-against this matrix and recorded one path it did not list, the node's own OTLP trace export, as a
-residual boundary above.
+test-lifecycle chapters keep their own facts and link to it. The matrix and chapter include
+the node's own OTLP trace exporter and its node-owned resolution boundary.
 
 | Acceptance item | Evidence |
 | --- | --- |
 | The chapter is registered as the authoritative reference and reachable from the book | `AGENTS.md`, `docs/src/SUMMARY.md` and the Architecture And Internals index; `just book dev` |
 | Operator diagnostics are the product's own | The startup messages, the `info` line and the CLI's lookup failure quoted by the chapter were captured from `nervix-server` and `nervix-cli` built from this source |
 | The feature graph matches the chapter | `just validate-dns-dependencies`; the server's normal dependency graph enables only `default`, `system-config` and `tokio` on Hickory 0.26.3 and 0.25.2, so no DNSSEC or encrypted DNS transport is compiled |
+
+## Hickory DNS 09 acceptance
+
+| Acceptance item | Evidence |
+| --- | --- |
+| Every node exports startup spans through its configured resolver | `cluster/node_trace_dns_resolution.feature`: *Every node exports its own startup traces through fixture DNS*, one and three real server processes, capturing the node service identities and DNS queries |
+| The channel is lazy and uses the shared resolver after installation | Tracing setup's lazy channel and pending-resolver tests |
+| Lookup failures and silent DNS remain bounded by the export timeout | Tracing setup's early-startup wait, closed-publication and silent-DNS tests |
+| DNS configuration failure timing, startup tracing and shutdown remain owned by startup | The existing DNS load boundary publishes its resolver; the tracing guard closes publication before flushing |

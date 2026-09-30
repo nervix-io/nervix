@@ -32,6 +32,7 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     RequestId, SessionLimits, UploadChunk, UploadStart, grpc::UPLOAD_RESOURCE_PATH,
 };
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_primitives::{
     net::TcpStream,
@@ -127,6 +128,10 @@ impl ServerProcessLaunch {
 /// A setting a scenario gives the server process in addition to the fixture's own.
 #[derive(Clone, Debug)]
 pub(crate) enum ServerProcessOption {
+    /// The files and authority the node's resolver loads.
+    Dns(DnsConfiguration),
+    /// Enable the node's own exporter with a distinct service identity for each process.
+    TraceExport { endpoint: String, service: String },
     /// `--drain-timeout`.
     DrainTimeout(Duration),
     /// `--state-snapshot-interval`.
@@ -146,8 +151,28 @@ pub(crate) enum ServerProcessOption {
 }
 
 impl ServerProcessOption {
-    fn apply_to(&self, command: &mut Command) {
+    fn apply_to(&self, command: &mut Command, node_id: &str) {
         match self {
+            Self::Dns(configuration) => {
+                command
+                    .arg("--dns-resolver-config")
+                    .arg(&configuration.resolver_configuration)
+                    .arg("--dns-hosts-file")
+                    .arg(&configuration.hosts_file);
+                if let NameServers::Explicit(servers) = &configuration.name_servers {
+                    for server in servers {
+                        command.arg("--dns-name-server").arg(server.to_string());
+                    }
+                }
+            }
+            Self::TraceExport { endpoint, service } => {
+                command
+                    .arg("--otel-enabled")
+                    .arg("--otel-otlp-endpoint")
+                    .arg(endpoint)
+                    .arg("--otel-service-name")
+                    .arg(format!("{service}-{node_id}"));
+            }
             Self::DrainTimeout(timeout) => {
                 command
                     .arg("--drain-timeout")
@@ -313,7 +338,7 @@ impl ServerProcessConfiguration {
         command.env_remove("RUST_LOG");
         // Options go last, so a variable a scenario sets survives the removal above.
         for option in &self.options {
-            option.apply_to(&mut command);
+            option.apply_to(&mut command, &self.node_id);
         }
         command.spawn()
     }

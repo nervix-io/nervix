@@ -96,6 +96,13 @@ it beneath their own failure, as the paragraphs below describe. HTTP polling, Pr
 OTEL and Iceberg report their failed request, export or catalog call without it, so their
 diagnostics do not name the lookup failure.
 
+The node's own trace export waits for the resolver installed by startup. Its connector's
+`TraceConnectError` distinguishes a closed installation, a connection timeout, and a Hyper
+connection failure retaining its `DnsLookupError` cause. Tonic and the OTLP SDK report the failed
+export. The export timeout encloses DNS and TCP after resolver installation; a missing DNS
+configuration still fails startup as
+`AppError::LoadDnsConfiguration`. Telemetry failures have no connector retry or ACK disposition.
+
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the

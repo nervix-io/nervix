@@ -391,8 +391,10 @@ _MODULE_ROOT_FILES = frozenset({"build.rs", "lib.rs", "main.rs", "mod.rs"})
 _CRATE_ROOT_DIRECTORIES = frozenset({"bin", "benches", "examples", "tests"})
 _CFG_PREDICATE = re.compile(r"(?<![A-Za-z0-9_])cfg(?:_attr)?\s*!?\s*\(")
 _MODE_CFG_NAME = re.compile(r"(?<![A-Za-z0-9_])(?P<name>loom|shuttle|turmoil)(?![A-Za-z0-9_])")
-_NEGATED_CFG = re.compile(r"not\s*\([^()]*\)")
-_LOOM_FEATURE = re.compile(r"feature\s*=\s*\"loom\"")
+# One token of a `cfg` predicate: an option name, a string literal, or its punctuation.
+_CFG_TOKEN = re.compile(
+    r"\s*(?:(?P<name>[A-Za-z_][A-Za-z0-9_]*)|(?P<string>\"(?:[^\"\\]|\\.)*\")|(?P<symbol>[(),=]))"
+)
 _CFG_ATTRIBUTE = re.compile(r"#\[\s*cfg\s*\((?P<condition>.*?)\)\s*\]", re.S)
 _IDENTIFIER = r"\$?[A-Za-z_][A-Za-z0-9_]*"
 _PATH = re.compile(rf"(?<![A-Za-z0-9_$])(?:::\s*)?{_IDENTIFIER}(?:\s*::\s*{_IDENTIFIER})*")
@@ -796,17 +798,101 @@ class FileUses:
     items: dict[str, int] = field(default_factory=dict)
 
 
+class CfgError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Cfg:
+    """One `cfg` predicate: a configuration option, or `all`, `any` or `not` over predicates."""
+
+    combinator: str | None
+    option: str | None = None
+    operands: tuple[Cfg, ...] = ()
+
+    @classmethod
+    def parse(cls, condition: str) -> Cfg:
+        """Read the predicate `condition` spells, or raise `CfgError`."""
+
+        tokens: list[str] = []
+        position = 0
+        while position < len(condition):
+            match = _CFG_TOKEN.match(condition, position)
+            if match is None:
+                if condition[position:].strip():
+                    raise CfgError(f"cannot read `cfg({condition.strip()})`")
+                break
+            tokens.append(match.group(match.lastgroup))
+            position = match.end()
+        predicate, index = cls._parse_at(tokens, 0, condition)
+        if index != len(tokens):
+            raise CfgError(f"cannot read `cfg({condition.strip()})`")
+        return predicate
+
+    @classmethod
+    def _parse_at(cls, tokens: Sequence[str], index: int, condition: str) -> tuple[Cfg, int]:
+        unreadable = CfgError(f"cannot read `cfg({condition.strip()})`")
+        if index >= len(tokens) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tokens[index]):
+            raise unreadable
+        name = tokens[index]
+        index += 1
+        if index < len(tokens) and tokens[index] == "=":
+            if index + 1 >= len(tokens) or not tokens[index + 1].startswith('"'):
+                raise unreadable
+            return cls(combinator=None, option=f"{name}={tokens[index + 1]}"), index + 2
+        if index >= len(tokens) or tokens[index] != "(":
+            return cls(combinator=None, option=name), index
+        if name not in ("all", "any", "not"):
+            raise unreadable
+        index += 1
+        operands: list[Cfg] = []
+        while index < len(tokens) and tokens[index] != ")":
+            operand, index = cls._parse_at(tokens, index, condition)
+            operands.append(operand)
+            if index < len(tokens) and tokens[index] == ",":
+                index += 1
+            elif index >= len(tokens) or tokens[index] != ")":
+                raise unreadable
+        if index >= len(tokens):
+            raise unreadable
+        if name == "not" and len(operands) != 1:
+            raise unreadable
+        return cls(combinator=name, operands=tuple(operands)), index + 1
+
+    def without_loom(self) -> bool | None:
+        """The predicate's value in a build without the `loom` feature, or `None` where another
+        option decides it. Three-valued logic keeps every definite answer true for every value the
+        other options can take."""
+
+        if self.combinator is None:
+            if self.option == 'feature="loom"':
+                return False
+            return None
+        values = [operand.without_loom() for operand in self.operands]
+        if self.combinator == "not":
+            value = values[0]
+            if value is None:
+                return None
+            return not value
+        if self.combinator == "all":
+            if False in values:
+                return False
+            if None in values:
+                return None
+            return True
+        if True in values:
+            return True
+        if None in values:
+            return None
+        return False
+
+
 def _loom_only(attributes: str) -> bool:
-    """Whether `attributes` compile their item only for Loom: a `cfg` that requires the `loom`
-    feature outside every `not(...)`."""
+    """Whether `attributes` compile their item only for Loom: one of its `cfg` predicates is false
+    in every build without the `loom` feature. Raises `CfgError` for a predicate it cannot read."""
 
     for match in _CFG_ATTRIBUTE.finditer(attributes):
-        condition = match.group("condition")
-        previous = None
-        while previous != condition:
-            previous = condition
-            condition = _NEGATED_CFG.sub("", condition)
-        if _LOOM_FEATURE.search(condition):
+        if Cfg.parse(match.group("condition")).without_loom() is False:
             return True
     return False
 
@@ -829,19 +915,28 @@ def check_loom_models(file: RustFile, loom_only_file: bool = False) -> list[Site
     named one would run a real primitive silently. What an owner the model drives uses internally
     is outside this check: a Loom claim excludes it. A module compiled only for Loom is an inline
     module whose attributes require the `loom` feature, or, when `loom_only_file` says so, the
-    whole file, which a `mod` declaration compiled only for Loom brought in.
+    whole file, which a `mod` declaration compiled only for Loom brought in. A module whose `cfg` it
+    cannot read is rejected, since whether it is model code is unknown.
     """
 
     violations: list[Site] = []
+    for declaration in _MODULE_DECLARATION.finditer(file.literals):
+        try:
+            _loom_only(declaration.group("attributes"))
+        except CfgError as error:
+            violations.append(file.site(declaration.start(), f"{RULE}: {error}"))
     blocks: list[tuple[int, int]] = []
-    if loom_only_file:
-        blocks.append((0, len(file.code)))
-    else:
-        for module in _MODULE_WITH_BODY.finditer(file.literals):
-            if not _loom_only(module.group("attributes")):
-                continue
+    for module in _MODULE_WITH_BODY.finditer(file.literals):
+        try:
+            only_for_loom = _loom_only(module.group("attributes"))
+        except CfgError as error:
+            violations.append(file.site(module.start(), f"{RULE}: {error}"))
+            continue
+        if only_for_loom and not loom_only_file:
             brace = module.end() - 1
             blocks.append((brace, _end_of_block(file.code, brace)))
+    if loom_only_file:
+        blocks = [(0, len(file.code))]
     for start, end in blocks:
         _check_loom_block(file, start, end, violations)
     return violations
@@ -1212,7 +1307,8 @@ def _module_directory(declaring: PurePosixPath) -> PurePosixPath:
 
 def declared_modules(file: RustFile, sources: frozenset[str]) -> Iterator[tuple[str, bool]]:
     """Each source file that `file` declares as an out-of-line module, and whether its declaration
-    compiles it only for Loom. A declaration whose file is not among `sources` is skipped."""
+    compiles it only for Loom. A declaration whose file is not among `sources` is skipped, and one
+    whose `cfg` cannot be read counts as ordinary code: `check_loom_models` rejects it."""
 
     declaring = PurePosixPath(file.path)
     directory = _module_directory(declaring)
@@ -1227,7 +1323,11 @@ def declared_modules(file: RustFile, sources: frozenset[str]) -> Iterator[tuple[
         for candidate in candidates:
             normalized = posixpath.normpath(str(candidate))
             if normalized in sources:
-                yield normalized, _loom_only(attributes)
+                try:
+                    only_for_loom = _loom_only(attributes)
+                except CfgError:
+                    only_for_loom = False
+                yield normalized, only_for_loom
                 break
 
 
