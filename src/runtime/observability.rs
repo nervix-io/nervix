@@ -200,7 +200,7 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        Ok(services.branch_presence.contains_key(key))
+        Ok(services.branch_presence.contains(key.as_ref()))
     }
 
     pub(crate) fn describe_metrics_for(
@@ -313,9 +313,13 @@ impl Runtime {
         let Some(services) = execution.relay_services.get(relay) else {
             return Vec::new();
         };
-        services
-            .branch_presence
-            .keys()
+        let membership = services.branch_presence.load();
+        let mut branches = membership
+            .branches()
+            .map(|branch| branch.as_str().to_string())
+            .collect::<Vec<_>>();
+        branches.sort();
+        branches
             .into_iter()
             .map(|branch| nervix_dataflow_graph::DataflowBranchStatistics {
                 branch,

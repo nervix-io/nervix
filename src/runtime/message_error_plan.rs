@@ -160,7 +160,7 @@ mod tests {
             0,
             Vec::new(),
             None,
-            RelayRegistry::new(),
+            Arc::new(BranchPresence::new()),
         ))
     }
 

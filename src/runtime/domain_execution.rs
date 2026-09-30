@@ -349,7 +349,7 @@ impl Runtime {
 
         let Some(revision) = revision else {
             self.withdraw_undeclared_relay_subscriptions(domain, |_| false);
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         };
         let stopped = self
@@ -358,7 +358,7 @@ impl Runtime {
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
         if stopped || !self.inner.domains.contains_key(domain) {
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         }
         let domain_clock =
@@ -403,16 +403,16 @@ impl Runtime {
             .await?;
 
         for relay in activation_plan.relays.values() {
-            let expiring_state = if branch_relays.contains(&relay.name) {
-                let state = self
-                    .expiring_stream_state(domain, &relay.name)
+            // A branch relay shares its presence with the relay's state placement, which outlives
+            // this execution; any other relay starts from a presence of its own.
+            let branch_presence = if branch_relays.contains(&relay.name) {
+                self.relay_branch_presence(domain, &relay.name)
                     .map_err(|error| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: error.to_string(),
-                    })?;
-                Some(state)
+                    })?
             } else {
-                None
+                Arc::new(BranchPresence::new())
             };
             let fanout = self
                 .relay_boundary_fanout_with_capacity(
@@ -422,10 +422,6 @@ impl Runtime {
                     RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
                 )
                 .await;
-            let branch_presence = match expiring_state.as_ref() {
-                Some(state) => state.registry.clone(),
-                None => RelayRegistry::new(),
-            };
             relay_builders.insert(
                 relay.name.clone(),
                 RelayBoundaryBuilder {

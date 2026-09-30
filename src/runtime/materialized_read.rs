@@ -488,15 +488,15 @@ impl Runtime {
         if scheduled {
             return true;
         }
-        // Expiring branches are tracked for the whole relay, in the same lifetime as the state.
-        let expiring_placement = RuntimeStatePlacement {
+        // Branch presence is kept for the whole relay, in the same lifetime as the state.
+        let presence_placement = RuntimeStatePlacement {
             branch_key: None,
             ..placement.clone()
         };
-        self.inner
-            .expiring_stream_states
-            .get(&expiring_placement)
-            .is_none_or(|state| state.registry.contains_key(key))
+        let Some(presence) = self.inner.relay_branch_presences.get(&presence_placement) else {
+            return true;
+        };
+        presence.contains(key.as_ref())
     }
 
     /// Every materialized record one relay holds on another node, reported the same way as the

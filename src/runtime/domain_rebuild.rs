@@ -310,7 +310,7 @@ impl Runtime {
             self.clear_domain_ingestor_quiescence(domain);
             self.inner.compiled_domain_udfs.remove(domain);
             self.clear_state_identities(domain);
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         };
         self.install_state_identities(&revision);
@@ -354,7 +354,7 @@ impl Runtime {
         }
         if stopped {
             self.clear_domain_ingestor_quiescence(domain);
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             let execution =
                 Box::pin(self.build_passive_execution_from_revision(domain, revision)).await?;
             self.install_domain_execution(domain, execution);
@@ -432,17 +432,17 @@ impl Runtime {
                     ModelName::from(&relay.name),
                 ))
                 .assured("the domain plan contains exactly the scheduled relays");
-            let expiring_state =
+            // A relay this node owns shares its presence with the relay's state placement, which
+            // outlives this execution; any other relay starts from a presence of its own.
+            let branch_presence =
                 if node.executes_on(local_node_id) && branch_relays.contains(&relay.name) {
-                    let state =
-                        self.expiring_stream_state(domain, &relay.name)
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: error.to_string(),
-                            })?;
-                    Some(state)
+                    self.relay_branch_presence(domain, &relay.name)
+                        .map_err(|error| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: error.to_string(),
+                        })?
                 } else {
-                    None
+                    Arc::new(BranchPresence::new())
                 };
             let fanout = Box::pin(self.relay_boundary_fanout_with_capacity(
                 domain,
@@ -451,10 +451,6 @@ impl Runtime {
                 RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
             ))
             .await;
-            let branch_presence = match expiring_state.as_ref() {
-                Some(state) => state.registry.clone(),
-                None => RelayRegistry::new(),
-            };
             relay_builders.insert(
                 relay.name.clone(),
                 RelayBoundaryBuilder {
@@ -979,7 +975,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    branch_presence: RelayRegistry::new(),
+                    branch_presence: Arc::new(BranchPresence::new()),
                     remote_runtime_consumers: Vec::new(),
                 },
             );

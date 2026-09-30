@@ -575,7 +575,7 @@ mod tests {
                     0,
                     Vec::new(),
                     None,
-                    RelayRegistry::new(),
+                    Arc::new(BranchPresence::new()),
                 )),
             },
             flush_policy,
@@ -660,7 +660,7 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
-                RelayRegistry::new(),
+                Arc::new(BranchPresence::new()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
@@ -723,7 +723,7 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
-                RelayRegistry::new(),
+                Arc::new(BranchPresence::new()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
@@ -847,7 +847,7 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
-                RelayRegistry::new(),
+                Arc::new(BranchPresence::new()),
             )),
         };
         let plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);

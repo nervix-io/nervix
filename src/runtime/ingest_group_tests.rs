@@ -1084,7 +1084,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         0,
         Vec::new(),
         None,
-        RelayRegistry::new(),
+        Arc::new(BranchPresence::new()),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
@@ -1176,7 +1176,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             0,
             Vec::new(),
             None,
-            RelayRegistry::new(),
+            Arc::new(BranchPresence::new()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,

@@ -2308,7 +2308,7 @@ mod tests {
             0,
             Vec::new(),
             None,
-            RelayRegistry::new(),
+            Arc::new(BranchPresence::new()),
         ));
         let owner = runtime.spawn_relay_owner_task(
             &domain,

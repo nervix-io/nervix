@@ -19696,6 +19696,14 @@ async fn then_node_interconnection_metrics_use_bounded_dimensions(
     );
 }
 
+/// Whether a line of a `DESCRIBE RELAY` output begins with `expected`. Matching the start of a
+/// whole line keeps `exists` from matching the `not exists` a missing branch reports.
+fn describe_relay_output_reports(output: &str, expected: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.trim_start().starts_with(expected))
+}
+
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]
 async fn then_within_duration_node_eventually_reports_describe_stream_as(
     world: &mut ScenarioWorld,
@@ -19712,7 +19720,7 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
     loop {
         nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
-            Ok(output) if output.contains(expected.as_str()) => {
+            Ok(output) if describe_relay_output_reports(&output, &expected) => {
                 world.last_command_output = Some(output);
                 return;
             }

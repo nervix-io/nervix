@@ -22,58 +22,10 @@ pub(super) fn addressable_count(configured: NonZeroU64) -> NonZeroUsize {
         .assured("a non-zero configured count is still non-zero at this target's pointer width")
 }
 
-#[derive(Debug)]
-pub(super) struct RelayPresence {
-    pub(super) last_seen_at: AtomicTimestamp,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RelayRegistry {
-    pub(super) presences: Arc<DashMap<Option<BranchKey>, Arc<RelayPresence>, RandomState>>,
-}
-
-impl RelayRegistry {
-    pub(super) fn new() -> Self {
-        Self {
-            presences: Arc::new(DashMap::default()),
-        }
-    }
-
-    pub(super) fn touch(&self, key: &Option<BranchKey>, now: Timestamp) {
-        if let Some(existing) = self.presences.get(key) {
-            existing.last_seen_at.store(now);
-            return;
-        }
-        self.presences.insert(
-            key.clone(),
-            Arc::new(RelayPresence {
-                last_seen_at: AtomicTimestamp::new(now),
-            }),
-        );
-    }
-
-    pub(super) fn contains_key(&self, key: &Option<BranchKey>) -> bool {
-        self.presences.contains_key(key)
-    }
-
-    pub(super) fn remove(&self, key: &Option<BranchKey>) {
-        self.presences.remove(key);
-    }
-
-    pub(super) fn clear(&self) {
-        self.presences.clear();
-    }
-
-    pub(super) fn keys(&self) -> Vec<String> {
-        let mut keys = self
-            .presences
-            .iter()
-            .filter_map(|entry| entry.key().as_ref().map(|key| key.as_str().to_string()))
-            .collect::<Vec<_>>();
-        keys.sort();
-        keys
-    }
-}
+/// The concrete branches this node's owner of one relay holds, as `DESCRIBE`, materialized reads
+/// and the console's graph observe them. The relay's owner task alone changes it, and only when a
+/// branch appears, is evicted or expires, or the owner starts or stops.
+pub(super) type RelayBranchPresence = Arc<BranchPresence<BranchKey>>;
 
 pub(super) struct ConcreteRelayRuntime {
     pub(super) key: Option<BranchKey>,
@@ -99,9 +51,9 @@ pub(super) struct RelayBoundaryServices {
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     pub(super) remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
     pub(super) owner_node: ArcSwapOption<ClusterNodeName>,
-    /// The concrete branches this node's owner of the relay holds, as `DESCRIBE` and materialized
-    /// reads observe them.
-    pub(super) branch_presence: RelayRegistry,
+    /// The concrete branches this node's owner of the relay holds, shared with the relay's state
+    /// placement so materialized reads observe the same membership across execution rebuilds.
+    pub(super) branch_presence: RelayBranchPresence,
     pub(super) ingress_slots: DashMap<Option<BranchKey>, Arc<RelayOutboundSlot>, RandomState>,
     pub(super) outbound_slots: DashMap<RelayOutboundChannel, Arc<RelayOutboundSlot>, RandomState>,
 }
@@ -202,7 +154,7 @@ pub(super) struct RelayBoundaryBuilder {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: usize,
     pub(super) detached_runtime_consumer_count: usize,
-    pub(super) branch_presence: RelayRegistry,
+    pub(super) branch_presence: RelayBranchPresence,
     pub(super) remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
 }
 
@@ -415,8 +367,9 @@ pub(super) struct RelayOwnerTask {
 }
 
 pub(super) struct RelayOwnerBranchState {
-    pub(super) registry: RelayRegistry,
-    pub(super) instances: BranchInstanceRegistry<Option<BranchKey>, RelayMetricRecorders>,
+    /// The concrete branches this owner holds, each with its metric series, and the presence it
+    /// publishes for them. Dropping it releases the presence.
+    pub(super) instances: OwnedBranches<BranchKey, RelayMetricRecorders>,
     pub(super) global_metrics: RelayMetricsHandle,
     pub(super) physical_node_id: Option<ClusterNodeName>,
     pub(super) capacity: Option<NonZeroUsize>,
@@ -429,7 +382,7 @@ pub(super) struct RelayOwnerBranchState {
 }
 
 impl RelayOwnerBranchState {
-    /// The domain time this owner stamps branch presence and expiry with.
+    /// The domain time this owner admits branches at and expires them by.
     fn expiration_time(
         &mut self,
         runtime: &Runtime,
@@ -1081,11 +1034,6 @@ impl RelayRuntimeFanIn {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct ExpiringRelayState {
-    pub(super) registry: RelayRegistry,
-}
-
 /// A relay owner consumes the retention decision made with the rest of its domain plan.
 pub(super) use crate::registry::PlannedRelayRetention as RelayRetention;
 
@@ -1098,14 +1046,6 @@ pub(super) struct RelayStateTaskSpec {
     pub(super) receiver: RelayRuntimeFanIn,
 }
 
-impl ExpiringRelayState {
-    pub(super) fn new() -> Self {
-        Self {
-            registry: RelayRegistry::new(),
-        }
-    }
-}
-
 impl RelayBoundaryServices {
     pub(super) fn new(
         fanout: RelayBoundaryFanout,
@@ -1113,7 +1053,7 @@ impl RelayBoundaryServices {
         detached_runtime_consumer_count: usize,
         remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
         remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
-        branch_presence: RelayRegistry,
+        branch_presence: RelayBranchPresence,
     ) -> Self {
         Self {
             fanout,
@@ -1632,32 +1572,32 @@ impl Runtime {
                 return Err(Box::new(batch.clone()));
             }
         };
-        branches.registry.touch(&batch.key, now);
-        let metrics = match batch.key.as_ref() {
-            Some(branch_key) => {
-                let branch_instance = branches
-                    .instances
-                    .get_or_try_create_with(batch.key.clone(), now, |_, _| {
-                        Ok::<RelayMetricRecorders, std::convert::Infallible>(
-                            self.inner.metrics.resolve_relay_metric_recorders(
-                                domain,
-                                relay,
-                                branches.physical_node_id.as_ref(),
-                                RELAY_BUFFER_DIRECTION_CONCRETE,
-                                Some(branch_key.as_str()),
-                            ),
-                        )
-                    })
-                    .assured("the metrics resolver's error type is Infallible");
-                RelayMetricsHandle::from_recorders(branch_instance.state)
-            }
+        let physical_node_id = branches.physical_node_id.as_ref();
+        let admission = branches
+            .instances
+            .admit(
+                batch.key.as_ref(),
+                now,
+                branches.capacity,
+                |branch_key, _| {
+                    Ok::<RelayMetricRecorders, std::convert::Infallible>(
+                        self.inner.metrics.resolve_relay_metric_recorders(
+                            domain,
+                            relay,
+                            physical_node_id,
+                            RELAY_BUFFER_DIRECTION_CONCRETE,
+                            Some(branch_key.as_str()),
+                        ),
+                    )
+                },
+            )
+            .assured("the metrics resolver's error type is Infallible");
+        let metrics = match admission.branch {
+            Some(recorders) => RelayMetricsHandle::from_recorders(recorders),
             None => branches.global_metrics.clone(),
         };
-        if let Some(capacity) = branches.capacity {
-            for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
-                branches.registry.remove(&evicted_key);
-                self.invalidate_branch_relay_generation(domain, &evicted_key);
-            }
+        for (evicted_key, _) in admission.evicted {
+            self.invalidate_branch_relay_generation(domain, &Some(evicted_key));
         }
         metrics.observe_batch(
             batch.message_count(),
@@ -1670,13 +1610,14 @@ impl Runtime {
         result
     }
 
-    /// The branch expiration state of `relay`, kept for the relay-wide materialized state in the
-    /// lifetime the committed schedule publishes for it.
-    pub(in crate::runtime) fn expiring_stream_state(
+    /// The branch presence of `relay`, kept with the relay-wide materialized state in the lifetime
+    /// the committed schedule publishes for it, so materialized reads observe the membership of
+    /// whichever owner the relay has on this node.
+    pub(in crate::runtime) fn relay_branch_presence(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> error_stack::Result<Arc<ExpiringRelayState>, StateIdentityError> {
+    ) -> error_stack::Result<RelayBranchPresence, StateIdentityError> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -1684,26 +1625,26 @@ impl Runtime {
             relay,
             None,
         )?;
-        if let Some(existing) = self.inner.expiring_stream_states.get(&placement) {
+        if let Some(existing) = self.inner.relay_branch_presences.get(&placement) {
             return Ok(existing.clone());
         }
-        let state = Arc::new(ExpiringRelayState::new());
+        let presence = Arc::new(BranchPresence::new());
         self.inner
-            .expiring_stream_states
-            .insert(placement, state.clone());
-        Ok(state)
+            .relay_branch_presences
+            .insert(placement, presence.clone());
+        Ok(presence)
     }
 
-    pub(in crate::runtime) fn clear_expiring_stream_states_for_domain(&self, domain: &DomainName) {
+    pub(in crate::runtime) fn clear_relay_branch_presences_for_domain(&self, domain: &DomainName) {
         let relays = self
             .inner
-            .expiring_stream_states
+            .relay_branch_presences
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in relays {
-            self.inner.expiring_stream_states.remove(&placement);
+            self.inner.relay_branch_presences.remove(&placement);
         }
     }
 
@@ -1771,11 +1712,12 @@ impl Runtime {
             branch_capacity,
         } = retention;
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
-        let registry = services.branch_presence.clone();
+        // Claiming before the task starts makes this owner the presence's only publisher from here
+        // on: a predecessor that is still ending can no longer change what observers read.
+        let instances = OwnedBranches::claim(services.branch_presence.clone());
         let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
-                registry,
-                instances: BranchInstanceRegistry::new(),
+                instances,
                 global_metrics,
                 physical_node_id,
                 capacity: branch_capacity,
@@ -1832,8 +1774,7 @@ impl Runtime {
                             now,
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
-                            branches.registry.remove(&expired_key);
-                            runtime.invalidate_branch_relay_generation(&domain, &expired_key);
+                            runtime.invalidate_branch_relay_generation(&domain, &Some(expired_key));
                         }
                         next_expiration_scan = Instant::now() + expiration_scan_interval;
                     }
@@ -1859,7 +1800,9 @@ impl Runtime {
             }
             services.observe_owner_buffer_length(&branches.global_metrics);
             services.deactivate_owner_buffer();
-            branches.registry.clear();
+            // Releasing the owner's branches publishes an empty presence before the relay's metrics
+            // are removed, unless a successor already claimed the presence.
+            drop(branches);
             runtime.inner.metrics.remove_relay(&domain, &relay);
         });
         RelayOwnerTask { shutdown, task }
@@ -2085,3 +2028,7 @@ impl Runtime {
 #[cfg(test)]
 #[path = "relay_boundary_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "relay_branch_presence_shuttle_tests.rs"]
+mod branch_presence_shuttle_tests;

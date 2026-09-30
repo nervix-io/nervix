@@ -19,11 +19,16 @@ The hot paths are:
 These paths may apply bounded backpressure and preserve required ordering. Their steady-state work
 must not acquire a `Mutex` or `RwLock`, including a read lock, merely to discover configuration,
 ownership, topology, a service, or a metric series. A read lock still changes shared lock state,
-competes with writers, and can join an unrelated reader to a writer's delay. Calling
-`DashMap::entry()` for an established value is also excluded: the occupied case still takes the
-shard's write side. Stable dependencies are resolved before the hot loop; a keyed registry that
-cannot be resolved ahead of time uses a borrowed lookup first and reaches `entry()` only for the
-first or racing installation.
+competes with writers, and can join an unrelated reader to a writer's delay.
+
+A shared concurrent map synchronizes on every access, not only on `entry()`. `DashMap::get`,
+`contains_key`, `len` and iteration take a shard's read side, and `get_mut`, `entry`, `insert`,
+`remove`, `retain` and `alter` take its write side, whether or not the key is present; a borrowed
+`Ref` holds its shard until it is dropped. A steady hot path therefore does not look an established
+value up in a shared map at all, whether by borrowed lookup or by `entry()`. It retains the handle
+it resolved when its task, branch, channel, or attempt was created. A shared registry serves the
+cold paths around that handle: registration and first installation, where `entry()` gives racing
+installers a single winner, replacement, teardown, and observers.
 
 The resulting design uses four forms of ownership:
 
@@ -32,8 +37,22 @@ The resulting design uses four forms of ownership:
 - A task resolves stable services, state authorities, slots, and metric series when it starts and
   retains those handles.
 - Scalar progress and counts use atomics with an ordering chosen for the contract they enforce.
-- State that changes for every row or batch belongs to one task, branch, delivery channel, or
-  source attempt.
+- State that changes for every row or batch belongs exclusively to one task, branch, delivery
+  channel, or source attempt. That owner mutates ordinary collections directly: a task-local
+  `HashMap`, `BTreeMap`, `IndexMap` or JSON map and its `entry` API are not synchronization, and
+  exclusive ownership does not pin the task to an operating-system thread. When other tasks need to
+  observe such state, the owner publishes an immutable value of it; observers never reach into the
+  owner's collection.
+
+A shared concurrent map is justified only for state that several owners register into or that
+observers read across owners, and only while its accesses stay on those cold paths. Hot-path
+synchronization that remains is an ordering fence or bounded protocol this chapter names, with the
+exact key that scopes it and the capacity or deadline that bounds its wait. The
+[concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
+records every concurrent map on the data plane and its neighbours, how often each is reached, and
+the disposition of every map that is still reached on a record, batch, remote-frame,
+acknowledgement or steady-poll path. Until its named repair lands, such a site is debt, not accepted
+design.
 
 The [Data Plane](./data-plane.md) chapter defines payload, persistence, branch, and ACK semantics.
 This chapter owns the concurrency contract for executing them. The [Cluster
@@ -61,6 +80,7 @@ writer.
 | Message-error route plans | The registry selects each DLQ route from the committed schedule. Domain installation binds its schemas, branch declaration, flush contract, relay target and SET program before tasks start. Schedule application replaces the complete bound route map under the domain execution's write guard with the planned nodes, placement, entrypoints and emitters of one typed revision. | A failed record looks up one prepared route under the domain execution read guard and releases the guard before running its VM program or delivery. A buffered route compares the bound plan allocation with its running delivery task; a replacement drains the preceding task and starts a task with the new target and cadence. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
 | Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
+| Relay branch presence | The relay's owner task publishes the complete membership of the concrete branches it holds, and whether it admitted unbranched work, when that membership changes: a branch appears, is evicted or expires, or the owner starts or stops. The relay's state placement keeps the same presence across execution rebuilds. See [Relay branch presence](#relay-branch-presence). | `DESCRIBE RELAY ... WHERE`, materialized reads, and the console's dataflow graph load one membership without a lock. A batch for a branch the owner already holds publishes nothing. |
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender until it observes domain removal, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
@@ -198,6 +218,31 @@ keeps the handoff only until either pre-publication abort restores it or generat
 makes it obsolete. Sibling branch tasks keep their own lanes and continue running. After
 publication, the supervisor creates fresh tasks and waits for their initial checkpoints before it
 drops the retained old tasks and accepts completion.
+
+### Relay branch presence
+
+A relay's owner task owns its concrete branch instances: their activity order, the TTL scan that
+expires them, and the LRU eviction that bounds them. It keeps them in an ordinary indexed map beside
+a persistent set of their keys, and admits, evicts and expires through one owner type that changes
+both in the same step. A step that changes the membership publishes the set, sharing its structure
+with the membership published before it, so creating or releasing one branch copies only the path
+to that branch, never every branch the owner holds. A batch that creates one branch and evicts
+another publishes once, so an observer never sees the relay above its capacity. A batch for an
+established branch refreshes that branch's activity in the owner's map and publishes nothing; it
+takes no lock and writes no shared timestamp.
+
+Each owner lifetime claims the presence when its task is spawned. The claim publishes an empty
+membership that replaces whatever an earlier owner left behind, including the branches of an owner
+aborted before its teardown ran, and from then on only the claiming owner changes what the presence
+publishes: a replaced owner that is still ending compares its lifetime with the published one and
+publishes nothing. Dropping the owner state, whether the task finishes its drain or is aborted,
+releases the presence by publishing an empty membership unless a successor has claimed it.
+Publication and claims are one `ArcSwap` compare-and-swap or read-copy-update each; the protocol
+adds no atomic of its own.
+
+The owner publishes a new branch before it fans out the batch that created it and an eviction
+before it invalidates the evicted branch's delivery slots, so a consumer that has processed a batch
+reads a membership that holds its branch.
 
 ### Materialized relay entries
 
@@ -414,9 +459,11 @@ value in `debt-baseline.json` is a ceiling: the count may fall and may never ris
 `just ratchet --update` records the lower baseline in the same change.
 
 The count is deliberately textual and broad. It includes lifecycle synchronization, cold
-registration, task-local collection `entry()` calls, and I/O methods named `read` or `write`.
-Passing the ratchet therefore proves only that the total did not increase. Review classifies every
-new site on its own, even when another deletion hides it in the net count.
+registration, task-local collection `entry()` calls, and I/O methods named `read` or `write`, and it
+cannot see a shared map's borrowed `get`, `contains_key` or iteration, or its `insert`, `remove`
+and `retain`. Passing the ratchet therefore proves only that the total did not increase. Review
+classifies every new site on its own, even when another deletion hides it in the net count, and the
+concurrent map inventory accounts for the accesses the count cannot see.
 
 Use the site listing while reviewing:
 
@@ -424,26 +471,34 @@ Use the site listing while reviewing:
 just ratchet --show data_plane_lock_acquisitions
 ```
 
-For every new or moved site, the reviewer establishes all of the following:
+For every new or moved site, and for every shared-map access the count cannot see, the reviewer
+establishes all of the following:
 
 1. **Frequency.** Trace its callers and decide whether it can run per record, row, batch, remote
    frame, ACK share, or steady poll iteration. A site on one of those paths is rejected unless it
-   is an ordering fence or task-owned mutation described by this chapter.
+   is an ordering fence or bounded protocol described by this chapter. Registration, first
+   installation, replacement, teardown and observer reads are cold and are classified as such,
+   separately from the recurring path.
 2. **Owner.** Identify the one component that changes the state. Immutable reconfiguration uses a
    whole-value publication, a scalar uses an atomic, a stable dependency is bound when the task
-   starts, and branch-local state belongs directly to the branch task.
-3. **Lookup behavior.** A steady keyed lookup must not take `entry()`. Resolve and retain the handle
-   when possible; otherwise perform a borrowed lookup and reserve `entry()` for a cold or racing
-   installation whose single-winner property is part of the contract.
-4. **Fence contract.** An allowed ordering fence names the order it preserves, the exact key that
-   limits its scope, the capacity or deadline that bounds waiting, and whether any guard crosses an
-   await. Unrelated branches, relays, destinations, or assignments must still progress.
+   starts, and branch-local state belongs directly to the branch task. An ordinary collection that
+   one owner holds, and its `entry` API, are not synchronization and need no justification.
+3. **Lookup behavior.** A steady path does not look an established value up in a shared map, with
+   `entry()` or with a borrowed `get`, `contains_key` or iteration, all of which take a shard lock.
+   It retains the handle resolved when its task, branch, channel or attempt was created. `entry()`
+   belongs to a cold or racing installation whose single-winner property is part of the contract.
+4. **Fence contract.** An allowed ordering fence or bounded protocol names the order it preserves,
+   the exact key that limits its scope, the capacity or deadline that bounds waiting, and whether
+   any guard crosses an await. Unrelated branches, relays, destinations, or assignments must still
+   progress.
 5. **Lifecycle separation.** Startup, registration, schedule application, snapshot sealing, and
    teardown may synchronize with their peers, but their guards must not leak into a hot callback or
    be held while awaiting data-plane work.
 6. **Mechanical result.** Run `just ratchet`; inspect the site list when the count changes; update
    the baseline only when the count fell. A lower aggregate count does not make a newly introduced
-   hot-path lock acceptable.
+   hot-path lock acceptable, and renaming a method or moving a file is not a repair.
+7. **Inventory.** Record a new concurrent map, or a changed frequency or disposition of an existing
+   one, in the concurrent map inventory in the same change.
 
 The companion `write_once_rwlock_fields` count rejects names and shared references stored as
 `RwLock<Option<...>>`. Such a field states that readers should coordinate forever around a value
@@ -685,6 +740,7 @@ A family of names means each member runs independently through the recipe.
 | Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
 | Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. `shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot` races a forwarded producer's detach against the clearance of its batch while a local producer waits for the window's one slot: the forwarded batch reaches the worker only after its clearance was recorded, and the local batch is admitted whichever comes first, so no slot leaks. `shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it` races an endpoint end against the clearance of two batches while the worker holds the first without reporting it: each batch is answered once, not admitted exactly when the worker never took it, whether it was still being cleared or cleared and waiting for the worker, and of unknown outcome when it did. |
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
+| Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
@@ -744,7 +800,10 @@ ordering means revisiting its qualification.
 Loom's own limits bound every claim. It does not model every relaxed behavior the C11 model
 permits, and an operation inside a third-party dependency, such as a `triomphe` reference count or
 an `arc-swap` publication, is invisible to it and excluded from the claim rather than given a
-fictional model. A standalone counter carries no cross-location claim, whatever its ordering.
+fictional model. A standalone counter carries no cross-location claim, whatever its ordering. Relay
+branch presence is such a case: its owner lifetimes and publications are `arc-swap` compare-and-swap
+and read-copy-update operations with no Nervix-owned atomic beside them, so it has no Loom model;
+its Shuttle checks order its publications against observers and successors.
 
 | Invariant | Claim | Model and qualification |
 | --- | --- | --- |

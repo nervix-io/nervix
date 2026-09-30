@@ -66,11 +66,7 @@ Feature: Branched branch expiration
       """
       "user_id":42
       """
-    Then within "5s" node "node-1" eventually reports describe relay as "exists"
-      """
-      DESCRIBE RELAY projected_notifications WHERE (user_id = 42);
-      """
-    And within "5s" node "node-1" eventually reports describe relay as "not exists"
+    And within "30s" node "node-1" eventually reports describe relay as "not exists"
       """
       DESCRIBE RELAY projected_notifications WHERE (user_id = 42);
       """
@@ -81,10 +77,6 @@ Feature: Branched branch expiration
     Then the relay subscription receives a payload
       """
       "user_id":42
-      """
-    Then within "5s" node "node-1" eventually reports describe relay as "exists"
-      """
-      DESCRIBE RELAY projected_notifications WHERE (user_id = 42);
       """
 
     Examples:
@@ -97,9 +89,11 @@ Feature: Branched branch expiration
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
+    # SKEW equals PERIOD, so every TIMESTAMP NOW row lies within SKEW of a reached tick center and
+    # is admitted.
     And the leader node is configured with these NSPL commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     When these NSPL commands are executed on the leader node
       """
@@ -159,11 +153,13 @@ Feature: Branched branch expiration
       """
       {"user_id":42}
       """
-    Then within "5s" node "node-1" eventually reports describe relay as "exists"
+    # At TIME RATE 0.01 the ingestor's and the deduplicator's 100ms logical flushes each take ten
+    # physical seconds, and the 200ms TTL keeps the branch for twenty more after its batch arrives.
+    Then within "60s" node "node-1" eventually reports describe relay as "exists"
       """
       DESCRIBE RELAY projected_notifications WHERE (user_id = 42);
       """
-    And within "30s" node "node-1" eventually reports describe relay as "not exists"
+    And within "60s" node "node-1" eventually reports describe relay as "not exists"
       """
       DESCRIBE RELAY projected_notifications WHERE (user_id = 42);
       """

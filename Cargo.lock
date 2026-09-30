@@ -6533,6 +6533,10 @@ name = "nervix-branch-instances"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "alloc_count",
+ "bolero",
+ "criterion 0.5.1",
+ "imbl",
  "indexmap 2.14.2",
  "meticulous",
  "nervix-models",

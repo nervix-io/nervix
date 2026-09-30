@@ -914,6 +914,7 @@ coverage-turmoil output:
 # left to whatever ran before them.
 bench *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+    cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
@@ -922,6 +923,7 @@ bench *args: build-web-console
 # Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
 bench-smoke: build-web-console
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
@@ -931,6 +933,11 @@ bench-smoke: build-web-console
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
 bench-relay-interaction *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+
+# Measure the branch owner a relay owner task holds: batches for established branches, which
+# publish nothing, and branch churn, which creates, evicts and publishes once per batch.
+bench-branch-instances *args:
+    cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
 
 # Build the SIMD kernel crate's optimized unit-test binary for the x86-64-v3 payload the Docker
 # image ships, in its own target directory, so the generated instructions of each dispatch level can

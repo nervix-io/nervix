@@ -157,8 +157,8 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeRef, PreparedForcedRuntimeStateRecovery, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
-    pub(in crate::runtime) expiring_stream_states:
-        DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>,
+    pub(in crate::runtime) relay_branch_presences:
+        DashMap<RuntimeStatePlacement, RelayBranchPresence, RandomState>,
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     pub(in crate::runtime) replicated_kafka_offset_states:

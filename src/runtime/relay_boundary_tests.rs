@@ -24,7 +24,7 @@ use triomphe::Arc;
 
 use super::*;
 use crate::{
-    runtime_ack::{AckOutcome, AckSet},
+    runtime_ack::{AckCompletion, AckOutcome, AckSet},
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
@@ -443,7 +443,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         0,
         Vec::new(),
         None,
-        RelayRegistry::new(),
+        Arc::new(BranchPresence::new()),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
@@ -801,13 +801,13 @@ fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
 }
 
 #[nervix_primitives::test]
-async fn owner_ingress_touches_expiring_stream_state() {
+async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
     let relay_id = RelayName::parse("notifications").expect("valid identifier");
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay_id);
-    let expiring_state = runtime
-        .expiring_stream_state(&domain, &relay_id)
+    let placement_presence = runtime
+        .relay_branch_presence(&domain, &relay_id)
         .expect("the relay's state identity is published");
     let services = Arc::new(RelayBoundaryServices::new(
         RelayBoundaryFanout::direct_with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
@@ -815,7 +815,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
         0,
         Vec::new(),
         None,
-        expiring_state.registry.clone(),
+        placement_presence.clone(),
     ));
     let (shutdown, _) = watch::channel(false);
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
@@ -900,6 +900,10 @@ async fn owner_ingress_touches_expiring_stream_state() {
     })
     .await
     .expect("owner should admit and observe the relay branch");
+    assert!(
+        placement_presence.contains(key.as_ref()),
+        "materialized reads observe the owner's presence through the relay's state placement"
+    );
     owner_task
         .stop(Duration::from_secs(1))
         .await
@@ -1078,9 +1082,9 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
     timeout(Duration::from_secs(1), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if !services.branch_presence.contains_key(&keys[0])
-                && services.branch_presence.contains_key(&keys[1])
-                && services.branch_presence.contains_key(&keys[2])
+            if !services.branch_presence.contains(keys[0].as_ref())
+                && services.branch_presence.contains(keys[1].as_ref())
+                && services.branch_presence.contains(keys[2].as_ref())
             {
                 break;
             }
@@ -1136,7 +1140,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         .expect("owner should admit the batch");
 
     timeout(Duration::from_secs(1), async {
-        while !services.branch_presence.contains_key(&key) {
+        while !services.branch_presence.contains(key.as_ref()) {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1146,7 +1150,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     timeout(Duration::from_secs(1), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if !services.branch_presence.contains_key(&key) {
+            if !services.branch_presence.contains(key.as_ref()) {
                 break;
             }
             sleep(Duration::from_millis(5)).await;
@@ -1161,18 +1165,24 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
 }
 
 #[nervix_primitives::test]
-async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
+async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let relay = named("notifications");
     let branch = string_branch_key("tenant", "acme");
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
-    let expiring_state = runtime
-        .expiring_stream_state(&domain, &relay)
+    let presence = runtime
+        .relay_branch_presence(&domain, &relay)
         .expect("the relay's state identity is published");
-    expiring_state
-        .registry
-        .touch(&branch, Timestamp::from_unix_nanos(1));
+    let mut owner = OwnedBranches::<BranchKey, ()>::claim(presence.clone());
+    owner
+        .admit(
+            branch.as_ref(),
+            Timestamp::from_unix_nanos(1),
+            None,
+            |_, _| Ok::<(), std::convert::Infallible>(()),
+        )
+        .expect("the test constructor cannot fail");
     let (shutdown, _) = watch::channel(false);
 
     runtime
@@ -1199,7 +1209,171 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
         )
         .await;
 
-    assert!(expiring_state.registry.contains_key(&branch));
+    assert!(presence.contains(branch.as_ref()));
+    drop(owner);
+}
+
+/// A batch for `key` whose completion reports when the relay owner has fanned it out.
+fn presence_test_batch(key: Option<BranchKey>) -> (RelayRecordBatch, AckCompletion) {
+    let (acks, completion) = AckSet::root();
+    let batch = RelayRecordBatch::single(test_schema(&[]), key, test_runtime_row([]), acks)
+        .expect("relay batch should build");
+    (batch, completion)
+}
+
+/// Hand `key`'s next batch to the owner of `services` and wait until the owner has fanned it out.
+async fn fan_out_through_owner(services: &RelayBoundaryServices, key: &Option<BranchKey>) {
+    let (batch, completion) = presence_test_batch(key.clone());
+    services
+        .enqueue_owner_batch(&batch)
+        .await
+        .expect("owner should admit the batch");
+    // The owner holds a share attached to this one, so the root completes once the owner has
+    // fanned the batch out and acknowledged its share.
+    batch.ack_success();
+    let outcome = timeout(Duration::from_secs(5), completion.wait())
+        .await
+        .expect("the owner acknowledges each batch after fanning it out");
+    assert_eq!(outcome, AckOutcome::Ack);
+}
+
+/// Relay services of their own that report to `presence`, as a rebuilt execution's services report
+/// to the presence the relay's state placement keeps.
+fn services_reporting_to(presence: RelayBranchPresence) -> Arc<RelayBoundaryServices> {
+    Arc::new(RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
+        0,
+        0,
+        Vec::new(),
+        None,
+        presence,
+    ))
+}
+
+#[nervix_primitives::test]
+async fn an_established_relay_branch_publishes_its_presence_once_across_successive_batches() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relay = named("orders");
+    let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        services.clone(),
+        RelayRetention {
+            branch_ttl: Some(Duration::from_secs(300)),
+            branch_capacity: Some(nonzero!(4usize)),
+        },
+    );
+    let acme = string_branch_key("tenant", "acme");
+
+    fan_out_through_owner(&services, &acme).await;
+    let published = services.branch_presence.load();
+    assert!(published.contains(acme.as_ref()));
+    for _ in 0..16 {
+        nervix_primitives::task::consume_budget().await;
+        fan_out_through_owner(&services, &acme).await;
+    }
+
+    assert!(
+        StdArc::ptr_eq(&published, &services.branch_presence.load()),
+        "batches for an established branch must leave its published presence untouched"
+    );
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+    assert!(!services.branch_presence.contains(acme.as_ref()));
+}
+
+#[nervix_primitives::test]
+async fn a_successor_owner_starts_from_an_empty_presence_after_its_predecessor_was_aborted() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relay = named("orders");
+    let presence: RelayBranchPresence = Arc::new(BranchPresence::new());
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    let predecessor_services = services_reporting_to(presence.clone());
+    let predecessor = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        predecessor_services.clone(),
+        RelayRetention::default(),
+    );
+    fan_out_through_owner(&predecessor_services, &acme).await;
+    assert!(presence.contains(acme.as_ref()));
+
+    // A stop that outlives its grace aborts the owner task before its teardown runs.
+    predecessor.task.abort();
+    predecessor
+        .task
+        .join_after_shutdown("aborted relay owner")
+        .await;
+    let successor_services = services_reporting_to(presence.clone());
+    let successor = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        successor_services.clone(),
+        RelayRetention::default(),
+    );
+
+    assert!(
+        !presence.contains(acme.as_ref()),
+        "a successor must not report a branch only its aborted predecessor held"
+    );
+    fan_out_through_owner(&successor_services, &beta).await;
+    assert!(presence.contains(beta.as_ref()));
+    assert!(!presence.contains(acme.as_ref()));
+    successor
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+}
+
+#[nervix_primitives::test]
+async fn an_ending_predecessor_owner_cannot_clear_its_successors_presence() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relay = named("orders");
+    let presence: RelayBranchPresence = Arc::new(BranchPresence::new());
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    let predecessor_services = services_reporting_to(presence.clone());
+    let predecessor = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        predecessor_services.clone(),
+        RelayRetention::default(),
+    );
+    fan_out_through_owner(&predecessor_services, &acme).await;
+
+    let successor_services = services_reporting_to(presence.clone());
+    let successor = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        successor_services.clone(),
+        RelayRetention::default(),
+    );
+    fan_out_through_owner(&successor_services, &beta).await;
+    predecessor
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("the predecessor drains and ends");
+
+    assert!(
+        presence.contains(beta.as_ref()),
+        "an ending predecessor must not clear the branches its successor holds"
+    );
+    assert!(!presence.contains(acme.as_ref()));
+    successor
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+    assert!(!presence.contains(beta.as_ref()));
 }
 
 #[nervix_primitives::test]
@@ -1750,4 +1924,103 @@ async fn relay_rebuilds_end_subscribers_only_when_the_relay_rows_change() {
         .await
         .expect_err("the relay is gone");
     assert!(matches!(refused, RuntimeError::RelayNotInstantiated { .. }));
+}
+
+#[nervix_primitives::test]
+async fn the_console_lists_the_concrete_branches_the_relay_owner_holds() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relay = named::<RelayName>("orders");
+    let services = test_relay_boundary_services();
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relay,
+        services.clone(),
+        RelayRetention::default(),
+    );
+    let beta = string_branch_key("tenant", "beta");
+    let acme = string_branch_key("tenant", "acme");
+    fan_out_through_owner(&services, &beta).await;
+    fan_out_through_owner(&services, &acme).await;
+    install_test_domain_execution(
+        &runtime,
+        &domain,
+        Vec::new(),
+        DomainRoutingSnapshot {
+            relay_services: HashMap::from_iter([(relay.clone(), services.clone())]),
+            ..DomainRoutingSnapshot::default()
+        },
+    );
+
+    let listed = runtime
+        .dataflow_relay_branch_statistics(&domain, &relay)
+        .into_iter()
+        .map(|statistics| statistics.branch)
+        .collect::<Vec<_>>();
+
+    let expected = [&acme, &beta]
+        .into_iter()
+        .map(|key| {
+            key.as_ref()
+                .expect("the test keys are concrete")
+                .as_str()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed, expected, "branches are listed in key order");
+    assert!(
+        runtime
+            .dataflow_relay_branch_statistics(&domain, &named("absent"))
+            .is_empty()
+    );
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+}
+
+#[nervix_primitives::test]
+async fn an_unscheduled_materialized_record_is_visible_only_while_its_owner_holds_the_branch() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("notifications");
+    let untracked = named::<RelayName>("untracked");
+    publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
+    publish_state_identity(&runtime, &domain, ModelKind::Relay, &untracked);
+    let presence = runtime
+        .relay_branch_presence(&domain, &relay)
+        .expect("the relay's state identity is published");
+    let placement_of = |relay: &RelayName| {
+        runtime
+            .state_placement(
+                &domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                relay,
+                None,
+            )
+            .expect("the relay's state identity is published")
+    };
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    let mut owner = OwnedBranches::<BranchKey, ()>::claim(presence);
+    owner
+        .admit(
+            acme.as_ref(),
+            Timestamp::from_unix_nanos(1),
+            None,
+            |_, _| Ok::<(), std::convert::Infallible>(()),
+        )
+        .expect("the test constructor cannot fail");
+
+    let placement = placement_of(&relay);
+    assert!(runtime.materialized_stream_key_is_visible(None, &placement, &acme));
+    assert!(!runtime.materialized_stream_key_is_visible(None, &placement, &beta));
+    assert!(
+        runtime.materialized_stream_key_is_visible(None, &placement_of(&untracked), &beta),
+        "a relay without a presence restricts nothing"
+    );
+    drop(owner);
+    assert!(!runtime.materialized_stream_key_is_visible(None, &placement, &acme));
 }

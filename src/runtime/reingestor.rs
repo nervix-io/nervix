@@ -1271,7 +1271,7 @@ mod tests {
             0,
             Vec::new(),
             None,
-            RelayRegistry::new(),
+            Arc::new(BranchPresence::new()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
@@ -1428,7 +1428,7 @@ mod tests {
             0,
             Vec::new(),
             None,
-            RelayRegistry::new(),
+            Arc::new(BranchPresence::new()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,

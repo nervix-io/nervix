@@ -33,6 +33,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `nspl-model` | `nervix-nspl` canonical Model render/reparse equality | current generated Create Models, v1 | 256 | 128 bytes |
 | `nspl-archive-model` | `nervix-nspl` archive document/reparse equality | ordered generated Models, v1 | 64 | 128 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
+| `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent
