@@ -1,5 +1,6 @@
 Feature: Ingestor quiesce engagement during dispatch
 
+  @retained_task_handles
   Scenario Outline: Entity gate engagement during ingestor dispatch stops new intake on a <nodes> node cluster
     Given Kafka is running
     And the production sticky scheduler is configured

@@ -249,7 +249,7 @@ Feature: Drain node
       "transaction_id":"after-handoff"
       """
 
-  @planned-required-wait-handoff
+  @planned-required-wait-handoff @retained_task_handles
   Scenario: A pending REQUIRED WAIT batch does not block its owner's drain
     Given entity gate deadline is configured as "5s"
     And Kafka is running

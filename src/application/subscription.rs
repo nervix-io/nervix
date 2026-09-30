@@ -87,7 +87,7 @@ use super::{
 use crate::{
     runtime::{
         BranchKey, CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionDefinition,
-        Runtime, RuntimeError, SubscriptionPredicateCompileContext, compile_subscription_predicate,
+        RuntimeError, SubscriptionPredicateCompileContext, compile_subscription_predicate,
         execute_subscription_predicate_on_record,
     },
     runtime_schema,
@@ -619,12 +619,19 @@ async fn select_subscription_rows(
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
     sampler: &SubscriptionSampler,
-    runtime: &Runtime,
-    domain: &DomainName,
+    clock: &Result<
+        crate::runtime::DomainClockLifecycle,
+        Report<crate::runtime::DomainClockAccessError>,
+    >,
 ) -> SubscriptionSelection {
     let row_count = batch.record_batch().num_rows();
     let now = match predicate {
-        Some(_) => match runtime.domain_execution_snapshot(domain) {
+        Some(_) => match match clock {
+            Ok(clock) => clock
+                .execution_snapshot()
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        } {
             Ok(snapshot) => Some(snapshot.now()),
             Err(error) => {
                 let skipped = NonZeroU64::new(

@@ -489,6 +489,7 @@ impl Runtime {
                 ),
             })?;
         let domain_clock = cadence.clock().clone();
+        let ack_tracker = self.domain_ack_root_tracker(domain);
         let routes = routes
             .into_iter()
             .map(|route| {
@@ -603,14 +604,7 @@ impl Runtime {
                     }
                     continue;
                 }
-                if runtime
-                    .inner
-                    .domains
-                    .get(&task_domain)
-                    .is_some_and(|state| {
-                        matches!(state.status, nervix_models::DomainStatus::Paused)
-                    })
-                {
+                if domain_clock.is_paused() {
                     pending_occurrence = None;
                     runtime
                         .flush_generator_route_buffers(
@@ -700,13 +694,7 @@ impl Runtime {
                     if !state_load_failed {
                         if source_gate.is_closed()
                             || runtime.local_intake_is_closed()
-                            || runtime
-                                .inner
-                                .domains
-                                .get(&task_domain)
-                                .is_some_and(|state| {
-                                    matches!(state.status, nervix_models::DomainStatus::Paused)
-                                })
+                            || domain_clock.is_paused()
                         {
                             continue;
                         }
@@ -791,7 +779,7 @@ impl Runtime {
                                         Ok(GeneratorProgramOutcome::Filtered) => {}
                                         Ok(GeneratorProgramOutcome::Output(record)) => {
                                             let (acks, _completion) =
-                                                runtime.tracked_ack_root(&task_domain);
+                                                AckSet::tracked_root(ack_tracker.clone());
                                             let failure_acks = acks.clone();
                                             let route_state = &mut branch_state.routes[route_index];
                                             let flush_snapshot = match domain_clock.snapshot() {
@@ -886,10 +874,11 @@ impl Runtime {
                                                 )
                                                 .clone();
                                             let (acks, _completion) =
-                                                runtime.tracked_ack_root(&task_domain);
+                                                AckSet::tracked_root(ack_tracker.clone());
                                             runtime
                                                 .handle_structured_message_error(
                                                     MessageErrorHandling {
+                                                        routing: Some(routing.load()),
                                                         domain: &task_domain,
                                                         node_kind: ModelKind::Generator,
                                                         node: &ModelName::from(&task_generator),

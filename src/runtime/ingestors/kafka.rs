@@ -27,6 +27,7 @@ use super::{
 
 struct RuntimeKafkaDomainOffsets {
     runtime: Runtime,
+    lifecycle: domain_clock::DomainClockLifecycle,
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
@@ -36,18 +37,14 @@ struct RuntimeKafkaDomainOffsets {
 #[async_trait]
 impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     fn generation(&self) -> Option<u64> {
-        self.runtime
-            .inner
-            .domains
-            .get(&self.domain)
-            .map(|state| state.start_version)
+        self.lifecycle.generation()
     }
 
     async fn initialization(
         &self,
         partitions: &[i32],
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
-        let Some(domain_state) = self.runtime.inner.domains.get(&self.domain) else {
+        let Some(domain_state) = self.lifecycle.task_state() else {
             return Err(
                 Report::new(KafkaDomainOffsetError::Read).attach_printable(format!(
                     "domain '{}' is not installed",
@@ -55,9 +52,8 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                 )),
             );
         };
-        let generation = domain_state.start_version;
+        let generation = domain_state.generation;
         let last_start = domain_state.last_start.clone();
-        drop(domain_state);
         let schedule = if let Some(execution) = self.runtime.inner.executions.get(&self.domain)
             && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
@@ -296,6 +292,9 @@ impl KafkaIngestorStartPlan {
                     ));
                 };
                 let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
+                    lifecycle: runtime
+                        .domain_clock_lifecycle(domain)
+                        .change_context_lazy(|| ingestor.initialize_failure())?,
                     runtime: runtime.clone(),
                     domain: domain.clone(),
                     ingestor: ingestor.name.clone(),

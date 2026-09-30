@@ -156,15 +156,56 @@ pub(crate) struct DataflowNodeTransientState {
     pub(crate) reconnect_wait_millis: Option<u64>,
 }
 
+/// One placement's dirty mark, retained beside the task's metric children.
+#[derive(Clone, Default)]
+pub(super) struct BranchMetricsMark(Option<Arc<ReplicatedBranchAggregatedState>>);
+
+impl BranchMetricsMark {
+    pub(super) fn mark(&self) {
+        if let Some(state) = &self.0 {
+            state.mark_metrics_updated();
+        }
+    }
+}
+
+impl DataflowNodeTransientState {
+    fn from_failure<R>(
+        failure: Option<StdArc<task_status::TaskFailure<R>>>,
+        retry_of: fn(&R) -> &RuntimeReconnectStatus,
+    ) -> Self {
+        let Some(failure) = failure else {
+            return Self::default();
+        };
+        let mut state = Self {
+            error: Some(failure.error.clone()),
+            ..Self::default()
+        };
+        if let Some(retry) = failure.retry.as_ref() {
+            let retry = retry_of(retry);
+            state.reconnect_backoff = Some(humantime::format_duration(retry.backoff).to_string());
+            state.reconnect_wait_millis = Some(
+                u64::try_from(
+                    retry
+                        .retry_at
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+            );
+        }
+        state
+    }
+}
+
 impl Runtime {
-    pub(in crate::runtime) fn mark_branch_aggregated_metrics_updated(
+    pub(super) fn branch_metrics_mark(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         identifier: impl Into<ModelName>,
-    ) {
+    ) -> BranchMetricsMark {
         if kind == ModelKind::Relay {
-            return;
+            return BranchMetricsMark::default();
         }
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
@@ -173,13 +214,12 @@ impl Runtime {
             identifier: identifier.into(),
             branch_key: None,
         };
-        if let Some(state) = self
-            .inner
-            .replicated_branch_aggregated_states
-            .get(&placement)
-        {
-            state.mark_metrics_updated();
-        }
+        BranchMetricsMark(
+            self.inner
+                .replicated_branch_aggregated_states
+                .get(&placement)
+                .map(|state| state.value().clone()),
+        )
     }
 
     pub(crate) fn describe_local_stream_exists(
@@ -343,20 +383,11 @@ impl Runtime {
         identifier: impl Into<ModelName>,
     ) -> nervix_dataflow_graph::DataflowNodeHealth {
         let identifier = identifier.into();
-        let reconnect_wait_millis = if kind.eq_ignore_ascii_case("INGESTOR") {
-            self.ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier))
-        } else if kind.eq_ignore_ascii_case("EMITTER") {
-            self.emitter_reconnect_wait_millis(domain, &EmitterName::from(&identifier))
-        } else {
-            None
-        };
+        let transient = self.dataflow_node_transient_state(domain, kind, &identifier);
+        let reconnect_wait_millis = transient.reconnect_wait_millis;
         let detail = if kind.eq_ignore_ascii_case("INGESTOR") {
-            if let Some(error) =
-                self.ingestor_transient_error(domain, &IngestorName::from(&identifier))
-            {
-                if let Some(backoff) =
-                    self.ingestor_reconnect_backoff(domain, &IngestorName::from(&identifier))
-                {
+            if let Some(error) = transient.error {
+                if let Some(backoff) = transient.reconnect_backoff {
                     Some(format!("{error}; reconnect backoff: {backoff}"))
                 } else {
                     Some(error)
@@ -371,12 +402,8 @@ impl Runtime {
                 None
             }
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            if let Some(error) =
-                self.emitter_transient_error(domain, &EmitterName::from(&identifier))
-            {
-                if let Some(backoff) =
-                    self.emitter_reconnect_backoff(domain, &EmitterName::from(&identifier))
-                {
+            if let Some(error) = transient.error {
+                if let Some(backoff) = transient.reconnect_backoff {
                     Some(format!("{error}; reconnect backoff: {backoff}"))
                 } else {
                     Some(error)
@@ -434,21 +461,21 @@ impl Runtime {
     ) -> DataflowNodeTransientState {
         let identifier = identifier.into();
         if kind.eq_ignore_ascii_case("INGESTOR") {
-            DataflowNodeTransientState {
-                error: self.ingestor_transient_error(domain, &IngestorName::from(&identifier)),
-                reconnect_backoff: self
-                    .ingestor_reconnect_backoff(domain, &IngestorName::from(&identifier)),
-                reconnect_wait_millis: self
-                    .ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier)),
-            }
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, identifier);
+            let failure = self
+                .inner
+                .ingestor_statuses
+                .get(&key)
+                .and_then(|status| status.snapshot());
+            DataflowNodeTransientState::from_failure(failure, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            DataflowNodeTransientState {
-                error: self.emitter_transient_error(domain, &EmitterName::from(&identifier)),
-                reconnect_backoff: self
-                    .emitter_reconnect_backoff(domain, &EmitterName::from(&identifier)),
-                reconnect_wait_millis: self
-                    .emitter_reconnect_wait_millis(domain, &EmitterName::from(&identifier)),
-            }
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            let failure = self
+                .inner
+                .emitter_statuses
+                .get(&key)
+                .and_then(|status| status.snapshot());
+            DataflowNodeTransientState::from_failure(failure, |retry| &retry.reconnect)
         } else {
             DataflowNodeTransientState::default()
         }
@@ -516,6 +543,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> error_stack::Result<IngestorDescribe, RuntimeObservationError> {
+        let transient = self.dataflow_node_transient_state(domain, "INGESTOR", ingestor);
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
         let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
         let quiesce_state = match quiesce_control.as_ref() {
@@ -529,7 +557,7 @@ impl Runtime {
         if !self.inner.executions.contains_key(domain) {
             let transient_error = match self.inner.domain_instantiation_errors.get(domain) {
                 Some(error) => Some(error.value().clone()),
-                None => self.ingestor_transient_error(domain, ingestor),
+                None => transient.error.clone(),
             };
             return Ok(IngestorDescribe {
                 running: false,
@@ -538,8 +566,8 @@ impl Runtime {
                 quiesce_counters,
                 memory_backpressure_paused,
                 transient_error,
-                reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-                reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+                reconnect_backoff: transient.reconnect_backoff.clone(),
+                reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
                 client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
@@ -547,15 +575,14 @@ impl Runtime {
 
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if !self.inner.ingestors.contains_key(&key) {
-            let transient_error =
-                if let Some(error) = self.ingestor_transient_error(domain, ingestor) {
-                    Some(error)
-                } else {
-                    self.inner
-                        .domain_instantiation_errors
-                        .get(domain)
-                        .map(|error| error.value().clone())
-                };
+            let transient_error = if let Some(error) = transient.error.clone() {
+                Some(error)
+            } else {
+                self.inner
+                    .domain_instantiation_errors
+                    .get(domain)
+                    .map(|error| error.value().clone())
+            };
             return Ok(IngestorDescribe {
                 running: false,
                 ready: false,
@@ -563,8 +590,8 @@ impl Runtime {
                 quiesce_counters,
                 memory_backpressure_paused,
                 transient_error,
-                reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-                reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+                reconnect_backoff: transient.reconnect_backoff.clone(),
+                reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
                 client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
@@ -576,9 +603,9 @@ impl Runtime {
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 memory_backpressure_paused,
-                transient_error: self.ingestor_transient_error(domain, ingestor),
-                reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-                reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+                transient_error: transient.error.clone(),
+                reconnect_backoff: transient.reconnect_backoff.clone(),
+                reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
                 client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
@@ -615,9 +642,9 @@ impl Runtime {
             quiesce_state,
             quiesce_counters,
             memory_backpressure_paused,
-            transient_error: self.ingestor_transient_error(domain, ingestor),
-            reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-            reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+            transient_error: transient.error.clone(),
+            reconnect_backoff: transient.reconnect_backoff.clone(),
+            reconnect_wait_millis: transient.reconnect_wait_millis,
             kafka_domain_offsets,
             client_producers: self.client_ingestor_gauges(domain, ingestor),
         })
@@ -687,7 +714,8 @@ impl Runtime {
             ));
         };
         lookup.metrics.observe(1, key.len().arch_into(), None);
-        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);
+        self.branch_metrics_mark(domain, ModelKind::Lookup, name)
+            .mark();
         lookup
             .entries
             .get(key)
