@@ -1208,10 +1208,10 @@ impl Runtime {
 mod tests {
     use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
     use nervix_primitives::sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         watch,
     };
-    use triomphe::Arc;
 
     use super::*;
 

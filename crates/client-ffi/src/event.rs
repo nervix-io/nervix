@@ -19,7 +19,7 @@ use nervix_client_core::{
     SubscriptionEvent,
     wire::{CellView, CellsView, RowBatchView},
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,

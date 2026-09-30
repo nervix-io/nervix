@@ -6,13 +6,13 @@
 //! - **Depends on.** The public branch owner and presence of `nervix-branch-instances`.
 //! - **Must not know.** Relays, batches, metrics or how an owner task reaches its branches.
 
-use std::{hint::black_box, num::NonZeroUsize, sync::Arc as StdArc};
+use std::{hint::black_box, num::NonZeroUsize};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_branch_instances::{BranchPresence, OwnedBranches};
 use nervix_models::Timestamp;
-use triomphe::Arc;
+use nervix_primitives::sync::{Arc, StdArc};
 
 /// Branch counts an owner holds while it admits batches.
 const HELD: [usize; 3] = [1, 64, 4_096];

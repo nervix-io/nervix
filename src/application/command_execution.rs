@@ -5,11 +5,7 @@
 //! - **Depends on.** Consensus command records and the authoritative visibility barrier.
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
 
-use std::{
-    collections::BTreeSet,
-    sync::{Arc as StdArc, Weak as StdWeak},
-    time::Duration,
-};
+use std::{collections::BTreeSet, time::Duration};
 
 use ahash::RandomState;
 use blake3::Hasher;
@@ -31,7 +27,7 @@ use nervix_models::{
 use nervix_nspl::client_statement::ClientStatement;
 use nervix_primitives::{
     collections::DashMap,
-    sync::{Mutex as AsyncMutex, OwnedMutexGuard},
+    sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc, StdWeak},
 };
 use thiserror::Error;
 use tracing::warn;

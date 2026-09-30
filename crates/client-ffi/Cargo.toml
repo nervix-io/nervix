@@ -19,7 +19,6 @@ nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true, features = ["derive"] }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

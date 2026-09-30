@@ -5,10 +5,8 @@
 //! - **Depends on.** The production source loops, source contract, quiesce control and Shuttle.
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
 
-use std::sync::Arc as StdArc;
-
 use nervix_connector::{IngestMessageHeaders, IngestMetadataRow};
-use nervix_primitives::sync::{mpsc, oneshot, watch};
+use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
 // changes in the same scheduling step as the dispatch it counts.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};

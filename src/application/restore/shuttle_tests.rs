@@ -15,7 +15,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
-    sync::Arc as StdArc,
 };
 
 use arch_into::ArchInto as _;
@@ -27,7 +26,7 @@ use nervix_models::{
     UserName,
 };
 use nervix_primitives::{
-    sync::{atomic::Ordering, blocking::Mutex},
+    sync::{StdArc, atomic::Ordering, blocking::Mutex},
     thread,
 };
 use shuttle::future::block_on;

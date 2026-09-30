@@ -879,14 +879,12 @@ pub(super) async fn wasm_envelope_from_relay_batch(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::{Array, Int32Array};
     use nervix_models::{ParseAsType, WasmStateGeneration};
+    use nervix_primitives::sync::{Arc, StdArc};
     use nervix_wasm::{WasmAckToken, WasmEnvelope, WasmOutputColumnRef};
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
-    use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};

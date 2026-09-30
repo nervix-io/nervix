@@ -51,7 +51,6 @@ mod tests {
         future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
-        sync::Arc as StdArc,
         time::Duration,
     };
 
@@ -69,7 +68,7 @@ mod tests {
         net::TcpListener,
         stream::wrappers::{ReceiverStream, TcpListenerStream},
         sync::{
-            CancellationToken, Notify,
+            Arc, CancellationToken, Notify, StdArc,
             atomic::{AtomicUsize, Ordering},
             blocking::{LazyLock, Mutex},
             mpsc, oneshot,
@@ -88,7 +87,6 @@ mod tests {
         server::{Grpc, NamedService, StreamingService},
         transport::Server,
     };
-    use triomphe::Arc;
 
     use crate::{
         cluster_teardown::{ClusterTeardown, TeardownNode},

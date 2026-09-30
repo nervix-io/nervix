@@ -18,8 +18,8 @@ use nervix_models::{
     ScheduledNodes, SchemaName, SignalingProtocolName, SignalingProtocolOnConnect,
     SignalingWireFormat, VhostName, WireSchemaLookup, WireSchemaName,
 };
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::runtime_schema::{CompiledSchema, compile_schema};
 

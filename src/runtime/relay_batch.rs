@@ -1,12 +1,10 @@
 pub(in crate::runtime) type RelayDispatchResult = Result<(), Box<RelayRecordBatch>>;
 
-use std::sync::Arc as StdArc;
-
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
-use triomphe::Arc;
+use nervix_primitives::sync::{Arc, StdArc};
 
 use super::{BranchKey, RecordMetadataColumns};
 use crate::{
@@ -758,13 +756,11 @@ pub(super) fn build_stream_record_batch_preserving_acks(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use meticulous::ResultExt as _;
     use nervix_models::{
         CreateSchema, FieldName, ModelName, ParseAsType, SchemaField, SchemaName, Timestamp,
     };
-    use triomphe::Arc;
+    use nervix_primitives::sync::{Arc, StdArc};
 
     use super::{
         RecordMetadataColumns, RelayMessage, RelayRecordBatch, RelayRecordBatchError,

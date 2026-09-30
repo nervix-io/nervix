@@ -13,8 +13,7 @@ use nervix_models::{
     AckWindow, CLIENT_CONSUMER_NODE_BYTES, DomainName, EmitterName, FieldName, ParseAsType,
     RelayName, SchemaField, Timestamp,
 };
-use nervix_primitives::sync::atomic::Ordering;
-use triomphe::Arc;
+use nervix_primitives::sync::{Arc, atomic::Ordering};
 use uuid::Uuid;
 
 use super::{

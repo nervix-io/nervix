@@ -7,7 +7,7 @@
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -24,12 +24,11 @@ use nervix_models::{
 use nervix_primitives::sync::atomic::{AtomicI64, Ordering};
 use nervix_primitives::{
     publication::ArcSwap,
-    sync::{CancellationToken, watch},
+    sync::{Arc, CancellationToken, StdArc, watch},
 };
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
-use triomphe::Arc;
 
 #[cfg(test)]
 use super::VmExecutionContext;

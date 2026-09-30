@@ -10,15 +10,15 @@
 
 // Unmodeled atomics are not Shuttle scheduling points, so each step record below changes in the
 // same scheduling step as the publication it records.
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use nervix_models::Timestamp;
 use nervix_primitives::{
+    sync::{Arc, StdArc},
     thread,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use nonzero_ext::nonzero;
-use triomphe::Arc;
 
 use super::*;
 use crate::{runtime_schema::RuntimeValue, shuttle_test::check_interleavings};

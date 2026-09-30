@@ -40,9 +40,9 @@ use std::{fmt, io, time::Duration};
 
 use error_stack::Report;
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::Arc;
 use nervix_server::application::AppError;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     node_liveness::{

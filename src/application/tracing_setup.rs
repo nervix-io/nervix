@@ -10,7 +10,7 @@
 use std::{fs::OpenOptions, io, path::Path};
 
 use error_stack::{Report, ResultExt};
-use nervix_primitives::sync::blocking::Mutex as ParkingMutex;
+use nervix_primitives::sync::{Arc, blocking::Mutex as ParkingMutex};
 use nervix_recovery::{Discarded, Reported};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
@@ -22,7 +22,6 @@ use tracing_subscriber::{
     EnvFilter, fmt, fmt::writer::BoxMakeWriter, prelude::__tracing_subscriber_SubscriberExt,
     util::SubscriberInitExt,
 };
-use triomphe::Arc;
 
 use super::{AppError, Args};
 

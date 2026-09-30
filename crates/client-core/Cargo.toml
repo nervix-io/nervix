@@ -54,7 +54,6 @@ tokio = { workspace = true, features = [
 ] }
 tonic = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 

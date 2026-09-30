@@ -15,8 +15,8 @@ use nervix_models::{
     ResourceNodeStatus, ResourceReplicaKey, ResourceUpload, ResourceUploadKey, ResourceUploadState,
     ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
 };
+use nervix_primitives::sync::Arc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use triomphe::Arc;
 
 use crate::durable_batch::{DurableBatch, StorageDecode, StorageEncode};
 

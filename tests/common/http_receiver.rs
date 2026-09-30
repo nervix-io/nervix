@@ -53,14 +53,13 @@ use std::{
     num::ParseIntError,
     path::Path,
     str::FromStr,
-    sync::Arc as StdArc,
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
-    sync::{CancellationToken, blocking::Mutex, watch},
+    sync::{Arc, CancellationToken, StdArc, blocking::Mutex, watch},
     task::{AbortOnDropHandle, JoinSet},
     time::Instant,
 };
@@ -75,7 +74,6 @@ use tempfile::TempDir;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_rustls::TlsAcceptor;
-use triomphe::Arc;
 
 /// How long stopping waits for connections to end on their own before it aborts and joins them,
 /// in seconds. Every await a connection makes also waits for the receiver's cancellation, so the

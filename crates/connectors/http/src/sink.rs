@@ -14,7 +14,7 @@
 
 mod response;
 
-use std::{net::SocketAddr, sync::Arc as StdArc, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -25,7 +25,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::net::TcpStream;
+use nervix_primitives::{net::TcpStream, sync::StdArc};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
 use thiserror::Error;

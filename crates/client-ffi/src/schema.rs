@@ -7,7 +7,7 @@
 
 use nervix_client_core::RowSchema;
 use nervix_models::{ParseAsType, SchemaField};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,

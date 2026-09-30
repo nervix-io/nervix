@@ -13,7 +13,6 @@ use std::{
     io,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::Arc as StdArc,
 };
 
 use error_stack::{Report, ResultExt};
@@ -38,7 +37,11 @@ use nervix_models::{
     DomainName, NodeEndpoint, NodeServiceUrl, NodeServiceUrlParseError, ResourceName,
     ResourceUploadIdentity, ResourceUploadKey, UserName,
 };
-use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
+use nervix_primitives::{
+    net::TcpListener,
+    sync::{CancellationToken, StdArc},
+    task::JoinSet,
+};
 use rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{

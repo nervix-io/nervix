@@ -10,7 +10,6 @@
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
 };
 
 use error_stack::{Report, ResultExt};
@@ -20,9 +19,9 @@ use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::NodeEndpoint;
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{Application, Args, error, error::AppError, shutdown::ShutdownCoordinator};
 use crate::{

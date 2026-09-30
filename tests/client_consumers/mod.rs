@@ -9,7 +9,6 @@
 use std::{
     collections::BTreeMap,
     num::{NonZeroU32, NonZeroU64},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -23,6 +22,7 @@ use nervix_client_wire::{
     ReadEmitterBatchRequest, ReadEmitterDisposition, ReplyBody, SettleEmitterBatchRequest,
 };
 use nervix_models::{ClientConsumerLimits, EmitterName};
+use nervix_primitives::sync::StdArc;
 
 use super::{
     client_producers::{expected_fields, scenario_domain},

@@ -27,7 +27,6 @@ rustls-pki-types = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "time"] }
 tokio-rustls = { workspace = true }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 nervix-test-environment = { workspace = true }

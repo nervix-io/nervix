@@ -25,10 +25,12 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Instant, timeout},
 };
-use triomphe::Arc;
 
 use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,

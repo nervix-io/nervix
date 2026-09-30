@@ -178,9 +178,11 @@ async fn reqwest_12_uses_the_same_resolver_without_a_public_fallback() {
             .assured("the test response can be written");
     });
     let client = reqwest_iceberg::Client::builder()
-        .dns_resolver(std::sync::Arc::new(fixture.resolver.clone()))
+        .dns_resolver(nervix_primitives::sync::StdArc::new(
+            fixture.resolver.clone(),
+        ))
         .use_preconfigured_tls(
-            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(nervix_primitives::sync::StdArc::new(
                 rustls::crypto::aws_lc_rs::default_provider(),
             ))
             .with_safe_default_protocol_versions()

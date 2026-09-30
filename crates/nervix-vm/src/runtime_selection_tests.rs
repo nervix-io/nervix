@@ -10,15 +10,13 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How the runtime narrows operands or scatters results.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{
     Array, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
     builder::{Int64Builder, ListBuilder, StringBuilder},
 };
 use arrow_schema::{DataType, Field, Schema};
 use nervix_models::Timestamp;
-use nervix_primitives::sync::blocking::Mutex;
+use nervix_primitives::sync::{StdArc, blocking::Mutex};
 
 use super::{
     ExecutionContext, FunctionInjector, InjectedResult, RowSelection,
@@ -206,7 +204,7 @@ fn compile_with_probe(
         outputs,
         CompileOptions {
             udf_signatures: probe_signatures(),
-            injector: Some(triomphe::Arc::new(injector)),
+            injector: Some(nervix_primitives::sync::Arc::new(injector)),
             ..CompileOptions::default()
         },
     )
@@ -714,7 +712,7 @@ fn an_arm_scatters_list_results_and_yields_nulls_where_no_row_selects_it() {
         vec![Field::new("route", DataType::Utf8, true)],
         CompileOptions {
             allow_header_reads: true,
-            injector: Some(triomphe::Arc::new(injector)),
+            injector: Some(nervix_primitives::sync::Arc::new(injector)),
             ..CompileOptions::default()
         },
     );
@@ -869,7 +867,7 @@ fn a_header_read_repeated_outside_its_arm_is_made_for_every_row() {
         vec![Field::new("route", DataType::Utf8, true)],
         CompileOptions {
             allow_header_reads: true,
-            injector: Some(triomphe::Arc::new(injector)),
+            injector: Some(nervix_primitives::sync::Arc::new(injector)),
             ..CompileOptions::default()
         },
     );

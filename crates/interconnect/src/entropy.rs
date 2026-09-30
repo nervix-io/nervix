@@ -6,8 +6,9 @@
 //! - **Depends on.** Operating-system randomness.
 //! - **Must not know.** What an identifier fences, or how a peer uses it.
 
-use std::{fmt, sync::Arc as StdArc};
+use std::fmt;
 
+use nervix_primitives::sync::StdArc;
 use rand_core::{OsRng, RngCore as _};
 
 /// The source of the unpredictable values a transport allocates: its process epoch, which fences

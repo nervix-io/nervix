@@ -12,19 +12,17 @@
 use std::{
     future::Future,
     num::NonZeroUsize,
-    sync::Arc as StdArc,
     task::{Context, Wake, Waker},
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
-    sync::oneshot,
+    sync::{Arc, StdArc, oneshot},
     time::Instant,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use shuttle::rand::{Rng as _, thread_rng};
-use triomphe::Arc;
 
 use super::{
     RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease, RelayReceiver, RelayTryRecv,

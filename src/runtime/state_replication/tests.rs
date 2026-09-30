@@ -19,6 +19,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc, watch,
     },
@@ -26,7 +27,6 @@ use nervix_primitives::{
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
-use triomphe::Arc;
 
 use super::*;
 use crate::{
@@ -1526,7 +1526,7 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
     assert!(snapshot_read.value.is_some());
     assert_eq!(latest.revision, 2);
     assert!(
-        !std::sync::Arc::ptr_eq(&snapshot_read, &latest),
+        !nervix_primitives::sync::StdArc::ptr_eq(&snapshot_read, &latest),
         "publishing replaced the window a snapshot was reading in place"
     );
 }

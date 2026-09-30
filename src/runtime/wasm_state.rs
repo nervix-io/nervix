@@ -9,7 +9,7 @@
 //! - **Must not know.** How a checkpoint reaches stable storage or a replica, guest execution, or
 //!   which acknowledgements a completed checkpoint releases.
 
-use std::{collections::BTreeSet, num::NonZeroU64, sync::Arc as StdArc};
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -20,7 +20,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     publication::{ArcSwap, ArcSwapOption},
-    sync::Notify,
+    sync::{Notify, StdArc},
 };
 
 use super::{PersistedRuntimeStateEntry, RuntimeStatePlacement, lsm_sequence::LsmSequence};

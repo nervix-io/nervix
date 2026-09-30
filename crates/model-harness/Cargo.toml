@@ -29,4 +29,3 @@ tracing-subscriber = { workspace = true, features = [
   "env-filter",
   "fmt",
 ], optional = true }
-triomphe = { workspace = true }

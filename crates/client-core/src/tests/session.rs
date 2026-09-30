@@ -26,7 +26,7 @@ use nervix_primitives::{
     net::TcpListener,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -41,7 +41,6 @@ use tonic::{
     server::{ClientStreamingService, Grpc, NamedService, StreamingService},
     transport::Server,
 };
-use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]

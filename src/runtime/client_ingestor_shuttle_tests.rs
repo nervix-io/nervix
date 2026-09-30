@@ -11,7 +11,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::Arc as StdArc,
 };
 
 use nervix_models::{
@@ -19,7 +18,7 @@ use nervix_models::{
     ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
     FieldName, IngestQuiesceMode, ParseAsType, SchemaField,
 };
-use nervix_primitives::sync::{mpsc, oneshot};
+use nervix_primitives::sync::{StdArc, mpsc, oneshot};
 // Real atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
 use nervix_primitives::unmodeled::sync::atomic::{

@@ -17,11 +17,11 @@ use nervix_models::{
     ClientConsumerLimits, DomainName, EmitterName, RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicBool, Ordering},
     oneshot,
 };
 use nervix_recovery::Discarded as _;
-use triomphe::Arc;
 use uuid::Uuid;
 
 use crate::{

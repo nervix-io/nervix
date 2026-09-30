@@ -11,12 +11,12 @@ use nervix_models::{
     CodecName, DomainName, FlushPolicy, IngestorInput, MessageErrorPolicy, Model, NodeRef,
     ProcessorOutputs, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaName,
 };
+use nervix_primitives::sync::Arc;
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
     program::{Program, SpannedNode},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::DomainActivationPlan;
 use crate::runtime_schema::CompiledSchema;

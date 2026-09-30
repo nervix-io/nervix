@@ -10,14 +10,15 @@
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
-use std::sync::Arc as StdArc;
-
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint,
     WasmCheckpointStage, WasmStateGeneration,
 };
-use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::{
+    sync::StdArc,
+    unmodeled::sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use super::*;
 use crate::{

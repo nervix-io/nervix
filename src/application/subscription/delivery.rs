@@ -414,7 +414,7 @@ impl SubscriptionSender {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+    use std::{num::NonZeroUsize, time::Duration};
 
     use arrow_array::{RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
@@ -422,7 +422,10 @@ mod tests {
         RowSchema, RowsSkippedCause, ServerEvent, ServerMessage, SubscriptionHandle, VerifiedFrame,
     };
     use nervix_models::{DomainName, RelayName, SchemaField, SubscriptionName};
-    use nervix_primitives::{sync::CancellationToken, time::timeout};
+    use nervix_primitives::{
+        sync::{CancellationToken, StdArc},
+        time::timeout,
+    };
 
     use super::*;
     use crate::{

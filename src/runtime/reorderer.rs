@@ -181,8 +181,7 @@ mod tests {
 
     use arrow_array::BinaryArray;
     use nervix_models::{ParseAsType, Timestamp};
-    use nervix_primitives::time::timeout;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::*;
     use crate::{

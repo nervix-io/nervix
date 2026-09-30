@@ -10,8 +10,7 @@
 use futures_util::FutureExt as _;
 use meticulous::ResultExt as _;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::thread;
-use triomphe::Arc;
+use nervix_primitives::{sync::Arc, thread};
 
 use super::{REMOTE_ACK_SILENT_SWEEPS, RemoteDispatchRegistry};
 use crate::{

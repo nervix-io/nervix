@@ -18,7 +18,6 @@ use std::{
     fmt,
     io::Cursor,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc as StdArc,
 };
 
 use arch_into::ArchInto as _;
@@ -29,6 +28,7 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, ExecutionError, Executor, MemoryClass};
 use nervix_models::ClientBatchDefect;
+use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
 use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};

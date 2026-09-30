@@ -447,7 +447,10 @@ impl<'t> TextCursor<'t> {
             .assured("a read advances only past bytes the text holds");
     }
 
-    fn expect_literal(&mut self, literal: &triomphe::Arc<str>) -> Result<(), UnreadableText> {
+    fn expect_literal(
+        &mut self,
+        literal: &nervix_primitives::sync::Arc<str>,
+    ) -> Result<(), UnreadableText> {
         if !self.rest().starts_with(literal.as_bytes()) {
             return Err(self.mismatch(TextExpectation::Literal(literal.clone())));
         }

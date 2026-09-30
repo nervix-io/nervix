@@ -7,7 +7,7 @@
 //! - **Depends on.** The runtime ingest grouping implementation and its test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use ahash::HashMap;
 use arrow_buffer::BooleanBuffer;
@@ -17,8 +17,10 @@ use nervix_models::{
     CreateWireSchema, ErrorPolicies, JsonType, ModelKind, ParseAsType, ResolvedCodecWireFormat,
     SchemaField, Timestamp, WireSchemaField,
 };
-use nervix_primitives::time::timeout;
-use triomphe::Arc;
+use nervix_primitives::{
+    sync::{Arc, StdArc},
+    time::timeout,
+};
 
 use super::*;
 use crate::{

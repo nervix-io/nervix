@@ -22,7 +22,6 @@ meticulous = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
-triomphe = { workspace = true }
 ubyte = { workspace = true }
 
 [dev-dependencies]

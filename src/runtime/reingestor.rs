@@ -1245,10 +1245,9 @@ mod tests {
         ProcessorOutputs, ReingestorName, RelayName,
     };
     use nervix_primitives::{
-        sync::{Mutex, mpsc, watch},
+        sync::{Arc, Mutex, mpsc, watch},
         time::timeout,
     };
-    use triomphe::Arc;
 
     use super::*;
     use crate::{

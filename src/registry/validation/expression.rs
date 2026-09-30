@@ -7,8 +7,6 @@
 //! - **Depends on.** The Models and the VM's program representation.
 //! - **Must not know.** What any caller concludes from what it finds.
 
-use std::sync::Arc as StdArc;
-
 use ahash::{HashMap, HashSet};
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt};
@@ -16,6 +14,7 @@ use nervix_models::{
     DomainName, EmitSink, Expression, FieldName, LookupName, MaterializedStatePolicy,
     MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef, ProcessorOutputs,
 };
+use nervix_primitives::sync::StdArc;
 use nervix_vm::{
     CompileBinding,
     program::{
@@ -679,7 +678,9 @@ mod tests {
         spanned(Expr::Json {
             document: Box::new(spanned(document)),
             extraction: JsonExtraction {
-                path: triomphe::Arc::new(JsonPath::parse("$.a").assured("the path is valid")),
+                path: nervix_primitives::sync::Arc::new(
+                    JsonPath::parse("$.a").assured("the path is valid"),
+                ),
                 output: JsonOutput::Exists,
             },
         })

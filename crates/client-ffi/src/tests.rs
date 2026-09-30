@@ -20,8 +20,7 @@ use nervix_client_core::{
     },
 };
 use nervix_models::{ParseAsType, SchemaField, Timestamp};
-use nervix_primitives::time::Instant;
-use triomphe::Arc;
+use nervix_primitives::{sync::Arc, time::Instant};
 
 use crate::{
     Cancel, CellState, Disposition, Event, EventKind, FailureKind, FieldType, Outcome, Schema,

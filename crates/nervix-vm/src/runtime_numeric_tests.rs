@@ -8,7 +8,7 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How an operation traverses its Arrow buffers.
 
-use std::{fmt, sync::Arc as StdArc};
+use std::fmt;
 
 use arrow_array::{
     Array, ArrowPrimitiveType, PrimitiveArray,
@@ -19,6 +19,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use nervix_approx_into::ApproxInto as _;
+use nervix_primitives::sync::StdArc;
 
 use super::execute_program_sync;
 use crate::{

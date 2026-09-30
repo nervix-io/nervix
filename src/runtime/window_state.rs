@@ -7,12 +7,13 @@
 //!   state placement.
 //! - **Must not know.** NSPL text, connector protocols, control-plane transactions, or ACK state.
 
-use std::{io::Write as _, sync::Arc as StdArc};
+use std::io::Write as _;
 
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::StdArc;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
@@ -724,7 +725,7 @@ impl ReplicatedWindowProcessorState {
 mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch};
     use nervix_models::ParseAsType;
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{

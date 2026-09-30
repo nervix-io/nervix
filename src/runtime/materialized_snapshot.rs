@@ -15,7 +15,7 @@
 //! into them. A snapshot larger than one section limit becomes more sections, never one larger
 //! section, so a receiver never decodes a whole snapshot as a single value.
 
-use std::{io::Write as _, ops::Range, sync::Arc as StdArc};
+use std::{io::Write as _, ops::Range};
 
 use arch_into::ArchInto as _;
 use arrow_schema::Schema as ArrowSchema;
@@ -23,9 +23,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
+use nervix_primitives::sync::{Arc, StdArc};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{BranchKey, snapshot_staging::StagedSnapshot};
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow};

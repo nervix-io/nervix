@@ -23,6 +23,7 @@ use nervix_models::{
 use nervix_primitives::{
     stream::wrappers::ReceiverStream,
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc, oneshot,
     },
@@ -30,7 +31,6 @@ use nervix_primitives::{
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 use uuid::Uuid;
 
 use crate::runtime::{

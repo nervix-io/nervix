@@ -37,10 +37,9 @@ use nervix_models::{
     ClientProducerLimits, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
     IngestorName, SchemaField,
 };
-use nervix_primitives::sync::{blocking::Mutex as SyncMutex, oneshot, watch};
+use nervix_primitives::sync::{Arc, blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},

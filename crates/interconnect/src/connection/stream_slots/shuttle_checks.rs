@@ -10,11 +10,10 @@
 // step as the lease or drain operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
-    sync::Notify,
+    sync::{Arc, Notify},
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use shuttle::rand::{Rng as _, thread_rng};
-use triomphe::Arc;
 
 use super::{
     BULK_RESOURCE_STREAMS, BULK_SHARED_STREAMS, BULK_SNAPSHOT_STREAMS,

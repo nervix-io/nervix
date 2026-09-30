@@ -1,13 +1,13 @@
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use ordered_float::OrderedFloat;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 
 use super::{
     KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
@@ -346,8 +346,8 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_expiry_map::ExpiryMap;
     use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint, Timestamp};
+    use nervix_primitives::sync::Arc;
     use ordered_float::OrderedFloat;
-    use triomphe::Arc;
 
     use super::{
         DeduplicatorKey, ReorderKeyPart, ReplicatedDeduplicatorState, RuntimeStatePlacement,
@@ -501,7 +501,7 @@ mod tests {
             &ModelName::parse("dedup_orders").assured("the identifier is well formed"),
             &[],
             &[],
-            std::sync::Arc::new(arrow_schema::Schema::empty()),
+            nervix_primitives::sync::StdArc::new(arrow_schema::Schema::empty()),
             None,
         ) else {
             panic!("a deduplicator without DEDUPLICATE ON expressions must not compile");

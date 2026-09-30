@@ -201,9 +201,10 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
 
 #[cfg(feature = "shuttle")]
 mod shuttle_checks {
-    use std::{future::Future, path::PathBuf, sync::Arc as StdArc, task::Poll};
+    use std::{future::Future, path::PathBuf, task::Poll};
 
     use meticulous::ResultExt as _;
+    use nervix_primitives::sync::StdArc;
     // The runner's step statistic spans the model executions it starts, so it is a real atomic.
     use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
     use shuttle::{

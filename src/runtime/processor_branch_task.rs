@@ -1834,12 +1834,12 @@ mod tests {
     };
     use nervix_primitives::{
         sync::{
+            Arc,
             atomic::{AtomicBool, Ordering},
             mpsc, watch,
         },
         time::timeout,
     };
-    use triomphe::Arc;
 
     use super::*;
     use crate::{

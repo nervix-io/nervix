@@ -7,13 +7,14 @@
 //! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
 //!   entries, or registry state.
 
-use std::{num::NonZeroUsize, sync::Arc as StdArc};
+use std::num::NonZeroUsize;
 
 use ahash::HashSet;
 use error_stack::Report;
 use nervix_connector::{
     RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
 };
+use nervix_primitives::sync::StdArc;
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};

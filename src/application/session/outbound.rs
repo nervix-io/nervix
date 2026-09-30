@@ -31,13 +31,12 @@
 use futures_util::{Stream, stream};
 use nervix_client_wire::{EncodedFrame, ServerFrame};
 use nervix_primitives::sync::{
-    CancellationToken,
+    Arc, CancellationToken,
     atomic::{AtomicBool, Ordering},
     blocking::Mutex,
     mpsc,
     mpsc::error::{TryRecvError, TrySendError},
 };
-use triomphe::Arc;
 
 /// How many control frames a session queues for its transport before their producers wait. A
 /// frame is at most the session frame limit, so this bounds the reply and event bytes a session

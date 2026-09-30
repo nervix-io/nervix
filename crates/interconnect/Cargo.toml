@@ -52,7 +52,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 turmoil = { workspace = true, optional = true }
 url = { workspace = true }
 x509-parser = { workspace = true }

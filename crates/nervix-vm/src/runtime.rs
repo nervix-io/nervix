@@ -7,13 +7,7 @@
 //! - **Depends on.** Compiled VM IR, Arrow kernels and vocabulary timestamps.
 //! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
 
-use std::{
-    cell::OnceCell,
-    fmt::{self, Write as _},
-    num::NonZeroUsize,
-    ops::Range,
-    sync::Arc as StdArc,
-};
+use std::{cell::OnceCell, fmt, fmt::Write as _, num::NonZeroUsize, ops::Range};
 
 use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
@@ -56,7 +50,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
-use nervix_primitives::task;
+use nervix_primitives::{sync::StdArc, task};
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
@@ -718,7 +712,7 @@ impl InjectedResult {
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub now: Timestamp,
-    pub injector: Option<triomphe::Arc<Box<dyn FunctionInjector>>>,
+    pub injector: Option<nervix_primitives::sync::Arc<Box<dyn FunctionInjector>>>,
 }
 
 impl ExecutionContext {
@@ -755,7 +749,7 @@ pub async fn execute_predicate_in_context(
 }
 
 pub async fn execute_program_with_selection_in_context(
-    program: &triomphe::Arc<CompiledProgram>,
+    program: &nervix_primitives::sync::Arc<CompiledProgram>,
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> error_stack::Result<ExecutionResult, RuntimeError> {
@@ -1091,7 +1085,7 @@ fn unselected_null(ty: RegisterType) -> Option<TypedArray> {
 #[derive(Clone, Copy)]
 struct Injectors<'a> {
     context: &'a ExecutionContext,
-    program: Option<&'a triomphe::Arc<Box<dyn FunctionInjector>>>,
+    program: Option<&'a nervix_primitives::sync::Arc<Box<dyn FunctionInjector>>>,
 }
 
 impl Instruction {
@@ -1264,7 +1258,7 @@ impl Instruction {
                 let documents = registers.operand::<StringArray>(*input)?;
                 let (answers, shape) =
                     scan_json_documents(documents, rows, row_count, outputs, row_errors);
-                let answers: ArrayRef = std::sync::Arc::new(answers);
+                let answers: ArrayRef = nervix_primitives::sync::StdArc::new(answers);
                 registers.set(*dst, TypedArray::Generic(answers), shape)
             }
             InstructionKind::JsonField { dst, input, index } => {
@@ -1295,7 +1289,7 @@ impl Instruction {
         output_type: &DataType,
         injectors: Injectors<'_>,
     ) -> error_stack::Result<InjectedResult, RuntimeError> {
-        let inject = |injector: &triomphe::Arc<Box<dyn FunctionInjector>>| {
+        let inject = |injector: &nervix_primitives::sync::Arc<Box<dyn FunctionInjector>>| {
             injector.inject_with_context(
                 function,
                 arguments,
@@ -6068,7 +6062,7 @@ mod tests {
         let context = ExecutionContext::new(now);
         let invoke =
             |context: &ExecutionContext,
-             program: Option<&triomphe::Arc<Box<dyn FunctionInjector>>>| {
+             program: Option<&nervix_primitives::sync::Arc<Box<dyn FunctionInjector>>>| {
                 instruction.call_injected_function(
                     &function,
                     &[],
@@ -6084,8 +6078,8 @@ mod tests {
             RuntimeError::MissingFunctionInjector { function } if function == "read_header"
         ));
 
-        let short: triomphe::Arc<Box<dyn FunctionInjector>> =
-            triomphe::Arc::new(Box::new(FixedInjector(InjectedResult::success(
+        let short: nervix_primitives::sync::Arc<Box<dyn FunctionInjector>> =
+            nervix_primitives::sync::Arc::new(Box::new(FixedInjector(InjectedResult::success(
                 TypedArray::Utf8(StringArray::from(vec!["one"])),
             ))));
         let invalid_output = invoke(&context, Some(&short))
@@ -6096,8 +6090,8 @@ mod tests {
                 if function == "read_header"
         ));
 
-        let bad_side_error: triomphe::Arc<Box<dyn FunctionInjector>> =
-            triomphe::Arc::new(Box::new(FixedInjector(InjectedResult {
+        let bad_side_error: nervix_primitives::sync::Arc<Box<dyn FunctionInjector>> =
+            nervix_primitives::sync::Arc::new(Box::new(FixedInjector(InjectedResult {
                 output: TypedArray::Utf8(StringArray::from(vec!["one", "two"])),
                 side_errors: vec![(
                     2,
@@ -6120,10 +6114,10 @@ mod tests {
 
         let context = ExecutionContext {
             now,
-            injector: Some(triomphe::Arc::new(Box::new(MissingInjector))),
+            injector: Some(nervix_primitives::sync::Arc::new(Box::new(MissingInjector))),
         };
-        let program: triomphe::Arc<Box<dyn FunctionInjector>> =
-            triomphe::Arc::new(Box::new(FixedInjector(InjectedResult::success(
+        let program: nervix_primitives::sync::Arc<Box<dyn FunctionInjector>> =
+            nervix_primitives::sync::Arc::new(Box::new(FixedInjector(InjectedResult::success(
                 TypedArray::Utf8(StringArray::from(vec!["one", "two"])),
             ))));
         let answer = invoke(&context, Some(&program))
@@ -8998,7 +8992,9 @@ mod tests {
             &batch,
             &ExecutionContext {
                 now: Timestamp::from_unix_nanos(1),
-                injector: Some(triomphe::Arc::new(Box::new(TestHeaderInjector))),
+                injector: Some(nervix_primitives::sync::Arc::new(Box::new(
+                    TestHeaderInjector,
+                ))),
             },
         )
         .expect("program must execute");
@@ -9048,13 +9044,15 @@ mod tests {
             ],
         )
         .expect("batch must build");
-        let compiled = triomphe::Arc::new(compiled);
+        let compiled = nervix_primitives::sync::Arc::new(compiled);
         let (release_tx, release_rx) = mpsc::channel();
         let context = ExecutionContext {
             now: Timestamp::from_unix_nanos(1),
-            injector: Some(triomphe::Arc::new(Box::new(BlockingPolicyInjector {
-                release: Mutex::new(release_rx),
-            }))),
+            injector: Some(nervix_primitives::sync::Arc::new(Box::new(
+                BlockingPolicyInjector {
+                    release: Mutex::new(release_rx),
+                },
+            ))),
         };
 
         let (result, ()) = tokio::join!(

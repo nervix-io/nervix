@@ -17,13 +17,11 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records. The emitter's own counts are the production owner's
 // state, so they are the selected, modeled atomics.
-use std::sync::Arc as StdArc;
-
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkPublishError;
 use nervix_primitives::{
-    sync::atomic as selected,
+    sync::{StdArc, atomic as selected},
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use nervix_recovery::NoReceiver as _;

@@ -591,7 +591,7 @@ pub(super) fn compile_lookup_hash_map_calls(
 mod tests {
     use ahash::HashMap;
     use nervix_models::{CreateSchema, ModelName, ParseAsType};
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{

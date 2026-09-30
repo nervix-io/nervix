@@ -18,7 +18,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -92,7 +91,7 @@ use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption, Cache},
     stream::StreamExt,
     sync::{
-        CancellationToken, Mutex, Notify,
+        Arc, CancellationToken, Mutex, Notify, StdArc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         broadcast, mpsc, oneshot, watch,
     },
@@ -139,7 +138,6 @@ use sorted_vec::SortedSet;
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 use tracing::{debug, error, info, trace, warn};
-use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
 #[cfg(test)]

@@ -41,7 +41,6 @@ strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

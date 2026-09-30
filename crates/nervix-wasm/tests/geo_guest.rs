@@ -9,13 +9,14 @@
 //! cargo test -p nervix-wasm --test geo_guest_smoke -- --ignored --nocapture
 //! ```
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
 use nervix_models::{Timestamp, WasmProcessorLimits};
+use nervix_primitives::sync::StdArc;
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmExecutionContext,
     WasmGuestOperation, WasmGuestReportExt as _, WasmOutputColumnRef, WasmOutputRow,
@@ -100,7 +101,7 @@ fn init() -> WasmBranchInit {
 }
 
 fn input_arrow(source_ip: &str) -> Vec<u8> {
-    let schema = Arc::new(Schema::new(vec![
+    let schema = StdArc::new(Schema::new(vec![
         Field::new("source", DataType::Utf8, false),
         Field::new("event_id", DataType::Utf8, false),
         Field::new("tenant_id", DataType::Utf8, false),
@@ -120,7 +121,7 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
         ),
         Field::new("seq", DataType::Int64, false),
     ]));
-    let text = |value: &str| Arc::new(StringArray::from(vec![value.to_string()]));
+    let text = |value: &str| StdArc::new(StringArray::from(vec![value.to_string()]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -132,14 +133,14 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
             text("edge-1"),
             text("location"),
             text(source_ip),
-            Arc::new(Float64Array::from(vec![1.0])),
-            Arc::new(Float64Array::from(vec![2.0])),
-            Arc::new(Float64Array::from(vec![90.0])),
+            StdArc::new(Float64Array::from(vec![1.0])),
+            StdArc::new(Float64Array::from(vec![2.0])),
+            StdArc::new(Float64Array::from(vec![90.0])),
             text("1.0.0"),
-            Arc::new(
+            StdArc::new(
                 TimestampNanosecondArray::from(vec![1_000_000_000_i64]).with_timezone("+00:00"),
             ),
-            Arc::new(Int64Array::from(vec![7_i64])),
+            StdArc::new(Int64Array::from(vec![7_i64])),
         ],
     )
     .expect("input batch must build");

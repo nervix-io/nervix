@@ -4,7 +4,6 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
-    sync::Arc as StdArc,
     time::{Duration, SystemTime},
 };
 
@@ -48,7 +47,10 @@ use nervix_interconnect::{
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint};
 use nervix_primitives::{
-    sync::blocking::{LazyLock, OnceLock},
+    sync::{
+        StdArc,
+        blocking::{LazyLock, OnceLock},
+    },
     time::Instant,
 };
 
@@ -59,7 +61,7 @@ pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
 use nervix_primitives::{
     net::{TcpListener as TokioTcpListener, TcpStream},
     stream::StreamExt,
-    sync::{CancellationToken, blocking::Mutex, mpsc, oneshot, watch},
+    sync::{Arc, CancellationToken, blocking::Mutex, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -96,7 +98,6 @@ use tokio_tungstenite::{
     WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
-use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 

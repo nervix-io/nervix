@@ -32,7 +32,6 @@ tokio = { workspace = true, features = [
   "time",
 ] }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
-triomphe = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]

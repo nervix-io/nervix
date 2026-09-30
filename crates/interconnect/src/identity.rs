@@ -7,11 +7,12 @@
 //! - **Depends on.** The shared cluster node name vocabulary and X.509/TLS primitives.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
-use std::{io, net::IpAddr, path::Path, sync::Arc as StdArc};
+use std::{io, net::IpAddr, path::Path};
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::StdArc;
 use percent_encoding::percent_decode_str;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,

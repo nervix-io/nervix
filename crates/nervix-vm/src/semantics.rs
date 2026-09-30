@@ -11,14 +11,12 @@
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
 
-use std::{
-    ops::{BitAnd, BitOr, BitXor, Not},
-    sync::Arc,
-};
+use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use arrow_schema::{DataType, Field, TimeUnit};
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::StdArc;
 
 use crate::{
     CompileError, CompileErrorCode, RegisterType,
@@ -1717,7 +1715,7 @@ fn builtin_output_type(
                         _ => None,
                     };
                 }
-                let field = Arc::new(Field::new("item", element, false));
+                let field = StdArc::new(Field::new("item", element, false));
                 return Ok(match fixed_width {
                     Some(width) => DataType::FixedSizeList(field, width),
                     None => DataType::List(field),
@@ -1810,7 +1808,7 @@ fn builtin_output_type(
                     }));
                 }
             }
-            let field = Arc::new(Field::new("item", element.clone(), false));
+            let field = StdArc::new(Field::new("item", element.clone(), false));
             if let BuiltinLowering::ArrayConstruct = lowering {
                 let width = i32::try_from(arg_types.len()).map_err(|_| {
                     Report::new(CompileError {
@@ -1865,7 +1863,9 @@ fn builtin_output_type(
                 let index = require_supported_register_type(function, index_type, span.clone())?;
                 require_integral_arg(function, index, span.clone())?;
             }
-            Ok(DataType::List(Arc::new(Field::new("item", element, false))))
+            Ok(DataType::List(StdArc::new(Field::new(
+                "item", element, false,
+            ))))
         }
         BuiltinLowering::ListMin | BuiltinLowering::ListMax | BuiltinLowering::Mean => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
@@ -2483,10 +2483,9 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_schema::{DataType, Field};
     use meticulous::ResultExt as _;
+    use nervix_primitives::sync::StdArc;
 
     use super::{
         ArmExecution, BitwiseOperation, BuiltinLowering, DependencyScope, ExpressionSemantics,
@@ -2926,7 +2925,7 @@ mod tests {
 
     #[test]
     fn collection_signatures_report_exact_type_and_width_failures() {
-        let list = |element| DataType::List(Arc::new(Field::new("item", element, false)));
+        let list = |element| DataType::List(StdArc::new(Field::new("item", element, false)));
         let cases = [
             (
                 FunctionName::NullIf,
@@ -2963,14 +2962,14 @@ mod tests {
         }
 
         let huge = DataType::FixedSizeList(
-            Arc::new(Field::new("item", DataType::Int64, false)),
+            StdArc::new(Field::new("item", DataType::Int64, false)),
             i32::MAX,
         );
         let report = builtin_signature(
             &FunctionName::Concat,
             &[
                 huge,
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Int64, false)), 1),
+                DataType::FixedSizeList(StdArc::new(Field::new("item", DataType::Int64, false)), 1),
             ],
             4..9,
         )

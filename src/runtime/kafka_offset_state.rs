@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc};
+use std::{collections::BTreeMap, num::NonZeroU64};
 
 use ahash::{HashMap, RandomState};
 #[cfg(test)]
@@ -14,12 +14,11 @@ use nervix_primitives::{
     collections::DashMap,
     publication::ArcSwap,
     sync::{
-        Notify,
+        Arc, Notify, StdArc,
         atomic::{AtomicI64, AtomicU64, Ordering},
     },
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
@@ -589,8 +588,7 @@ mod tests {
     use ahash::HashMap;
     use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
-    use nervix_primitives::sync::oneshot;
-    use triomphe::Arc;
+    use nervix_primitives::sync::{Arc, oneshot};
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};

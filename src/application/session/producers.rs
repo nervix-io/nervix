@@ -38,10 +38,9 @@ use nervix_models::{
     ClientProducerGrant, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DomainStatus, IngestorInput, MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
-use nervix_primitives::sync::{blocking::Mutex, mpsc};
+use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 use nervix_recovery::Discarded as _;
 use tracing::debug;
-use triomphe::Arc;
 
 use super::{InFlightKind, QueuedReply, SessionShared};
 use crate::{

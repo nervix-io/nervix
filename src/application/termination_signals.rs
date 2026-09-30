@@ -26,7 +26,10 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_primitives::{
     runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 use signal_hook::{
@@ -35,7 +38,6 @@ use signal_hook::{
     low_level,
 };
 use tracing::{info, warn};
-use triomphe::Arc;
 
 use super::{
     error::AppError,

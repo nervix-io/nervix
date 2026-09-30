@@ -1108,8 +1108,8 @@ mod tests {
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, ParseAsType,
         PlacementPolicy, ProcessorInputs, SchemaField, WireSchemaField, WireSchemaName,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::registry::{

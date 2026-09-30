@@ -18,7 +18,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{
-        Notify,
+        Arc, Notify,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, oneshot,
     },
@@ -26,7 +26,6 @@ use nervix_primitives::{
 };
 use nervix_recovery::NoReceiver as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 use uuid::Uuid;
 
 use super::{BranchKey, DomainNodeRef, Runtime};

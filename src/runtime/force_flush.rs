@@ -9,8 +9,7 @@
 //! makes the same generation deliverable again.
 
 use ahash::{HashMap, HashMapExt};
-use nervix_primitives::sync::{blocking::Mutex, watch};
-use triomphe::Arc;
+use nervix_primitives::sync::{Arc, blocking::Mutex, watch};
 
 use super::*;
 

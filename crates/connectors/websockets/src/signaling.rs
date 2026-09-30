@@ -4,7 +4,7 @@ use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
 use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
 use nervix_models::{SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat};
-use nervix_primitives::time;
+use nervix_primitives::{sync::Arc, time};
 use prost::Message as ProstMessage;
 use prost_reflect::{
     DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, MessageDescriptor,
@@ -17,7 +17,6 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Error as WebSocketError, Message},
 };
-use triomphe::Arc;
 
 /// How much of a rejection value is carried into the failure reason.
 const MAX_REJECTION_REASON_BYTES: usize = 512;
@@ -721,14 +720,12 @@ fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use nervix_models::{
         CreateSignalingProtocol, ModelName, ResourceName, SignalingProtobufConfig,
         SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
         SignalingWireFormat,
     };
-    use nervix_primitives::sync::blocking::Mutex;
+    use nervix_primitives::sync::{StdArc, blocking::Mutex};
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
 

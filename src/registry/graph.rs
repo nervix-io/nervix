@@ -23,10 +23,10 @@ use nervix_models::{
     NodeRef, ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode,
     SchemaField, SchemaFingerprint,
 };
+use nervix_primitives::sync::Arc;
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
 };
-use triomphe::Arc;
 
 use crate::registry::{
     domain_state::DomainState,

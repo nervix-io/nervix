@@ -1,14 +1,14 @@
-use std::sync::Arc as StdArc;
-
 use ahash::RandomState;
 use error_stack::Report;
 use nervix_execution::Executor;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     collections::DashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-use triomphe::Arc;
 
 use super::{
     BranchKey, RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,

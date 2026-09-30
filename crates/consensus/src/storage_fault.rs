@@ -37,12 +37,11 @@ mod enabled {
 
     use nervix_primitives::{
         sync::{
-            Notify,
+            Arc, Notify,
             blocking::{Condvar, Mutex, RwLock},
         },
         thread,
     };
-    use triomphe::Arc;
 
     use super::*;
 

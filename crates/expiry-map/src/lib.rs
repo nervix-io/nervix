@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** The map: hash lookup, the intrusive order, and the pointer discipline that keeps the
 //!   two views of an entry consistent.
-//! - **Depends on.** The standard library, `ahash`, `intrusive-collections` and `triomphe`.
+//! - **Depends on.** The standard library, `ahash`, `intrusive-collections`, and shared ownership
+//!   from `nervix-primitives`.
 //! - **Must not know.** What expires, or why. The caller decides the order; the map holds no clock,
 //!   no branch and no Nervix type.
 
@@ -13,7 +14,7 @@ use std::{borrow::Borrow, fmt, hash::Hash, ptr};
 use ahash::HashMap;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 use meticulous::OptionExt as _;
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 struct Entry<K, V> {
     link: LinkedListAtomicLink,
@@ -252,11 +253,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Arc};
+    use std::collections::VecDeque;
 
     use ahash::HashMap;
     use meticulous::ResultExt as _;
-    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
+    use nervix_primitives::sync::{
+        StdArc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::ExpiryMap;
 
@@ -337,7 +341,7 @@ mod tests {
     #[test]
     fn clear_remove_and_drop_release_every_value_once() {
         #[derive(Debug)]
-        struct DropProbe(Arc<AtomicUsize>);
+        struct DropProbe(StdArc<AtomicUsize>);
 
         impl Drop for DropProbe {
             fn drop(&mut self) {
@@ -345,7 +349,7 @@ mod tests {
             }
         }
 
-        let drops = Arc::new(AtomicUsize::new(0));
+        let drops = StdArc::new(AtomicUsize::new(0));
         {
             let mut map = ExpiryMap::default();
             for key in 0..8 {
@@ -441,11 +445,14 @@ mod tests {
         for (key, value) in original.iter_shared() {
             assert!(shared.insert_shared(key.clone(), *value));
         }
-        assert!(!shared.insert_shared(triomphe::Arc::new("first".to_string()), 100));
+        assert!(!shared.insert_shared(nervix_primitives::sync::Arc::new("first".to_string()), 100));
 
         for ((original_key, _), (shared_key, _)) in original.iter_shared().zip(shared.iter_shared())
         {
-            assert!(triomphe::Arc::ptr_eq(original_key, shared_key));
+            assert!(nervix_primitives::sync::Arc::ptr_eq(
+                original_key,
+                shared_key
+            ));
         }
         drop(original);
         assert_eq!(
@@ -468,7 +475,7 @@ mod tests {
 
     #[test]
     fn ahash_lookup_matches_the_shared_key_hash() {
-        let key = super::SharedKey(triomphe::Arc::new(7_i32));
+        let key = super::SharedKey(nervix_primitives::sync::Arc::new(7_i32));
         let hash_builder = ahash::RandomState::default();
         assert_eq!(
             hash_builder.hash_one(&key),

@@ -11,8 +11,8 @@ use std::{collections::BTreeSet, marker::PhantomData, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::Arc;
 use rkyv::{Archive, Deserialize, Serialize};
-use triomphe::Arc;
 
 use super::{
     ErasedRequestHandler, HandlerRegistration, InterconnectRequest, RequestContext, RequestState,

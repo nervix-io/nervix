@@ -5,11 +5,9 @@
 //! - **Depends on.** The production routing publisher, cache and typed processor plan.
 //! - **Must not know.** Schedule application, processor execution or graph Models.
 
-use std::sync::Arc as StdArc;
-
 use ahash::HashMap;
 use nervix_models::{AckMode, ErrorPolicies, ModelKind, ModelName, NodeRef};
-use nervix_primitives::thread;
+use nervix_primitives::{sync::StdArc, thread};
 
 use super::*;
 use crate::{

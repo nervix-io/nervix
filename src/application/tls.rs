@@ -12,7 +12,6 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -26,7 +25,7 @@ use nervix_interconnect::{
 use nervix_models::ClusterNodeName;
 use nervix_models::{ClusterSchedule, DomainName, ResourceId, ResourceName, VhostName};
 use nervix_primitives::{
-    sync::{CancellationToken, Mutex as AsyncMutex, blocking::RwLock},
+    sync::{Arc, CancellationToken, Mutex as AsyncMutex, StdArc, blocking::RwLock},
     time::interval,
 };
 use rustls::{
@@ -39,7 +38,6 @@ use rustls_pki_types::pem::{Error as PemError, PemObject};
 use thiserror::Error;
 use tonic::transport::{Identity as TonicIdentity, ServerTlsConfig};
 use tracing::{info, warn};
-use triomphe::Arc;
 
 use super::AppError;
 use crate::{
@@ -655,13 +653,14 @@ impl HttpsListenerCertificates {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf, sync::Arc as StdArc};
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use nervix_interconnect::HttpsListenerInstallation;
     use nervix_models::{
         ClusterSchedule, CreateVhost, DomainName, DomainSchedule, Model, ResourceId, ScheduledNode,
         SchemaFingerprint, VhostTlsResource,
     };
+    use nervix_primitives::sync::StdArc;
     use rustls_pki_types::pem::Error as PemError;
 
     use super::{

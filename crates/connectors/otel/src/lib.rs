@@ -11,9 +11,7 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-use std::{
-    io::Write, num::NonZeroU64, ops::Range, str::FromStr, sync::Arc as StdArc, time::Duration,
-};
+use std::{io::Write, num::NonZeroU64, ops::Range, str::FromStr, time::Duration};
 
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use arrow_array::{
@@ -36,6 +34,7 @@ use nervix_connector::{
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, FieldPath, Timestamp};
+use nervix_primitives::sync::StdArc;
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::{ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse},

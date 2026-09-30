@@ -9,7 +9,7 @@
 //!   wire contract, and the language layer for splitting and classifying statements.
 //! - **Must not know.** How a frame is routed off an exchange.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc as SharedClientArc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -26,11 +26,10 @@ use nervix_models::{
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
-    sync::Mutex,
+    sync::{Arc, Mutex, StdArc as SharedClientArc},
     time::{Instant, sleep},
 };
 use tonic::transport::Channel;
-use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]

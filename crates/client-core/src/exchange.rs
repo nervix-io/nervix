@@ -27,12 +27,11 @@ use nervix_client_wire::{
 use nervix_models::RelayName;
 use nervix_primitives::{
     stream::{Stream, StreamExt as _, wrappers::ReceiverStream},
-    sync::{Mutex, blocking::Mutex as SyncMutex, mpsc, oneshot, watch},
+    sync::{Arc, Mutex, blocking::Mutex as SyncMutex, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use tonic::{Request, Status, codegen::http::uri::PathAndQuery, transport::Channel};
-use triomphe::Arc;
 
 use crate::{
     connection::GrpcConnector,

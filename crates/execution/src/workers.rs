@@ -1,12 +1,12 @@
 //! One class's bounded pool of workers, and the admission that keeps its queue finite.
 
-use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+use std::{num::NonZeroUsize, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     sync::{
-        OwnedSemaphorePermit, Semaphore, TryAcquireError,
+        OwnedSemaphorePermit, Semaphore, StdArc, TryAcquireError,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
@@ -251,9 +251,10 @@ mod simulation_checks {
     use std::{
         future::{Future as _, poll_fn},
         num::NonZeroUsize,
-        sync::Arc as StdArc,
         task::Poll,
     };
+
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
     use crate::{CpuClass, Executor, MemoryClass};

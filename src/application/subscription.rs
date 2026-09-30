@@ -60,6 +60,7 @@ use nervix_models::{
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicU64, Ordering},
         oneshot,
     },
@@ -68,7 +69,6 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
-use triomphe::Arc;
 
 use self::delivery::SubscriptionDelivery;
 pub(in crate::application) use self::interest::SubscriptionInterests;

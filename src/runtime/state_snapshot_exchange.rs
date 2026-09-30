@@ -206,7 +206,7 @@ impl Runtime {
         &self,
         target_node_id: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
-        schema: &std::sync::Arc<arrow_schema::Schema>,
+        schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
         after_revision: Option<u64>,
     ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedSnapshotExchangeError>
     {

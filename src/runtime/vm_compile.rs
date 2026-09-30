@@ -1874,7 +1874,7 @@ pub(super) fn relay_schema_for_routing(
 mod tests {
     use ahash::{HashMap, HashSet};
     use nervix_models::{CreateSchema, ModelName, ParseAsType, Timestamp};
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, compile_schema, test_runtime_row};

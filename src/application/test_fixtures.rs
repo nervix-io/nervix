@@ -6,7 +6,7 @@
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
 
-use std::{path::PathBuf, sync::Arc as StdArc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use ahash::RandomState;
 use clap::Parser;
@@ -27,7 +27,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     collections::DashMap,
-    sync::CancellationToken,
+    sync::{Arc, CancellationToken, StdArc},
     unmodeled::sync::atomic::{AtomicU64, Ordering},
 };
 use nonzero_ext::nonzero;
@@ -35,7 +35,6 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
-use triomphe::Arc;
 
 #[cfg(feature = "shuttle")]
 use super::shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome, ShutdownRequest};

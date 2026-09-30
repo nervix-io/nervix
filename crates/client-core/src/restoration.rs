@@ -29,8 +29,7 @@ use nervix_client_wire::{
     ReplyBody, SubscribeDisposition,
 };
 use nervix_models::DomainName;
-use nervix_primitives::time::sleep;
-use triomphe::Arc;
+use nervix_primitives::{sync::Arc, time::sleep};
 
 use crate::{
     domain_clock::DomainClockAttachments,

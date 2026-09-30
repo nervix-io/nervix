@@ -10,7 +10,6 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     str::FromStr,
-    sync::Arc as StdArc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -65,7 +64,7 @@ use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome, Connect
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_primitives::{
     sync::{
-        CancellationToken,
+        CancellationToken, StdArc,
         blocking::{Mutex as BlockingMutex, OnceLock},
     },
     task::AbortOnDropHandle,

@@ -1,4 +1,4 @@
-use std::{net::IpAddr, sync::Arc as StdArc};
+use std::net::IpAddr;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
@@ -12,6 +12,7 @@ use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
     SMALL_SET_CAPACITY, SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
@@ -20,7 +21,6 @@ use nervix_vm::{
     program::{Program, SpannedNode},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 #[path = "vm/workloads.rs"]
 mod workloads;

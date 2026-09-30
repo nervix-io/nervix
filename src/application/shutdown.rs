@@ -13,11 +13,10 @@ use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
-    sync::{CancellationToken, watch},
+    sync::{Arc, CancellationToken, watch},
     time::Instant,
 };
 use tracing::info;
-use triomphe::Arc;
 
 pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a shutdown may take from its first stop request until the process exits. It covers

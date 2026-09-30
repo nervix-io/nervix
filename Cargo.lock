@@ -6515,7 +6515,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml 0.8.2",
- "triomphe",
  "upon",
  "uuid",
 ]
@@ -6541,7 +6540,6 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -6569,7 +6567,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "triomphe",
  "url",
 ]
 
@@ -6605,7 +6602,6 @@ dependencies = [
  "tokio",
  "tonic 0.13.1",
  "tracing",
- "triomphe",
  "url",
  "uuid",
 ]
@@ -6623,7 +6619,6 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "tonic 0.13.1",
- "triomphe",
 ]
 
 [[package]]
@@ -6661,6 +6656,7 @@ dependencies = [
  "error-stack",
  "itoa",
  "meticulous",
+ "nervix-primitives",
  "nervix-simd-kernels",
  "ryu",
  "serde",
@@ -6689,7 +6685,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "triomphe",
  "upon",
  "url",
  "uuid",
@@ -6799,7 +6794,6 @@ dependencies = [
  "rdkafka",
  "thiserror 2.0.21",
  "tracing",
- "triomphe",
 ]
 
 [[package]]
@@ -6843,7 +6837,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "triomphe",
  "url",
 ]
 
@@ -7021,7 +7014,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
- "triomphe",
 ]
 
 [[package]]
@@ -7110,7 +7102,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.24.0",
- "triomphe",
  "url",
 ]
 
@@ -7153,7 +7144,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "triomphe",
  "ubyte",
 ]
 
@@ -7195,7 +7185,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "triomphe",
  "webpki-roots 1.0.9",
 ]
 
@@ -7210,7 +7199,6 @@ dependencies = [
  "nervix-primitives",
  "shuttle",
  "thiserror 2.0.21",
- "triomphe",
  "ubyte",
 ]
 
@@ -7222,7 +7210,6 @@ dependencies = [
  "intrusive-collections",
  "meticulous",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -7264,7 +7251,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "triomphe",
  "turmoil",
  "ubyte",
  "url",
@@ -7297,7 +7283,6 @@ dependencies = [
  "nervix-primitives",
  "tracing",
  "tracing-subscriber",
- "triomphe",
 ]
 
 [[package]]
@@ -7325,7 +7310,6 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "triomphe",
  "url",
  "uuid",
 ]
@@ -7437,7 +7421,6 @@ dependencies = [
  "regex",
  "roto",
  "thiserror 2.0.21",
- "triomphe",
  "uuid",
 ]
 
@@ -7591,7 +7574,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "triomphe",
  "trybuild",
  "typed-builder 0.20.1",
  "ubyte",
@@ -7680,7 +7662,6 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.21",
  "tokio",
- "triomphe",
  "unicode-normalization",
  "url",
  "uuid",
@@ -7706,7 +7687,6 @@ dependencies = [
  "nonzero_ext",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "triomphe",
  "wasmtime",
 ]
 
