@@ -13,8 +13,9 @@
 
 use error_stack::{AttachmentKind, FrameKind, ResultExt as _};
 use nervix_connector::{
-    SinkAcknowledgementServices, SinkAcknowledgements, SinkEventReporter, SinkGeneralErrorHandler,
-    SinkHost, SinkStagingDirectory, SinkTransientErrorStatus, physical_time::actual_utc_now,
+    SinkAcknowledgementServices, SinkAcknowledgements, SinkBoundedExecution, SinkEventReporter,
+    SinkGeneralErrorHandler, SinkHost, SinkStagingDirectory, SinkTransientErrorStatus,
+    physical_time::actual_utc_now,
 };
 
 use super::*;
@@ -153,6 +154,8 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     FinalFlush,
     #[error("failed to encode emitter batch")]
     EncodeBatch,
+    #[error("the node's bounded execution did not take the emitter's encoding")]
+    EncodingRefused,
     #[error("failed to publish emitter batch")]
     PublishBatch,
     #[error("emitter publish is stalled")]
@@ -165,6 +168,7 @@ impl EmitterRuntimeError {
             Self::SinkNotInitialized
             | Self::PublishBatch
             | Self::PublishStalled
+            | Self::EncodingRefused
             | Self::UnansweredSinkRecords { .. } => true,
             Self::FlushPolicyNotInitialized
             | Self::HeaderCountMismatch { .. }
@@ -335,6 +339,12 @@ impl SinkEventReporter for EmitterSinkContext {
 impl SinkStagingDirectory for EmitterSinkContext {
     fn staging_directory(&self) -> PathBuf {
         self.runtime.temp_dir().to_path_buf()
+    }
+}
+
+impl SinkBoundedExecution for EmitterSinkContext {
+    fn executor(&self) -> Executor {
+        self.runtime.executor().clone()
     }
 }
 
@@ -1658,7 +1668,13 @@ impl EmitterBatchContext<'_> {
             None => None,
             Some(ordering_group) => {
                 let evaluated = ordering_group
-                    .evaluate(self.emitter, &batch, execution_now, &materialized_values)
+                    .evaluate(
+                        self.runtime.executor(),
+                        self.emitter,
+                        &batch,
+                        execution_now,
+                        &materialized_values,
+                    )
                     .await;
                 match evaluated {
                     Ok(groups) => Some(groups),
@@ -1700,6 +1716,7 @@ impl EmitterBatchContext<'_> {
             (Some(_), false) | (None, _) => None,
         };
         let planned = plan_emitter_filter_map_batch(
+            self.runtime.executor(),
             self.emitter,
             filter_map,
             batch,
@@ -1780,6 +1797,7 @@ impl EmitterBatchContext<'_> {
     ) -> Option<EmitterPublishBatch> {
         let prepared = requests
             .prepare(
+                self.runtime.executor(),
                 self.emitter,
                 batch,
                 input,
@@ -1856,12 +1874,15 @@ impl EmitterBatchContext<'_> {
             return Some(batch);
         };
         let plan = match plan_filter_map_messages(
+            ProgramRun {
+                executor: self.runtime.executor(),
+                now: execution_now,
+            },
             "emitter",
             self.emitter,
             MessageErrorOperation::SourceWhere,
             program,
             batch,
-            execution_now,
             side_inputs,
         )
         .await

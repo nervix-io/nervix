@@ -723,7 +723,7 @@ mod tests {
         for offset in 0..3i64 {
             let payload = format!(r#"{{"value":{offset}}}"#);
             group
-                .decode_payload(&codec, payload.as_bytes())
+                .decode_payload(&Executor::default(), &codec, payload.as_bytes())
                 .await
                 .expect("each payload must decode into the group's record builder");
             group
@@ -1123,6 +1123,7 @@ mod tests {
         ]);
         let grouped_keys = vec![None, None];
         let grouped_outcomes = evaluate_filter_map_on_batch(
+            &Executor::default(),
             ModelKind::Ingestor.as_str(),
             &named::<ModelName>("header_ingestor"),
             &program,

@@ -236,6 +236,10 @@ pub(super) async fn evaluate_processor_output_events(
     };
 
     let executed = execute_filter_map_program_on_batch(
+        ProgramRun {
+            executor: context.branch.runtime.executor(),
+            now: scope.execution_now,
+        },
         context.node_kind.as_str(),
         context.processor,
         program,
@@ -246,7 +250,6 @@ pub(super) async fn evaluate_processor_output_events(
             side_inputs: &scope.side_inputs,
             ingest_metadata: None,
         },
-        scope.execution_now,
         batch.acks.clone(),
         Some(&mut scope.shared),
     )

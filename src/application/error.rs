@@ -92,6 +92,8 @@ pub enum AppError {
     StartCluster,
     #[error("failed to stop cluster membership")]
     ShutdownCluster,
+    #[error("failed to close the node's stores")]
+    CloseStores,
     #[error("memory high watermark requires memory low watermark")]
     MissingMemoryPressureLowWatermark,
     #[error("memory low watermark requires memory high watermark")]

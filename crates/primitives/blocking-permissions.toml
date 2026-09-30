@@ -1,0 +1,70 @@
+# Every file that runs work on the runtime's blocking pool, `nervix_primitives::task::spawn_blocking`,
+# itself rather than through the bounded executor.
+#
+# A node runs its variable-size encoding, decoding, validation, hashing, compilation and synchronous
+# filesystem or database work through `nervix-execution`, which admits it into a CPU or storage
+# class, charges its memory and cancels it between bounded units; the executor's worker pools are
+# the only built-in owner of the pool, for the storage jobs they admit. A permission names a file
+# whose work stays outside the executor, its owner, why that owner cannot be admitted, and what
+# bounds the work instead. `just validate-primitive-boundary` rejects any other file that names the
+# pool and a permission for a file that no longer names it.
+
+[[permission]]
+bound = "Two small files, read once for each resolver built; a node builds one when it starts."
+owner = "The resolver's configuration load in nervix-dns."
+path = "crates/dns/src/lib.rs"
+reason = "A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one."
+
+[[permission]]
+bound = "The flush returns by the physical deadline the host hands the sink's finish."
+owner = "The Kafka sink's final producer-queue drain."
+path = "crates/connectors/kafka/src/lib.rs"
+reason = "librdkafka's flush parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole drain."
+
+[[permission]]
+bound = "Each metadata request carries a five-second timeout, and a partition watch makes one request per watch interval."
+owner = "The Kafka source's partition inspection."
+path = "crates/connectors/kafka/src/source.rs"
+reason = "librdkafka's metadata fetch parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole request."
+
+[[permission]]
+bound = "One rename of the archive the client already wrote and synchronized."
+owner = "The Rust client's backup download."
+path = "crates/client-core/src/backup.rs"
+reason = "The client is not a node and has no executor; it moves the finished archive into place on its own process's blocking pool."
+
+[[permission]]
+bound = "One sequential read of the archive the operator named, in fixed-size chunks."
+owner = "The Rust client's restore upload."
+path = "crates/client-core/src/restore.rs"
+reason = "The client is not a node and has no executor; it measures and digests the archive on its own process's blocking pool before it uploads it."
+
+[[permission]]
+bound = "One thread for the life of the command, printing the lines a bounded channel delivers."
+owner = "The CLI's event printer."
+path = "crates/nervix-cli/src/main.rs"
+reason = "The CLI is not a node and has no executor; its printer blocks on the terminal so a slow terminal never stalls the session tasks that collect events."
+
+[[permission]]
+bound = "Each metadata request carries its own timeout, within the driver's overall deadline."
+owner = "The benchmark driver's Kafka topic preparation."
+path = "crates/benchmark/src/kafka.rs"
+reason = "The driver is a harness, not a node; librdkafka's metadata fetch parks its calling thread until the broker answers."
+
+[[permission]]
+bound = "One database open per check, and one committed-offset request with a one-second timeout per poll of a bounded wait."
+owner = "The scenario harness's cluster fixture."
+path = "tests/common/cluster.rs"
+reason = "The harness is not a node; it checks that a stopped node released its databases and reads Kafka's committed offsets, both blocking calls outside any node's executor."
+
+[[permission]]
+bound = "One probe run, which ends when the probe's session with the cluster ends."
+owner = "The scenario harness's in-process C binding probe."
+path = "tests/common/client_conformance.rs"
+reason = "The harness is not a node; the probe drives the C binding, whose calls block their thread by contract."
+
+[[permission]]
+bound = "One join of a polling thread that leaves the group within one poll interval of being asked."
+owner = "The scenario harness's external Kafka group member."
+path = "tests/common/kafka_group_member.rs"
+reason = "The harness is not a node; joining the member's polling thread blocks until its consumer has closed."

@@ -19,8 +19,10 @@ per-acquisition scopes in `tools/nervix-lint/scopes.json`. Its same-source calib
 `881c9097` inventories 1,117 authored sites across the declared native configuration matrix, with
 132 debt sites. `tools/nervix-lint/calibration.json` records the comparison and owning deliveries;
 [Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review) states the gate's
-current contract. After the checkpoint replication repair, native client reconnect and endpoint-route publication, the complete matrix inventories 1,114
-authored sites and 125 debt sites. Typed Ratchet 14 owns recurring branch catch-up lookups and
+current contract. After the checkpoint replication repair, native client reconnect, endpoint-route
+publication and bounded-executor admission update, the complete matrix inventories 1,115 authored
+sites and 125 debt sites. The extra executor-saturation lookup is testing fault control.
+Typed Ratchet 14 owns recurring branch catch-up lookups and
 Typed Ratchet 15 owns the remaining state-replication frame and announcer reads. Their scopes
 include helpers reached by both lifecycle and recurring callers and the primary's synchronization
 request handler, whose borrowed registry reads remain recurring debt.
@@ -267,7 +269,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | session service maps, command execution locks, retained backups and restore archives | per command, control plane; 250 ms sweeps | retain: lifecycle registry |
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
 | client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
-| `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
+| `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit occupancy, saturation and release controls | test-only |
+| Other `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
 
 ### Rust client attachment recovery
 

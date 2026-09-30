@@ -672,8 +672,10 @@ belong to other layers, testing capabilities or modeled primitive implementation
 or higher ceiling was needed to activate this gate. Each remaining debt site names its owning epic
 delivery. The calibration is evidence at its recorded source revision, not the live baseline.
 
-After the checkpoint replication repair, native client reconnect and endpoint-route publication, the complete matrix inventories 1,114 authored sites
-and 125 debt sites. Placement-local progress and announcement transitions have an explicit
+After the checkpoint replication repair, native client reconnect, endpoint-route publication and
+bounded-executor admission update, the complete matrix inventories 1,115 authored sites and 125
+debt sites. The added executor-saturation lookup belongs to explicit testing fault control.
+Placement-local progress and announcement transitions have an explicit
 bounded-protocol scope. Borrowed state-registry reads on replication frames remain debt, as do
 per-branch catch-up lookups: Typed Ratchet 14 owns the polling repair and Typed Ratchet 15 owns
 retained frame routing. A helper reached by both installation and recurring callers carries its
@@ -749,6 +751,7 @@ target cannot provide is a compile error rather than another implementation.
 | Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
 | `block_in_place` | `task` | Tokio's | Unavailable | Real: Tokio's, outside every model |
 | Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
+| Running a job on the blocking pool itself: the executor's storage jobs, and the declared owners outside the executor | `task::spawn_blocking` | Tokio's blocking pool | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | Tokio's, following the clock of the runtime that polls them: the operating system's, a test's paused clock, or the simulated host's under Turmoil | Shuttle's: a sleep or an interval's tick is one scheduling point that takes no time, and a timeout expires only when a check triggers it; `Instant::now` reads the operating system's clock | Real: Tokio's, outside every model |
 | Controls of a paused clock: `pause`, `advance` and `resume` | `time`, with the `test-util` capability | Tokio's | Shuttle's, which take no time | Real: Tokio's, outside every model |
 | Sockets: TCP listeners and streams with their owned halves, UDP and local sockets | `net` | Tokio's over the operating system's network; under Turmoil, Turmoil's simulated sockets and `lookup_host`, which answers from the simulated DNS table, and no local socket or socket configured before it connects | Real: Tokio's, outside every model. A Shuttle execution has no Tokio reactor, so a socket created inside a check panics and fails it | Real: Tokio's, outside every model |
@@ -794,7 +797,12 @@ through the operating system. `time` grants no clock permission: actual UTC and 
 keep the owners `scripts/check_clock_boundaries.py` declares, and a logical deadline stays in the
 domain clock's coordinate, as [Domain Clock](./domain-clock.md) describes. `task::spawn_cpu` belongs
 to the bounded executor, which admits, charges and cancels every job; the boundary check rejects it
-in any file but the executor's worker pools, so it is no way around admission. `pause`, `advance`
+in any file but the executor's worker pools, so it is no way around admission. `task::spawn_blocking`
+is the runtime's blocking pool, which the executor's storage workers run on. Work a node runs off
+its async workers goes through the executor instead, so the check rejects the pool in any other file
+unless a permission in `crates/primitives/blocking-permissions.toml` declares that file's owner, why
+the owner stays outside the executor, and what bounds its work there instead, as
+[Blocking work outside the executor](#blocking-work-outside-the-executor) lists. `pause`, `advance`
 and `resume` exist only with the `test-util` capability, which ordinary tests of elapsed-time
 behavior enable and no production graph has, because a clock that can be paused is checked on every
 read.
@@ -846,10 +854,11 @@ branch. That covers Tokio's `time` and `net` modules, Turmoil's `net`, and the s
 `Instant` and sockets. Each rejection names the approved path; `tokio::net::lookup_host` and the
 `ToSocketAddrs` traits name the node's resolver instead. It also rejects an unmodeled use without its
 permission, a permission nothing uses, a dependency on a library whose family the boundary selects
-from any package but the boundary, and `task::spawn_cpu` in any file but the executor's worker
-pools. Turmoil is a runner as well as the network the boundary selects, so beside the boundary, a
-package whose harness drives a simulation may depend on it, only as an optional dependency its own
-`turmoil` feature enables. Tokio's unstable runtime controls belong to the Turmoil build: the check
+from any package but the boundary, `task::spawn_cpu` in any file but the executor's worker
+pools, `task::spawn_blocking` in any file but those pools and the owners a blocking permission
+declares, and a blocking permission for a file that no longer names the pool. Turmoil is a runner
+as well as the network the boundary selects, so beside the boundary, a package whose harness drives
+a simulation may depend on it, only as an optional dependency its own `turmoil` feature enables. Tokio's unstable runtime controls belong to the Turmoil build: the check
 rejects `--cfg tokio_unstable` in any `justfile` recipe but a Turmoil one, and in Cargo
 configuration, a workflow or a build script. It rejects a `static`, including one a
 `thread_local!` declares, whose declared type names a selected atomic, directly or through a
@@ -871,6 +880,31 @@ then keeps the behavior this chapter describes:
 
 Tokio's `pin!` and `join!` pin and poll futures without any synchronization of their own, so they
 stay Tokio's in every mode.
+
+### Blocking work outside the executor
+
+A node runs its variable-size encoding, decoding, validation, hashing, compilation, program
+execution and synchronous filesystem or database work through the bounded executor, which admits
+each job into a CPU or storage class, charges its memory, and gives it the cancellation it checks
+between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call or a JAQ
+transformation, takes the extension class, so a program that never returns holds only that class's
+workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
+listener spends only those, and saturated data, extension or bulk work never delays a login. The
+executor's storage workers are the one built-in owner of the runtime's blocking pool.
+
+Everything else that blocks a thread is a declared owner in
+`crates/primitives/blocking-permissions.toml`, which names the file, the owner, why it stays outside
+the executor, and what bounds its work instead:
+
+| Owner | Why it stays outside the executor | What bounds it |
+| --- | --- | --- |
+| The resolver's configuration load in `nervix-dns` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
+| The Kafka sink's final producer-queue drain and the Kafka source's partition inspection | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, and a five-second metadata timeout per request |
+| The Rust client's backup download and restore upload, and the CLI's event printer | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
+| The benchmark driver and the scenario harness | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
+
+The boundary check rejects the pool in any other file, and a permission for a file that no longer
+names it.
 
 ## Deterministic Concurrency Verification
 
