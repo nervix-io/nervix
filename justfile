@@ -647,10 +647,16 @@ test-scenarios-coverage: tests-deps
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
+# Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
+# Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
+# the current ones in a report.
+coverage-clean-workspace:
+    cargo llvm-cov clean --workspace
+
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
-coverage-report-workspace:
-    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info
+coverage-report-workspace *args:
+    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info {{ args }}
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed

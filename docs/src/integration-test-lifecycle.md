@@ -923,6 +923,11 @@ ends on its own.
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
 current profiles and reuses unchanged instrumented artifacts for another scenario selection.
+When collecting a different source revision, first run `just coverage-clean-workspace` so
+instrumented binaries and line mappings from earlier sources cannot enter the new report.
+After collecting unit and scenario profiles, `just coverage-report-workspace` exports all
+workspace packages; pass `--no-default-ignore-filename-regex` when measuring changed test files
+as well as product files.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
