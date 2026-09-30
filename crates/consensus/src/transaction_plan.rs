@@ -333,6 +333,7 @@ impl TransactionCommitPlanStepKey {
 )]
 struct TransactionCommitPlanRecordHeader {
     preview: TransactionPreviewIdentity,
+    #[rkyv(with = nervix_models::CountAsU64)]
     step_count: usize,
     eligibility: TransactionScheduleEligibility,
 }
@@ -526,6 +527,24 @@ pub(crate) fn test_admission_plan(
     );
     TransactionCommitAdmissionPlan::capture(decision, input, eligibility)
         .assured("the test plan can advance from its captured domain inputs")
+}
+
+#[cfg(test)]
+pub(crate) fn assert_count_archives(count: usize) {
+    use crate::archive_count_tests::assert_round_trip;
+
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let header = TransactionCommitPlanRecordHeader {
+        preview: crate::transaction::test_commit_plan("count-transaction", 1).preview,
+        step_count: count,
+        eligibility: TransactionScheduleEligibility::new(
+            domain,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
+    assert_round_trip(&header);
 }
 
 #[cfg(test)]

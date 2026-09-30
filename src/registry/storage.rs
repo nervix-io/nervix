@@ -1486,7 +1486,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 
 // The header identifies the current persisted Model shape before archive decoding. Its length
 // preserves rkyv's alignment when the archive is restored.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL BIN";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL U64";
 
 #[cfg(test)]
 mod tests {
@@ -1668,6 +1668,53 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn current_model_archive_validates_its_header() {
+        let model = sample_transport_model("transport");
+        let mut encoded = super::serialize_value(&model)
+            .assured("a bounded current Model archives into its current stored shape");
+        assert!(encoded.starts_with(super::MODEL_ARCHIVE_HEADER));
+        assert_eq!(
+            super::deserialize_value(&encoded).assured("a current Model reads its own encoding"),
+            model
+        );
+        encoded[0] ^= 1;
+        let Err(error) = super::deserialize_value(&encoded) else {
+            panic!("a damaged current header must fail before archive decoding");
+        };
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidModelArchive
+        ));
+    }
+
+    #[test]
+    fn bolero_registry_archived_models_round_trip() {
+        use nervix_arbitrary::{Arbitrary, Domain};
+        use nervix_models::RequestedResourceVersion;
+
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(4096)
+            .for_each(|bytes: &[u8]| {
+                let requested = Arbitrary::new(bytes, Domain::Vocabulary).model();
+                let pinned: Result<Model, std::convert::Infallible> = requested
+                    .try_map_resource_versions(|_, version| match version {
+                        RequestedResourceVersion::Latest => Ok(0),
+                        RequestedResourceVersion::Number(number) => Ok(number),
+                    });
+                let model = match pinned {
+                    Ok(model) => model,
+                    Err(never) => match never {},
+                };
+                let encoded = super::serialize_value(&model)
+                    .assured("bounded current Models encode through the registry owner");
+                let decoded = super::deserialize_value(&encoded)
+                    .assured("a current registry archive restores its complete Model");
+                assert_eq!(decoded, model);
+            });
     }
 
     #[test]

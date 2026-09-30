@@ -109,19 +109,6 @@ impl<'bytes> Arbitrary<'bytes> {
         &mut self.entropy
     }
 
-    /// The largest count a `usize` field of a Model or statement holds in this domain.
-    ///
-    /// NSPL spells any 64-bit count. The archived form of a `usize` is 32 bits wide and truncates a
-    /// larger count without an error, so the vocabulary's archived round trips draw counts only
-    /// from the range that form keeps; the truncation is a recorded storage defect, not a domain
-    /// the archive claims.
-    pub(crate) fn largest_archived_count(&self) -> u64 {
-        match self.domain {
-            Domain::Nspl => u64::MAX,
-            Domain::Vocabulary => u64::from(u32::MAX),
-        }
-    }
-
     /// Builds a value whose expressions are written inside a region that ends at `ends`.
     pub(crate) fn within_region<T>(
         &mut self,

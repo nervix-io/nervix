@@ -50,7 +50,11 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v1 | 256 | 4096 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v2 | 256 | 4096 bytes |
+| `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v1 | 256 | 16 bytes |
+| `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
+| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v1 | 256 | 4096 bytes |
+| `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 
@@ -92,6 +96,13 @@ counts reach the largest value their field holds. The language properties also s
 deterministic byte sequences through every Model family, every emitter sink and every statement form
 on every ordinary run, so none is left to the random cases.
 
+Relay capacities in both domains reach `u64::MAX` on native 64-bit targets. Archived native counts
+use the vocabulary's fixed-width [count representation](./typed-states.md#archived-counts).
+Dedicated count properties assert complete current-record equality at zero where permitted,
+`u32::MAX + 1`, `u64::MAX`, and generated values. The public scenario **Relay capacities keep every
+bit through replication and a full cluster restart** checks creation and alteration at both positive
+boundaries in one-node and three-node clusters, including a follower read and full restart.
+
 Rejection targets start from valid canonical text and edit up to three characters, inserting,
 deleting or replacing delimiters, quotes, comment markers, line endings, digits and non-ASCII
 characters. The result is mostly no longer NSPL and sometimes still is, so both the rejection and
@@ -114,13 +125,23 @@ recorded boundary, not a claim:
 - `DROP` has no form for branches, generators, hash maps, signaling protocols, WASM processors or
   window processors, an HTTP emitter has no `BATCH` clause, and a correlator's filter has no
   spelling. Only the vocabulary domain generates those states, for the archive properties.
-- The archived form of a `usize` count, such as a relay's `CAPACITY`, is 32 bits wide and
-  truncates a larger count without an error. The vocabulary domain draws those counts only from the
-  range the archive keeps.
 - A time rate's JSON form is not asserted: `serde_json` reads a float without correct rounding, so
   it may land one unit in the last place away. Its text and archived forms keep every bit.
 
 ## Commands And Enforcement
+
+Server properties embed the real web console assets. The Bolero recipes build them before
+discovery, requiring Trunk and the repository Rust toolchain's `wasm32-unknown-unknown` target.
+Both CI modes install those prerequisites.
+Asset builds stage Trunk's complete output and preserve byte-identical published files, including
+their timestamps, so preparing assets again keeps the native server's compiled artifacts reusable.
+
+On a shared host, a cold server sanitizer build can exceed the runner's build deadline. Run
+`CARGO_BUILD_JOBS=1 just prepare-archive-counts-fuzz` to prepare its binary first, then run the
+registered registry and window campaigns with `just fuzz`. Preparation records its own build log
+and metadata; it does not count as a completed fuzz campaign. The dedicated sanitizer CI job also
+prepares the server binary and builds with one Cargo job to bound compiler memory; its overall
+deadline includes that preparation before the ordinary and sanitizer evidence is collected.
 
 Install the dated sanitizer nightly named in the inventory and the pinned CLI:
 
@@ -140,7 +161,9 @@ just fuzz-reduce nspl-model <saved-input>
 `just validate-bolero` compares the inventory with all workspace packages declaring
 Bolero, scans their property macros, and queries compiled targets through filtered library-test
 discovery. It rejects missing, unregistered, duplicate, ignored and zero-selected targets, plus
-corpus paths different from Bolero's actual work directory. Discovery executes only
+corpus paths different from Bolero's actual work directory. Each source scan stays within its owning
+Cargo package, excluding generated build directories and packages nested beneath the server's root
+manifest. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.

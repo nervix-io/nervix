@@ -74,6 +74,8 @@ use thiserror::Error;
 use tracing::{error, info};
 use triomphe::Arc;
 
+#[cfg(test)]
+mod archive_count_tests;
 mod command_execution;
 mod connectivity_fault;
 mod domain_mutation;
@@ -467,6 +469,7 @@ pub enum ConsensusCommand {
     },
     OpenTransaction {
         transaction: Box<ReplicatedTransaction>,
+        #[rkyv(with = nervix_models::CountAsU64)]
         max_open_transactions: usize,
     },
     QueueTransactionStatement {
@@ -496,7 +499,9 @@ pub enum ConsensusCommand {
     },
     AdvanceTransactionCommit {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected_next_statement: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         next_statement: usize,
         at: nervix_models::Timestamp,
         result: Box<TransactionStepResult>,
@@ -505,6 +510,7 @@ pub enum ConsensusCommand {
     },
     CompleteTransactionApplication {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
         actual: Box<nervix_models::ActualExecutionStepImpact>,
@@ -6075,6 +6081,50 @@ fn read_key<T: durable_batch::StorageDecode>(
         return Ok(None);
     };
     storage_decode(bytes.as_ref()).map(Some)
+}
+
+#[cfg(test)]
+fn assert_count_command_archives(count: usize) {
+    use archive_count_tests::assert_round_trip;
+
+    let id = "count-transaction".to_string();
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let owner = UserName::parse("operator").assured("the literal follows the name rule");
+    let at = nervix_models::Timestamp::from_unix_nanos(1);
+    let activity = TransactionActivity::from_timeout(at, std::time::Duration::from_secs(60));
+    let transaction = ReplicatedTransaction::open(id.clone(), domain, owner, activity);
+    assert_round_trip(&ConsensusCommand::OpenTransaction {
+        transaction: Box::new(transaction),
+        max_open_transactions: count,
+    });
+    let result = TransactionStepResult {
+        impact: transaction::test_commit_plan(&id, 1).steps.remove(0).impact,
+        result: TransactionCommandResult {
+            success: true,
+            message: "applied".to_string(),
+            diagnostics: Vec::new(),
+            already_existed: false,
+            admission: None,
+        },
+    };
+    for (expected_next_statement, next_statement) in [(count, 0), (0, count)] {
+        assert_round_trip(&ConsensusCommand::AdvanceTransactionCommit {
+            id: id.clone(),
+            expected_next_statement,
+            next_statement,
+            at,
+            result: Box::new(result.clone()),
+            effect: None,
+            completion: None,
+        });
+    }
+    assert_round_trip(&ConsensusCommand::CompleteTransactionApplication {
+        id,
+        expected_next_statement: count,
+        at,
+        actual: Box::new(nervix_models::ActualExecutionStepImpact::applying()),
+        outcome: TransactionApplicationOutcome::Applied,
+    });
 }
 
 #[cfg(test)]

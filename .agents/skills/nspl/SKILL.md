@@ -293,6 +293,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
   in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
+  On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
+  creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
   including an outbound WebSocket client, is single-owner and keeps its live assignment across
   ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it

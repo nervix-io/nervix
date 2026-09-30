@@ -13,32 +13,64 @@ help:
 install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
+# Server library properties embed the same real console assets as the product.
+bolero-deps: build-web-console
+
+# Prepare the server sanitizer binary on shared hosts before the bounded count campaigns.
+# This retains the inventory's flags and production assertion; preparation is not a campaign.
+prepare-archive-counts-fuzz: bolero-deps
+    #!/usr/bin/env python3
+    import pathlib
+    import sys
+    import time
+    sys.path.insert(0, str(pathlib.Path.cwd()))
+    from scripts import bolero
+    inventory = bolero.load_inventory()
+    target = bolero.select(inventory, "registry-archived-models")[0]
+    bolero.verify_tool(inventory)
+    path = bolero.run_dir(target)
+    corpus = path / "build-corpus"
+    crashes = path / "build-crashes"
+    corpus.mkdir()
+    crashes.mkdir()
+    args = bolero.bolero_args(inventory, target) + [
+        "--runs", "0", "--corpus-dir", str(corpus),
+        "--crashes-dir", str(crashes), target.test,
+    ]
+    started = time.monotonic()
+    result = "instrumented preparation failed"
+    try:
+        bolero.command(args, log=path / "build.log")
+        result = "instrumented preparation"
+    finally:
+        bolero.metadata(path, target, args, result, time.monotonic() - started)
+
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="":
+test-bolero filter="": bolero-deps
     python3 scripts/bolero.py test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
-fuzz-list:
+fuzz-list: bolero-deps
     python3 scripts/bolero.py list
 
 # Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
-fuzz target duration="30":
+fuzz target duration="30": bolero-deps
     python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
 
 # Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
-fuzz-all duration="30":
+fuzz-all duration="30": bolero-deps
     python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
 
 # Replay the exact saved input through its ordinary property assertion.
-fuzz-replay target failure:
+fuzz-replay target failure: bolero-deps
     python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
-fuzz-reduce target failure:
+fuzz-reduce target failure: bolero-deps
     python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
 
 # Compare the inventory, package declarations, test harness and compiled Bolero targets.
-validate-bolero:
+validate-bolero: bolero-deps
     python3 scripts/bolero.py validate
 
 # Check the dedicated PR and campaign workflow with the pinned Actions linter.
@@ -46,7 +78,7 @@ validate-bolero-workflow:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
-qualify-bolero:
+qualify-bolero: bolero-deps
     python3 scripts/bolero.py qualify
 
 # Exercise the inventory and runner's validation and failure paths.
@@ -55,15 +87,15 @@ test-bolero-runner:
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
-coverage-bolero duration="2":
+coverage-bolero duration="2": bolero-deps
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
-    "${coverage[@]}" run --branch -a scripts/bolero.py test
-    "${coverage[@]}" run --branch -a scripts/bolero.py fuzz-all {{ quote(duration) }}
-    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.build_web_console -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console scripts/bolero.py test
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console scripts/bolero.py fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console scripts/bolero.py qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
@@ -488,6 +520,10 @@ test-wasm *args: wasm-processor-guests
 test-consensus *args:
     cargo test --package nervix-consensus --lib -- {{ args }}
 
+# Run vocabulary unit tests and representation properties.
+test-models *args:
+    cargo test --package nervix-models --all-targets -- {{ args }}
+
 # Run the interconnect unit tests, which live in the nervix-interconnect crate rather than the
 # server lib.
 test-interconnect *args:
@@ -754,6 +790,38 @@ coverage-visual-create-report output="target/visual-create.lcov":
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Measure the count adapter through vocabulary properties, production storage codecs, language
+# archives and window snapshots. These ordinary tests need no external services or containers.
+coverage-archive-counts output="target/archive-counts.lcov": build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --package nervix-models --test representations
+    cargo llvm-cov --no-report --package nervix-consensus --lib
+    cargo llvm-cov --no-report --package nervix-interconnect --lib
+    cargo llvm-cov --no-report --package nervix-nspl --lib -- bolero_
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
+        registry::storage::tests
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
+        runtime::window_state::tests
+    cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-arbitrary --package nervix-consensus \
+        --package nervix-interconnect --package nervix-server
+
+# Retain the current package profiles while collecting both server archive owners.
+coverage-archive-counts-server-append output="target/archive-counts.lcov": download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --features testing --package nervix-server --lib -- \
+        registry::storage::tests
+    cargo llvm-cov --no-clean --features testing --package nervix-server --lib -- \
+        runtime::window_state::tests
+    cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-arbitrary --package nervix-consensus \
+        --package nervix-interconnect --package nervix-server
 
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
@@ -1625,10 +1693,7 @@ client *args: build-deps
     cargo run --package nervix-cli -- {{ args }}
 
 build-web-console:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd crates/web-console
-    env -u NO_COLOR trunk build --release
+    python3 scripts/build_web_console.py
 
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server

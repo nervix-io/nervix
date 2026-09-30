@@ -700,6 +700,14 @@ committed schedule of a running domain removes it. Until the node has applied a 
 an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
 
+Recovery also validates the current representation before decoding its counts. Registry Model
+frames and the dedicated consensus database identify their fixed-width 64-bit count shape;
+unrecognized stored state fails with an instruction to recreate it. Window checkpoints use the
+current runtime-state kind and `NVXWIN64` frame signature. Native decoding of an archived count is
+checked and cannot truncate it to fit the target. See
+[Archived Counts](./typed-states.md#archived-counts) and
+[Storage Layout And Compatibility](./consensus-storage-and-replication.md#storage-layout-and-compatibility).
+
 ### Interrupted Snapshot Installation
 
 Installing a consensus snapshot publishes the manifest and a marker naming the generation whose

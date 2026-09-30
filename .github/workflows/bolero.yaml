@@ -32,11 +32,13 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just,toml-cli,trunk
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -92,7 +94,9 @@ jobs:
   bolero-fuzz:
     name: bolero-fuzz
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 60
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 360 }}
+    env:
+      CARGO_BUILD_JOBS: "1"
     permissions:
       contents: read
       id-token: write
@@ -102,6 +106,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Setup pinned sanitizer nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -111,7 +117,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just,toml-cli,trunk
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -164,6 +170,9 @@ jobs:
 
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
+
+      - name: Prepare the server sanitizer binary
+        run: just prepare-archive-counts-fuzz
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |

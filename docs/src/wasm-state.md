@@ -625,6 +625,10 @@ the reset is still `Publishing`, and `READY` once `Ready` is published; an all-b
 `RESETTING` until then, because a sample of the current branches cannot prove every selected branch
 completed. Nervix exports no WASM-specific metric.
 
+Checkpoint stage totals and omitted-entry counts use the vocabulary's fixed-width 64-bit archive
+adapter, so an interconnect response preserves their complete native magnitude. Decoding refuses a
+count the receiving target cannot represent. See [Archived Counts](./typed-states.md#archived-counts).
+
 ## Guarantees And Limits
 
 Nervix guarantees:

@@ -12,7 +12,67 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts import bolero
+from scripts import bolero, build_web_console
+
+
+class ConsoleAssetTests(unittest.TestCase):
+    def test_identical_assets_preserve_their_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source, destination = root / "staging", root / "dist"
+            source.mkdir()
+            (source / "index.html").write_bytes(b"current console")
+            build_web_console.publish_assets(source, destination)
+            current = (destination / "index.html").stat()
+            source.mkdir(exist_ok=True)
+            (source / "index.html").write_bytes(b"current console")
+            build_web_console.publish_assets(source, destination)
+            published = (destination / "index.html").stat()
+            self.assertEqual(published.st_mtime_ns, current.st_mtime_ns)
+            self.assertEqual(published.st_ino, current.st_ino)
+
+    def test_published_assets_equal_the_complete_build_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source, destination = root / "staging", root / "dist"
+            source.mkdir()
+            destination.mkdir()
+            (destination / "index.html").write_bytes(b"partial console")
+            (destination / "unreferenced.js").write_bytes(b"unused")
+            (source / "index.html").write_bytes(b"current console")
+            (source / "nested").mkdir()
+            (source / "nested/console.css").write_bytes(b"current style")
+            expected = {path.relative_to(source): path.read_bytes()
+                        for path in source.rglob("*") if path.is_file()}
+            build_web_console.publish_assets(source, destination)
+            actual = {path.relative_to(destination): path.read_bytes()
+                      for path in destination.rglob("*") if path.is_file()}
+            self.assertEqual(actual, expected)
+
+    def test_build_publishes_success_and_preserves_assets_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            console = root / "crates/web-console"
+            console.mkdir(parents=True)
+
+            def build(args: list[str], **kwargs: object) -> None:
+                self.assertEqual(args[:4], ["trunk", "build", "--release", "--dist"])
+                self.assertEqual(kwargs["cwd"], console)
+                self.assertNotIn("NO_COLOR", kwargs["env"])
+                self.assertTrue(kwargs["check"])
+                staging = pathlib.Path(args[4])
+                staging.mkdir()
+                (staging / "index.html").write_bytes(b"current console")
+
+            with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.subprocess, "run", side_effect=build):
+                build_web_console.main()
+            with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.subprocess, "run",
+                                      side_effect=subprocess.CalledProcessError(1, "trunk")):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    build_web_console.main()
+            self.assertEqual((console / "dist/index.html").read_bytes(), b"current console")
 
 
 class InventoryTests(unittest.TestCase):
@@ -50,6 +110,10 @@ class InventoryTests(unittest.TestCase):
             "models-identities",
             "models-identity-validation",
             "models-archived-models",
+            "models-archived-counts",
+            "consensus-archived-counts",
+            "registry-archived-models",
+            "runtime-window-archived-counts",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -58,6 +122,8 @@ class InventoryTests(unittest.TestCase):
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
+            "nervix-consensus",
+            "nervix-server",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
@@ -236,6 +302,26 @@ class DiscoveryTests(unittest.TestCase):
                 (manifest.parent / "lib.rs").write_text(content)
                 with self.assertRaisesRegex(bolero.BoleroError, message):
                     bolero.static_targets(manifest)
+
+    def test_source_scan_stays_within_its_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = root / "Cargo.toml"
+            manifest.write_text("[package]\nname = 'root'\n")
+            source = root / "src/lib.rs"
+            source.parent.mkdir()
+            source.write_text("fn bolero_root() { bolero::check!(); }")
+            nested = root / "crates/nested/Cargo.toml"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("[package]\nname = 'nested'\n")
+            nested_source = nested.parent / "src/lib.rs"
+            nested_source.parent.mkdir()
+            nested_source.write_text("fn bolero_nested() { bolero::check!(); }")
+            generated = root / "target/generated.rs"
+            generated.parent.mkdir()
+            generated.write_text("fn bolero_generated() { bolero::check!(); }")
+            self.assertEqual(bolero.static_targets(manifest), {"bolero_root": source})
+            self.assertEqual(bolero.static_targets(nested), {"bolero_nested": nested_source})
 
     def test_compiled_selection_must_match_inventory_and_work_directory(self) -> None:
         def listed(package: str, test_target: str, ignored: bool) -> list[str]:

@@ -39,6 +39,7 @@ pub struct TransactionStatement {
 )]
 pub struct TransactionStatementRequest {
     pub request_reference: CommandExecutionReference,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub expected_position: usize,
     pub source: String,
     pub statement: Statement,
@@ -100,6 +101,7 @@ impl std::ops::Deref for TransactionStatement {
     RkyvDeserialize,
 )]
 pub struct TransactionQueueLimits {
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub max_statements: usize,
     pub max_source_bytes: u64,
 }
@@ -239,6 +241,7 @@ pub struct TransactionCommitProgress {
     /// The latest actual-UTC observation associated with administrative commit progress.
     pub last_activity_at: Timestamp,
     /// The first statement whose application has not completed yet.
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub next_statement: usize,
     /// Results whose authoritative effects and application obligations both completed.
     pub results: Vec<TransactionStepResult>,
@@ -253,6 +256,7 @@ pub struct TransactionCommitProgress {
 )]
 pub struct TransactionApplyingStep {
     pub effect_revision: u64,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub next_statement: usize,
     pub result: TransactionStepResult,
     pub effect: Option<TransactionStepEffect>,
@@ -275,11 +279,13 @@ pub struct TransactionApplyingStep {
 pub enum TransactionOutcome {
     Committed,
     Failed {
+        #[rkyv(with = nervix_models::CountAsU64)]
         failing_step: usize,
         error: String,
     },
     #[strum(serialize = "FAILED")]
     PlanningInputsChanged {
+        #[rkyv(with = nervix_models::CountAsU64)]
         failing_step: usize,
         error: String,
     },
@@ -407,6 +413,7 @@ pub struct ReplicatedTransaction {
     pub owner: UserName,
     pub created_at: Timestamp,
     pub state: TransactionState,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub statement_count: usize,
     pub queued_source_bytes: u64,
     pub statements: Vec<TransactionStatement>,
@@ -1190,9 +1197,16 @@ pub enum TransactionMutationError {
     #[error("transaction '{id}' finished with outcome {outcome}")]
     Finished { id: String, outcome: String },
     #[error("concurrent open transaction limit {limit} reached")]
-    OpenLimit { limit: usize },
+    OpenLimit {
+        #[rkyv(with = nervix_models::CountAsU64)]
+        limit: usize,
+    },
     #[error("transaction '{id}' queued statement limit {limit} reached")]
-    StatementLimit { id: String, limit: usize },
+    StatementLimit {
+        id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
+        limit: usize,
+    },
     #[error("transaction '{id}' queued source byte limit {limit} exceeded")]
     SourceByteLimit { id: String, limit: u64 },
     #[error(
@@ -1206,7 +1220,9 @@ pub enum TransactionMutationError {
     #[error("transaction '{id}' queue position changed: expected {expected}, found {actual}")]
     PositionConflict {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         actual: usize,
     },
     #[error("transaction '{id}' report identity does not match its accepted queue state")]
@@ -1229,7 +1245,9 @@ pub enum TransactionMutationError {
     )]
     ProgressConflict {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         actual: usize,
     },
     #[error(
@@ -1237,15 +1255,25 @@ pub enum TransactionMutationError {
     )]
     InvalidProgress {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         next: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         statement_count: usize,
     },
     #[error("transaction '{id}' commit step result does not match its progress range")]
     InvalidStepResult { id: String },
     #[error("transaction '{id}' is already applying the step beginning at statement {statement}")]
-    ApplicationInProgress { id: String, statement: usize },
+    ApplicationInProgress {
+        id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
+        statement: usize,
+    },
     #[error("transaction '{id}' has no applying step beginning at statement {statement}")]
-    NoApplicationInProgress { id: String, statement: usize },
+    NoApplicationInProgress {
+        id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
+        statement: usize,
+    },
     #[error("transaction '{id}' commit step effect does not match its queued statement(s)")]
     EffectMismatch { id: String },
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]
@@ -1258,6 +1286,118 @@ pub enum TransactionMutationError {
     },
     #[error("transaction '{id}' lost its mutation lease for domain '{domain}'")]
     DomainMutationFenceLost { id: String, domain: DomainName },
+}
+
+#[cfg(test)]
+pub(crate) fn assert_count_archives(count: usize) {
+    use crate::archive_count_tests::assert_round_trip;
+
+    let id = "count-transaction".to_string();
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let owner = UserName::parse("operator").assured("the literal follows the name rule");
+    let activity =
+        TransactionActivity::from_timeout(Timestamp::from_unix_nanos(1), Duration::from_secs(60));
+    let request = TransactionStatementRequest {
+        request_reference: CommandExecutionReference::parse("count-request")
+            .assured("the literal follows the reference rule"),
+        expected_position: count,
+        source: "SHOW TRANSACTIONS;".to_string(),
+        statement: Statement::ShowTransactions(nervix_models::ShowTransactions),
+    };
+    assert_round_trip(&request);
+    assert_round_trip(&TransactionQueueLimits {
+        max_statements: count,
+        max_source_bytes: 1024,
+    });
+    let mut transaction = ReplicatedTransaction::open(id.clone(), domain, owner, activity);
+    transaction.statement_count = count;
+    assert_round_trip(&transaction);
+
+    let impact = test_commit_plan(&id, 1).steps.remove(0).impact;
+    let applying = TransactionApplyingStep {
+        effect_revision: 1,
+        next_statement: count,
+        result: TransactionStepResult {
+            impact,
+            result: TransactionCommandResult {
+                success: true,
+                message: "applied".to_string(),
+                diagnostics: Vec::new(),
+                already_existed: false,
+                admission: None,
+            },
+        },
+        effect: None,
+        completion: None,
+    };
+    assert_round_trip(&applying);
+    let progress = TransactionCommitProgress {
+        last_activity_at: Timestamp::from_unix_nanos(2),
+        next_statement: count,
+        results: vec![applying.result.clone()],
+        applying: Some(applying),
+        domain_mutation: None,
+    };
+    assert_round_trip(&progress);
+    for outcome in [
+        TransactionOutcome::Failed {
+            failing_step: count,
+            error: "step failed".to_string(),
+        },
+        TransactionOutcome::PlanningInputsChanged {
+            failing_step: count,
+            error: "inputs changed".to_string(),
+        },
+    ] {
+        assert_round_trip(&outcome);
+    }
+    for error in [
+        TransactionMutationError::OpenLimit { limit: count },
+        TransactionMutationError::StatementLimit {
+            id: id.clone(),
+            limit: count,
+        },
+        TransactionMutationError::PositionConflict {
+            id: id.clone(),
+            expected: count,
+            actual: 0,
+        },
+        TransactionMutationError::PositionConflict {
+            id: id.clone(),
+            expected: 0,
+            actual: count,
+        },
+        TransactionMutationError::ProgressConflict {
+            id: id.clone(),
+            expected: count,
+            actual: 0,
+        },
+        TransactionMutationError::ProgressConflict {
+            id: id.clone(),
+            expected: 0,
+            actual: count,
+        },
+        TransactionMutationError::InvalidProgress {
+            id: id.clone(),
+            next: count,
+            statement_count: 0,
+        },
+        TransactionMutationError::InvalidProgress {
+            id: id.clone(),
+            next: 0,
+            statement_count: count,
+        },
+        TransactionMutationError::ApplicationInProgress {
+            id: id.clone(),
+            statement: count,
+        },
+        TransactionMutationError::NoApplicationInProgress {
+            id,
+            statement: count,
+        },
+    ] {
+        assert_round_trip(&error);
+    }
 }
 
 #[cfg(test)]

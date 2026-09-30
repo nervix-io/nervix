@@ -219,7 +219,15 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
 
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
     found = {}
-    for source in manifest.parent.rglob("*.rs"):
+    sources = []
+    excluded = {"target", ".git", ".venv", ".nervix-deps", "node_modules", "__fuzz__"}
+    for directory, children, files in os.walk(manifest.parent):
+        directory = pathlib.Path(directory)
+        children[:] = [name for name in children
+                       if name not in excluded
+                       and not (directory / name / "Cargo.toml").is_file()]
+        sources.extend(directory / name for name in files if name.endswith(".rs"))
+    for source in sources:
         content = source.read_text()
         for macro in MACRO.finditer(content):
             preceding = list(FUNCTION.finditer(content, 0, macro.start()))

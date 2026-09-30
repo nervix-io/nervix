@@ -1116,6 +1116,12 @@ snapshot codec seals those views as bounded Arrow sections on the bulk executor.
 histogram's delayed removals ride beside them in a typed section, because the retained rows cannot
 reproduce them.
 
+Each delayed removal archives its bucket index as a fixed-width 64-bit count, with checked native
+decoding. The current snapshot frame begins with `NVXWIN64`, and window state uses runtime-state
+kind tag `8`. These identify the current stored and transferred shape before decoding; an
+unrecognized frame fails validation, and stored state outside the current namespace must be
+recreated. The count contract is defined in [Archived Counts](./typed-states.md#archived-counts).
+
 A snapshot from an earlier incarnation of the branch restores an empty window and marks it for
 publication, so a late checkpoint of a previous lifetime cannot restore its panes. Otherwise,
 restoring checks that the snapshot's sequences are consecutive, that its input schema matches, and

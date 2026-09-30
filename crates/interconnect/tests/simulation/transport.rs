@@ -128,6 +128,7 @@ struct BatchRequest {
 
 #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
 struct BatchResponse {
+    #[rkyv(with = nervix_models::CountAsU64)]
     rows: usize,
     peer: ClusterNodeName,
 }

@@ -143,6 +143,10 @@ backpressure boundary, not a per-producer, per-consumer, or per-branch capacity.
 runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
 buffer and the fixed dispatch slots leading to it are occupied.
 
+The capacity is a positive integer, through `18446744073709551615` on native 64-bit targets.
+Creation and `ALTER RELAY ... SET CAPACITY` retain the exact accepted value in storage, replicated
+commands, and `SHOW CREATE` after a node or full-cluster restart.
+
 At most the following batches can be admitted or in dispatch for one relay:
 
 - `CAPACITY` batches in the owner buffer;

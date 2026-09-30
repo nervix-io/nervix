@@ -35,9 +35,10 @@ pub(super) struct WindowEntrySnapshot {
     pub(super) arguments: crate::runtime_schema::RuntimeRow,
 }
 
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) struct LinearHistogramDelayedRemovalSnapshot {
     pub(super) expires_at: Timestamp,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub(super) bucket: usize,
 }
 
@@ -79,7 +80,7 @@ pub(super) enum WindowPublishedSnapshot {
     Sealed(Vec<u8>),
 }
 
-const WINDOW_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXWINSN";
+const WINDOW_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXWIN64";
 const WINDOW_SNAPSHOT_FRAME_BYTES: usize = WINDOW_SNAPSHOT_MAGIC.len() + 4;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -107,7 +108,7 @@ pub(super) enum WindowSnapshotSection {
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub(super) enum WindowSnapshotIssue {
-    #[error("the sealed header is missing or truncated")]
+    #[error("the sealed header is invalid or truncated; recreate the stored window state")]
     Header,
     #[error("the header exceeds its bulk limit")]
     HeaderLimit,
@@ -732,6 +733,34 @@ mod tests {
         runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue},
     };
 
+    #[test]
+    fn bolero_window_archive_counts_round_trip() {
+        use meticulous::ResultExt as _;
+        use nervix_arbitrary::Entropy;
+
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(32)
+            .for_each(|bytes: &[u8]| {
+                let mut entropy = Entropy::new(bytes);
+                let generated = entropy.any_u64();
+                let expires_at = Timestamp::from_unix_nanos(entropy.any_i64());
+                for bucket in [0, u64::from(u32::MAX) + 1, u64::MAX, generated] {
+                    let bucket = usize::try_from(bucket)
+                        .assured("the native test and fuzz targets address 64 bits");
+                    let value = LinearHistogramDelayedRemovalSnapshot { expires_at, bucket };
+                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&value)
+                        .assured("the bounded current typed snapshot section encodes");
+                    let decoded = rkyv::from_bytes::<
+                        LinearHistogramDelayedRemovalSnapshot,
+                        rkyv::rancor::Error,
+                    >(&encoded)
+                    .assured("a current typed snapshot section reads back its own encoding");
+                    assert_eq!(decoded, value);
+                }
+            });
+    }
+
     #[nervix_primitives::test]
     async fn window_snapshot_seals_and_restores_shared_arrow_columns() {
         let plan = window_plan(
@@ -807,11 +836,21 @@ mod tests {
         );
         let mut malformed = payload;
         malformed[0] = b'X';
+        let Err(error) =
+            decode_window_processor_snapshot(&malformed, &executor, &plan, &input_schema, 7).await
+        else {
+            panic!("a damaged current snapshot header must fail before section decoding");
+        };
+        assert!(matches!(
+            error.current_context(),
+            WindowSnapshotError::Invalid {
+                issue: WindowSnapshotIssue::Header
+            }
+        ));
         assert!(
-            decode_window_processor_snapshot(&malformed, &executor, &plan, &input_schema, 7)
-                .await
-                .is_err(),
-            "an invalid snapshot magic must fail to load"
+            error
+                .to_string()
+                .contains("recreate the stored window state")
         );
     }
 
