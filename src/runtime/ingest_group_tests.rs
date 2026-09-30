@@ -28,8 +28,8 @@ use crate::{
     },
     runtime_ack::{AckOutcome, AckRootTracker, AckSet},
     runtime_schema::{
-        RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT, RuntimeRecordBatch,
-        RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
+        CodecContractError, RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT,
+        RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
     },
 };
 
@@ -1378,6 +1378,41 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
     assert_eq!(snapshot.extension_cpu.completed, 1);
     assert_eq!(snapshot.data_cpu.admitted, 0);
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+}
+
+#[test]
+fn an_unfolding_that_panicked_fails_its_payload_and_a_refused_one_judges_nothing() {
+    let codec = unfolding_event_codec(".[]");
+
+    let panicked = PayloadDecodeFailure::from_unfolding_execution(
+        &codec,
+        Report::new(ExecutionError::JobPanicked {
+            class: "extension_cpu",
+        }),
+    );
+    let PayloadDecodeFailure::Codec(panicked) = panicked else {
+        panic!("a panicked unfolding must fail its payload's decode: {panicked:?}");
+    };
+    assert!(
+        matches!(
+            panicked.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::UnfoldingPanicked)
+        ),
+        "{panicked:?}"
+    );
+    assert!(panicked.contains::<ExecutionError>(), "{panicked:?}");
+
+    let refused = PayloadDecodeFailure::from_unfolding_execution(
+        &codec,
+        Report::new(ExecutionError::QueueFull {
+            class: "extension_cpu",
+            pending: 1,
+        }),
+    );
+    assert!(
+        matches!(refused, PayloadDecodeFailure::NotAdmitted(_)),
+        "a refused unfolding must not be judged: {refused:?}"
+    );
 }
 
 #[nervix_primitives::test]

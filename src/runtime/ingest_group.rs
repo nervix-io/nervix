@@ -76,6 +76,18 @@ pub(in crate::runtime) enum PayloadDecodeFailure {
     NotAdmitted(Report<UnfoldingNotAdmitted>),
 }
 
+impl PayloadDecodeFailure {
+    /// What an unfolding job through `codec` that the executor did not complete means for its
+    /// payload. A panic is the unfolding's own defect, which presenting the payload again would
+    /// repeat, so it fails the payload's decode; every other outcome judged nothing.
+    fn from_unfolding_execution(codec: &CompiledCodec, error: Report<ExecutionError>) -> Self {
+        if let ExecutionError::JobPanicked { .. } = error.current_context() {
+            return Self::Codec(codec.unfolding_panicked(error));
+        }
+        Self::NotAdmitted(error.change_context(UnfoldingNotAdmitted))
+    }
+}
+
 /// The node's bounded execution did not take a payload's unfolding now.
 #[derive(Debug, Error)]
 #[error("the node's bounded execution did not unfold the payload")]
@@ -1216,14 +1228,7 @@ pub(super) async fn decode_ingested_payload(
     let unfolded = match unfolded {
         Ok(unfolded) => unfolded?,
         Err(error) => {
-            // A panic is the unfolding's own defect, which presenting the payload again would
-            // repeat, so it fails the payload's decode rather than asking for it again.
-            if let ExecutionError::JobPanicked { .. } = error.current_context() {
-                return Err(PayloadDecodeFailure::Codec(codec.unfolding_panicked(error)));
-            }
-            return Err(PayloadDecodeFailure::NotAdmitted(
-                error.change_context(UnfoldingNotAdmitted),
-            ));
+            return Err(PayloadDecodeFailure::from_unfolding_execution(codec, error));
         }
     };
     unfolded
