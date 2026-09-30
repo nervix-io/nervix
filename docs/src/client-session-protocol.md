@@ -1841,3 +1841,12 @@ are logged at `warn`. Session opening and closing, individual requests, and rows
 no log line carries a payload value. The server exports no metric for sessions, requests,
 rejections, or authentication attempts; a client that needs them measures them itself. Producer
 counts are exported by the node that executes the client ingestor, not per session.
+
+## Retained Subscription And Producer Dependencies
+
+A subscription generation retains its domain lifecycle when delivery starts. Filtered batches read
+the currently installed clock through that capability, including a domain started after the
+subscription opened. Unavailable-clock skipped-row outcomes remain unchanged.
+Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
+public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
+These internal ownership rules change neither session framing nor client recovery behavior.

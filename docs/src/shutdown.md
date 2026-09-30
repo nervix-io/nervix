@@ -851,3 +851,14 @@ not yet completed.
 
 Raising `--drain-timeout` above `--shutdown-timeout` does not extend the drain, because every drain
 step is also bounded by the shutdown deadline. Raise both together.
+
+## Retained Drain Dependencies
+
+Running source, generator and sink tasks retain their acknowledgement trackers and confirmation
+counters. A drain observes those same registrations. Emitter retry state remains publishing work
+even when its buffer is empty. Idle and already-claimed force-flush participants use a retained
+readiness hint; only an available obligation enters the coordinator to claim its generation. A
+released claim becomes available again. Task teardown removes its confirmation/status registration,
+and pooled sink teardown removes its wait registration; cancellation clears a pending borrow's
+wait through its guard. Handoff watches register before reading their retained entity publication,
+and release publishes thaw before waking them.

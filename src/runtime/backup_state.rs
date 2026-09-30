@@ -268,10 +268,16 @@ impl Runtime {
         let mut snapshots = Vec::new();
         for (placement, snapshot) in stored_snapshots {
             let node = NodeRef::new(placement.kind, placement.identifier.clone()).in_domain(domain);
-            let Some(identity) = self.inner.state_identities.get(&node) else {
+            let Some(slot) = self.inner.state_identities.get(&node) else {
                 continue;
             };
-            if identity.names(placement.state, placement.branch.as_ref()) {
+            let Some(assignment) = slot.load_full() else {
+                continue;
+            };
+            if assignment
+                .identity
+                .names(placement.state, placement.branch.as_ref())
+            {
                 snapshots.push((placement, snapshot));
             }
         }
@@ -415,15 +421,18 @@ mod tests {
         let domain = DomainName::parse("orders").assured("domain is valid");
         let entity = ModelName::parse("accumulator").assured("processor is valid");
         let schema = SchemaFingerprint::from_digest([4; 32]);
-        runtime.inner.state_identities.insert(
+        runtime.publish_state_assignment(
             nervix_models::DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::WasmProcessor,
                 entity.clone(),
             ),
-            super::super::ScheduledStateIdentity {
-                schema_fingerprint: schema,
-                wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
+            super::super::ScheduledStateAssignment {
+                identity: super::super::ScheduledStateIdentity {
+                    schema_fingerprint: schema,
+                    wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
+                },
+                checkpoint_owners: None,
             },
         );
         let key = super::super::string_branch_key("tenant", "alpha");
@@ -464,6 +473,13 @@ mod tests {
             captured
                 .iter()
                 .all(|entry| entry.placement.state.kind() != RuntimeStateKind::WasmProcessor)
+        );
+        runtime.clear_state_identities(&domain);
+        assert!(
+            runtime
+                .capture_backup_state(&domain, true)
+                .assured("removed entities do not contribute retained checkpoints")
+                .is_empty()
         );
     }
 }

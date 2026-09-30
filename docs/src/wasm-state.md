@@ -718,3 +718,13 @@ ledger](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualifica
 records the commands, the defects the qualification found and fixed, the validation record, and the
 measured cost of a durable checkpoint: 3 to 18 milliseconds per round for one branch, and 6 to 37
 milliseconds for sixteen concurrent branches that share a synchronization.
+
+## Retained Checkpoint Assignment
+
+A branch's guest-state owner retains its entity assignment publication. Schedule installation
+publishes state identity and checkpoint executors/replicas together before a reset callback can
+checkpoint. Each callback and replica-boundary replan reads that retained slot. Replacement
+lifetimes and removed entities are rejected before guest capture; losing local execution ownership
+also rejects the checkpoint. The captured replica count and checkpoint deadline keep their existing
+meaning. Removal publishes absence before dropping registry interest, so a retained reader cannot
+resurrect an assignment.

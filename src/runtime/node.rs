@@ -32,14 +32,12 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) ingestor_quiescence:
         Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
     pub(in crate::runtime) ingestors_paused_for_memory_pressure: AtomicBool,
-    pub(in crate::runtime) ingestor_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
-    pub(in crate::runtime) ingestor_reconnect_backoffs:
-        DashMap<DomainNodeRef, RuntimeReconnectStatus, RandomState>,
+    pub(in crate::runtime) ingestor_statuses:
+        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<RuntimeReconnectStatus>>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
-    pub(in crate::runtime) emitter_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
-    pub(in crate::runtime) emitter_retry_statuses:
-        DashMap<DomainNodeRef, EmitterRetryStatus, RandomState>,
+    pub(in crate::runtime) emitter_statuses:
+        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
         DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     /// One connector instance per named client on this node, keyed by the client it belongs to and
@@ -49,7 +47,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// The graph nodes that have asked a shared client for a connection and not yet been given
     /// one, keyed by the waiting node rather than the client it waits on.
     pub(in crate::runtime) pool_waits:
-        DashMap<DomainNodeRef, shared_clients::PoolWait, RandomState>,
+        DashMap<DomainNodeRef, Arc<shared_clients::PoolWaitSlot>, RandomState>,
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
@@ -98,14 +96,12 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by the entity gate deadline task so a failed handoff resumes state timers when
     /// its lease expires.
     pub(in crate::runtime) frozen_ownership_handoff_entities:
-        Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
-    /// Also held by branch tasks waiting for a handoff freeze to end.
-    pub(in crate::runtime) ownership_handoff_freeze_changed: Arc<Notify>,
+        Arc<DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>>,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     pub(in crate::runtime) active_domain_alters:
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
-        DashMap<DomainNodeRef, ScheduledStateIdentity, RandomState>,
+        DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
     /// The endpoint task of every client ingestor this node executes, kept while the ingestor
     /// restarts so its producers stay attached.
     pub(in crate::runtime) client_ingestors:

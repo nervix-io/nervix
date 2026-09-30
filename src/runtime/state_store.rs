@@ -2108,7 +2108,7 @@ fn stored_state_generation(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::ReplicatedWasmProcessorState, *};
 
     #[test]
     fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen() {
@@ -2660,7 +2660,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
         let placement = wasm_guest_placement("acme", 1);
-        let guest = super::super::ReplicatedWasmProcessorState::new(placement.clone(), None);
+        let guest = ReplicatedWasmProcessorState::new(placement.clone(), None, Default::default());
         let captured = guest.capture(
             vec![1, 2, 3],
             super::super::WasmCheckpointBoundary::LocalStorage,

@@ -8,14 +8,12 @@
 use arrow_array::{Array, TimestampNanosecondArray};
 use arrow_buffer::BooleanBuffer;
 use error_stack::{Report, ResultExt as _};
-use nervix_models::{
-    DomainName, DomainStatus, FieldName, IngestTimestampSource, IngestorName, Timestamp,
-};
+use nervix_models::{DomainName, FieldName, IngestTimestampSource, IngestorName, Timestamp};
 use thiserror::Error;
 
 use super::{
     RecordMetadataColumns, Runtime, RuntimeRecordBatch,
-    domain_clock::{DomainClockAccessError, DomainIngestionSnapshot},
+    domain_clock::{DomainClockLifecycle, DomainIngestionSnapshot},
 };
 
 #[derive(Debug, Error)]
@@ -141,6 +139,23 @@ impl IngestionTime<'_> {
 }
 
 impl Runtime {
+    #[cfg(test)]
+    pub(super) fn ingestion_time<'a>(
+        &self,
+        domain: &'a DomainName,
+        ingestor: &'a IngestorName,
+    ) -> Result<IngestionTime<'a>, Report<IngestionTimeError>> {
+        let clock =
+            self.domain_clock_lifecycle(domain)
+                .change_context(IngestionTimeError::Clock {
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                })?;
+        clock.ingestion_time(domain, ingestor)
+    }
+}
+
+impl DomainClockLifecycle {
     pub(super) fn ingestion_time<'a>(
         &self,
         domain: &'a DomainName,
@@ -150,20 +165,15 @@ impl Runtime {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
         };
-        let state = self.inner.domains.get(domain).ok_or_else(|| {
-            Report::new(DomainClockAccessError::Missing {
-                domain: domain.clone(),
-            })
-            .change_context(context())
-        })?;
-        if let DomainStatus::Paused = state.status {
-            return Err(Report::new(IngestionTimeError::Paused {
-                domain: domain.clone(),
-                ingestor: ingestor.clone(),
-            }));
-        }
-        let clock = state.clock.bind().change_context(context())?;
-        let snapshot = clock.ingestion_snapshot().change_context(context())?;
+        let snapshot = match self.ingestion_read().change_context(context())? {
+            super::domain_clock::DomainIngestionRead::Paused => {
+                return Err(Report::new(IngestionTimeError::Paused {
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                }));
+            }
+            super::domain_clock::DomainIngestionRead::Available(snapshot) => snapshot,
+        };
         Ok(IngestionTime {
             domain,
             ingestor,
@@ -178,11 +188,13 @@ mod tests {
 
     use arrow_array::TimestampNanosecondArray;
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_models::{DomainClockState, DomainTimeRate};
+    use nervix_models::{DomainClockState, DomainStatus, DomainTimeRate};
 
     use super::*;
     use crate::{
-        runtime::{domain, named, paced_domain_state, unpaced_domain_state},
+        runtime::{
+            DomainClockAccessError, domain, named, paced_domain_state, unpaced_domain_state,
+        },
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
 

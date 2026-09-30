@@ -164,6 +164,7 @@ impl MessageErrorHandlingError {
 }
 
 pub(super) struct MessageErrorContext<'a> {
+    pub(super) routing: Option<&'a DomainRoutingSnapshot>,
     pub(super) domain: &'a DomainName,
     pub(super) node_kind: ModelKind,
     pub(super) node: &'a ModelName,
@@ -177,6 +178,7 @@ pub(super) struct MessageErrorContext<'a> {
 }
 
 pub(super) struct MessageErrorHandling<'a> {
+    pub(super) routing: Option<&'a DomainRoutingSnapshot>,
     pub(super) domain: &'a DomainName,
     pub(super) node_kind: ModelKind,
     pub(super) node: &'a ModelName,
@@ -197,6 +199,7 @@ pub(super) struct MessageErrorFailure {
 }
 
 pub(super) struct MessageErrorSourceContext<'a> {
+    pub(super) routing: Option<&'a DomainRoutingSnapshot>,
     pub(super) domain: &'a DomainName,
     pub(super) node_kind: ModelKind,
     pub(super) node: &'a ModelName,
@@ -491,6 +494,7 @@ impl Runtime {
         failure: MessageErrorFailure,
     ) {
         let MessageErrorSourceContext {
+            routing,
             domain,
             node_kind,
             node,
@@ -502,6 +506,7 @@ impl Runtime {
             operation,
         } = failure;
         self.handle_structured_message_error(MessageErrorHandling {
+            routing,
             domain,
             node_kind,
             node,
@@ -532,6 +537,7 @@ impl Runtime {
         failure: MessageErrorFailure,
     ) {
         let MessageErrorSourceContext {
+            routing,
             domain,
             node_kind,
             node,
@@ -543,6 +549,7 @@ impl Runtime {
             operation,
         } = failure;
         self.handle_structured_message_error(MessageErrorHandling {
+            routing,
             domain,
             node_kind,
             node,
@@ -570,6 +577,7 @@ impl Runtime {
         handling: MessageErrorHandling<'_>,
     ) {
         let MessageErrorHandling {
+            routing,
             domain,
             node_kind,
             node,
@@ -608,6 +616,7 @@ impl Runtime {
             }
             MessageErrorPolicy::Dlq { relay, .. } => {
                 let context = MessageErrorContext {
+                    routing,
                     domain,
                     node_kind,
                     node,
@@ -714,6 +723,7 @@ impl Runtime {
 
     pub(in crate::runtime) async fn handle_planned_message_errors(
         &self,
+        routing: Option<&DomainRoutingSnapshot>,
         domain: &DomainName,
         node_kind: ModelKind,
         node: impl Into<ModelName>,
@@ -723,6 +733,7 @@ impl Runtime {
         let node = node.into();
         for error in errors {
             self.handle_structured_message_error(MessageErrorHandling {
+                routing,
                 domain,
                 node_kind,
                 node: &node,
@@ -741,18 +752,19 @@ impl Runtime {
 
     pub(in crate::runtime) async fn handle_planned_message_errors_with_policy(
         &self,
+        routing: Option<&DomainRoutingSnapshot>,
         domain: &DomainName,
-        node_kind: ModelKind,
-        node: &ModelName,
+        node: NodeRef,
         source_route: Option<&RelayName>,
         policy: &MessageErrorPolicy,
         errors: Vec<PlannedMessageError>,
     ) {
         for error in errors {
             self.handle_structured_message_error(MessageErrorHandling {
+                routing,
                 domain,
-                node_kind,
-                node,
+                node_kind: node.kind,
+                node: &node.identifier,
                 source_route,
                 policy,
                 message: error.message,
@@ -772,6 +784,7 @@ impl Runtime {
         relay: &RelayName,
     ) -> error_stack::Result<(), MessageErrorHandlingError> {
         let MessageErrorContext {
+            routing,
             domain,
             node_kind,
             node,
@@ -789,23 +802,16 @@ impl Runtime {
             source_route: source_route.cloned(),
             error_relay: relay.clone(),
         };
-        let route_plan = {
-            let Some(execution) = self.inner.executions.get(domain) else {
-                return Err(error_stack::Report::new(
-                    MessageErrorHandlingError::DomainNotInstantiated {
-                        domain: domain.clone(),
-                    },
-                ));
-            };
-            execution
-                .message_error_plans
-                .get(&route_key)
-                .ok_or_else(|| {
-                    error_stack::Report::new(MessageErrorHandlingError::PreparedRouteUnavailable {
-                        route: route_key.clone(),
-                    })
-                })?
-        };
+        let routing = routing.ok_or_else(|| {
+            Report::new(MessageErrorHandlingError::DomainNotInstantiated {
+                domain: domain.clone(),
+            })
+        })?;
+        let route_plan = routing.message_error_plans.get(&route_key).ok_or_else(|| {
+            Report::new(MessageErrorHandlingError::PreparedRouteUnavailable {
+                route: route_key.clone(),
+            })
+        })?;
         let dlq_record = Self::execute_message_error_set_program(
             ProgramRun {
                 executor: self.executor(),
@@ -1194,7 +1200,9 @@ mod tests {
             [],
         );
         let materialized_state = HashMap::default();
-        let context = || MessageErrorContext {
+        let routing = DomainRoutingSnapshot::default();
+        let context = |routing| MessageErrorContext {
+            routing,
             domain: &domain,
             node_kind: ModelKind::Junction,
             node: &node,
@@ -1208,7 +1216,7 @@ mod tests {
         };
 
         let failure = runtime
-            .dispatch_message_error_to_dlq(context(), &error_relay)
+            .dispatch_message_error_to_dlq(context(None), &error_relay)
             .await
             .expect_err("a missing domain execution must fail");
         assert!(matches!(
@@ -1216,14 +1224,8 @@ mod tests {
             MessageErrorHandlingError::DomainNotInstantiated { .. }
         ));
 
-        install_test_domain_execution(
-            &runtime,
-            &domain,
-            Vec::new(),
-            DomainRoutingSnapshot::default(),
-        );
         let failure = runtime
-            .dispatch_message_error_to_dlq(context(), &error_relay)
+            .dispatch_message_error_to_dlq(context(Some(&routing)), &error_relay)
             .await
             .expect_err("the route has not been installed");
         assert!(matches!(

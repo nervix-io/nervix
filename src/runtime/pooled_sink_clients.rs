@@ -16,7 +16,7 @@ use nervix_connector_postgres::{PostgresConnection, PostgresConnections};
 use nervix_connector_redis::{RedisCommandPool, RedisPoolHandle, RedisPoolServices, RedisPoolWait};
 
 use super::*;
-use crate::runtime::shared_clients::PoolWaitGuard;
+use crate::runtime::shared_clients::{PoolWaitRegistration, PoolWaitSlot};
 
 /// One sink's interest in this node's shared pool for its client.
 ///
@@ -26,9 +26,7 @@ pub(super) struct PooledSinkClient {
     lease: SharedClientLease,
     /// The client borrowed from, named in this sink's diagnostics and in its pool wait.
     client: ClientName,
-    runtime: Runtime,
-    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
-    waiter: DomainNodeRef,
+    wait: PoolWaitRegistration,
 }
 
 impl PooledSinkClient {
@@ -45,18 +43,15 @@ impl PooledSinkClient {
         Ok(Self {
             lease,
             client: client.name.clone(),
-            runtime: context.runtime.clone(),
-            waiter: DomainNodeRef::node_in(
-                context.domain.clone(),
-                ModelKind::Emitter,
-                context.emitter.clone(),
+            wait: context.runtime.register_pool_wait(
+                DomainNodeRef::node_in(
+                    context.domain.clone(),
+                    ModelKind::Emitter,
+                    context.emitter.clone(),
+                ),
+                client.name.clone(),
             ),
         })
-    }
-
-    /// Marks this sink as waiting for a connection until the returned guard is dropped.
-    fn wait_guard(&self) -> PoolWaitGuard {
-        self.runtime.pool_wait_guard(&self.waiter, &self.client)
     }
 
     fn not_initialized(sink: &'static str) -> SinkPublishError {
@@ -76,10 +71,7 @@ impl MySqlConnections for PooledSinkClient {
             .client()
             .mysql(&self.client)
             .map_err(|error| error.change_context(Self::not_initialized("mysql")))?;
-        let waiting = self.wait_guard();
-        let connection = pool.connection().await;
-        drop(waiting);
-        connection
+        PoolWaitSlot::borrow(&self.wait.slot, pool.connection()).await
     }
 }
 
@@ -95,10 +87,7 @@ impl PostgresConnections for PooledSinkClient {
             .client()
             .postgres(&self.client)
             .map_err(|error| error.change_context(Self::not_initialized("postgres")))?;
-        let waiting = self.wait_guard();
-        let connection = pool.connection().await;
-        drop(waiting);
-        connection
+        PoolWaitSlot::borrow(&self.wait.slot, pool.connection()).await
     }
 }
 
@@ -136,12 +125,13 @@ impl EmitterSinkContext {
         Ok(RedisPoolHandle::new(LeasedRedisPool {
             _lease: lease,
             pool,
-            runtime: self.runtime.clone(),
-            client: plan.client.name.clone(),
-            waiter: DomainNodeRef::node_in(
-                self.domain.clone(),
-                ModelKind::Emitter,
-                self.emitter.clone(),
+            wait: self.runtime.register_pool_wait(
+                DomainNodeRef::node_in(
+                    self.domain.clone(),
+                    ModelKind::Emitter,
+                    self.emitter.clone(),
+                ),
+                plan.client.name.clone(),
             ),
         }))
     }
@@ -154,11 +144,7 @@ struct LeasedRedisPool {
     /// the shared client, which closes the pool once its last local user leaves.
     _lease: SharedClientLease,
     pool: RedisCommandPool,
-    runtime: Runtime,
-    /// The client borrowed from, named in this emitter's pool wait.
-    client: ClientName,
-    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
-    waiter: DomainNodeRef,
+    wait: PoolWaitRegistration,
 }
 
 impl RedisPoolServices for LeasedRedisPool {
@@ -167,6 +153,6 @@ impl RedisPoolServices for LeasedRedisPool {
     }
 
     fn begin_pool_wait(&self) -> RedisPoolWait {
-        RedisPoolWait::new(self.runtime.pool_wait_guard(&self.waiter, &self.client))
+        RedisPoolWait::new(PoolWaitSlot::begin(&self.wait.slot))
     }
 }

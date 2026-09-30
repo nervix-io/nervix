@@ -314,8 +314,11 @@ impl Runtime {
                 LocalDomainDrainStatus::tally(&mut status.publishing_emitters, 1);
             }
         }
-        for retry in self.inner.emitter_retry_statuses.iter() {
-            if &retry.key().domain == domain {
+        for status_entry in self.inner.emitter_statuses.iter() {
+            if &status_entry.key().domain == domain
+                && let Some(failure) = status_entry.value().snapshot()
+                && failure.retry.is_some()
+            {
                 LocalDomainDrainStatus::tally(&mut status.publishing_emitters, 1);
             }
         }

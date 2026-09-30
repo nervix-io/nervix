@@ -156,10 +156,9 @@ use crate::{
     emitter_execution_plan::{EmitterExecutionPlan, EmitterOrderingGroupPlan, EmitterRoutePlan},
     emitter_start_plan::*,
     metrics::{
-        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries,
-        IngestorQuiesceMetricLabels, MessageMetricsHandle, NodeBatchMetricsSpec,
-        NodeInputMetricsHandle, RelayMetricRecorders, RelayMetricsHandle, RuntimeMetrics,
-        RuntimeMetricsSnapshot,
+        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, IngestorQuiesceMetrics,
+        MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
+        RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{
         BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
@@ -240,6 +239,7 @@ mod inferencer;
 mod inferencer_output;
 mod ingest_group;
 mod ingest_metadata;
+mod ingest_task_handles;
 mod ingestion_time;
 mod ingestor_quiesce;
 mod ingestor_start;
@@ -284,9 +284,14 @@ mod resources;
 mod runtime_lifecycle;
 mod schedule_apply;
 mod snapshot_staging;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod task_handle_benchmark;
+mod task_status;
 
 mod scheduled_node;
 mod shared_clients;
+mod state_assignment;
 mod state_replication;
 mod state_snapshot_exchange;
 mod state_snapshot_transfer;
@@ -341,9 +346,8 @@ use deduplicator::{
     ReplicatedDeduplicatorState, compile_deduplicator_key_program,
 };
 use domain_clock::{
-    DomainCadenceOccurrence, DomainCadenceStart, DomainClock, DomainClockAccessResult,
-    DomainClockLifecycle, LogicalDeadline, checked_add_duration_to_timestamp,
-    wait_for_branch_deadline,
+    DomainCadenceOccurrence, DomainCadenceStart, DomainClockAccessResult, LogicalDeadline,
+    checked_add_duration_to_timestamp, wait_for_branch_deadline,
 };
 #[cfg(test)]
 use domain_execution::DomainRouting;
@@ -393,7 +397,7 @@ pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVA
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
     NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
-    OwnershipHandoffFreezeWatch,
+    OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch,
 };
 pub(crate) use entrypoint_routes::EntrypointBindingError;
 use entrypoint_routes::{
@@ -655,7 +659,10 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
-pub(crate) use domain_clock::{DomainClockObserver, DomainExecutionSnapshot};
+pub(crate) use domain_clock::{
+    DomainClock, DomainClockAccessError, DomainClockLifecycle, DomainClockObserver,
+    DomainExecutionSnapshot,
+};
 pub(crate) use domain_execution::LookupRuntime;
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.
@@ -699,17 +706,20 @@ pub(crate) use entity_gate::{
 pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
+use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
+use observability::BranchMetricsMark;
 pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};
 pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
 pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
 pub(crate) use relay_subscription::RelaySubscriptionDefinition;
 use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
+use state_assignment::{ScheduledStateAssignment, SharedStateAssignment, WasmCheckpointOwners};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{

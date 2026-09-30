@@ -1,5 +1,6 @@
 Feature: Domain clock attachment
 
+  @retained_task_handles
   Scenario Outline: A session attaches to a domain clock once and follows every generation
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
