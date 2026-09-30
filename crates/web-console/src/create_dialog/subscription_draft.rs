@@ -256,6 +256,26 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_reads_a_backslash_in_a_string_literal_as_the_typed_statement_does() {
+        let mut draft = SubscriptionDraft::for_relay(name("acme"), relay("notifications"));
+        draft.filter = r#"input.tenant = 'a\nb' OR input.tenant = "c\'d""#.to_string();
+        let typed = parse_client_statement(
+            r#"CREATE SUBSCRIPTION acme TO notifications WHERE input.tenant = 'a\nb' OR input.tenant = "c\'d";"#,
+        )
+        .assured("the typed statement is valid NSPL");
+        assert_eq!(
+            ClientStatement::CreateSubscription(draft.build().assured("the draft is complete")),
+            typed
+        );
+        assert_eq!(
+            draft.filter_reading(),
+            FilterReading::Expression(
+                r#"input.tenant = 'a\nb' OR input.tenant = "c\'d""#.to_string()
+            )
+        );
+    }
+
+    #[test]
     fn invalid_names_references_filters_and_rates_stay_in_the_draft() {
         let mut draft = SubscriptionDraft::named(name("typed"));
         assert_eq!(draft.delivery, SubscriptionDeliveryBehavior::Blocking);

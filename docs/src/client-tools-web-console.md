@@ -75,7 +75,10 @@ catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash
 relays, branches, ingestors, junctions, reingestors, and subscriptions. The resource group in the
 sidebar also provides a contextual create action. A form keeps its unfinished draft when it closes,
 restores focus to the action that opened it, reports validation and server failures inline, and
-shows the canonical NSPL statement before submission.
+shows the canonical NSPL statement before submission. An expression typed into a form, such as a
+filter, a `WHERE` predicate, an assigned value or an invocation argument, reads exactly as it does
+in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
+backslash is an ordinary character.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
 policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
 same creation modifier.

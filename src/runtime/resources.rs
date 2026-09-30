@@ -277,9 +277,9 @@ impl Runtime {
             codec.wire_format.resolved(),
             protobuf_descriptors,
         )
-        .map_err(|err| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: err.to_string(),
+        .map_err(|report| RuntimeError::CodecCompile {
+            domain: domain.clone(),
+            report,
         })
     }
 

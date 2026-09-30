@@ -9,10 +9,12 @@
 //! - **Must not know.** Prometheus query or sample details, NSPL parsing, registry validation, or
 //!   placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_prometheus::{PrometheusSource, PrometheusSourcePlan};
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{PacedSourceStart, SourceStart},
 };
 
@@ -21,7 +23,7 @@ impl PrometheusIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let PrometheusIngestorStartPlan {
             client,
             query,
@@ -29,11 +31,9 @@ impl PrometheusIngestorStartPlan {
         } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(
-                ingestor.start_failure("the node DNS resolver is not installed".to_string())
-            );
+            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
         PacedSourceStart {
             connector: PrometheusSourcePlan {
