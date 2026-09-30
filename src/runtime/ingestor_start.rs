@@ -368,6 +368,7 @@ impl Runtime {
             }
             let decoded = decode_ingested_payload(
                 self.executor(),
+                QueueAdmission::RefuseWhenFull,
                 &codec,
                 line.as_bytes(),
                 &mut decoder,

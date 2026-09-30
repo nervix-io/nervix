@@ -346,7 +346,11 @@ choose a backend.
   such as a UDF call or a JAQ transformation, takes the extension class, and password hashing
   takes the credentials class. A refusal from the
   executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
-  stays retryable rather than becoming a decode, encode or authentication failure.
+  stays retryable rather than becoming a decode, encode or authentication failure. A class whose
+  wait queue is full refuses work that answers a request, because its sender can present it again.
+  Work the node already accepted and keeps, which nothing can present again, such as a payload a
+  quiesce buffer retained, states `QueueAdmission::WaitForPlace` and waits for a place instead; its
+  owner lets shutdown and a new quiesce end that wait, and keeps the work where it was until then.
   `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other
   file that names it needs a permission in `crates/primitives/blocking-permissions.toml` stating
   its owner, why that owner stays outside the executor, and what bounds its work instead, such as
