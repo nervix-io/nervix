@@ -632,7 +632,7 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
     pub(super) dropped_total: AtomicU64,
     pub(super) rejected_total: AtomicU64,
     pub(super) metrics: RuntimeMetrics,
-    pub(super) metric_labels: IngestorQuiesceMetricLabels,
+    pub(super) metric_labels: IngestorQuiesceMetrics,
 }
 
 /// The exact publication a source host last observed before it awaited dispatch or a new batch.
@@ -646,7 +646,7 @@ impl IngestorQuiesceControl {
     pub(super) fn new(
         mode: IngestQuiesceMode,
         metrics: RuntimeMetrics,
-        metric_labels: IngestorQuiesceMetricLabels,
+        metric_labels: IngestorQuiesceMetrics,
     ) -> Self {
         let modes = IngestorQuiesceModes {
             active: mode,
@@ -998,43 +998,36 @@ impl IngestorReadiness {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RuntimeReconnectStatus {
     pub(super) backoff: Duration,
     pub(super) retry_at: Instant,
 }
 
 impl Runtime {
+    pub(super) fn ingestor_status(
+        &self,
+        key: &DomainNodeRef,
+    ) -> Arc<task_status::TaskStatus<RuntimeReconnectStatus>> {
+        if let Some(status) = self.inner.ingestor_statuses.get(key) {
+            return status.clone();
+        }
+        // Execution preparation serializes this entity's first registration before instances start.
+        let status = Arc::new(task_status::TaskStatus::<RuntimeReconnectStatus>::default());
+        self.inner
+            .ingestor_statuses
+            .insert(key.clone(), status.clone());
+        status
+    }
+
     pub(in crate::runtime) fn record_ingestor_transient_error(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
         error: impl Into<String>,
     ) {
-        self.inner.ingestor_transient_errors.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            error.into(),
-        );
-    }
-
-    pub(in crate::runtime) fn record_ingestor_transient_error_with_backoff(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        error: impl Into<String>,
-        backoff: Duration,
-    ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        self.inner
-            .ingestor_transient_errors
-            .insert(key.clone(), error.into());
-        self.inner.ingestor_reconnect_backoffs.insert(
-            key,
-            RuntimeReconnectStatus {
-                backoff,
-                retry_at: Instant::now() + backoff,
-            },
-        );
+        self.ingestor_status(&key).record_error(error.into());
     }
 
     pub(in crate::runtime) fn clear_ingestor_transient_error(
@@ -1043,12 +1036,9 @@ impl Runtime {
         ingestor: &IngestorName,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        self.clear_ingestor_transient_error_for(&key);
-    }
-
-    pub(in crate::runtime) fn clear_ingestor_transient_error_for(&self, key: &DomainNodeRef) {
-        self.inner.ingestor_transient_errors.remove(key);
-        self.inner.ingestor_reconnect_backoffs.remove(key);
+        if let Some(status) = self.inner.ingestor_statuses.get(&key) {
+            status.clear();
+        }
     }
 
     pub(in crate::runtime) fn prepare_ingestor_readiness(
@@ -1258,74 +1248,22 @@ impl Runtime {
             .is_none_or(|readiness| readiness.is_ready())
     }
 
-    pub(super) fn ingestor_transient_error(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-    ) -> Option<String> {
-        self.inner
-            .ingestor_transient_errors
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ))
-            .map(|error| error.value().clone())
-    }
-
-    pub(super) fn ingestor_reconnect_backoff(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-    ) -> Option<String> {
-        self.inner
-            .ingestor_reconnect_backoffs
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ))
-            .map(|status| humantime::format_duration(status.value().backoff).to_string())
-    }
-
-    pub(super) fn ingestor_reconnect_wait_millis(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-    ) -> Option<u64> {
-        self.inner
-            .ingestor_reconnect_backoffs
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ))
-            .map(|status| {
-                u64::try_from(
-                    status
-                        .value()
-                        .retry_at
-                        .saturating_duration_since(Instant::now())
-                        .as_millis(),
-                )
-                .unwrap_or(u64::MAX)
-            })
-    }
-
     pub(in crate::runtime) async fn wait_if_ingestor_faulted(
         &self,
-        domain: &DomainName,
+        status: &task_status::TaskStatus<RuntimeReconnectStatus>,
         ingestor: &IngestorName,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> bool {
         if !self.inner.fault_injection.ingestor_is_failed(ingestor) {
             return false;
         }
-        self.record_ingestor_transient_error_with_backoff(
-            domain,
-            ingestor,
-            "ingestor fault injector failed source",
-            Duration::from_millis(250),
+        let backoff = Duration::from_millis(250);
+        status.fail(
+            "ingestor fault injector failed source".into(),
+            Some(RuntimeReconnectStatus {
+                backoff,
+                retry_at: Instant::now() + backoff,
+            }),
         );
         nervix_primitives::select! {
             changed = shutdown_rx.changed() => changed.is_err() || *shutdown_rx.borrow(),

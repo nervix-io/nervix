@@ -305,6 +305,7 @@ impl BoundIngestorInput {
 
 /// What every execution of one ingestor dispatches through, whatever input it reads.
 pub(super) struct IngestorDependencies {
+    pub(super) handles: IngestTaskHandles,
     pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) branched_templates: HashMap<RelayName, IngestorRouteTemplate>,
@@ -312,6 +313,7 @@ pub(super) struct IngestorDependencies {
 }
 
 pub(super) struct IngestGroupContext {
+    pub(super) handles: IngestTaskHandles,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) timestamp_source: Option<IngestTimestampSource>,
@@ -328,6 +330,7 @@ pub(super) struct IngestGroupContext {
 /// collector owns the actual group boundary: request-scoped sources flush at the end of the
 /// request, while streaming sources flush at the message or idle-time bound.
 pub(super) struct IngestGroupDispatch<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
@@ -346,6 +349,7 @@ pub(super) struct IngestGroupDispatch<'a> {
 }
 
 pub(super) struct IngestGroupContribution<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
@@ -360,6 +364,7 @@ pub(super) struct IngestGroupContribution<'a> {
 ///
 /// Every row shares the batch's ACK set, so the batch resolves once each of its rows has.
 pub(super) struct ClientBatchDispatch<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
@@ -373,6 +378,7 @@ pub(super) struct ClientBatchDispatch<'a> {
 }
 
 pub(super) struct RawIngestDispatch<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
@@ -389,6 +395,7 @@ pub(super) struct RawIngestDispatch<'a> {
 /// group now accepts. None of them carries an acknowledgement of its own: each message takes a
 /// share of a root the group tracks.
 pub(super) struct RawIngestAcceptance<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
@@ -712,6 +719,7 @@ impl IngestGroupRows {
 
 /// An ingestor-wide message error, with the row it came from.
 pub(super) struct IngestorMessageError<'a> {
+    pub(super) routing: &'a DomainRoutingSnapshot,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
@@ -792,6 +800,7 @@ impl IngestRouteCollector {
         contribution: IngestGroupContribution<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let IngestGroupContribution {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -827,6 +836,7 @@ impl IngestRouteCollector {
         }
         if self.context.is_none() {
             self.context = Some(IngestGroupContext {
+                handles: handles.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.clone(),
                 timestamp_source: timestamp_source.cloned(),
@@ -1452,6 +1462,7 @@ impl Runtime {
         dispatch: IngestGroupDispatch<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let IngestGroupDispatch {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -1469,6 +1480,7 @@ impl Runtime {
             .await;
         collector
             .collect(IngestGroupContribution {
+                handles,
                 domain,
                 ingestor,
                 timestamp_source,
@@ -1505,27 +1517,20 @@ impl Runtime {
         // Sources that do not track acks themselves still need a root for downstream
         // resolution to land on. Those completions are deliberately never observed.
         let mut _unobserved_completions = Vec::new();
-        let ack_root_trackers = if rows.acks.iter().any(AckSet::is_empty) {
-            Some(self.ingestor_ack_root_trackers(domain, ingestor))
-        } else {
-            None
-        };
         for slot in rows.acks.iter_mut().filter(|slot| slot.is_empty()) {
-            let trackers = ack_root_trackers
-                .as_ref()
-                .verified("the tracker handle was acquired because this ACK set is empty");
-            let (tracked, completion) = trackers.tracked_root();
+            let (tracked, completion) = context.handles.tracked_root();
             *slot = tracked;
             _unobserved_completions.push(completion);
         }
         // One execution clock for the whole group: a batch is evaluated against the
         // state it was admitted with.
-        let ingestion_time = self.ingestion_time(domain, ingestor).change_context(
-            IngestGroupError::IngestionTime {
+        let ingestion_time = context
+            .handles
+            .ingestion_time(domain, ingestor)
+            .change_context(IngestGroupError::IngestionTime {
                 domain: domain.clone(),
                 ingestor: ingestor.clone(),
-            },
-        )?;
+            })?;
         let execution_now = ingestion_time.now();
 
         if let Some(filter_where) = filter_where {
@@ -1580,6 +1585,7 @@ impl Runtime {
                         keep.append(false);
                         let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
                         self.handle_ingestor_message_error(IngestorMessageError {
+                            routing,
                             domain,
                             ingestor,
                             output_routes,
@@ -1645,6 +1651,7 @@ impl Runtime {
                 );
                 let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
                 self.handle_ingestor_message_error(IngestorMessageError {
+                    routing,
                     domain,
                     ingestor,
                     output_routes,
@@ -1671,7 +1678,7 @@ impl Runtime {
         collector
             .metrics
             .observe(row_count, estimated_bytes, domain_timestamp);
-        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Ingestor, ingestor);
+        context.handles.mark_metrics();
 
         // Every route filters the same surviving group in one VM execution. Outcomes are
         // transposed back onto their originating row so each record's ack split still
@@ -1899,6 +1906,7 @@ impl Runtime {
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_error.output_index];
                 self.handle_structured_message_error(MessageErrorHandling {
+                    routing: Some(routing),
                     domain,
                     node_kind: ModelKind::Ingestor,
                     node: &ModelName::from(ingestor),
@@ -1939,6 +1947,7 @@ impl Runtime {
     /// ACKs the same way a routed message would have.
     pub(super) async fn handle_ingestor_message_error(&self, handling: IngestorMessageError<'_>) {
         let IngestorMessageError {
+            routing,
             domain,
             ingestor,
             output_routes,
@@ -1964,6 +1973,7 @@ impl Runtime {
                 .pop_front()
                 .verified("the queue above was filled with one ACK entry per route");
             self.handle_structured_message_error(MessageErrorHandling {
+                routing: Some(routing),
                 domain,
                 node_kind: ModelKind::Ingestor,
                 node: &ModelName::from(ingestor),
@@ -1994,6 +2004,7 @@ impl Runtime {
         dispatch: ClientBatchDispatch<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let ClientBatchDispatch {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -2028,6 +2039,7 @@ impl Runtime {
             acks: row_acks,
         };
         let context = IngestGroupContext {
+            handles: handles.clone(),
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             timestamp_source: timestamp_source.cloned(),
@@ -2081,6 +2093,7 @@ impl Runtime {
         acceptance: RawIngestAcceptance<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let RawIngestAcceptance {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -2091,6 +2104,7 @@ impl Runtime {
         } = acceptance;
         let metadata = payload.metadata_rows();
         self.dispatch_ingested_records(IngestGroupDispatch {
+            handles,
             collector,
             domain,
             ingestor,
@@ -2112,6 +2126,7 @@ impl Runtime {
         dispatch: RawIngestDispatch<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let RawIngestDispatch {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -2130,6 +2145,7 @@ impl Runtime {
             return Err(failure.into_group_error(ingestor));
         }
         self.accept_raw_ingest_payload(RawIngestAcceptance {
+            handles,
             domain,
             ingestor,
             timestamp_source,

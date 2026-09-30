@@ -1562,7 +1562,7 @@ impl Runtime {
                 }
             }
             execution.revision = revision;
-            execution.message_error_plans = message_error_plans;
+            execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
@@ -1612,7 +1612,7 @@ impl Runtime {
                 })?,
             );
             execution.revision = revision;
-            execution.message_error_plans = message_error_plans;
+            execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
         } else {
@@ -2735,7 +2735,10 @@ mod tests {
                 ModelKind::Deduplicator,
                 ModelName::from(&processor),
             ))
-            .map(|entry| entry.value().schema_fingerprint);
+            .and_then(|slot| {
+                slot.load_full()
+                    .map(|assignment| assignment.identity.schema_fingerprint)
+            });
         assert_eq!(
             installed,
             Some(SchemaFingerprint::from_digest([7; 32])),

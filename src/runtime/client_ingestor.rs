@@ -316,6 +316,7 @@ pub(in crate::runtime) struct ClientExecution {
 
 /// Everything the admission worker of one execution dispatches through.
 pub(in crate::runtime) struct ClientIntake {
+    pub(in crate::runtime) handles: IngestTaskHandles,
     pub(in crate::runtime) runtime: Runtime,
     pub(in crate::runtime) domain: DomainName,
     pub(in crate::runtime) ingestor: IngestorName,
@@ -735,6 +736,7 @@ impl Runtime {
         dependencies: IngestorDependencies,
     ) {
         let IngestorDependencies {
+            handles,
             output_routes,
             filter_where,
             branched_templates,
@@ -759,6 +761,7 @@ impl Runtime {
         });
         let commands = self.client_ingestor_endpoint(domain, &ingestor.name);
         let intake = ClientIntake {
+            handles,
             runtime: self.clone(),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
@@ -1876,6 +1879,7 @@ impl ClientIntake {
         let dispatched = self
             .runtime
             .dispatch_client_batch(ClientBatchDispatch {
+                handles: &self.handles,
                 domain: &self.domain,
                 ingestor: &self.ingestor,
                 timestamp_source: self.timestamp_source.as_ref(),

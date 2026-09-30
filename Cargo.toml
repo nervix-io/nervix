@@ -287,6 +287,11 @@ required-features = ["benchmarks"]
 
 [[bench]]
 harness = false
+name = "task_handles"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
 name = "state_replication"
 required-features = ["benchmarks"]
 

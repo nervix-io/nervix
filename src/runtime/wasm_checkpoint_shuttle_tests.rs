@@ -191,7 +191,11 @@ async fn inspect(state: StdArc<ReplicatedWasmProcessorState>, record: StdArc<Con
 /// reports confirmation before every replica reported or moves the committed revision back.
 fn a_checkpoint_waiting_for_its_replicas_misses_no_confirmation() {
     shuttle::future::block_on(async {
-        let state = StdArc::new(ReplicatedWasmProcessorState::new(placement(), None));
+        let state = StdArc::new(ReplicatedWasmProcessorState::new(
+            placement(),
+            None,
+            triomphe::Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+        ));
         let record = StdArc::new(ConfirmationRecord::default());
         let mut replicating = Vec::with_capacity(REPLICAS.len());
         for replica in 0..REPLICAS.len() {
