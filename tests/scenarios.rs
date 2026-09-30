@@ -12882,7 +12882,11 @@ async fn close_browser(world: &mut ScenarioWorld) {
     if let Some(browser) = world.browser.take() {
         let _ = browser.close().await;
     }
-    world.playwright = None;
+    if let Some(playwright) = world.playwright.take() {
+        // Driver cleanup in Drop blocks the task polling every scenario and the suite watchdog.
+        // Shut it down asynchronously before dropping the handle so the rest of the run progresses.
+        let _ = playwright.shutdown().await;
+    }
 }
 
 fn chromium_launch_options() -> LaunchOptions {
@@ -14396,28 +14400,51 @@ async fn given_stopped_transaction_qualification_graph(
     relay_count: usize,
 ) {
     let leader = current_leader_node(world).await;
-    let mut session = world
+    let grpc_uri = world
         .cluster()
-        .open_session(&leader, &world.domain)
+        .grpc_uri(&leader)
+        .expect("failed to resolve the transaction qualification setup leader");
+    let mut options =
+        client_connect_options(&grpc_uri).expect("transaction qualification client options");
+    for node in world.cluster().node_ids() {
+        let seed = world
+            .cluster()
+            .grpc_uri(&node)
+            .expect("transaction qualification seed node has a gRPC URI");
+        options
+            .seed_servers
+            .push(url::Url::parse(&seed).expect("cluster gRPC seed URIs are valid URLs"));
+    }
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
         .await
         .unwrap_or_else(|error| {
-            panic!("failed to open the transaction qualification setup session: {error}")
+            panic!("failed to connect the transaction qualification setup client: {error}")
         });
-    session
-        .run_command("CREATE SCHEMA qualification_event ( value I64 );")
+    let outcome = client
+        .execute("CREATE SCHEMA qualification_event ( value I64 );")
         .await
         .unwrap_or_else(|error| {
             panic!("failed to create the transaction qualification schema: {error}")
         });
+    assert!(
+        outcome.succeeded(),
+        "transaction qualification schema creation must succeed: {}",
+        outcome.message
+    );
     for index in 0..relay_count {
         nervix_primitives::task::consume_budget().await;
         let relay = format!("qualification_relay_{index:04}");
         let command =
             format!("CREATE RELAY {relay} SCHEMA qualification_event UNBRANCHED CAPACITY 1;");
-        session
-            .run_command(&command)
+        let outcome = client
+            .execute(command)
             .await
             .unwrap_or_else(|error| panic!("failed to create relay '{relay}': {error}"));
+        assert!(
+            outcome.succeeded(),
+            "transaction qualification relay '{relay}' creation must succeed: {}",
+            outcome.message
+        );
     }
 }
 

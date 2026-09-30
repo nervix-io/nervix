@@ -226,7 +226,9 @@ producers it opens. A producer is not a statement: clients open, feed, and close
   node clears each forwarded batch before it may be admitted; only the cleared batches are reported
   as of unknown outcome.
 - When the session ends, its producers detach. Admitted batches continue through the graph with
-  nobody left to answer them, so a client reports them as of unknown outcome.
+  nobody left to answer them, so a client reports them as of unknown outcome. The Rust client keeps
+  the producer handle and restores a fresh attachment if the domain generation and endpoint
+  contract still match; it does not resend those uncertain batches.
 
 ## Suggestions
 
@@ -245,11 +247,13 @@ not relay subscriptions. A read is concurrent with the session's ordered control
 receive loop can keep processing producer submissions, ACKs, commands, and clock observations
 while that read waits. A returned batch is still unacknowledged. Its current reference must be
 confirmed with `ACK`, retried, or rejected; close and session loss revoke unresolved attempts.
-The consumer belongs to its session exchange and is reopened explicitly after that exchange is
-lost. The server does not persist a consumer position. A session may attach through a different
-node from the emitter; that node forwards output and settlement over the authenticated
-interconnect. [Client Session Protocol](./client-session-protocol.md#emitter-consumers) defines
-the frames, and [Emitters](./emitters.md#client-emitters) defines their graph ACK boundary.
+The server attachment belongs to its session exchange. The Rust client keeps the consumer handle
+and restores a fresh attachment when the generation and endpoint contract still match. The first
+read after a gap reports an interruption. Delivery references from the former attachment cannot
+ACK through the new one. The server does not persist a consumer position. A session may attach
+through a different node from the emitter; that node forwards output and settlement over the
+authenticated interconnect. [Client Session Protocol](./client-session-protocol.md#emitter-consumers)
+defines the frames, and [Emitters](./emitters.md#client-emitters) defines their graph ACK boundary.
 
 ## Suggestions
 

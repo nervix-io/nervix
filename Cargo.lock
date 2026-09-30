@@ -6643,6 +6643,7 @@ dependencies = [
  "strum 0.26.3",
  "tonic 0.13.1",
  "triomphe",
+ "uuid",
 ]
 
 [[package]]

@@ -73,6 +73,15 @@ attempt becomes live. Confirmed ACK, retry and rejection results have bounded re
 idempotence and expire independently of the delivery identity. An absent consumer is not encoded
 as an empty consumer id, and an unbranched batch has no synthetic branch fingerprint.
 
+The Rust client's desired producer and consumer handles have distinct active, interrupted,
+restoring, reopen-required and closed states. An attachment belongs to one session exchange; a
+replacement receives a fresh request-derived identity. The producer's unresolved sent batch has
+an unknown outcome, rather than a missing outcome defaulted to not admitted. A consumer reports
+the interruption before delivery from a replacement attachment. Its prior delivery reference is
+expired, while a settlement sent before losing its answer is separately uncertain. The domain
+`START` generation and endpoint contract fingerprint are required values on every successful
+consumer open, so absence cannot be mistaken for a matching contract.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that

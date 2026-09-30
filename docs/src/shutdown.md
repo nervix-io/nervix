@@ -670,6 +670,9 @@ the last successfully applied schedule; the failed revision is not recorded as a
 Until admission succeeds, the node is live but inert with respect to ownership. Its public listeners and
 its interconnect answer requests, which keeps configured listening entities available on every live
 node, but no runtime routes exist, so a payload it accepts cannot reach recovered graph execution.
+A client producer or consumer open is refused as temporarily unavailable until the node has passed
+the catch-up barrier; the node does not report a stale local missing or stopped domain as a terminal
+endpoint refusal during that interval. The client can retry the open on its restored session.
 A former owner restarted while cut off from consensus therefore produces no output, and once
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.
