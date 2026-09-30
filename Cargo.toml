@@ -739,6 +739,12 @@ inherits = "dev"
 opt-level = 2
 overflow-checks = true
 
+# The full server's single codegen unit must fit the bounded sanitizer build. Keep its checks
+# and coverage instrumentation with lighter optimization and no debug output.
+[profile.fuzz.package.nervix-server]
+debug = 0
+opt-level = 1
+
 [profile.dev.package."wasmtime"]
 opt-level = 3
 [profile.dev.package."wasmtime-environ"]

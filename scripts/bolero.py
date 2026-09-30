@@ -18,7 +18,7 @@ import sys
 import time
 import tomllib
 from collections import Counter
-from typing import Any
+from typing import Any, Iterator
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tests/bolero-targets.toml"
@@ -217,21 +217,25 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
     return False
 
 
-def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
-    found = {}
-    sources = []
+def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
     for directory, children, files in os.walk(manifest.parent):
-        directory = pathlib.Path(directory)
-        # Each nested Cargo package owns its sources. Build artifacts and dependency trees
-        # contain generated or external Rust and never belong to this package's inventory.
-        children[:] = [
+        parent = pathlib.Path(directory)
+        # Nested Cargo packages own their Rust, including a workspace's qualification crate.
+        # Build output, hidden metadata and dependency trees are not package-authored sources.
+        children[:] = sorted(
             child for child in children
             if not child.startswith(".")
             and child not in {"target", "node_modules"}
-            and not (directory / child / "Cargo.toml").is_file()
-        ]
-        sources.extend(directory / name for name in files if name.endswith(".rs"))
-    for source in sorted(sources):
+            and not (parent / child / "Cargo.toml").is_file()
+        )
+        for name in sorted(files):
+            if name.endswith(".rs"):
+                yield parent / name
+
+
+def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
+    found = {}
+    for source in package_rust_sources(manifest):
         content = source.read_text()
         for macro in MACRO.finditer(content):
             preceding = list(FUNCTION.finditer(content, 0, macro.start()))

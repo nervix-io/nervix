@@ -40,6 +40,11 @@ jobs:
         with:
           tool: just,toml-cli,trunk
 
+      - name: Install server build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -50,7 +55,6 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
-          sudo apt-get install --yes --no-install-recommends protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -118,6 +122,11 @@ jobs:
         with:
           tool: just,toml-cli,trunk
 
+      - name: Install server build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -131,7 +140,6 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
-          sudo apt-get install --yes --no-install-recommends protobuf-compiler
 
       - name: Configure cargo
         run: |

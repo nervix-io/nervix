@@ -118,6 +118,39 @@ routing snapshot with its installed execution revision. Unchanged processor spec
 fingerprints and resolved branch contracts keep their exact plan allocation, including prepared
 programs and compiled WASM modules.
 
+### Server endpoint intake
+
+`EndpointIntakeRoutes` owns one immutable host-and-path table containing each domain's configured
+endpoint definitions and the source lifetimes bound to them. Domain install or teardown and source
+bind or unbind derive a replacement from the current publication with `ArcSwap::rcu`. Concurrent
+writers retry against the latest complete table, preserving unrelated domains and sources. A
+passive installation publishes no endpoint definitions. The listening socket remains present on
+every node independently of this table.
+
+An HTTP request resolves one route using borrowed host and path keys; only uppercase hosts need a
+normalization allocation. A WebSocket retains the resolved route and its signaling protocol from
+upgrade through all later frames, including signaling data frames. Readers share the route
+allocation and borrow its prepared intakes; they do not clone route vectors, programs, codecs, or
+sender maps and do not return to a concurrent registry for each frame.
+
+Each source lifetime publishes its optional intake through `ArcSwapOption`. Close, drop, domain
+replacement, domain teardown, and runtime clear publish absence before withdrawing that lifetime.
+Retained routes therefore refuse later admission even after a replacement source starts. A request
+that already loaded a present intake keeps its lease until dispatch finishes. Unbind removes the
+exact source allocation, so a late close cannot remove a replacement with the same typed identity.
+Configuration withdrawal removes the route; source withdrawal alone leaves configured metadata
+available to report unavailable intake. These publications remain volatile data-plane state.
+
+Unit regressions and the registered Bolero operation sequence exercise the production owner and
+retained lifetimes. Shuttle races whole-domain publication with resolution, unbind with admitted
+requests and replacement, and domain teardown with retained routes. These checks treat publication
+operations as opaque scheduling points. Both publications reuse the primitive boundary's existing
+implementation: no new memory-ordering protocol is introduced, and Loom does not model their
+internals. Listener ownership and network primitives retain their existing contracts; Turmoil is
+outside this owner's scope. Public scenarios cover one and three nodes; the endpoint Chaos workload
+belongs to Typed Ratchet 10. The inventory ledger records the routing measurement and verification
+evidence.
+
 ## Mutable Execution State
 
 Per-row mutation is kept close to the lane that orders it. A global concurrent map is an index into

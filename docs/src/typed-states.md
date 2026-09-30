@@ -280,6 +280,15 @@ same plan shape feeds running and passive builds. Passive builds retain the plan
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
 
+Server endpoint configuration and source availability are distinct states. The immutable route
+table contains configured definitions; a bound source lifetime contains an optional prepared intake.
+Source ending publishes absence through that lifetime before removing its route binding. A retained
+request or WebSocket cannot interpret absence as a replacement source with the same node identity.
+A lease loaded before ending may complete; later admission sees absence. Domain replacement and
+teardown end the domain's lifetimes and replace all of its route definitions together, preserving
+other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
+its replacement.
+
 A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
 route's records get their branch key as one of three states: unbranched, keeping the incoming key,

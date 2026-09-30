@@ -738,6 +738,17 @@ sequenceDiagram
   endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
   when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
   The compiler never chooses a graph route or an endpoint listener.
+- **Server endpoint intake.** The endpoint source binds one prepared intake lifetime to all of its
+  configured routes before reporting readiness. Domain definitions and bound lifetimes share one
+  immutable publication. HTTP resolves it once per request; a WebSocket retains its route and
+  signaling protocol for the connection, including data accepted during signaling. Close or drop
+  ends that exact lifetime before withdrawing it, so a retained route cannot attach to a replacement
+  source. A request already holding an intake may finish. Configured routes without a live intake
+  reject with HTTP 503, and after signaling an established WebSocket closes with 1013 on its next
+  refused payload.
+  Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
+  other domains publishing the same host and path. The host continues to own quiesce, buffering,
+  decoding, routing, flush cadence, and error reporting.
 
 ## Failure and observation
 
