@@ -286,7 +286,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("suite")
     parser.add_argument("--inventory", type=Path, default=None)
     parser.add_argument("logs", nargs="*", type=Path)
-    arguments = parser.parse_args(argv)
+    # `--inventory` sits between the suite and its logs, which only an intermixed parse reads on
+    # every supported Python: before 3.12's later releases, `argparse` gives an optional placed
+    # there to no positional and refuses the logs after it.
+    arguments = parser.parse_intermixed_args(argv)
     inventory = None
     if arguments.inventory is not None:
         try:
