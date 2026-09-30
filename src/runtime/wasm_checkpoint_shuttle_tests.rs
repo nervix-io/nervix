@@ -10,7 +10,6 @@
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     ClusterNodeName, DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint,

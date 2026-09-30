@@ -33,7 +33,7 @@ use nervix_primitives::{
 use shuttle::{
     Config, FailurePersistence, MaxSteps, Runner,
     scheduler::{
-        DfsScheduler, PctScheduler, RandomScheduler, ReplayScheduler, Scheduler,
+        DfsScheduler, PctScheduler, RandomScheduler, ReplayScheduler,
         UncontrolledNondeterminismCheckScheduler,
     },
 };

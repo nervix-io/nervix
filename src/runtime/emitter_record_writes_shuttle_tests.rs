@@ -18,14 +18,12 @@
 // scheduling step as the operation it records. The emitter's own counts are the production owner's
 // state, so they are the selected, modeled atomics.
 use futures_util::FutureExt as _;
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkPublishError;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
     sync::{StdArc, atomic as selected},
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use nervix_recovery::NoReceiver as _;
 
 use super::*;
 use crate::{runtime::test_fixtures::input_schema, runtime_ack::AckProgress};
