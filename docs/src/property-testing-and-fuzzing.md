@@ -31,7 +31,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | --- | --- | --- | ---: | ---: |
 | `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
-| `nspl-expression` | `nervix-nspl` expression render and statement-embedded reparse equality | NSPL expressions of every form, v3 | 256 | 512 bytes |
+| `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v3 | 256 | 512 bytes |
 | `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v4 | 256 | 2048 bytes |
 | `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v4 | 64 | 4096 bytes |
 | `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v2 | 256 | 2048 bytes |

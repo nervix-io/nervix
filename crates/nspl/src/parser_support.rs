@@ -2432,17 +2432,10 @@ fn expression_token_to_source(token: &Token) -> String {
     match token {
         Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
         Token::Word(Word::UnknownWord(raw)) => raw.clone(),
-        Token::StringLiteral(value) => {
-            // The expression lexer rejects raw control characters inside a quoted string, so they
-            // are escaped here rather than passed through from the outer dollar-quoted form.
-            let escaped = value
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("\"{escaped}\"")
-        }
+        // The expression lexer reads a string literal as the statement lexer does, verbatim, so the
+        // value is handed over in the spelling canonical NSPL gives it, which reads back as exactly
+        // that value.
+        Token::StringLiteral(value) => nervix_models::string_literal(value),
         Token::NumberLiteral(value) => value.clone(),
         Token::LParen => "(".to_string(),
         Token::RParen => ")".to_string(),
