@@ -156,6 +156,14 @@ must be a positive integer and affects only compilation; the inventory's case li
 requested campaign duration remain enforced. CI uses the default deadline. The runner prints the
 effective compilation deadline alongside the build command and retains timeout evidence.
 
+Ordinary execution prepares each selected package, harness and exact feature set once with
+`cargo test --no-run`, under a separate 1,800-second compilation deadline. Discovery can require
+the union of a package's features; its binary does not prepare a target with a different declared
+feature set. Each property still has a 240-second execution bound and must complete its exact
+randomized iteration count and replay every checked-in corpus input. A failed preparation ends
+the run before that harness executes any property. The ordinary CI job reserves 60 minutes for
+discovery, the declared feature builds and every registered target.
+
 Install the dated sanitizer nightly named in the inventory and the pinned CLI:
 
 ```bash

@@ -474,6 +474,45 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(bolero.BoleroError, "expected 256"):
                 bolero.test_targets(self.inventory, (self.target,))
 
+    def test_ordinary_prepares_each_exact_harness_before_bounded_execution(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-server", features=())
+        repeated = dataclasses.replace(target, id="another-target", test="tests::bolero_another")
+        with_features = dataclasses.replace(target, id="feature-target", features=("testing",))
+        good = subprocess.CompletedProcess(
+            [], 0, "corpus inputs: 2 | rng inputs: 256\n"
+            "test result: ok. 1 passed; 0 failed\n", ""
+        )
+        with mock.patch.object(bolero, "command", return_value=good) as command:
+            bolero.test_targets(self.inventory, (target, repeated, with_features))
+        builds = [call for call in command.call_args_list if "--no-run" in call.args[0]]
+        self.assertEqual(len(builds), 2)
+        self.assertEqual(builds[0].args[0], bolero.cargo_test_args(target) + ["--no-run"])
+        self.assertEqual(builds[1].args[0], bolero.cargo_test_args(with_features) + ["--no-run"])
+        self.assertTrue(all(call.kwargs["timeout"] == 1800 for call in builds))
+        cases = [call for call in command.call_args_list if "--exact" in call.args[0]]
+        self.assertEqual(len(cases), 3)
+        self.assertTrue(all(call.kwargs["timeout"] == 240 for call in cases))
+        self.assertEqual(command.call_args_list[0], builds[0])
+        self.assertEqual(command.call_args_list[3], builds[1])
+
+    def test_failed_ordinary_preparation_stops_before_any_property_execution(self) -> None:
+        calls = []
+
+        def prepare_fails(args, **kwargs):
+            calls.append(args)
+            if "--no-run" in args:
+                raise bolero.BoleroError("ordinary build refused")
+            return subprocess.CompletedProcess(
+                [], 0, "corpus inputs: 2 | rng inputs: 256\n"
+                "test result: ok. 1 passed; 0 failed\n", ""
+            )
+
+        with mock.patch.object(bolero, "command", side_effect=prepare_fails):
+            with self.assertRaisesRegex(bolero.BoleroError, "ordinary build refused"):
+                bolero.test_targets(self.inventory, (self.target,))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--no-run", calls[0])
+
     def test_ordinary_run_rejects_missing_assertion_and_corpus(self) -> None:
         for output, message in (
             ("test result: ok. 0 passed; 0 failed", "exactly once"),

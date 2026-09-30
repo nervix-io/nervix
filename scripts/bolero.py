@@ -524,8 +524,15 @@ def metadata(
 def test_targets(inventory: Inventory, selected: tuple[Target, ...]) -> None:
     executed = 0
     completed = 0
+    prepared: set[tuple[str, ...]] = set()
     for target in selected:
-        args = cargo_test_args(target) + ["--", "--exact", target.test, "--nocapture"]
+        args = cargo_test_args(target)
+        harness = tuple(args)
+        if harness not in prepared:
+            print(f"{target.id}: ordinary build deadline 1800s", flush=True)
+            command(args + ["--no-run"], timeout=1800)
+            prepared.add(harness)
+        args += ["--", "--exact", target.test, "--nocapture"]
         env = {
             "BOLERO_RANDOM_ITERATIONS": str(target.random_iterations),
             "BOLERO_RANDOM_MAX_LEN": str(target.max_input_bytes),
