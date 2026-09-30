@@ -9,10 +9,12 @@
 //! - **Must not know.** The Pulsar driver, consumer lifecycle, NSPL parsing, registry validation,
 //!   or placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_pulsar::{PulsarSource, PulsarSourcePlan, PulsarSourceSettings};
 
 use super::{
     super::*,
+    IngestorStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -21,7 +23,7 @@ impl PulsarIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let PulsarIngestorStartPlan {
             client,
             topic,
@@ -31,7 +33,7 @@ impl PulsarIngestorStartPlan {
         } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let connector = PulsarSourcePlan::connect(PulsarSourceSettings {
             config: &resolved.entries,
             topic: &topic,
@@ -39,7 +41,7 @@ impl PulsarIngestorStartPlan {
             consumer_name: ingestor.name.as_str().to_string(),
         })
         .await
-        .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+        .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
             instances,

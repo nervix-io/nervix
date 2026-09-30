@@ -9,10 +9,12 @@
 //! - **Must not know.** The NATS driver, subscription lifecycle, NSPL parsing, registry
 //!   validation, or placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_nats::{NatsSource, NatsSourcePlan};
 
 use super::{
     super::*,
+    IngestorStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -21,7 +23,7 @@ impl NatsIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let NatsIngestorStartPlan {
             client,
             subject,
@@ -31,7 +33,7 @@ impl NatsIngestorStartPlan {
         } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector: NatsSourcePlan::new(resolved.entries, subject, queue_group),
             instances,

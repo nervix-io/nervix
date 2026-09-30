@@ -11,12 +11,14 @@
 //!   computation.
 
 use async_trait::async_trait;
+use error_stack::ResultExt as _;
 use nervix_connector::{
     SourceAckPolicy, SourceConnector, SourceHost, SourceHostServices as _, SourcePlan, SourceResult,
 };
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{RuntimeSourceHost, SourceInstance, SourceStart, run_request_source},
 };
 
@@ -113,22 +115,22 @@ impl EndpointIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let EndpointIngestorStartPlan { endpoint, mode: _ } = self;
         let route = {
             let Some(execution) = runtime.inner.executions.get(&ingestor.domain) else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: ingestor.domain.as_str().to_string(),
-                    reason: "domain execution is not instantiated".to_string(),
-                });
+                return Err(Report::new(
+                    IngestorStartError::DomainExecutionUnavailable {
+                        domain: ingestor.domain.clone(),
+                        ingestor: ingestor.name.clone(),
+                    },
+                ));
             };
             execution.endpoint_routes.get(&endpoint).cloned()
         };
         let Some(route) = route else {
-            return Err(ingestor.start_failure(format!(
-                "endpoint '{}' is not instantiated",
-                endpoint.as_str()
-            )));
+            return Err(ingestor
+                .source_start_failure(SourceStartError::EndpointNotInstantiated { endpoint }));
         };
         let routes = route
             .hostnames
@@ -150,7 +152,7 @@ impl EndpointIngestorStartPlan {
         };
         let source = EndpointSource::open(&plan.connector, 0)
             .await
-            .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance: Box<dyn SourceInstance> = Box::new(source);
         Ok(SourceStart {
             instances: vec![instance],
@@ -285,6 +287,64 @@ mod tests {
             .await
             .expect("the endpoint ingestor's schedule applies");
         runtime
+    }
+
+    #[nervix_primitives::test]
+    async fn a_payload_its_codec_rejects_is_reported_with_the_whole_codec_chain() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let mut events = runtime.events().subscribe();
+
+        let outcome = runtime
+            .dispatch_http_payload(
+                "edge.example.com",
+                "/events",
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+            )
+            .await;
+
+        assert!(outcome.is_accepted());
+        let RuntimeEvent::Error(message) = events
+            .try_recv()
+            .expect("the rejected payload is reported to the node's observers");
+        assert_eq!(
+            message,
+            "failed to decode http message for ingestor 'event_source' in domain 'default': codec \
+             'event_json' failed to parse field 'user_id': expected Integer, found a JSON string"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_running_ingestor_refuses_a_second_start() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let plan = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("the running domain has an execution")
+            .revision
+            .entrypoints
+            .ingestor(&ingestor)
+            .cloned()
+            .expect("the execution plans the endpoint ingestor");
+
+        let report = runtime
+            .start_ingestor(&plan)
+            .await
+            .expect_err("the ingestor already runs on this node");
+
+        assert!(matches!(
+            report.current_context(),
+            IngestorStartError::AlreadyRunning { .. }
+        ));
+        assert_eq!(
+            format!("{report:#}"),
+            "ingestor 'event_source' in domain 'default' is already running"
+        );
     }
 
     #[nervix_primitives::test]
