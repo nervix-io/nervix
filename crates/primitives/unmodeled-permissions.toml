@@ -132,6 +132,17 @@ reason = "Each gate and wake record must change in the same scheduling step as t
 [[permission]]
 items = [
   "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
+limit = "Records observe the steps a relay's branch owners have published and never synchronize them; the presence publication under test is the modeled `ArcSwap`."
+owner = "The relay branch presence Shuttle checks."
+path = "src/runtime/relay_branch_presence_shuttle_tests.rs"
+reason = "Each step record must change in the same scheduling step as the publication it records, so recording adds no scheduling point."
+
+[[permission]]
+items = [
+  "sync::atomic::AtomicBool",
   "sync::atomic::AtomicU64",
   "sync::atomic::Ordering",
 ]

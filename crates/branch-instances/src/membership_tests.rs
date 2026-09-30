@@ -298,7 +298,8 @@ impl Operation {
     /// Decode the operations in `bytes`, four bytes each; a trailing partial operation is ignored.
     fn decode(bytes: &[u8]) -> Vec<Self> {
         let mut operations = Vec::new();
-        for chunk in bytes.chunks_exact(4) {
+        let (whole_operations, _trailing_partial) = bytes.as_chunks::<4>();
+        for chunk in whole_operations {
             let owner = chunk[1];
             let key = match chunk[2] % (PROPERTY_KEYS + 1) {
                 0 => None,
