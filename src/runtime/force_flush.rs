@@ -8,17 +8,60 @@
 //! the participant clears its outstanding obligation, while dropping an unhandled completion
 //! makes the same generation deliverable again.
 
-use ahash::{HashMap, HashMapExt};
-use nervix_primitives::sync::{blocking::Mutex, watch};
+use std::collections::BTreeMap;
+
+use nervix_primitives::sync::{atomic::AtomicU8, blocking::Mutex, watch};
 use triomphe::Arc;
 
 use super::*;
 
 #[derive(Debug)]
 struct ForceFlushParticipantState {
+    /// Also retained by the participant that polls, independently of the coordinator borrow.
+    readiness: Arc<ForceFlushReadiness>,
     counters: Option<Arc<NodeQuiesceCounters>>,
     pending_generation: Option<u64>,
     claimed_generation: Option<u64>,
+}
+
+/// An independent polling hint. The coordinator mutex remains the authority for generation and
+/// claim data; this atomic publishes no other location. Watch registration supplies wakeups.
+/// The private byte encoding is idle=0, available=1, closed=2.
+#[derive(Debug)]
+struct ForceFlushReadiness(AtomicU8);
+
+#[derive(Clone, Copy)]
+enum ForceFlushAvailability {
+    Idle,
+    Available,
+    Closed,
+}
+
+impl ForceFlushAvailability {
+    fn encoding(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Available => 1,
+            Self::Closed => 2,
+        }
+    }
+}
+
+impl ForceFlushReadiness {
+    fn new(state: ForceFlushAvailability) -> Self {
+        Self(AtomicU8::new(state.encoding()))
+    }
+    fn publish(&self, state: ForceFlushAvailability) {
+        self.0.store(state.encoding(), Ordering::Relaxed);
+    }
+    fn pending(&self) -> Result<bool, ()> {
+        match self.0.load(Ordering::Relaxed) {
+            0 => Ok(false),
+            1 => Ok(true),
+            2 => Err(()),
+            _ => unreachable!("only this owner writes its three readiness encodings"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -27,25 +70,30 @@ struct DomainForceFlushState {
     active_generation: Option<u64>,
     next_participant: u64,
     sender: Option<watch::Sender<u64>>,
-    participants: HashMap<u64, ForceFlushParticipantState>,
+    /// Participant-ID order keeps publication reproducible across executions and model replays.
+    participants: BTreeMap<u64, ForceFlushParticipantState>,
 }
 
 /// Coordinates force-flush generations for one runtime domain.
 #[derive(Debug)]
 pub(super) struct DomainForceFlush {
     state: Mutex<DomainForceFlushState>,
+    #[cfg(test)]
+    completion_lock_acquisitions: AtomicUsize,
 }
 
 impl DomainForceFlush {
     pub(super) fn new() -> Arc<Self> {
         let (sender, _) = watch::channel(0_u64);
         Arc::new(Self {
+            #[cfg(test)]
+            completion_lock_acquisitions: AtomicUsize::new(0),
             state: Mutex::new(DomainForceFlushState {
                 generation: 0,
                 active_generation: None,
                 next_participant: 0,
                 sender: Some(sender),
-                participants: HashMap::new(),
+                participants: BTreeMap::new(),
             }),
         })
     }
@@ -61,6 +109,13 @@ impl DomainForceFlush {
             .assured("a domain cannot register 2^64 force-flush participants");
         let participant = state.next_participant;
         let pending_generation = state.active_generation;
+        let readiness = Arc::new(ForceFlushReadiness::new(if state.sender.is_none() {
+            ForceFlushAvailability::Closed
+        } else if pending_generation.is_some() {
+            ForceFlushAvailability::Available
+        } else {
+            ForceFlushAvailability::Idle
+        }));
         if pending_generation.is_some()
             && let Some(counters) = &counters
         {
@@ -69,6 +124,7 @@ impl DomainForceFlush {
         state.participants.insert(
             participant,
             ForceFlushParticipantState {
+                readiness: readiness.clone(),
                 counters,
                 pending_generation,
                 claimed_generation: None,
@@ -82,6 +138,7 @@ impl DomainForceFlush {
             receiver
         };
         DomainForceFlushParticipant {
+            readiness,
             coordinator: coordinator.clone(),
             participant,
             receiver,
@@ -120,6 +177,9 @@ impl DomainForceFlush {
             }
             participant.pending_generation = Some(generation);
             participant.claimed_generation = None;
+            participant
+                .readiness
+                .publish(ForceFlushAvailability::Available);
         }
         if state.participants.is_empty() {
             state.active_generation = None;
@@ -145,6 +205,9 @@ impl DomainForceFlush {
             let mut state = self.state.lock();
             for participant in state.participants.values_mut() {
                 Self::clear_participant_pending(participant);
+                participant
+                    .readiness
+                    .publish(ForceFlushAvailability::Closed);
             }
             state.active_generation = None;
             state.sender.take()
@@ -156,6 +219,10 @@ impl DomainForceFlush {
         coordinator: &Arc<Self>,
         participant: u64,
     ) -> Result<Option<DomainForceFlushCompletion>, ()> {
+        #[cfg(test)]
+        coordinator
+            .completion_lock_acquisitions
+            .fetch_add(1, Ordering::Relaxed);
         let mut state = coordinator.state.lock();
         if state.sender.is_none() {
             return Err(());
@@ -170,6 +237,9 @@ impl DomainForceFlush {
             return Ok(None);
         }
         participant_state.claimed_generation = Some(generation);
+        participant_state
+            .readiness
+            .publish(ForceFlushAvailability::Idle);
         Ok(Some(DomainForceFlushCompletion {
             coordinator: coordinator.clone(),
             participant,
@@ -207,6 +277,9 @@ impl DomainForceFlush {
             && participant.claimed_generation == Some(generation)
         {
             participant.claimed_generation = None;
+            participant
+                .readiness
+                .publish(ForceFlushAvailability::Available);
         }
     }
 
@@ -225,6 +298,7 @@ impl DomainForceFlush {
     }
 
     fn clear_participant_pending(participant: &mut ForceFlushParticipantState) {
+        participant.readiness.publish(ForceFlushAvailability::Idle);
         participant.claimed_generation = None;
         if participant.pending_generation.take().is_some()
             && let Some(counters) = &participant.counters
@@ -238,6 +312,7 @@ impl DomainForceFlush {
 /// One live task participating in domain force flushes.
 #[derive(Debug)]
 pub(super) struct DomainForceFlushParticipant {
+    readiness: Arc<ForceFlushReadiness>,
     coordinator: Arc<DomainForceFlush>,
     participant: u64,
     receiver: watch::Receiver<u64>,
@@ -245,6 +320,9 @@ pub(super) struct DomainForceFlushParticipant {
 
 impl DomainForceFlushParticipant {
     pub(super) fn pending_completion(&mut self) -> Result<Option<DomainForceFlushCompletion>, ()> {
+        if !self.readiness.pending()? {
+            return Ok(None);
+        }
         let completion = DomainForceFlush::completion(&self.coordinator, self.participant)?;
         if completion.is_some() {
             self.receiver.borrow_and_update();
@@ -334,13 +412,15 @@ impl Runtime {
         &self,
         domain: &DomainName,
     ) -> (AckSet, AckCompletion) {
-        let tracker = self
-            .inner
+        AckSet::tracked_root(self.domain_ack_root_tracker(domain))
+    }
+
+    pub(super) fn domain_ack_root_tracker(&self, domain: &DomainName) -> Arc<AckRootTracker> {
+        self.inner
             .in_flight_by_domain
             .entry(domain.clone())
             .or_insert_with(|| Arc::new(AckRootTracker::default()))
-            .clone();
-        AckSet::tracked_root(tracker)
+            .clone()
     }
 
     pub(in crate::runtime) fn ingestor_ack_root_trackers(
@@ -415,6 +495,71 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_and_claimed_force_flush_polls_do_not_acquire_the_coordinator() {
+        let coordinator = DomainForceFlush::new();
+        let mut participant = DomainForceFlush::subscribe(&coordinator, None);
+        for _ in 0..100 {
+            assert!(
+                participant
+                    .pending_completion()
+                    .assured("participant remains open")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            0
+        );
+        coordinator.request();
+        let completion = participant
+            .pending_completion()
+            .assured("participant remains open")
+            .assured("the requested generation has an obligation");
+        for _ in 0..100 {
+            assert!(
+                participant
+                    .pending_completion()
+                    .assured("participant remains open")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            1
+        );
+        drop(completion);
+        let redelivery = participant
+            .pending_completion()
+            .assured("participant remains open")
+            .assured("dropping a claim makes its obligation available again");
+        assert!(redelivery.complete());
+        assert!(
+            participant
+                .pending_completion()
+                .assured("participant remains open")
+                .is_none()
+        );
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            2
+        );
+        coordinator.close();
+        assert!(participant.pending_completion().is_err());
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            2
+        );
+    }
 
     fn counters() -> Arc<NodeQuiesceCounters> {
         Arc::new(NodeQuiesceCounters::default())

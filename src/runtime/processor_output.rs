@@ -569,6 +569,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
             .branch
             .runtime
             .handle_structured_message_error(MessageErrorHandling {
+                routing: context.branch.routing_snapshot.as_deref(),
                 domain: &context.branch.domain,
                 node_kind: context.node_kind,
                 node: context.processor,

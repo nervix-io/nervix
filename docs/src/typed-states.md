@@ -339,3 +339,13 @@ qualification passed `just validate` and `just ratchet`.
 These results establish the listed semantic paths and their tested failure boundaries. The
 ledger distinguishes source-audited findings from demonstrated runtime behavior and records
 which values remain legitimate zeros, empty content, Arrow masked lanes, and private encodings.
+
+## Recurring Task Observations
+
+Healthy connector status is absence of a failure; a failure contains its safe error and an optional
+retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
+point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
+a present assignment contains its state identity and checkpoint owners together. Force-flush
+readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
+decodes that byte; the coordinator remains the authority for generation and claim state. The hint
+has no cross-location data-publication contract.

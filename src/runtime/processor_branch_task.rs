@@ -218,6 +218,8 @@ pub(super) async fn run_processor_node_runtime(
         template.source_kind,
         ModelName::from(&processor),
     );
+    let ownership_freeze =
+        OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity.clone());
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
     let mut last_persisted_lru_lsm = 0;
@@ -345,7 +347,7 @@ pub(super) async fn run_processor_node_runtime(
     let mut handoff_response = None;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
+        let ownership_frozen = ownership_freeze.observe().is_frozen();
         let snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {

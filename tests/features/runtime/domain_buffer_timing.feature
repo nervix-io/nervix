@@ -228,8 +228,8 @@ Feature: Domain-paced branch buffering
       | 1            |
       | 3            |
 
-  @domain_buffer_timing
-  Scenario Outline: A force flush releases ingestor route buffers held by slow domain time
+  @domain_buffer_timing @retained_task_handles
+  Scenario Outline: Retained task handles force-flush interleaved branches under slow domain time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -286,7 +286,7 @@ Feature: Domain-paced branch buffering
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SUBSCRIPTION held_subscription TO held_ingested;
+      CREATE SUBSCRIPTION held_subscription TO held_ingested WHERE sequence > 0;
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
     And http payload is posted to host "held-buffering-{{test_id}}.example.com" path "/events"
@@ -297,7 +297,26 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":1,"path":"held"}
       """
-    Then the relay subscription does not receive a payload within "2s"
+    And http payload is posted to host "held-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2,"path":"held"}
+      """
+    And http payload is posted to host "held-buffering-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2,"path":"held"}
+      """
+    When these NSPL commands are executed
+      """
+      DESCRIBE INGESTOR held_buffering_source;
+      """
+    Then the last command output contains
+      """
+      ready: true
+      """
+    And the last command output contains
+      """
+      transient error: -
+      """
     When these NSPL commands are executed
       """
       ALTER INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
@@ -306,6 +325,8 @@ Feature: Domain-paced branch buffering
       """
       {"path":"held","sequence":1,"tenant":"alpha"}
       {"path":"held","sequence":1,"tenant":"beta"}
+      {"path":"held","sequence":2,"tenant":"alpha"}
+      {"path":"held","sequence":2,"tenant":"beta"}
       """
 
     Examples:

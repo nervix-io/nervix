@@ -251,3 +251,13 @@ diagnostics through the existing control-plane and session surfaces. Runtime met
 report node or connector failures without exposing payloads. A recovery expansion reports when
 local entity replacement needed a wider rebuild. The execution plan itself is an internal,
 reconstructible artifact, so it is not an independently persisted or user-editable graph.
+
+## Task Dependency Binding
+
+Installation publishes bound message-error plans inside the domain routing snapshot. A failed
+record retains that snapshot while executing its prepared route. Entity state identity and
+checkpoint executors/replicas publish through one stable assignment slot before reset callbacks;
+WASM states retain that slot across schedule replacements. Task startup also binds connector
+status, accounting, metric, freeze and domain-clock dependencies. Their runtime registries serve
+registration, teardown and observers; recurring operations use the retained capabilities. See
+[Data-Plane Concurrency](./data-plane-concurrency.md#retained-task-dependencies).

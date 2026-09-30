@@ -1,5 +1,5 @@
 Feature: MySQL emission
-  @domain_execution_time
+  @domain_execution_time @retained_task_handles
   Scenario Outline: MySQL emitter inserts mapped rows from a relay
     Given MQTT is running
     And MySQL is running

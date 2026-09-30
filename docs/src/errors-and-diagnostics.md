@@ -786,3 +786,12 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+## Connector Status Observation
+
+Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
+operations read the retained status without writing it; a transition clears an active failure.
+Reporting a different error without selecting a new retry preserves the active retry. DESCRIBE
+renders error, backoff and remaining wait from one immutable observation. A failed record obtains
+its prepared message-error route from its task's retained routing publication and preserves that
+plan while its VM program and delivery execute.

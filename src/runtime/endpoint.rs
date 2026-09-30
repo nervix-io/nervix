@@ -43,6 +43,7 @@ pub(super) struct RoutedEndpoint {
 /// The intake one ingestor admits an endpoint's requests through, bound to every route the
 /// endpoint publishes while the ingestor's endpoint source runs.
 pub(crate) struct EndpointIngestBinding {
+    pub(super) handles: IngestTaskHandles,
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
@@ -246,6 +247,7 @@ impl Runtime {
                 let metadata = [payload.first_metadata_row()];
                 let dispatch_result = self
                     .dispatch_ingested_records(IngestGroupDispatch {
+                        handles: &binding.handles,
                         collector: &mut collector,
                         domain: &binding.domain,
                         ingestor: &binding.ingestor,
