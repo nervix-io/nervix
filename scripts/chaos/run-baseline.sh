@@ -1049,7 +1049,7 @@ select_run_network
 resolve_tool_image kafka "${CHAOS_KAFKA_IMAGE}"
 resolve_tool_image kcat "${CHAOS_KCAT_IMAGE}"
 resolve_tool_image probe "${CHAOS_PROBE_IMAGE}"
-if [[ "${scenario}" != "baseline" ]]; then
+if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
@@ -1079,9 +1079,6 @@ run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
     'test -x /usr/local/bin/nervix-server; test -x /usr/local/bin/nervix-cli' \
     || setup_error "image '${image_ref}' does not package executable nervix-server and nervix-cli binaries"
 
-ensure_tool_image "${CHAOS_KAFKA_IMAGE}"
-ensure_tool_image "${CHAOS_KCAT_IMAGE}"
-ensure_tool_image "${CHAOS_PROBE_IMAGE}"
 start_run_event_recording
 if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     [[ -S /var/run/docker.sock ]] \
