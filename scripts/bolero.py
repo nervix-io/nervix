@@ -18,7 +18,7 @@ import sys
 import time
 import tomllib
 from collections import Counter
-from typing import Any
+from typing import Any, Iterator
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tests/bolero-targets.toml"
@@ -26,6 +26,9 @@ RUNS = ROOT / "target/bolero/runs"
 QUALIFICATION = ROOT / "tests/bolero-qualification/Cargo.toml"
 TARGET_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 TEST_LINE = re.compile(r"^(\S+): test$", re.MULTILINE)
+# Cargo names every test executable it builds: a library's or binary's as `unittests <root>`, an
+# integration test's by its source path.
+EXECUTABLE = re.compile(r"Executable (?P<description>[^(]+?) \((?P<path>[^)]+)\)")
 MACRO = re.compile(r"\bbolero::check!\s*\(")
 UNQUALIFIED_CHECK = re.compile(r"(?<![:\w])check!\s*\(")
 FUNCTION = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(")
@@ -214,9 +217,24 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
     return False
 
 
+def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
+    for directory, children, files in os.walk(manifest.parent):
+        parent = pathlib.Path(directory)
+        # Nested Cargo packages own their Rust, including a workspace's qualification crate.
+        # Build output and Git metadata are not authored sources of the package being checked.
+        children[:] = sorted(
+            child for child in children
+            if child not in {".git", "target"}
+            and not (parent / child / "Cargo.toml").is_file()
+        )
+        for name in sorted(files):
+            if name.endswith(".rs"):
+                yield parent / name
+
+
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
     found = {}
-    for source in manifest.parent.rglob("*.rs"):
+    for source in package_rust_sources(manifest):
         content = source.read_text()
         for macro in MACRO.finditer(content):
             preceding = list(FUNCTION.finditer(content, 0, macro.start()))
@@ -583,19 +601,31 @@ def build_instrumented(
         target.test,
     ]
     build = command(args, timeout=1800, log=path / "build.log")
-    executables = re.findall(r"Executable [^(]+ \(([^)]+)\)", build.stdout)
+    executables = EXECUTABLE.findall(build.stdout)
+    matches = []
     if target.test_target == "lib":
-        prefix = target.package.replace("-", "_") + "-"
+        # A binary of the same name as the library builds a unit-test executable with the same
+        # file-name prefix, so the library's is told apart by the root cargo names it after.
+        library = f"unittests {library_root(target)}"
+        for description, executable in executables:
+            if description == library:
+                matches.append(ROOT / executable)
     else:
         prefix = target.test_target.removeprefix("test:") + "-"
-    matches = [
-        ROOT / executable
-        for executable in executables
-        if pathlib.Path(executable).name.startswith(prefix)
-    ]
+        for _, executable in executables:
+            if pathlib.Path(executable).name.startswith(prefix):
+                matches.append(ROOT / executable)
     if len(matches) != 1 or not matches[0].is_file():
         raise BoleroError(f"{target.id}: expected one instrumented {target.test_target} binary")
     return matches[0]
+
+
+def library_root(target: Target) -> str:
+    """The library root of a target's package, relative to the package, as cargo reports it."""
+    manifest_path = target.manifest or package_manifests()[target.package]
+    with manifest_path.open("rb") as file:
+        manifest = tomllib.load(file)
+    return manifest.get("lib", {}).get("path", "src/lib.rs")
 
 
 def run_instrumented(

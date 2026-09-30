@@ -36,7 +36,7 @@ pub(in crate::runtime) struct EndpointSource {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
     /// The ingestor whose intake the routes are bound to, while they are bound.
-    bound: Option<DomainNodeRef>,
+    bound: Option<EndpointBinding<EndpointIngestBinding>>,
 }
 
 #[async_trait]
@@ -60,30 +60,26 @@ impl SourceConnector for EndpointSource {
 impl EndpointSource {
     /// Binds every route to `intake`, so the requests arriving on it enter the host.
     fn bind(&mut self, intake: EndpointIngestBinding) {
-        for route in &self.routes {
-            self.runtime
-                .inner
-                .endpoint_bindings
-                .entry(route.clone())
-                .or_default()
-                .push(intake.clone());
-        }
-        self.bound = Some(intake.runtime_key);
+        let identity = DomainNodeRef::node_in(
+            intake.domain.clone(),
+            ModelKind::Ingestor,
+            intake.ingestor.clone(),
+        );
+        self.bound = Some(self.runtime.inner.endpoint_intake_routes.bind(
+            identity,
+            intake,
+            &self.routes,
+        ));
     }
 
     fn unbind(&mut self) {
-        let Some(runtime_key) = self.bound.take() else {
+        let Some(binding) = self.bound.take() else {
             return;
         };
-        let bindings = &self.runtime.inner.endpoint_bindings;
-        for route in &self.routes {
-            if let Some(mut bound) = bindings.get_mut(route) {
-                bound.retain(|binding| binding.runtime_key != runtime_key);
-            }
-            // Removing only an emptied entry, under the same shard lock that checks it, keeps a
-            // binding another ingestor added to the route in the meantime.
-            bindings.remove_if(route, |_, bound| bound.is_empty());
-        }
+        self.runtime
+            .inner
+            .endpoint_intake_routes
+            .unbind(&binding, &self.routes);
     }
 }
 
@@ -177,6 +173,7 @@ mod tests {
         ParseAsType, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
         VhostName, WireSchemaField, WireSchemaName,
     };
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nonzero_ext::nonzero;
 
     use super::*;
@@ -288,42 +285,127 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn endpoint_requests_reuse_bound_routes() {
+        struct RouteReferences {
+            routes: Arc<BoundIngestorRoutes>,
+            observed: AtomicUsize,
+        }
+
+        impl nervix_connector::IngestMessageHeaders for RouteReferences {
+            fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {
+                self.observed
+                    .store(Arc::strong_count(&self.routes), Ordering::Relaxed);
+            }
+        }
+
+        let domain = domain("endpoint_reuse");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .assured("the fixture installs its endpoint route");
+        let routes = route.bindings()[0]
+            .intake()
+            .as_deref()
+            .assured("the fixture starts its endpoint source")
+            .output_routes
+            .clone();
+        let probe = RouteReferences {
+            routes,
+            observed: AtomicUsize::new(0),
+        };
+        let references = Arc::strong_count(&probe.routes);
+        for _ in 0..4 {
+            let outcome = route.dispatch(&runtime, br#"{"user_id":7}"#, &probe).await;
+            assert!(outcome.is_accepted());
+            assert_eq!(
+                probe.observed.load(Ordering::Relaxed),
+                references,
+                "request routing must borrow the prepared routes without cloning the intake"
+            );
+        }
+        runtime.shutdown().await;
+    }
+
+    #[cfg(feature = "benchmarks")]
+    #[nervix_primitives::test]
+    #[ignore = "same-host routing and allocation measurement"]
+    async fn endpoint_routing_cost() {
+        let domain = domain("endpoint_cost");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let allocated = tikv_jemalloc_ctl::thread::allocatedp::read()
+            .assured("the server test allocator uses jemalloc");
+        for sample in 0..5 {
+            let before = allocated.get();
+            let started = nervix_primitives::time::Instant::now();
+            for _ in 0..10_000 {
+                nervix_primitives::task::consume_budget().await;
+                let route = runtime
+                    .resolve_endpoint("edge.example.com", "/events")
+                    .assured("the benchmark route remains installed");
+                std::hint::black_box(route.endpoint_type());
+                std::hint::black_box(route.admission());
+            }
+            println!(
+                "endpoint-routing sample={sample} ns_per_request={} allocated_bytes_per_request={}",
+                started.elapsed().as_nanos() / 10_000,
+                allocated
+                    .get()
+                    .checked_sub(before)
+                    .assured("the sample allocation counter does not wrap")
+                    / 10_000
+            );
+        }
+        let retained = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .assured("the benchmark route remains installed");
+        for sample in 0..5 {
+            let before = allocated.get();
+            let started = nervix_primitives::time::Instant::now();
+            for _ in 0..10_000 {
+                nervix_primitives::task::consume_budget().await;
+                std::hint::black_box(retained.admission());
+            }
+            println!(
+                "endpoint-retained sample={sample} ns_per_frame={} allocated_bytes_per_frame={}",
+                started.elapsed().as_nanos() / 10_000,
+                allocated
+                    .get()
+                    .checked_sub(before)
+                    .assured("the sample allocation counter does not wrap")
+                    / 10_000
+            );
+        }
+        runtime.shutdown().await;
+    }
+
+    #[nervix_primitives::test]
     async fn endpoint_source_binds_its_routes_while_its_ingestor_runs() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
-        let route = HttpRouteKey {
-            host: "edge.example.com".to_string(),
-            path: "/events".to_string(),
-        };
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .assured("a running endpoint ingestor publishes its route");
         let runtime_key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
 
         // The routes are bound before the start returns, so a request that arrives right after it
         // is admitted, and the source counts as ready at once.
-        let bindings = runtime
-            .inner
-            .endpoint_bindings
-            .get(&route)
-            .expect("a running endpoint ingestor binds its route");
-        let bound = bindings
+        let bound = route
+            .bindings()
             .iter()
-            .map(|binding| binding.runtime_key.clone())
+            .map(|binding| binding.identity().clone())
             .collect::<Vec<_>>();
-        drop(bindings);
         assert_eq!(bound, vec![runtime_key]);
         let describe = runtime
             .describe_local_ingestor(&domain, &ingestor)
             .expect("describe should represent the running ingestor");
         assert!(describe.running);
         assert!(describe.ready);
-        let outcome = runtime
-            .dispatch_http_payload(
-                "edge.example.com",
-                "/events",
-                br#"{"user_id":7}"#,
-                &NoIngestHeaders,
-            )
+        let outcome = route
+            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
             .await;
         assert!(outcome.is_accepted());
 
@@ -332,17 +414,13 @@ mod tests {
             .await
             .expect("the running endpoint ingestor stops");
 
-        assert!(
-            !runtime.inner.endpoint_bindings.contains_key(&route),
-            "a stopped endpoint ingestor must leave no binding on its route"
-        );
-        let outcome = runtime
-            .dispatch_http_payload(
-                "edge.example.com",
-                "/events",
-                br#"{"user_id":8}"#,
-                &NoIngestHeaders,
-            )
+        let current = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .assured("source stop retains the configured endpoint");
+        assert!(current.bindings().is_empty());
+        assert!(route.bindings()[0].intake().is_none());
+        let outcome = route
+            .dispatch(&runtime, br#"{"user_id":8}"#, &NoIngestHeaders)
             .await;
         assert!(!outcome.is_accepted());
     }

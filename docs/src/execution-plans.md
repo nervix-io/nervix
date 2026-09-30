@@ -118,6 +118,14 @@ bound on every live node regardless of domain status, leadership, or placement; 
 does not admit its graph's traffic. Resuming or changing the domain start version builds the
 appropriate running revision rather than treating passive state as an active task graph.
 
+Server endpoint installation replaces that domain's complete set of host-and-path definitions in
+the node's immutable intake table. Source starts bind prepared intake lifetimes to the same table;
+source ending and domain teardown end those lifetimes before withdrawing them. Other domains'
+definitions and intakes survive the replacement. Passive execution keeps endpoint definitions for
+inspection but publishes none for request routing. HTTP resolves one route per request and a
+WebSocket retains the route and signaling protocol selected at upgrade. The detailed admission and
+publication contract remains in [Data-Plane Concurrency](./data-plane-concurrency.md).
+
 [Data-Plane Concurrency](./data-plane-concurrency.md) owns the publication and branch refresh
 protocols. [Domain Clock](./domain-clock.md) owns the execution-time capability bound during
 installation. [Client Session Protocol](./client-session-protocol.md) owns how a client observes

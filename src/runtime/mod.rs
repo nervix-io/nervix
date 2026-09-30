@@ -216,6 +216,7 @@ mod emitter_supervision;
 mod emitter_task;
 mod emitter_values;
 mod endpoint;
+mod endpoint_route_table;
 mod entity_gate;
 mod entrypoint_routes;
 mod error;
@@ -371,9 +372,9 @@ use emitter_task::{
 use emitter_values::{
     MappedRequestSink, MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit,
 };
-use endpoint::{
-    EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
-};
+pub(crate) use endpoint::ResolvedEndpointRoute;
+use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
+use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeRoutes};
 pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,

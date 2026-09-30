@@ -118,12 +118,8 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeRef, Arc<client_emitter::ClientEmitterEndpoint>, RandomState>,
     /// The node's independent native-output byte reservation.
     pub(in crate::runtime) client_emitter_budget: client_emitter::ClientEmitterBudget,
-    pub(in crate::runtime) endpoint_bindings:
-        DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
-    /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so
-    /// request routing never scans domain executions or their configured routes.
-    pub(in crate::runtime) routed_endpoints:
-        DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
+    /// Endpoint definitions and bound source lifetimes share one immutable publication.
+    pub(in crate::runtime) endpoint_intake_routes: EndpointIntakeRoutes<EndpointIngestBinding>,
     pub(in crate::runtime) relay_boundary_fanouts: RelayBoundaryFanoutMap,
     pub(in crate::runtime) events: RuntimeEvents,
     /// The test harness keeps another handle to the same injected state and arms it while this

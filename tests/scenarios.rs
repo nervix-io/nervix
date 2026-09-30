@@ -150,6 +150,7 @@ mod client_producers;
 mod common;
 mod database_batches;
 mod domain_clock_attachment;
+mod endpoint_intake;
 mod ingestion_time;
 mod process_cluster;
 mod session_protocol;
@@ -275,6 +276,7 @@ struct ScenarioWorld {
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
+    endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     transaction_clients: BTreeMap<String, Client>,
     /// Rows a named client received and a step has not taken yet, as the client displays them.
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
