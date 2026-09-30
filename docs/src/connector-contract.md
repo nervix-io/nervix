@@ -8,6 +8,8 @@ the resulting Arrow batches inside the graph.
 
 [Execution Plans](./execution-plans.md) describes how one committed revision supplies those typed
 source and sink plans to the host.
+[HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
+outbound request, from Arrow preparation to response and recovery.
 
 ## Ownership and dependency direction
 

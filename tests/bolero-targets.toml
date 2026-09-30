@@ -76,3 +76,17 @@ random_iterations = 256
 source = "crates/backup/src/tests.rs"
 test = "tests::bolero_domain_records_and_manifests_round_trip"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/__fuzz__/tests__requests__bolero_processor_choice_request_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-processor-choice-request"
+invariant = "Processor choice requests with a current target, relay context, search, page and identity decode to the complete original message."
+max_input_bytes = 32
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/requests.rs"
+test = "tests::requests::bolero_processor_choice_request_round_trip"
+test_target = "lib"
