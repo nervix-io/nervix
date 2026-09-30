@@ -5,18 +5,21 @@
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
 
+use std::sync::Arc as StdArc;
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    DomainClockAuthority, DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState,
-    DomainStatus, EmitterName, ErrorPolicies, FieldName, ParseAsType, PlacementPolicy,
-    ResolvedCodecWireFormat, SchemaName, Timestamp,
+    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainStartPoint,
+    DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
+    PlacementPolicy, ResolvedCodecWireFormat, SchemaName, Timestamp,
 };
 
 use super::{
-    BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle, EmitterPublishBatch,
-    EmitterSinkContext, Executor, RelayMessage, RelayRecordBatch, Runtime,
-    emitter_encoding::encode_pending_broker_payloads, prepare_branched_entrypoint_input,
+    ArcSwap, BranchInstanceAckBoundary, BranchKey, BranchMetricsMark, CompiledCodec,
+    DomainClockLifecycle, DomainRoutingSnapshot, EmitterPublishBatch, EmitterSinkContext, Executor,
+    RelayMessage, RelayRecordBatch, Runtime, emitter_encoding::encode_pending_broker_payloads,
+    prepare_branched_entrypoint_input,
 };
 use crate::{
     runtime_ack::AckSet,
@@ -212,12 +215,19 @@ impl TransformedEncodingBenchmark {
         let clock = lifecycle
             .bind()
             .assured("the benchmark installs its unpaced domain clock above");
+        let emitter = identifier::<EmitterName>("admitted_work_emitter");
+        let node = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+        let node_runtime = Runtime::new();
         Self {
             runtime: benchmark_runtime(),
             context: EmitterSinkContext {
-                runtime: Runtime::new(),
+                routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+                metrics_dirty: BranchMetricsMark::default(),
+                status: node_runtime.emitter_status(&node),
+                confirmation_waits: node_runtime.emitter_confirmation_counter(&node),
+                runtime: node_runtime,
                 domain,
-                emitter: identifier::<EmitterName>("admitted_work_emitter"),
+                emitter,
                 error_policies: ErrorPolicies::handled_by_log(),
                 udfs: None,
                 clock,
