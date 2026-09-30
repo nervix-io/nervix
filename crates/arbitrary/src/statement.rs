@@ -932,12 +932,12 @@ impl Arbitrary<'_> {
         match self.entropy.byte() % choices {
             0 => AlterProcessorOperation::AddFrom {
                 relay: self.name(),
-                where_clause: self.filter_expression(),
+                where_clause: self.optional_expression(),
             },
             1 => AlterProcessorOperation::DropFrom { relay: self.name() },
             2 => AlterProcessorOperation::AlterFromSetWhere {
                 relay: self.name(),
-                where_clause: self.required_filter_expression(),
+                where_clause: self.expression(),
             },
             3 => AlterProcessorOperation::AlterFromDropWhere { relay: self.name() },
             4 => AlterProcessorOperation::SetCollect {
@@ -945,7 +945,7 @@ impl Arbitrary<'_> {
             },
             5 => AlterProcessorOperation::DropCollect,
             6 => AlterProcessorOperation::SetFilterWhere {
-                where_clause: self.required_filter_expression(),
+                where_clause: self.expression(),
             },
             7 => AlterProcessorOperation::DropFilterWhere,
             8 => AlterProcessorOperation::SetMode {
@@ -996,7 +996,7 @@ impl Arbitrary<'_> {
         match self.entropy.byte() % 16 {
             0 => AlterEmitterOperation::AddFrom {
                 relay: self.name(),
-                where_clause: self.filter_expression(),
+                where_clause: self.optional_expression(),
             },
             1 => AlterEmitterOperation::DropFrom { relay: self.name() },
             2 => AlterEmitterOperation::AlterFromSetWhere {

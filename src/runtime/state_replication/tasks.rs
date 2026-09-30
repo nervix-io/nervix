@@ -41,9 +41,12 @@ impl Runtime {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &store) {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    state.read().placement(), lsm,
-                                ),
+                                Ok(Some(lsm)) => {
+                                    let offsets = state.read();
+                                    runtime.announce_checkpoint(
+                                        offsets.placement(), offsets.replication(), lsm,
+                                    );
+                                }
                                 Ok(None) => {}
                                 Err(error) => warn!(error = %error, "failed to flush kafka offset snapshot during shutdown"),
                             }
@@ -52,9 +55,12 @@ impl Runtime {
                     }
                     _ = sleep(snapshot_interval) => {
                         match flush_latest_snapshot(&state, &store) {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                state.read().placement(), lsm,
-                            ),
+                            Ok(Some(lsm)) => {
+                                let offsets = state.read();
+                                runtime.announce_checkpoint(
+                                    offsets.placement(), offsets.replication(), lsm,
+                                );
+                            }
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist kafka offset snapshot"),
                         }
@@ -97,8 +103,8 @@ impl Runtime {
                                 );
                             }
                             match state.persist_published(&store, &runtime.inner.executor).await {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    state.placement(), lsm,
+                                Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                    state.placement(), state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
                                 Err(error) => warn!(
@@ -123,8 +129,8 @@ impl Runtime {
                         }
                         next_persist = Instant::now() + snapshot_interval;
                         match state.persist_published(&store, &runtime.inner.executor).await {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                state.placement(), lsm,
+                            Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                state.placement(), state.replication(), lsm,
                             ),
                             Ok(None) => {}
                             Err(error) => warn!(
@@ -202,9 +208,12 @@ impl Runtime {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &store).await {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    state.read().placement(), lsm,
-                                ),
+                                Ok(Some(lsm)) => {
+                                    let materialized = state.read();
+                                    runtime.announce_checkpoint(
+                                        materialized.placement(), materialized.replication(), lsm,
+                                    );
+                                }
                                 Ok(None) => {}
                                 Err(error) => warn!(error = %error, "failed to flush materialized relay snapshot during shutdown"),
                             }
@@ -213,9 +222,12 @@ impl Runtime {
                     }
                     _ = sleep(snapshot_interval) => {
                         match flush_latest_snapshot(&state, &store).await {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                state.read().placement(), lsm,
-                            ),
+                            Ok(Some(lsm)) => {
+                                let materialized = state.read();
+                                runtime.announce_checkpoint(
+                                    materialized.placement(), materialized.replication(), lsm,
+                                );
+                            }
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist materialized relay snapshot"),
                         }
@@ -264,8 +276,8 @@ impl Runtime {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &metrics, &store) {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    &state.placement, lsm,
+                                Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                    &state.placement, state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
                                 Err(error) => warn!(error = %error, "failed to flush branch-aggregated state snapshot during shutdown"),
@@ -275,8 +287,8 @@ impl Runtime {
                     }
                     _ = sleep(snapshot_interval) => {
                         match flush_latest_snapshot(&state, &metrics, &store) {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                &state.placement, lsm,
+                            Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                &state.placement, state.replication(), lsm,
                             ),
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist branch-aggregated state snapshot"),
@@ -296,17 +308,17 @@ impl Runtime {
         let primary_node = offsets.primary_node()?;
         let placement = offsets.placement().clone();
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(&placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(nervix_primitives::task::spawn(async move {
+            let offsets = state.read();
             let mut initial_sync_pending = true;
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        offsets.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -315,7 +327,7 @@ impl Runtime {
                     break;
                 }
                 initial_sync_pending = false;
-                let after_lsm = state.read().current_lsm();
+                let after_lsm = offsets.current_lsm();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
@@ -388,7 +400,7 @@ impl Runtime {
             None,
         )?;
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(&branch_lru);
+        let lifecycle = self.replicated_branch_lifecycle(&branch_lru);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Ok(Some(nervix_primitives::task::spawn(async move {
@@ -398,7 +410,7 @@ impl Runtime {
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        lifecycle.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -445,17 +457,11 @@ impl Runtime {
                 let Some(state_kind) = state_kind else {
                     continue;
                 };
-                let branch_snapshot = match runtime
-                    .inner
-                    .replicated_branch_lru_snapshots
-                    .get(&branch_lru)
-                    .map(|snapshot| snapshot.clone())
-                {
-                    Some(snapshot) => snapshot,
-                    None => continue,
+                let Some(held) = lifecycle.latest() else {
+                    continue;
                 };
-                let branches = match decode_branch_lru_snapshot(&branch_snapshot.payload) {
-                    Ok(branches) => branches,
+                let branches = match held.branches() {
+                    Ok(branches) => branches.keys(),
                     Err(error) => {
                         warn!(
                             error = %error,
@@ -471,7 +477,7 @@ impl Runtime {
                         state_kind,
                         branch_lru.kind,
                         branch_lru.identifier.clone(),
-                        branch.key,
+                        branch,
                     ) {
                         Ok(placement) => placement,
                         Err(error) => {
@@ -524,17 +530,17 @@ impl Runtime {
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.read().primary_node()?;
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(state.read().placement());
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(nervix_primitives::task::spawn(async move {
+            let materialized = state.read();
             let mut initial_sync_pending = true;
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        materialized.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -543,11 +549,11 @@ impl Runtime {
                     break;
                 }
                 initial_sync_pending = false;
-                let after_lsm = state.read().current_lsm();
+                let after_lsm = materialized.current_lsm();
                 match runtime
                     .install_materialized_snapshot_from(
                         &primary_node,
-                        state.read(),
+                        materialized,
                         &state,
                         Some(after_lsm),
                     )
@@ -563,7 +569,7 @@ impl Runtime {
                                     Envelope::Control(
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
-                                                placement: state.read().placement().to_remote(),
+                                                placement: materialized.placement().to_remote(),
                                                 lsm: revision,
                                             },
                                         ),
@@ -590,7 +596,6 @@ impl Runtime {
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.primary_node()?;
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(&state.placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(nervix_primitives::task::spawn(async move {
@@ -600,7 +605,7 @@ impl Runtime {
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        state.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -1056,19 +1061,13 @@ impl Runtime {
                 .remove(&placement);
         }
         self.inner
-            .replicated_branch_lru_snapshots
+            .replicated_branch_lifecycles
             .retain(|placement, _| &placement.domain != domain);
         self.inner
             .passive_runtime_state_snapshots
             .retain(|placement, _| &placement.domain != domain);
         self.inner
             .pending_state_replica_syncs
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .pending_state_checkpoint_announcements
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .state_checkpoint_notifications
             .retain(|placement, _| &placement.domain != domain);
     }
 }

@@ -3,6 +3,7 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     CreateSignalingProtocol, CreateStatement, RequestedResourceVersion, SignalingProtobufConfig,
     SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    parse_duration_text,
 };
 
 use crate::{
@@ -173,7 +174,7 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
         .boxed()
         .then_ignore(kw(Identifier::Timeout))
         .then(duration_lit().try_map(|timeout, span| {
-            humantime::parse_duration(&timeout)
+            parse_duration_text(&timeout)
                 .map(|_| timeout.clone())
                 .map_err(|error| {
                     Rich::custom(span, format!("invalid duration '{timeout}': {error}"))
@@ -284,6 +285,31 @@ mod tests {
         );
         assert!(parsed.on_connect.fail_matchers.is_empty());
         assert_eq!(parsed.on_connect.timeout, "5s");
+    }
+
+    #[test]
+    fn signaling_timeout_says_why_its_text_names_no_duration() {
+        let error = crate::statement::parse_statement(
+            "CREATE SIGNALING PROTOCOL guarded FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ \
+             '.id == 1' TIMEOUT oops;",
+        )
+        .expect_err("the timeout names no duration");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid duration 'oops': expected number at 0"),
+            "{error}"
+        );
+
+        // The duration literal itself refuses the text before the protocol reads it.
+        let too_long = crate::statement::parse_statement(
+            "CREATE SIGNALING PROTOCOL guarded FORMAT JSON ON CONNECT SEND JAQ '{id: 1}' WAIT JAQ \
+             '.id == 1' TIMEOUT 18446744073709551615s;",
+        );
+        assert!(
+            too_long.is_err(),
+            "the timeout is longer than a duration can be"
+        );
     }
 
     #[test]

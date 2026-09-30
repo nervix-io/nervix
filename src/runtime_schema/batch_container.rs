@@ -32,8 +32,8 @@ use prost::encoding::{WireType, encode_key, encode_varint};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::{
-    ArrowCodecRow, CodecError, CompiledCodec, CompiledCodecBatchEncoder, CompiledWireSchema,
-    PayloadLimitExceeded, encode_protobuf_payload, run_jaq_transformation,
+    ArrowCodecRow, CodecContractError, CodecError, CompiledCodec, CompiledCodecBatchEncoder,
+    CompiledWireSchema, PayloadLimitExceeded, encode_protobuf_payload, run_jaq_transformation,
     syslog::SyslogBatchMember,
 };
 
@@ -205,18 +205,10 @@ impl CompiledCodecBatchEncoder<'_> {
         let codec = self.codec;
         self.check_row(row_index)?;
         let Some(program) = codec.on_emitting() else {
-            return Err(Report::new(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: "codec used for encoding must declare ON EMITTING transformation"
-                    .to_string(),
-            }));
+            return Err(codec.contract_violation(CodecContractError::OnEmittingRequired));
         };
         let row = ArrowCodecRow::new(codec, self.batch, row_index);
-        Ok(run_jaq_transformation(
-            codec,
-            program,
-            row.to_json_value()?,
-        )?)
+        run_jaq_transformation(codec, program, row.to_json_value()?)
     }
 }
 

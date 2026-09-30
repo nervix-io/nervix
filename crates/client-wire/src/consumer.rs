@@ -12,7 +12,8 @@ use bytes::Bytes;
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
-    AckWindow, ClientConsumerLimits, DomainName, EmitterName, RelayName, SchemaField, Timestamp,
+    AckWindow, ClientConsumerLimits, ClientEndpointContract, DomainName, EmitterName, RelayName,
+    SchemaField, Timestamp,
 };
 use uuid::Uuid;
 
@@ -301,6 +302,8 @@ pub struct EmitterOpened {
     pub domain: DomainName,
     pub emitter: EmitterName,
     pub fields: Vec<SchemaField>,
+    pub generation: u64,
+    pub contract: ClientEndpointContract,
     pub window: AckWindow,
     pub ack_timeout: Duration,
     pub retry_backoff: Duration,
@@ -396,6 +399,7 @@ impl EmitterOpened {
             encoder.table_vector("EmitterOpened.fields", &self.fields, |field, encoder| {
                 encode_field(field, encoder, OPENED_FIELD_DEPTH)
             })?;
+        let contract = encoder.fingerprint("EmitterOpened.contract", self.contract.as_digest())?;
         let window = match self.window {
             AckWindow::Sequential => EncodedUnion::new(
                 wire::ConsumerWindow::SequentialConsumerWindow,
@@ -418,6 +422,8 @@ impl EmitterOpened {
                 domain: Some(domain),
                 emitter: Some(emitter),
                 fields: Some(fields),
+                generation: self.generation,
+                contract: Some(contract),
                 window_type: window.discriminant,
                 window: Some(window.value),
                 ack_timeout_nanos: encode_nanos(
@@ -454,6 +460,9 @@ impl EmitterOpened {
                 field: "EmitterOpened.fields",
             }));
         }
+        let contract = ClientEndpointContract::from_digest(
+            decoder.fingerprint("EmitterOpened.contract", opened.contract())?,
+        );
         let window = if opened.window_as_sequential_consumer_window().is_some() {
             AckWindow::Sequential
         } else if let Some(parallel) = opened.window_as_parallel_consumer_window() {
@@ -509,6 +518,8 @@ impl EmitterOpened {
             domain,
             emitter,
             fields,
+            generation: opened.generation(),
+            contract,
             window,
             ack_timeout,
             retry_backoff,

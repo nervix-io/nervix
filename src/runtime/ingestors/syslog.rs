@@ -9,11 +9,13 @@
 //! - **Must not know.** Syslog socket drivers, framing, TLS configuration, NSPL parsing, registry
 //!   validation, or placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_syslog::{SyslogSource, SyslogSourcePlan};
 use nervix_models::IngestAcknowledgement;
 
 use super::{
     super::*,
+    IngestorStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -22,19 +24,15 @@ impl SyslogIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let SyslogIngestorStartPlan { client } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let connector = SyslogSourcePlan::new(resolved.entries, |configured| {
             runtime.syslog_ingestor_bind_addr(configured)
         })
-        .map_err(|report| RuntimeError::SyslogSourcePlan {
-            domain: ingestor.domain.clone(),
-            ingestor: ingestor.name.clone(),
-            report,
-        })?;
+        .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
             instances: NonZeroU64::MIN,

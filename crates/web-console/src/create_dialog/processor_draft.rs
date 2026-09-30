@@ -584,8 +584,9 @@ pub(super) enum ProcessorDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        BranchName, CreateStatement, FieldName, MaterializedStatePolicy, Model, ModelName,
-        OutputBranch, RequestedResourceVersion, Statement,
+        BinaryOperator, BranchName, CreateStatement, Expression, FieldName, FieldReference,
+        FieldScope, Literal, MaterializedStatePolicy, Model, ModelName, OutputBranch,
+        RequestedResourceVersion, Statement,
     };
     use nervix_nspl::statement::parse_statement;
 
@@ -752,6 +753,34 @@ mod tests {
         assert_eq!(
             parse_statement(&canonical).assured("canonical junction parses"),
             statement
+        );
+    }
+
+    #[test]
+    fn input_predicates_and_filters_read_a_backslash_in_a_string_literal_verbatim() {
+        let mut draft = complete(ProcessorFamily::Junction);
+        draft.inputs[0].where_clause = r"input.message = 'a\nb'".into();
+        draft.filter = r#"input.message != "c\'d""#.into();
+        let built = draft.build_junction().assured("complete junction builds");
+        let message = Expression::Field(FieldReference::scoped(
+            FieldScope::Input,
+            FieldName::parse("message").assured("valid field"),
+        ));
+        assert_eq!(
+            built.from.r#where[0].where_clause,
+            Expression::Binary {
+                operator: BinaryOperator::Equal,
+                left: Box::new(message.clone()),
+                right: Box::new(Expression::Literal(Literal::String(r"a\nb".to_string()))),
+            }
+        );
+        assert_eq!(
+            built.filter_where,
+            Some(Expression::Binary {
+                operator: BinaryOperator::NotEqual,
+                left: Box::new(message),
+                right: Box::new(Expression::Literal(Literal::String(r"c\'d".to_string()))),
+            })
         );
     }
 

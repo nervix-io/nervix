@@ -259,8 +259,11 @@ relay. Do not use them to scan across branches.
   source: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO_ACK`. The schema is the exact
   contract producers declare, including optionality and sensitivity, and a paced domain requires
   its timestamp source. Changing its schema, mode, timestamp, filter, routes other than `FLUSH`, or
-  branch declarations ends attached producers. A row that fails on a route follows that route's
-  `ON MESSAGE ERROR` policy, so under `LOG` its whole batch fails processing as `rejected`.
+  branch declarations ends attached producers. The Rust client may restore a producer handle with a
+  fresh attachment after a session gap or relocation only when the domain `START` generation and
+  endpoint contract still match; unresolved sent batches remain of unknown outcome. A row that
+  fails on a route follows that route's `ON MESSAGE ERROR` policy, so under `LOG` its whole batch
+  fails processing as `rejected`.
 - Every client emitter declares `TO CLIENT SCHEMA <output_schema> MODE ACK SEQUENTIAL|ACK
   PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`, a required `BATCH` row and
   byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
@@ -268,8 +271,10 @@ relay. Do not use them to scan across branches.
   `ON MESSAGE ERROR`. There is no external client, codec, header operation, or direct `VALUES`
   body. An attached emitter holds source acknowledgement until the application ACKs; a detached
   emitter releases the source earlier. Consumers compete for output and are volatile across
-  session or owner loss, so applications must handle a repeated delivery identity with a fresh
-  ACK reference.
+  session or owner loss. The Rust client may restore a matching consumer handle with a fresh
+  attachment, but reports the gap before new output and never sends an old delivery reference to
+  the replacement. Applications must handle a repeated delivery identity with a fresh ACK
+  reference and uncertain ACK confirmation.
 - HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` use domain-logical cadence. HTTP and
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the

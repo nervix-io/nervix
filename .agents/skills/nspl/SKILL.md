@@ -322,7 +322,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
   until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
   and delivery identity but use a fresh reference. Consumers are volatile across owner and
-  session loss; design application effects for duplicates. Read `Emitters` → `Client emitters`,
+  session loss; the Rust client may restore the same handle with a fresh attachment only when the
+  domain `START` generation and endpoint contract still match. The first read after a session gap
+  or endpoint relocation reports interruption, and an old delivery reference cannot ACK a
+  replacement attempt. Design
+  application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
@@ -413,12 +417,19 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   BACKOFF <d> MAX <d> ON QUIESCE SUSPEND`, with no client, codec, headers, or `NO_ACK`. Producers are
   opened through the client library or session protocol, not with a statement. Read `Ingestors` →
   `Client Ingestors` before explaining outcomes, limits, or what ends a producer, and never promise
-  that a batch whose outcome is unknown or failed had no effect.
+  that a batch whose outcome is unknown or failed had no effect. The Rust client restores a desired
+  producer across a session gap or relocation only while the domain `START` generation and endpoint
+  contract still match; it never resends a batch merely because its outcome is missing.
 - End every transport ingestor source specification with an explicit source-supported `ON QUIESCE`
   body immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
   explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include `RETRY AFTER` for endpoint
   `REJECT`. Use MQTT `SUSPEND` only with `SESSION PERSISTENT QOS 1`. Do not invent a default or use a
   mode offered by another source type.
+- A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
+  its source stops or is replaced, reconnect to use the new source; after signaling, the next
+  refused payload on the preceding connection closes with 1013. Configured routes without a live
+  intake reject with HTTP 503, while withdrawn routes return 404. Another domain sharing the host
+  and path retains its own intake when a domain is stopped.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.

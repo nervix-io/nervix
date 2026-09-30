@@ -251,38 +251,14 @@ impl Runtime {
         domain: &DomainName,
         execution: &DomainExecution,
     ) {
-        if execution.passive_only {
-            return;
-        }
-        for (key, endpoint) in execution.routed_endpoints() {
-            self.inner
-                .routed_endpoints
-                .entry(key)
-                .or_default()
-                .insert(domain.clone(), endpoint);
-        }
-    }
-
-    /// Withdraws an execution's endpoint routes from the routing index. Called with the execution
-    /// that has just been removed, so only the routes that domain published are dropped.
-    pub(super) fn withdraw_routed_endpoints(
-        &self,
-        domain: &DomainName,
-        execution: &DomainExecution,
-    ) {
-        for (key, _) in execution.routed_endpoints() {
-            let Some(mut domains) = self.inner.routed_endpoints.get_mut(&key) else {
-                continue;
-            };
-            domains.remove(domain);
-            let emptied = domains.is_empty();
-            drop(domains);
-            if emptied {
-                self.inner
-                    .routed_endpoints
-                    .remove_if(&key, |_, domains| domains.is_empty());
-            }
-        }
+        let definitions = if execution.passive_only {
+            Vec::new()
+        } else {
+            execution.routed_endpoints().collect()
+        };
+        self.inner
+            .endpoint_intake_routes
+            .replace_domain(domain, definitions);
     }
 
     pub(in crate::runtime) async fn rebuild_domain_from_revision(
@@ -390,15 +366,15 @@ impl Runtime {
             let Some(acknowledgement) = plan.transport_acknowledgement() else {
                 continue;
             };
-            if let Err(error) =
+            if let Err(report) =
                 Self::parse_ingest_acknowledgement(domain, &plan.ingestor.name, acknowledgement)
             {
                 self.record_ingestor_transient_error(
                     domain,
                     &plan.ingestor.name,
-                    error.to_string(),
+                    format!("{report:#}"),
                 );
-                return Err(error);
+                return Err(RuntimeError::IngestorStart { report });
             }
         }
         for wasm in resource_plans.wasm.values() {
@@ -918,10 +894,10 @@ impl Runtime {
         for plan in local_ingestors {
             let ingestor_name = &plan.ingestor.name;
             self.clear_ingestor_transient_error(domain, ingestor_name);
-            if let Err(error) = Box::pin(self.start_ingestor(&plan)).await {
-                self.record_ingestor_transient_error(domain, ingestor_name, error.to_string());
+            if let Err(report) = Box::pin(self.start_ingestor(&plan)).await {
+                self.record_ingestor_transient_error(domain, ingestor_name, format!("{report:#}"));
                 Box::pin(self.abort_domain_execution_start(domain)).await;
-                return Err(error);
+                return Err(RuntimeError::IngestorStart { report });
             }
         }
 

@@ -1,4 +1,4 @@
-//! Three real `nervix-server` processes with separate durable stores and shared membership.
+//! One or three real `nervix-server` processes with separate durable stores and shared membership.
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
@@ -45,6 +45,14 @@ pub(crate) struct ServerProcessCluster {
 
 impl ServerProcessCluster {
     pub(crate) async fn start(options: &[ServerProcessOption]) -> io::Result<Self> {
+        Self::start_sized(NODE_COUNT, options).await
+    }
+
+    pub(crate) async fn start_sized(
+        node_count: usize,
+        options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
+        assert!(matches!(node_count, 1 | NODE_COUNT));
         let root = tempfile::Builder::new()
             .prefix("nervix-server-process-cluster-")
             .tempdir()?;
@@ -64,7 +72,7 @@ impl ServerProcessCluster {
         let bootstrap_host = bootstrap.interconnect_endpoint();
         let mut nodes = BTreeMap::new();
         nodes.insert("node-1".to_string(), bootstrap);
-        for index in 2..=NODE_COUNT {
+        for index in 2..=node_count {
             nervix_primitives::task::consume_budget().await;
             let node_id = format!("node-{index}");
             let node_root = tempfile::Builder::new()
@@ -120,7 +128,7 @@ impl ServerProcessCluster {
     }
 
     /// Starts an exited member again from its own database and ports, then waits until every
-    /// member reports the same leader and all three voters.
+    /// member reports the same leader and all configured voters.
     pub(crate) async fn restart(&mut self, node_id: &str) -> io::Result<()> {
         self.member_mut(node_id)?.restart().await?;
         self.wait_for_voters().await
@@ -263,8 +271,8 @@ impl ServerProcessCluster {
                 } else {
                     ready = false;
                 }
-                for index in 1..=NODE_COUNT {
-                    if !status.contains(&format!("- node-{index} [voter]")) {
+                for member in self.nodes.keys() {
+                    if !status.contains(&format!("- {member} [voter]")) {
                         ready = false;
                     }
                 }
@@ -275,7 +283,7 @@ impl ServerProcessCluster {
             }
             if deadline.has_passed() {
                 return Err(io::Error::other(format!(
-                    "process cluster did not converge on three voters within {}; last statuses: \
+                    "process cluster did not converge on its voters within {}; last statuses: \
                      {last_statuses:?}",
                     humantime::format_duration(CLUSTER_READY_TIMEOUT)
                 )));

@@ -208,6 +208,12 @@ pub fn kw_phrase3<'src>(
         .boxed()
 }
 
+/// The comma between two operations of an `ALTER` statement: one followed by the keyword that
+/// heads the next operation.
+///
+/// A comma inside an operation's expression is followed by a term instead, which may be a call to
+/// a builtin that spells an operation keyword, as `replace(...)` does. Such a call heads no
+/// operation.
 pub fn alter_op_separator<'src>()
 -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
     let operation_head = choice((
@@ -217,7 +223,8 @@ pub fn alter_op_separator<'src>()
         kw(Identifier::Set),
         kw(Identifier::Replace),
         kw(Identifier::Rename),
-    ));
+    ))
+    .and_is(expression_term_word().not());
     tok(Token::Comma)
         .and_is(tok(Token::Comma).ignore_then(operation_head))
         .labelled("alter_operation_separator")
@@ -1047,7 +1054,12 @@ pub fn duration_lit<'src>()
             .try_map(|raw, span| {
                 nervix_models::parse_duration_text(&raw)
                     .map(|_| raw.clone())
-                    .map_err(|report| Rich::custom(span, report.current_context().to_string()))
+                    .map_err(|report| {
+                        Rich::custom(
+                            span,
+                            format!("invalid duration '{raw}': {}", report.current_context()),
+                        )
+                    })
             }),
         unknown_word(),
     ))
@@ -1643,12 +1655,46 @@ fn explicit_route_construction<'src>()
         .boxed()
 }
 
-/// The tokens of an expression region, up to the first `boundary` token outside every parenthesized
-/// or bracketed group.
+/// A word written as part of an expression term: the name of a call, followed by the `(` that opens
+/// its arguments, or the scope of a field, followed by the `.` before the field.
+///
+/// Such a word heads no clause of the statement around the expression, whatever keyword it spells.
+/// A keyword an expression follows directly is never such a word: after `BY` or `PATH`, a `(` opens
+/// the clause's own expression. Callers read this only under `not`, which consumes nothing and
+/// discards what it expected, so completion never offers the bracket or the dot it looks for.
+fn expression_term_word<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    any()
+        .filter(Token::may_name_a_term)
+        .then(any().filter(|token: &Token| matches!(token, Token::LParen | Token::Dot)))
+        .ignored()
+        .boxed()
+}
+
+/// A `boundary` token where the statement's next clause begins, which ends the expression region
+/// before it.
+///
+/// A boundary word written as part of an expression term, such as the `max` of
+/// `max(input.readings)` or the `output` of `output.total`, begins no clause and ends no region.
+fn expression_region_end<'src>(
+    boundary: fn(&Token) -> bool,
+) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    any()
+        .filter(move |token: &Token| boundary(token))
+        .and_is(expression_term_word().not())
+        .ignored()
+        .boxed()
+}
+
+/// The tokens of an expression region, up to the first `boundary` token that begins the
+/// statement's next clause outside every parenthesized or bracketed group.
 ///
 /// A comma separates the relays of a `FROM` list, but inside an `IN` set or a call's arguments it
-/// belongs to the expression, so a boundary ends the region only at nesting depth zero.
-fn nested_expression_tokens<'src>(
+/// belongs to the expression, so a boundary ends the region only at nesting depth zero. A keyword
+/// written as part of a term belongs to the expression too: before `(` it names a call, before `.`
+/// the scope of a field and after `.` the field itself. `max(input.readings)`, `output.total` and
+/// `right.id` therefore stay whole in a region that ends at `MAX`, `OUTPUT` or `RIGHT`.
+pub fn nested_expression_tokens<'src>(
     boundary: fn(&Token) -> bool,
 ) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
     let group = recursive(|group| {
@@ -1688,7 +1734,8 @@ fn nested_expression_tokens<'src>(
             .then(any().filter(|token: &Token| !token.is_group_delimiter()))
             .map(|(dot, field)| vec![dot, field]),
         any()
-            .filter(move |token: &Token| !boundary(token) && !token.is_group_delimiter())
+            .filter(|token: &Token| !token.is_group_delimiter())
+            .and_is(expression_region_end(boundary).not())
             .map(|token| vec![token]),
     ))
     .repeated()
@@ -1890,12 +1937,7 @@ pub fn filter_where_clause<'src>()
     kw(Identifier::Filter)
         .ignore_then(kw(Identifier::Where))
         .ignore_then(
-            any()
-                .filter(|token: &Token| !processor_output_boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .labelled("where_expression"),
+            nested_expression_tokens(processor_output_boundary_token).labelled("where_expression"),
         )
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
@@ -2395,17 +2437,10 @@ fn expression_token_to_source(token: &Token) -> String {
     match token {
         Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
         Token::Word(Word::UnknownWord(raw)) => raw.clone(),
-        Token::StringLiteral(value) => {
-            // The expression lexer rejects raw control characters inside a quoted string, so they
-            // are escaped here rather than passed through from the outer dollar-quoted form.
-            let escaped = value
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("\"{escaped}\"")
-        }
+        // The expression lexer reads a string literal as the statement lexer does, verbatim, so the
+        // value is handed over in the spelling canonical NSPL gives it, which reads back as exactly
+        // that value.
+        Token::StringLiteral(value) => nervix_models::string_literal(value),
         Token::NumberLiteral(value) => value.clone(),
         Token::LParen => "(".to_string(),
         Token::RParen => ")".to_string(),
@@ -2441,8 +2476,9 @@ mod tests {
     use meticulous::OptionExt as _;
 
     use super::{
-        LexedInput, ParseError, current_word_prefix, format_parse_error, into_parse_error, kw,
-        lex_input, schema_ref, suggestions_from_errors, token_span_to_source_span,
+        LexedInput, ParseError, current_word_prefix, filter_where_clause, format_parse_error,
+        into_parse_error, kw, lex_input, schema_ref, suggestions_from_errors,
+        token_span_to_source_span,
     };
     use crate::lexer::{Identifier, Token, Word};
 
@@ -2541,5 +2577,56 @@ mod tests {
     fn format_parse_error_preserves_custom_messages() {
         let err: ParseError<'_> = chumsky::error::Rich::custom((2..4).into(), "custom failure");
         assert_eq!(format_parse_error(&err), "custom failure");
+    }
+
+    /// The filter `source` writes before its last word, when the filter's region ends right in
+    /// front of that word and nothing else is left over.
+    fn filter_before_the_last_word(source: &str) -> Option<nervix_models::Expression> {
+        let LexedInput { tokens, .. } = lex_input(source).expect("lex should succeed");
+        filter_where_clause()
+            .then_ignore(any())
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .ok()
+    }
+
+    #[test]
+    fn a_keyword_written_as_a_call_a_scope_or_a_field_stays_in_the_filter() {
+        for (source, expected) in [
+            (
+                "FILTER WHERE max(input.readings) > 10 UNBRANCHED",
+                "max(input.readings) > 10",
+            ),
+            (
+                "FILTER WHERE (max(input.readings) > 10) USING",
+                "max(input.readings) > 10",
+            ),
+            ("FILTER WHERE output.total > 0 BY", "output.total > 0"),
+            (
+                "FILTER WHERE input.max > 0 AND input.output < 1 MAX",
+                "input.max > 0 AND input.output < 1",
+            ),
+        ] {
+            let filter = filter_before_the_last_word(source)
+                .unwrap_or_else(|| panic!("{source} must end its filter at the last word"));
+            let expected =
+                crate::parse_expression(expected).expect("the expected filter is an expression");
+            assert_eq!(filter, expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_keyword_that_heads_a_clause_still_ends_the_filter() {
+        for source in [
+            "FILTER WHERE input.total > max TIME",
+            "FILTER WHERE input.total > output SCHEMA",
+            "FILTER WHERE max(input.readings > 10 UNBRANCHED",
+        ] {
+            assert!(
+                filter_before_the_last_word(source).is_none(),
+                "{source} must be rejected"
+            );
+        }
     }
 }

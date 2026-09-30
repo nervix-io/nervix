@@ -1,5 +1,5 @@
 use error_stack::ResultExt as _;
-use nervix_models::ModelName;
+use nervix_models::{ModelName, parse_duration_text};
 #[cfg(test)]
 use nervix_models::{ProcessorInputWhere, ProcessorInputs};
 
@@ -106,13 +106,11 @@ fn parse_optional_window_duration(
     let Some(raw) = value else {
         return Ok(None);
     };
-    let duration = humantime::parse_duration(raw).map_err(|error| {
-        Report::new(PlanningError::InvalidWindowDuration {
+    let duration =
+        parse_duration_text(raw).change_context_lazy(|| PlanningError::InvalidWindowDuration {
             node: processor.clone(),
             setting,
-        })
-        .attach_printable(error)
-    })?;
+        })?;
     Ok(Some(duration))
 }
 
@@ -173,13 +171,12 @@ pub(in crate::runtime) fn parse_branch_flush_policy(
     else {
         return Ok(RuntimeFlushPolicy::Immediate);
     };
-    let parsed_interval = humantime::parse_duration(interval).map_err(|error| {
-        Report::new(PlanningError::InvalidFlushInterval {
+    let parsed_interval = parse_duration_text(interval).change_context_lazy(|| {
+        PlanningError::InvalidFlushInterval {
             kind,
             node: processor.clone(),
             route: route.clone(),
-        })
-        .attach_printable(error)
+        }
     })?;
     let parsed_max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
         Report::new(PlanningError::InvalidFlushMaxBatchSize {
@@ -201,13 +198,12 @@ pub(in crate::runtime) fn parse_input_collect_policy(
     relay: &RelayName,
     policy: &nervix_models::InputCollectPolicy,
 ) -> error_stack::Result<RuntimeInputCollectPolicy, PlanningError> {
-    let interval = humantime::parse_duration(&policy.collect_for).map_err(|error| {
-        Report::new(PlanningError::InvalidCollectInterval {
+    let interval = parse_duration_text(&policy.collect_for).change_context_lazy(|| {
+        PlanningError::InvalidCollectInterval {
             kind,
             node: processor.clone(),
             relay: relay.clone(),
-        })
-        .attach_printable(error)
+        }
     })?;
     let max_batch_size = if let Some(max_batch_size) = policy.max_batch_size.as_deref() {
         let size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
@@ -233,12 +229,9 @@ fn parse_max_time(
     processor: &ModelName,
     value: &str,
 ) -> error_stack::Result<Duration, PlanningError> {
-    humantime::parse_duration(value).map_err(|error| {
-        Report::new(PlanningError::InvalidMaxTime {
-            kind,
-            node: processor.clone(),
-        })
-        .attach_printable(error)
+    parse_duration_text(value).change_context_lazy(|| PlanningError::InvalidMaxTime {
+        kind,
+        node: processor.clone(),
     })
 }
 
@@ -526,13 +519,11 @@ fn parse_branch_ttl_setting(
     let Some(ttl) = ttl else {
         return Ok(None);
     };
-    let duration = humantime::parse_duration(ttl).map_err(|error| {
-        Report::new(PlanningError::InvalidBranchTtl {
+    let duration =
+        parse_duration_text(ttl).change_context_lazy(|| PlanningError::InvalidBranchTtl {
             kind,
             node: identifier.clone(),
-        })
-        .attach_printable(error)
-    })?;
+        })?;
     Ok(Some(duration))
 }
 

@@ -52,6 +52,9 @@ use nervix_branch_instances::{
     BranchInstanceRegistry, BranchInstanceSnapshotEntry, BranchPresence, GetOrCreateBranchInstance,
     OwnedBranches,
 };
+use nervix_checkpoint_replication::{
+    Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
+};
 use nervix_dns::DnsResolver;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
@@ -193,6 +196,7 @@ use crate::{
 mod branch_aggregated_state;
 mod branch_buffering;
 mod branch_key;
+mod branch_lifecycle_state;
 mod branch_lru_state;
 mod branch_runtime;
 mod client_emitter;
@@ -216,6 +220,7 @@ mod emitter_supervision;
 mod emitter_task;
 mod emitter_values;
 mod endpoint;
+mod endpoint_route_table;
 mod entity_gate;
 mod entrypoint_routes;
 mod error;
@@ -295,6 +300,7 @@ use branch_buffering::{
     wait_for_branch_buffer_deadlines,
 };
 use branch_key::branch_key_display;
+use branch_lifecycle_state::{BranchLifecycleCheckpoint, ReplicatedBranchLifecycle};
 use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,
 };
@@ -371,9 +377,9 @@ use emitter_task::{
 use emitter_values::{
     MappedRequestSink, MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit,
 };
-use endpoint::{
-    EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
-};
+pub(crate) use endpoint::ResolvedEndpointRoute;
+use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
+use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeRoutes};
 pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
@@ -424,7 +430,7 @@ use ingestor_quiesce::{
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
     KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
-    KafkaOffsetStatePersistence, KafkaOffsetStateRead, ReplicatedKafkaOffsetState,
+    KafkaOffsetStatePersistence, ReplicatedKafkaOffsetState,
 };
 use local_drain::LocalIntake;
 use lookup_hash_map::{
@@ -522,9 +528,8 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,
-    PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
-    PublishedBranchState,
+    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateReplicaSync, PreparedForcedRuntimeStateRecovery,
+    PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -537,21 +542,21 @@ pub(in crate::runtime) use state_store::{
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 #[cfg(test)]
 use test_fixtures::{
-    EntrypointTestDomain, OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders,
-    attach_loopback_cluster, batch_value, bind_ingestor_route_for_test, branch_model, branched_by,
-    concrete_branch_key, construction, domain, execute_filter_map_for_test, expression,
-    ingest_metadata_for_test, install_test_domain_execution, install_unpaced_test_domain,
-    junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
-    planned_entrypoints_for_test, processor_branched_by, publish_state_identity,
-    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_branching,
-    test_domain_clock, test_domain_clock_authority, test_execution_revision,
-    test_ingestor_quiesce_control, test_named_branching, test_optional_schema,
-    test_relay_boundary_services, test_schema, u32_branch_key, unbranched_subscription_definition,
-    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
-    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
-    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
-    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
-    window_outputs, window_plan, with_inherit_all,
+    EntrypointTestDomain, OptionalTestField, TOO_LONG_DURATION_TEXT,
+    TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster, batch_value,
+    bind_ingestor_route_for_test, branch_model, branched_by, concrete_branch_key, construction,
+    domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
+    install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
+    key_label, named, nonzero_capacity, paced_domain_state, planned_entrypoints_for_test,
+    processor_branched_by, publish_state_identity, quiesce_test_batch, row_value, scheduled_model,
+    string_branch_key, test_branching, test_domain_clock, test_domain_clock_authority,
+    test_execution_revision, test_ingestor_quiesce_control, test_named_branching,
+    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
+    unbranched_subscription_definition, unpaced_domain_state, validate_wasm_test_output_groups,
+    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
+    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
+    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
+    window_aggregate, window_outputs, window_plan, with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
@@ -624,6 +629,9 @@ mod wasm_checkpoint;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod wasm_checkpoint_benchmark;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub use state_replication::benchmark::StateReplicationBenchmark;
 mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
@@ -681,6 +689,7 @@ pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
+pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
 pub use node::{DEFAULT_TEMP_DIR, Runtime};

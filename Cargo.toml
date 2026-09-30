@@ -86,6 +86,7 @@ fjall = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
+http = { workspace = true }
 http-body-util = { workspace = true }
 humantime = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
@@ -102,6 +103,7 @@ nervix-approx-into = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-branch-instances = { workspace = true }
+nervix-checkpoint-replication = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-columnar-json = { workspace = true }
@@ -158,6 +160,7 @@ ort = { workspace = true, features = [
   "tracing",
   "webgpu",
 ] }
+otel-tonic = { workspace = true }
 petgraph = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -184,6 +187,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
 tonic = { workspace = true }
+tower-service = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
@@ -209,7 +213,6 @@ cucumber = { workspace = true, features = ["libtest"] }
 flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 h2 = { workspace = true }
-http = { workspace = true }
 httparse = { workspace = true }
 iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
@@ -278,6 +281,11 @@ harness = false
 name = "wasm_checkpoint"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "state_replication"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",
@@ -287,6 +295,7 @@ members = [
   "crates/benchmark",
   "crates/bounded-write",
   "crates/branch-instances",
+  "crates/checkpoint-replication",
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-wire",
@@ -348,6 +357,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 as-conversions = "deny"
+disallowed-methods = "deny"
 disallowed-types = "deny"
 
 [workspace.dependencies]
@@ -501,6 +511,7 @@ nervix-arbitrary = { package = "nervix-arbitrary", path = "crates/arbitrary" }
 nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-branch-instances = { package = "nervix-branch-instances", path = "crates/branch-instances" }
+nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", path = "crates/checkpoint-replication" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
@@ -728,6 +739,12 @@ debug-assertions = true
 inherits = "dev"
 opt-level = 2
 overflow-checks = true
+
+# The full server's single codegen unit must fit the bounded sanitizer build. Keep its checks
+# and coverage instrumentation with lighter optimization and no debug output.
+[profile.fuzz.package.nervix-server]
+debug = 0
+opt-level = 1
 
 [profile.dev.package."wasmtime"]
 opt-level = 3

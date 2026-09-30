@@ -61,33 +61,6 @@ pub enum Domain {
 pub struct Arbitrary<'bytes> {
     entropy: Entropy<'bytes>,
     domain: Domain,
-    region: RegionEnds,
-}
-
-/// Field scopes the statement region an expression is written in reads as its own end.
-///
-/// A statement reads an embedded expression up to the first token its region stops at. A region
-/// that ends at `OUTPUT` or `RIGHT` cannot hold a field in the `output` or `right` scope, so an
-/// expression built for such a region names neither: NSPL has no spelling for it there.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct RegionEnds {
-    output_scope: bool,
-    right_scope: bool,
-}
-
-impl RegionEnds {
-    /// A processor clause whose region ends at the clause keywords that follow it, `OUTPUT`
-    /// among them.
-    pub(crate) const PROCESSOR_CLAUSE: Self = Self {
-        output_scope: true,
-        right_scope: false,
-    };
-
-    /// The inputs a correlator reads on its left side, whose region also ends at `RIGHT`.
-    pub(crate) const LEFT_INPUTS: Self = Self {
-        output_scope: true,
-        right_scope: true,
-    };
 }
 
 impl<'bytes> Arbitrary<'bytes> {
@@ -95,7 +68,6 @@ impl<'bytes> Arbitrary<'bytes> {
         Self {
             entropy: Entropy::new(bytes),
             domain,
-            region: RegionEnds::default(),
         }
     }
 
@@ -107,19 +79,6 @@ impl<'bytes> Arbitrary<'bytes> {
     /// The byte cursor, for a property that makes a choice of its own between generated values.
     pub fn entropy(&mut self) -> &mut Entropy<'bytes> {
         &mut self.entropy
-    }
-
-    /// Builds a value whose expressions are written inside a region that ends at `ends`.
-    pub(crate) fn within_region<T>(
-        &mut self,
-        ends: RegionEnds,
-        build: impl FnOnce(&mut Self) -> T,
-    ) -> T {
-        let enclosing = self.region;
-        self.region = ends;
-        let value = build(self);
-        self.region = enclosing;
-        value
     }
 }
 

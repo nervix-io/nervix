@@ -24,3 +24,4 @@ triomphe = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tonic = { workspace = true }
+uuid = { workspace = true }

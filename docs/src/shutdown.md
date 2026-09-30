@@ -110,6 +110,7 @@ guarantees the process ends.
 | Shutdown deadline expired | `1` |
 | A public listener, cluster shutdown, or storage release reported an error | `1` |
 | Termination signal handlers could not be registered at startup | `1` |
+| A command-line option or its environment variable holds a value the node cannot read, such as duration text that names no duration | `2` |
 | Repeated `SIGINT` | `130` |
 | Repeated `SIGTERM` | `143` |
 | `SIGKILL` | Terminated by signal, no exit status |
@@ -201,6 +202,13 @@ during a resumable hold — a model alteration, a domain pause, or memory-pressu
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
+
+Endpoint source close and terminal table clearing end each exact intake lifetime before withdrawing
+its binding. HTTP requests and WebSocket sessions that retained a route then see absent intake on
+later admission; a replacement source does not reopen that retained lifetime. A request already
+holding an intake lease may finish within the existing shutdown deadline. Endpoint definitions and
+intake leases are volatile publications and are reconstructed from the installed revision on startup.
+
 Payloads already admitted continue through their routes.
 Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
 change wait compares against that publication after registering the waiter, so a shutdown or
@@ -582,6 +590,14 @@ serving their streams, so a peer's request the node has not answered fails inste
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
 
+The node's own OTLP trace exporter is a process service. After the application returns, its tracing
+guard closes resolver installation and asks the SDK to flush before the process drops its Tokio
+runtime. An installed resolver remains available to queued exports. If startup failed before DNS
+installation, closing the publication ends a pending collector connection. Export failures remain
+telemetry diagnostics with no data-plane acknowledgement consequence, and a forced process ending
+does not guarantee a final export. [Node Trace Export](./name-resolution.md#node-trace-export) owns
+the resolver lifetime and export budgets.
+
 ### Consensus Work At The Ending Boundary
 
 Consensus remains live through stop admission and drain support. A terminating node can still append
@@ -661,6 +677,9 @@ the last successfully applied schedule; the failed revision is not recorded as a
 Until admission succeeds, the node is live but inert with respect to ownership. Its public listeners and
 its interconnect answer requests, which keeps configured listening entities available on every live
 node, but no runtime routes exist, so a payload it accepts cannot reach recovered graph execution.
+A client producer or consumer open is refused as temporarily unavailable until the node has passed
+the catch-up barrier; the node does not report a stale local missing or stopped domain as a terminal
+endpoint refusal during that interval. The client can retry the open on its restored session.
 A former owner restarted while cut off from consensus therefore produces no output, and once
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.

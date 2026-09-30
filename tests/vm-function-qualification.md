@@ -12,7 +12,7 @@ the cited feature explicitly tests a topology-specific event.
 | --- | --- | --- |
 | Conditional selection, comparison, equality, and active rows | [Conditional expressions](features/runtime/conditional_expressions.feature), [expression semantics](features/runtime/expression_function_semantics.feature) | Selected arms alone evaluate failures, including casts, patterns, headers, UDFs and float functions; `NULLIF` agrees with equality for NaN and signed zero. |
 | Membership, ranges, null-safe equality, extrema | [Membership and extrema](features/runtime/membership_ranges_extrema.feature) | Ingestor and source filters, routes, read-only subscriptions, lookup keys, inferencer mappings, nulls, invalid types, sensitivity. |
-| Checked arithmetic | [Checked numeric execution](features/runtime/checked_numeric_execution.feature) | Batch-local overflow, division and non-finite errors; reingestor and emitter error routes. |
+| Checked arithmetic | [Checked numeric execution](features/runtime/checked_numeric_execution.feature) | Batch-local overflow, division and non-finite errors; `+`, `-` and `*` over every integer width below 64 bits, with a literal on either side and a null operand; reingestor and emitter error routes. |
 | Explicit and tolerant conversions | [Tolerant conversions](features/runtime/tolerant_conversions.feature), [strict schema typing](features/runtime/schema_type_strictness.feature) | `AS` errors, `TRY_CAST` typed nulls, conditional selection, output field type rejection, materialized defaults and inferencer input. |
 | JSON extraction | [JSON extraction](features/runtime/json_extraction.feature) | Declared scalar and collection types, strict errors, tolerant nulls, active-row selection and sensitivity. |
 | Hash map lookup | [Lookup hash map](features/runtime/lookup_hash_map.feature) | Filters before lookup, missing-key validation and independent resolution for output routes. |
@@ -54,6 +54,11 @@ The new `A schema mutation installs a newly compiled function plan before ingest
 `Replacing a route installs its newly prepared regular expression` outlines passed on both one-
 and three-node clusters (4 scenarios, 38 steps). The updated `Case conversion agrees across
 literal, column and repeated expressions` outline also passed on both topologies.
+
+The `Narrow integer arithmetic fails only the messages whose exact results leave their width`
+outline, which reaches the explicit SIMD lanes of every integer width below 64 bits, passed on both
+one- and three-node clusters together with the other checked numeric and numeric function outlines
+(20 scenarios, 90 steps).
 
 The full `just test` run passed 1,986 scenarios and 21,628 steps, including the client conformance
 suite. The standalone client conformance run passed 19 scenarios; client wire tests, subscription

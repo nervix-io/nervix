@@ -40,6 +40,11 @@ jobs:
         with:
           tool: just,toml-cli,trunk
 
+      - name: Install server build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -88,6 +93,7 @@ jobs:
 
       - name: Run runner tests and every ordinary Bolero property
         run: |
+          just build-web-console
           just test-bolero-runner
           just test-bolero
 
@@ -118,6 +124,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: just,toml-cli,trunk
+
+      - name: Install server build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -176,6 +187,7 @@ jobs:
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |
+          just build-web-console
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             budget=30
           else

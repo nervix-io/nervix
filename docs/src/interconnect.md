@@ -878,6 +878,21 @@ replicated branch lifecycle does not name yet first synchronizes the owner's bra
 refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
 owner has evicted. [WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint
 these acknowledgements complete.
+
+The owner of a placement offers its newest checkpoint to the replicas the committed schedule
+assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
+that revision, until every one of them has, the node stops being the placement's primary, the
+placement's state goes away, or the node stops. A newer checkpoint taken meanwhile raises the
+revision on offer instead of starting a second offer. The owner records the highest revision each
+replica acknowledged, so an acknowledgement delivered after a newer one never lowers it, and a
+Kafka offset commit waiting for its replica quorum, like a WASM checkpoint waiting for its replicas,
+completes on the acknowledgement that satisfies it rather than at its deadline. Only a node that
+holds a placement's state announces it: an ownership handoff announces the final checkpoints it
+captured from live state, and the placements it fills from its storage or with an empty checkpoint
+reach replicas through their own synchronization. A replica acts on an announcement by waking the
+task that keeps its copy of that placement current, which keeps the announcement until it next
+waits when it is busy; an announcement of a placement the replica holds no state for wakes nothing.
+
 The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
 replica that installs that revision replaces the evicted branch's rows and sketch panes with the
 empty state. The branch lifecycle checkpoint records an incarnation for each concrete branch;

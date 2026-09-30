@@ -41,6 +41,13 @@ the *state* is absent or different, not merely because a literal looks special.
 
 ## Absence And Distinct States
 
+**Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
+publication together. The publication carries `Option<DnsResolver>`: absence means startup has not
+installed the node resolver, and presence carries that same resolver's shared handle. A closed
+publication before installation is a distinct connection failure, not a choice of another resolver.
+The lazy connector waits through the publication primitive; its export connection timeout starts
+only after installation, preserving early startup spans.
+
 **Branching.** A validated branch declaration is either unbranched or carries its named branch
 and resolved schema together. The schema supplies the branch fields and their sensitivity, so a
 runtime plan cannot pair a present branch schema with an independently missing sensitivity set.
@@ -65,6 +72,15 @@ reference and deadline. Retry, timeout or detach makes that reference stale befo
 attempt becomes live. Confirmed ACK, retry and rejection results have bounded retention for
 idempotence and expire independently of the delivery identity. An absent consumer is not encoded
 as an empty consumer id, and an unbranched batch has no synthetic branch fingerprint.
+
+The Rust client's desired producer and consumer handles have distinct active, interrupted,
+restoring, reopen-required and closed states. An attachment belongs to one session exchange; a
+replacement receives a fresh request-derived identity. The producer's unresolved sent batch has
+an unknown outcome, rather than a missing outcome defaulted to not admitted. A consumer reports
+the interruption before delivery from a replacement attachment. Its prior delivery reference is
+expired, while a settlement sent before losing its answer is separately uncertain. The domain
+`START` generation and endpoint contract fingerprint are required values on every successful
+consumer open, so absence cannot be mistaken for a matching contract.
 
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
@@ -270,9 +286,12 @@ past its step limit, a minimum above its maximum, or a size that is not a whole 
 such data fails to decode with a typed error and is never normalized into a valid value. A timestamp
 is its signed Unix nanoseconds, and every conversion into one goes through them, so two spellings of
 one instant, such as an offset and its UTC equivalent, or a leap second and the second after it, are
-one timestamp. NSPL duration literals and domain-clock periods and skews are read by a guarded
-parser in the vocabulary, which refuses text whose spans could add up to the most seconds a duration
-holds with a typed error; the grammar library it wraps would panic on such text instead of failing.
+one timestamp. Every duration Nervix reads from text, whether an NSPL literal, a domain-clock period
+or skew, a Model's timeout, interval, retention or TTL, a window aggregate's delay, or a node's
+command-line option, is read by one guarded parser in the vocabulary. It refuses text whose spans
+could add up to the most seconds a duration holds with a typed error; the grammar library it wraps
+would panic on such text instead of failing, and Clippy rejects every other way of reaching that
+library's parser.
 
 One in-memory domain activation plan resolves each relay's compiled schema, branch retention and
 materialized-state presence; each codec's schema and wire definition; and each endpoint's VHOST and
@@ -280,6 +299,15 @@ signaling reference. A missing reference is a typed planning failure before inst
 same plan shape feeds running and passive builds. Passive builds retain the planned materialized
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
+
+Server endpoint configuration and source availability are distinct states. The immutable route
+table contains configured definitions; a bound source lifetime contains an optional prepared intake.
+Source ending publishes absence through that lifetime before removing its route binding. A retained
+request or WebSocket cannot interpret absence as a replacement source with the same node identity.
+A lease loaded before ending may complete; later admission sees absence. Domain replacement and
+teardown end the domain's lifetimes and replace all of its route definitions together, preserving
+other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
+its replacement.
 
 A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a

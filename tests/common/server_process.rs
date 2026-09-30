@@ -32,6 +32,7 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     RequestId, SessionLimits, UploadChunk, UploadStart, grpc::UPLOAD_RESOURCE_PATH,
 };
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_primitives::{
     net::TcpStream,
@@ -124,9 +125,13 @@ impl ServerProcessLaunch {
     }
 }
 
-/// A command-line option a scenario sets on the server process in addition to the fixture's own.
-#[derive(Clone, Copy, Debug)]
+/// A setting a scenario gives the server process in addition to the fixture's own.
+#[derive(Clone, Debug)]
 pub(crate) enum ServerProcessOption {
+    /// The files and authority the node's resolver loads.
+    Dns(DnsConfiguration),
+    /// Enable the node's own exporter with a distinct service identity for each process.
+    TraceExport { endpoint: String, service: String },
     /// `--drain-timeout`.
     DrainTimeout(Duration),
     /// `--state-snapshot-interval`.
@@ -137,35 +142,67 @@ pub(crate) enum ServerProcessOption {
     TransactionIdleTimeout(Duration),
     /// `--transaction-tombstone-retention`.
     TransactionTombstoneRetention(Duration),
+    /// A command-line option with its value written exactly as the scenario gives it, whether or
+    /// not the server can read it.
+    Written { option: String, value: String },
+    /// An environment variable set exactly as the scenario gives it, whether or not the server
+    /// can read it.
+    Environment { variable: String, value: String },
 }
 
 impl ServerProcessOption {
-    fn apply_to(self, command: &mut Command) {
+    fn apply_to(&self, command: &mut Command, node_id: &str) {
         match self {
+            Self::Dns(configuration) => {
+                command
+                    .arg("--dns-resolver-config")
+                    .arg(&configuration.resolver_configuration)
+                    .arg("--dns-hosts-file")
+                    .arg(&configuration.hosts_file);
+                if let NameServers::Explicit(servers) = &configuration.name_servers {
+                    for server in servers {
+                        command.arg("--dns-name-server").arg(server.to_string());
+                    }
+                }
+            }
+            Self::TraceExport { endpoint, service } => {
+                command
+                    .arg("--otel-enabled")
+                    .arg("--otel-otlp-endpoint")
+                    .arg(endpoint)
+                    .arg("--otel-service-name")
+                    .arg(format!("{service}-{node_id}"));
+            }
             Self::DrainTimeout(timeout) => {
                 command
                     .arg("--drain-timeout")
-                    .arg(humantime::format_duration(timeout).to_string());
+                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::StateSnapshotInterval(interval) => {
                 command
                     .arg("--state-snapshot-interval")
-                    .arg(humantime::format_duration(interval).to_string());
+                    .arg(humantime::format_duration(*interval).to_string());
             }
             Self::ShutdownTimeout(timeout) => {
                 command
                     .arg("--shutdown-timeout")
-                    .arg(humantime::format_duration(timeout).to_string());
+                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::TransactionIdleTimeout(timeout) => {
                 command
                     .arg("--transaction-idle-timeout")
-                    .arg(humantime::format_duration(timeout).to_string());
+                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::TransactionTombstoneRetention(retention) => {
                 command
                     .arg("--transaction-tombstone-retention")
-                    .arg(humantime::format_duration(retention).to_string());
+                    .arg(humantime::format_duration(*retention).to_string());
+            }
+            Self::Written { option, value } => {
+                command.arg(option).arg(value);
+            }
+            Self::Environment { variable, value } => {
+                command.env(variable, value);
             }
         }
     }
@@ -291,9 +328,6 @@ impl ServerProcessConfiguration {
         } else {
             command.arg("--allow-bootstrap");
         }
-        for option in &self.options {
-            option.apply_to(&mut command);
-        }
         // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the
         // server, and `RUST_LOG` would replace the log filter the server ships with.
         for (name, _) in std::env::vars_os() {
@@ -302,6 +336,10 @@ impl ServerProcessConfiguration {
             }
         }
         command.env_remove("RUST_LOG");
+        // Options go last, so a variable a scenario sets survives the removal above.
+        for option in &self.options {
+            option.apply_to(&mut command, &self.node_id);
+        }
         command.spawn()
     }
 }

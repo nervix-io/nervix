@@ -13,7 +13,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState, DomainClockPeriod,
-    DomainClockSkew, DomainName, DomainTimeRate, Timestamp,
+    DomainClockSkew, DomainName, DomainTimeRate, Timestamp, parse_duration_text,
 };
 
 use super::*;
@@ -251,7 +251,7 @@ async fn next_clock_frame(
     duration: &str,
     domain: &DomainName,
 ) -> TestClockFrame {
-    let duration = humantime::parse_duration(duration).expect("step durations are valid durations");
+    let duration = parse_duration_text(duration).expect("step durations are valid durations");
     let frame = clock_session(world)
         .try_next_clock_frame(duration)
         .await
@@ -485,8 +485,7 @@ async fn then_clock_session_receives_no_frame(
     duration: String,
 ) {
     let domain = scenario_domain(world, &domain);
-    let duration =
-        humantime::parse_duration(&duration).expect("step durations are valid durations");
+    let duration = parse_duration_text(&duration).expect("step durations are valid durations");
     let session = clock_session(world);
     let reply = session
         .clock_log()
@@ -774,7 +773,7 @@ fn client_admission_window(world: &ScenarioWorld, name: &str) -> DomainAdmission
 
 #[then(expr = "within {string} client {string} receives a tick for its attached domain clock")]
 async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, name: String) {
-    let duration = humantime::parse_duration(&duration).expect("step durations are valid");
+    let duration = parse_duration_text(&duration).expect("step durations are valid");
     let client = world
         .transaction_clients
         .get(&name)
@@ -803,6 +802,44 @@ async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, 
     let latest = attached.latest_tick().expect("the helper retains the tick");
     assert!(latest.tick_id >= ticked.tick.tick_id);
     assert_eq!(attached.frontier(), Some(latest.logical_boundary));
+}
+
+#[then(
+    expr = "within {string} client {string} reports an interruption of its attached domain clock"
+)]
+async fn then_client_reports_clock_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+) {
+    let duration = parse_duration_text(&duration).assured("step durations are valid");
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let domain = scenario_domain(world, &world.domain);
+    nervix_primitives::time::timeout(duration, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match client
+                .next_domain_clock_event()
+                .await
+                .expect("the client reads clock events")
+            {
+                nervix_client_core::DomainClockEvent::Interrupted(interrupted)
+                    if interrupted.domain == domain =>
+                {
+                    break;
+                }
+                nervix_client_core::DomainClockEvent::Observed(_)
+                | nervix_client_core::DomainClockEvent::Ticked(_) => {}
+                other => panic!("unexpected clock event while waiting for interruption: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the clock reports its session gap within the scenario deadline");
 }
 
 async fn post_timestamped_event(
@@ -879,8 +916,7 @@ async fn then_client_observes_server_error(
     #[step] step: &Step,
 ) {
     let expected = expand_placeholders(world, docstring(step));
-    let duration =
-        humantime::parse_duration(&duration).expect("step durations are valid durations");
+    let duration = parse_duration_text(&duration).expect("step durations are valid durations");
     let client = world
         .transaction_clients
         .get(&name)

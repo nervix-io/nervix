@@ -722,7 +722,7 @@ Feature: Client ingestors
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{entry}} IGNORE PREFERENCES;
       """
-    Then producer "forwarded" eventually ends because "relocated"
+    Then producer "forwarded" is interrupted because "relocated"
     When within "30s" <session> opens producer "local" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "local" submits batch "on the new owner" with rows
       | region | order_id | amount | card   |
@@ -843,7 +843,7 @@ Feature: Client ingestors
       | eu     | o-1      | 1      | 4111-1 |
     Then HTTP receiver "sink" eventually receives at least 1 request
     When node "{{owner}}" is stopped
-    Then producer "orders" eventually ends because "shutting down"
+    Then producer "orders" is interrupted because "shutting down"
     And batch "in flight" has an unknown outcome because "interrupted"
     When HTTP receiver "sink" releases its held responses with "respond 200"
     And within "60s" client "app" opens producer "failed over" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
@@ -852,7 +852,7 @@ Feature: Client ingestors
       | us     | o-2      | 2      | 4111-2 |
     Then batch "after failover" completes
 
-  @client_ingestor @client_ingestor_placement
+  @client_ingestor @client_ingestor_placement @client_io_03_producer @client_io_03_forwarder
   Scenario: Losing the node that forwards a producer leaves its batches unknown to the client and lets admitted work finish
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
@@ -908,7 +908,7 @@ Feature: Client ingestors
       admitted batches: 1
       """
     When node "{{entry}}" is stopped
-    Then producer "orders" eventually ends because "session lost"
+    Then producer "orders" is interrupted because "session lost"
     And batch "in flight" has an unknown outcome because "session_lost"
     And within "30s" the leader node describes ingestor "orders_in" with
       """
@@ -924,8 +924,13 @@ Feature: Client ingestors
       """
     And HTTP receiver "sink" has captured exactly 1 request
 
-  @client_ingestor
-  Scenario Outline: A producer ends with its session across a full restart and a new one publishes again
+    When producer "orders" submits batch "after entry loss" with rows
+      | region | order_id | amount | card   |
+      | us     | o-2      | 2      | 4111-2 |
+    Then batch "after entry loss" completes
+
+  @client_ingestor @client_io_03_producer @client_io_03_restore
+  Scenario Outline: A producer restores its attachment across a full restart and publishes again
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -964,9 +969,7 @@ Feature: Client ingestors
       | eu     | o-1      | 1      | 4111-1 |
     Then batch "before restart" completes
     When the cluster is restarted
-    Then producer "orders" eventually ends because "session lost"
-    When within "60s" client "app" opens producer "restarted" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
-    And producer "restarted" submits batch "after restart" with rows
+    And producer "orders" submits batch "after restart" with rows
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
     Then batch "after restart" completes
@@ -976,6 +979,78 @@ Feature: Client ingestors
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_ingestor @client_io_03_producer @client_io_03_socket_loss
+  Scenario Outline: A producer restores its attachment after its session socket is lost
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_in (region STRING, order_id STRING);
+      CREATE RELAY orders SCHEMA order_in UNBRANCHED;
+      CREATE INGESTOR orders_in FROM CLIENT SCHEMA order_in
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND TIMESTAMP NOW
+        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "app" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "app" opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING"
+    And producer "orders" submits batch "before socket loss" with rows
+      | region | order_id |
+      | eu     | o-1      |
+    Then batch "before socket loss" completes
+    When the TCP forwarder at "127.0.0.1" stops
+    Then producer "orders" is interrupted because "session lost"
+    When producer "orders" submits batch "after socket loss" with rows
+      | region | order_id |
+      | us     | o-2      |
+    Then batch "after socket loss" completes
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_ingestor @client_io_03_producer @client_io_03_relocation
+  Scenario: A producer follows planned relocation without a new application open
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_in (region STRING, order_id STRING);
+      CREATE RELAY orders SCHEMA order_in UNBRANCHED;
+      CREATE INGESTOR orders_in FROM CLIENT SCHEMA order_in
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND TIMESTAMP NOW
+        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "next_owner"
+    When these NSPL commands are executed on the leader node
+      """
+      RELOCATE INGESTOR orders_in ONTO NODE {{leader}} IGNORE PREFERENCES;
+      """
+    Given client "app" is connected to node "{{leader}}"
+    When client "app" opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING"
+    And producer "orders" submits batch "before relocation" with rows
+      | region | order_id |
+      | eu     | o-1      |
+    Then batch "before relocation" completes
+    When these NSPL commands are executed on the leader node
+      """
+      RELOCATE INGESTOR orders_in ONTO NODE {{next_owner}} IGNORE PREFERENCES;
+      """
+    Then producer "orders" is interrupted because "relocated"
+    When producer "orders" submits batch "after relocation" with rows
+      | region | order_id |
+      | us     | o-2      |
+    Then batch "after relocation" completes
 
   @client_ingestor
   Scenario Outline: A batch beyond a producer's credit is refused without graph effect and ends the producer

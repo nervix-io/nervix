@@ -43,6 +43,7 @@ use nervix_models::{
     CollectionName, CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression,
     FieldName, HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName,
     RetryPolicy, RouteConstruction, SchemaName, SubjectName, TableName, TopicName,
+    parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -72,12 +73,9 @@ pub(super) enum IcebergCommitSetting {
 impl EmitterDurationSetting {
     /// The duration `value` declares for this setting.
     fn parse(self, value: &str) -> Result<Duration, Report<EmitterStartPlanError>> {
-        humantime::parse_duration(value).map_err(|source| {
-            Report::new(EmitterStartPlanError::InvalidDuration {
-                setting: self,
-                value: value.to_string(),
-            })
-            .attach_printable(source)
+        parse_duration_text(value).change_context_lazy(|| EmitterStartPlanError::InvalidDuration {
+            setting: self,
+            value: value.to_string(),
         })
     }
 }
@@ -247,13 +245,12 @@ fn iceberg_commit_policy(
     commit_each: &str,
     max_commit_size: &str,
 ) -> Result<IcebergCommitPolicy, Report<EmitterStartPlanError>> {
-    let interval = humantime::parse_duration(commit_each).map_err(|source| {
-        Report::new(EmitterStartPlanError::InvalidIcebergCommit {
+    let interval = parse_duration_text(commit_each).change_context_lazy(|| {
+        EmitterStartPlanError::InvalidIcebergCommit {
             emitter: emitter.name.clone(),
             setting: IcebergCommitSetting::CommitEach,
             value: commit_each.to_string(),
-        })
-        .attach_printable(source)
+        }
     })?;
     let max_size = max_commit_size
         .parse::<ubyte::ByteUnit>()
@@ -2112,6 +2109,46 @@ mod tests {
         );
     }
 
+    /// Duration text `humantime` panicked on instead of refusing: spans that add up to the last
+    /// second a duration holds, and fractions of exactly one more second.
+    const TOO_LONG_DURATION_TEXT: &str = "18446744073709551615s 1000000000ns";
+
+    #[test]
+    fn iceberg_commit_cadence_keeps_why_its_text_names_no_duration() {
+        for (commit_each, why) in [
+            ("oops", "expected number at 0"),
+            (
+                TOO_LONG_DURATION_TEXT,
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let mut case = SinkKind::IcebergS3.case();
+            let EmitSink::Iceberg {
+                commit_each: cadence,
+                ..
+            } = &mut case.sink
+            else {
+                panic!("the case must be Iceberg");
+            };
+            *cadence = commit_each.to_string();
+            let error = case.decide().expect_err("the commit cadence must be valid");
+            assert_eq!(
+                *error.current_context(),
+                EmitterStartPlanError::InvalidIcebergCommit {
+                    emitter: named("orders_out"),
+                    setting: IcebergCommitSetting::CommitEach,
+                    value: commit_each.to_string(),
+                }
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<nervix_models::DurationTextError>()
+                    .map(ToString::to_string),
+                Some(why.to_string())
+            );
+        }
+    }
+
     #[test]
     fn iceberg_commit_limits_are_parsed_during_planning() {
         let mut case = SinkKind::IcebergS3.case();
@@ -2458,6 +2495,13 @@ mod tests {
             value: "oops".to_string(),
         }
     )]
+    #[case::too_long(
+        retry_policy("1s", TOO_LONG_DURATION_TEXT),
+        EmitterStartPlanError::InvalidDuration {
+            setting: EmitterDurationSetting::RetryMaxBackoff,
+            value: TOO_LONG_DURATION_TEXT.to_string(),
+        }
+    )]
     fn rejects_an_unusable_retry_policy(
         #[case] policy: RetryPolicy,
         #[case] expected: EmitterStartPlanError,
@@ -2481,6 +2525,13 @@ mod tests {
         EmitterStartPlanError::InvalidDuration {
             setting: EmitterDurationSetting::AckTimeout,
             value: "oops".to_string(),
+        }
+    )]
+    #[case::too_long(
+        TOO_LONG_DURATION_TEXT,
+        EmitterStartPlanError::InvalidDuration {
+            setting: EmitterDurationSetting::AckTimeout,
+            value: TOO_LONG_DURATION_TEXT.to_string(),
         }
     )]
     fn rejects_an_unusable_ack_timeout(

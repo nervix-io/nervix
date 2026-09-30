@@ -558,7 +558,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_invalid_histogram_latency;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_invalid_histogram_latency;
       """
-    When these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration"
+    When these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration 'not-a-duration': expected number at 0"
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency FROM metrics
         WIDTH 3 MESSAGES
@@ -566,6 +566,16 @@ Feature: Window processor runtime behavior
         BRANCHED BY by_invalid_histogram_latency
         TO metric_summaries
         SET tenant = FIRST(input.tenant), latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 10, 0, 100, 'not-a-duration')
+        ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '18446744073709551615s 1000000000ns': it is longer than a duration can be"
+      """
+      CREATE WINDOW PROCESSOR invalid_histogram_latency FROM metrics
+        WIDTH 3 MESSAGES
+        STEP 3 MESSAGES
+        BRANCHED BY by_invalid_histogram_latency
+        TO metric_summaries
+        SET tenant = FIRST(input.tenant), latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 10, 0, 100, '18446744073709551615s 1000000000ns')
         ON MESSAGE ERROR LOG;
       """
 

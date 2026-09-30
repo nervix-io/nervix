@@ -110,6 +110,39 @@ routing snapshot with its installed execution revision. Unchanged processor spec
 fingerprints and resolved branch contracts keep their exact plan allocation, including prepared
 programs and compiled WASM modules.
 
+### Server endpoint intake
+
+`EndpointIntakeRoutes` owns one immutable host-and-path table containing each domain's configured
+endpoint definitions and the source lifetimes bound to them. Domain install or teardown and source
+bind or unbind derive a replacement from the current publication with `ArcSwap::rcu`. Concurrent
+writers retry against the latest complete table, preserving unrelated domains and sources. A
+passive installation publishes no endpoint definitions. The listening socket remains present on
+every node independently of this table.
+
+An HTTP request resolves one route using borrowed host and path keys; only uppercase hosts need a
+normalization allocation. A WebSocket retains the resolved route and its signaling protocol from
+upgrade through all later frames, including signaling data frames. Readers share the route
+allocation and borrow its prepared intakes; they do not clone route vectors, programs, codecs, or
+sender maps and do not return to a concurrent registry for each frame.
+
+Each source lifetime publishes its optional intake through `ArcSwapOption`. Close, drop, domain
+replacement, domain teardown, and runtime clear publish absence before withdrawing that lifetime.
+Retained routes therefore refuse later admission even after a replacement source starts. A request
+that already loaded a present intake keeps its lease until dispatch finishes. Unbind removes the
+exact source allocation, so a late close cannot remove a replacement with the same typed identity.
+Configuration withdrawal removes the route; source withdrawal alone leaves configured metadata
+available to report unavailable intake. These publications remain volatile data-plane state.
+
+Unit regressions and the registered Bolero operation sequence exercise the production owner and
+retained lifetimes. Shuttle races whole-domain publication with resolution, unbind with admitted
+requests and replacement, and domain teardown with retained routes. These checks treat publication
+operations as opaque scheduling points. Both publications reuse the primitive boundary's existing
+implementation: no new memory-ordering protocol is introduced, and Loom does not model their
+internals. Listener ownership and network primitives retain their existing contracts; Turmoil is
+outside this owner's scope. Public scenarios cover one and three nodes; the endpoint Chaos workload
+belongs to Typed Ratchet 10. The inventory ledger records the routing measurement and verification
+evidence.
+
 ## Mutable Execution State
 
 Per-row mutation is kept close to the lane that orders it. A global concurrent map is an index into
@@ -218,6 +251,49 @@ keeps the handoff only until either pre-publication abort restores it or generat
 makes it obsolete. Sibling branch tasks keep their own lanes and continue running. After
 publication, the supervisor creates fresh tasks and waits for their initial checkpoints before it
 drops the retained old tasks and accepts completion.
+
+### Checkpoint replication
+
+Every replicated runtime state owns its replication: the domain offsets of a Kafka ingestor, the
+state of a deduplicator, window or WASM processor branch, a materialized relay, an entity's
+branch-aggregated metrics, and the branch lifecycle of a branch-keyed entity. On the node that owns
+a placement, the replication records the highest revision each replica reported holding on its
+stable storage, and offers the placement's newest checkpoint to the replicas that do not hold it
+yet. On a replica, it carries the owner's announcements to the task that keeps the replica's copy
+current. It lives and ends with the state it replicates, so a WASM checkpoint or a Kafka offset
+commit offers its revision through the state it already holds, and no checkpoint, commit,
+announcement or acknowledgement enters a node-wide map.
+
+A replica's progress only rises. Acknowledgements travel independently, and a replica acknowledges
+what it holds again whenever it is offered a checkpoint, so an acknowledgement of an older revision
+can arrive after a newer one; it leaves the newer one in place. Each wait for replicas registers for
+the next report before it reads the progress: a WASM checkpoint waiting for the replicas its
+boundary names, a Kafka offset commit waiting for its replica quorum, and a WASM state reset waiting
+for the branch lifecycle that authorizes its first checkpoint. A report that lands between the read
+and the wait therefore wakes the wait instead of leaving it to its deadline.
+
+One announcer at a time offers a placement's revision. An offer raises the revision the running
+announcer offers or, with none running, starts one. The announcer sends the revision to the
+replicas that lag behind it, again every 100 milliseconds, and ends in the same step that finds
+every replica the committed schedule assigns holding it, so a revision offered while it ends is
+either sent by that step or starts the next announcer. It also ends when this node stops being the
+placement's primary, when the replicated state goes away, and when the runtime stops. An announcer
+whose task ends before it finished hands its announcement back to the next offer.
+
+The announcement, the progress and the announcer's handover change together under a short lock
+that belongs to the one placement and is never held across an await. The placement's originator,
+its one announcer and its replicas' acknowledgements are the only participants; unrelated
+placements never share it. An acknowledgement or an announcement names its placement, and the node
+that receives it finds the placement's state in the registry that already keeps that kind of state,
+through a borrowed read that creates nothing. An announcement of a placement a node holds no state
+for wakes nothing.
+
+A replica installs a branch checkpoint only while the branch lifecycle it holds names the branch.
+Each lifecycle checkpoint a node holds is decoded once into the set of branches it names, so
+installing a branch checkpoint looks its branch up in that set, and the replica's synchronization
+task walks the same set, instead of copying and decoding the lifecycle each time. Holding a
+replica's copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its
+payload is never copied under the registry's guard.
 
 ### Relay branch presence
 
@@ -357,6 +433,33 @@ consumer detachment. The `shuttle_publish_cancellation_and_ack_race_release_one_
 check also races publisher cancellation against application ACK and verifies retained byte credit
 returns once. Timeout revocation is covered by the ordinary owner and public scenarios.
 
+### Rust client attachment recovery
+
+The client retains desired producer and consumer handles independently of their wire attachments.
+Their weak registries are reached for attachment registration, admission changes, termination and
+reconnect snapshots, not for discovering an attachment on each submission or delivery. Producer
+wire entries include the exchange generation beside the attachment ID. A snapshot upgrades live
+weak handles and releases its map guard before any handle transition or network await. Close/drop
+removes desired entries, exchange termination removes its producer wire entries, and snapshots
+prune expired weak handles. The
+[concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md#rust-client-attachment-recovery)
+records each map's access frequency and disposal.
+
+Each desired handle has one lifecycle owner, with a short selected mutex over its typed attachment
+phase and a watch notification for changes. Beginning or installing a restore checks that phase
+and its exchange generation under the same mutex as close. Close is terminal: a restore reply
+that loses that transition cannot install its attachment and releases the grant it obtained.
+Another exchange loss can interrupt only the restore or active attachment of that exchange.
+No lifecycle guard crosses an await. Submissions and deliveries keep their originating attachment,
+so replacing it cannot retarget an uncertain submission or an application ACK.
+
+The four production-owner Shuttle checks listed below race close with starting restoration and
+with another loss during restoration. They establish that the handle stays closed and cannot
+begin a subsequent restore. Public scenarios cover exchange I/O, late open replies, reservation
+cleanup and delivery interruption; those network effects are outside these in-process checks.
+[Client Session Protocol](./client-session-protocol.md) and its implementation manual own the
+restoration and application-outcome contract.
+
 ### Node quiesce accounting
 
 Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the
@@ -486,7 +589,13 @@ it:
   deadline. The state store's durability barrier lets one writer at a time run a storage
   synchronization for every writer waiting, through one atomic runner slot and a ticket watermark;
   it holds no lock across that wait, and the synchronization runs on the storage workers. Replica
-  progress reaches the waiting branch through its own state's notification.
+  progress reaches the waiting branch through the replication of its own state.
+- one placement's replication changes its announcement, its replicas' reported progress and the
+  handover between its announcers under a lock scoped to that placement, taken by its originator,
+  its one announcer and its replicas' acknowledgements, and never held across an await; see
+  [Checkpoint replication](#checkpoint-replication)
+- a replica's copy of one branch checkpoint is held under the registry's guard for one revision
+  comparison and a move, never a copy of its payload
 - an ACK root locks only its single terminal sender transition
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
@@ -828,7 +937,9 @@ A family of names means each member runs independently through the recipe.
 | Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
 | Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. `shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot` races a forwarded producer's detach against the clearance of its batch while a local producer waits for the window's one slot: the forwarded batch reaches the worker only after its clearance was recorded, and the local batch is admitted whichever comes first, so no slot leaks. `shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it` races an endpoint end against the clearance of two batches while the worker holds the first without reporting it: each batch is answered once, not admitted exactly when the worker never took it, whether it was still being cleared or cleared and waiting for the worker, and of unknown outcome when it did. |
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
+| Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
+| Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
@@ -891,7 +1002,11 @@ an `arc-swap` publication, is invisible to it and excluded from the claim rather
 fictional model. A standalone counter carries no cross-location claim, whatever its ordering. Relay
 branch presence is such a case: its owner lifetimes and publications are `arc-swap` compare-and-swap
 and read-copy-update operations with no Nervix-owned atomic beside them, so it has no Loom model;
-its Shuttle checks order its publications against observers and successors.
+its Shuttle checks order its publications against observers and successors. Checkpoint
+replication is another: its announcement and progress change under one placement's lock, and its
+wake-ups are the boundary's `Notify`, with no Nervix-owned atomic beside them, so it has no Loom
+model either; its Shuttle checks order an announcer's end against offers, and a wait's registration
+against reports and announcements.
 
 | Invariant | Claim | Model and qualification |
 | --- | --- | --- |

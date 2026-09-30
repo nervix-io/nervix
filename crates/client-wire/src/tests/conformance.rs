@@ -539,6 +539,8 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                         domain: name("tenant"),
                         emitter: name("app_output"),
                         fields: producer_fields(),
+                        generation: 4,
+                        contract: nervix_models::ClientEndpointContract::from_digest([7; 32]),
                         window: AckWindow::Parallel { max: non_zero(8) },
                         ack_timeout: Duration::from_secs(30),
                         retry_backoff: Duration::from_millis(100),
@@ -1107,10 +1109,13 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                             AckWindow::Parallel { max } => format!("parallel:{}", max.get()),
                         };
                         lines.push(format!(
-                            "REPLY {id} EMITTER_OPENED domain={} emitter={} window={window} \
-                             ack_timeout={} retry={}/{} granted={}/{} max_batch={}/{} message={}",
+                            "REPLY {id} EMITTER_OPENED domain={} emitter={} generation={} \
+                             contract={} window={window} ack_timeout={} retry={}/{} granted={}/{} \
+                             max_batch={}/{} message={}",
                             opened.domain.as_str(),
                             opened.emitter.as_str(),
+                            opened.generation,
+                            opened.contract,
                             opened.ack_timeout.as_nanos(),
                             opened.retry_backoff.as_nanos(),
                             opened.retry_max_backoff.as_nanos(),

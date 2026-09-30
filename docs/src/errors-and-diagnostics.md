@@ -96,6 +96,13 @@ it beneath their own failure, as the paragraphs below describe. HTTP polling, Pr
 OTEL and Iceberg report their failed request, export or catalog call without it, so their
 diagnostics do not name the lookup failure.
 
+The node's own trace export waits for the resolver installed by startup. Its connector's
+`TraceConnectError` distinguishes a closed installation, a connection timeout, and a Hyper
+connection failure retaining its `DnsLookupError` cause. Tonic and the OTLP SDK report the failed
+export. The export timeout encloses DNS and TCP after resolver installation; a missing DNS
+configuration still fails startup as
+`AppError::LoadDnsConfiguration`. Telemetry failures have no connector retry or ACK disposition.
+
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
@@ -129,6 +136,24 @@ syntax, invalid UTF-8, and invalid escapes enter through that failure; object sh
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and
 nested sequence shapes keep their existing typed codec or runtime-schema failures. Diagnostics name
 the codec and field when one is known and never attach the rejected payload value.
+
+Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
+codec, and the field when one is at fault, and the typed reason stays beneath it: a
+`CodecContractError` for a declaration or use the wire format does not support, such as a missing
+wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
+does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
+builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+An unfolding payload keeps the report of the message that failed and names its zero-based input and
+output position after it. The ingest group returns that report unchanged. A source host keeps it
+beneath its intake's decode or dispatch failure and reports the whole chain, an HTTP or WebSocket
+endpoint renders the whole chain in its decode notice, a lookup line keeps it beneath the line it
+failed on, and an emitter keeps it beneath the record it rejects or the encoding it could not start. The rendered chain reads as the codec
+diagnostic did before: `codec 'events_codec' failed to parse field 'user_id': ...` followed by the
+Arrow builder's own reason. A codec that fails to compile while a domain execution is built keeps its
+report in the runtime build error. A codec failure whose parser or writer error is its `#[source]`,
+such as a simd-json, CBOR, Avro, protobuf, I/O, UTF-8 or timestamp error, leaves that error out of
+its own message: `error-stack` records a context's source as the frame beneath it, so the rendered
+chain names each cause once.
 
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
@@ -216,6 +241,22 @@ end the wait as `RetryDeadline`. Connection timeouts and TLS name failures remai
 failures and do not become command dispositions. OTEL gRPC reports a failed lookup or
 connection through its existing infrastructure export failure; the emitter host keeps the batch
 and its acknowledgement under the declared retry policy. No record rejection is inferred from DNS.
+
+Native endpoint recovery keeps failure states distinct. A lost producer submission resolves to
+`ProducerOutcome::OutcomeUnknown(SessionLost)` when its frame was sent but no outcome arrived; the
+client never calls that batch not admitted or replays it automatically. A consumer read crossing a
+session gap returns `ClientError::ConsumerInterrupted` before any batch from the replacement
+attachment. `ClientError::ConsumerReopenRequired` names a changed, stopped or removed endpoint that
+needs a fresh application open; `ConsumerSessionUnavailable` means the bounded reconnect attempt
+did not establish a session. A delivery from a revoked attachment returns
+`DeliveryReferenceExpired` before settlement, while `SettlementUnknown` means a settlement request
+may have reached the server but its answer was lost. The application must resolve such an ACK with
+its own idempotency policy. None of these errors claims that a downstream effect did or did not
+occur.
+
+Before a restarted serving node has proved linearizable catch-up, both native endpoint opens use
+the ordinary retryable `EndpointUnavailable` refusal. They do not report a missing or stopped
+domain from that node's stale local snapshot as a terminal application error.
 
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
@@ -412,6 +453,19 @@ The last carries the runtime planning failure beneath it, such as a relay withou
 an unparseable flush or collection cadence, rather than restating it. Runtime installation adds
 domain context to either report, and an ingestor that fails to start while its domain execution is
 built records that report as its transient error.
+
+Starting an ingestor on a node returns an `IngestorStartError` report. An ingestor already running,
+a domain execution or codec the node has not instantiated, and a binding failure beneath the
+binding context are start failures of their own. Every failure to compose or open the source is
+`IngestorStartError::Initialize`, naming the ingestor and its domain, with the cause beneath it: a
+`SourceStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
+offsets this node does not own, or a delivery-mode duration that does not parse, or else the report
+of the client configuration, connector plan, source instance or domain cadence that failed. A
+runtime caller that still returns `RuntimeError` keeps the whole report in
+`RuntimeError::IngestorStart`, whose message is the report's chain, such as
+`failed to initialize ingestor 'syslog_source' in domain 'edge': invalid Syslog client config key
+'framing': UDP does not use stream framing`. That message is what the failed command and the
+ingestor's transient status show.
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
@@ -707,10 +761,21 @@ Broken internal guarantees take the explicit panic classes `assured` for a const
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
 in the type. A dependency that panics on input a caller can supply is such a failure too: its owner
-refuses that input with a typed error before the dependency reads it, as the vocabulary's duration
-parser does with `DurationTextError::TooLong` for text whose spans would overflow `humantime`'s
-duration arithmetic. A dropped result with no stated recovery class does not establish that it was
-handled.
+refuses that input with a typed error before the dependency reads it, and that guarded read is the
+only way the rest of Nervix reaches the dependency. The vocabulary's duration parser,
+`parse_duration_text`, refuses text whose spans would overflow `humantime`'s duration arithmetic
+with `DurationTextError::TooLong`, and every reader of duration text uses it: NSPL literals, Model
+settings, window aggregate arguments, node command-line options and their environment variables,
+benchmark settings and test harnesses. Clippy rejects a direct call to `humantime::parse_duration`
+and any use of `humantime::Duration`, whose text conversion reads through the same parser.
+`DurationTextError` describes only the reason, `humantime`'s own for malformed text or
+`it is longer than a duration can be`, so each owner keeps its diagnostic around it: the setting,
+the text it could not read, then that reason. An owner with a typed error of its own, such as the
+command line, an ingestor's start, the activation, entrypoint, runtime and emitter plans, and the
+WebSockets signaling compiler, also keeps the `DurationTextError` beneath it. A node given such a
+value on its command line or in an environment variable names the option and the reason and exits
+with status 2 before it starts. A dropped result with no stated recovery class does not establish
+that it was handled.
 
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
