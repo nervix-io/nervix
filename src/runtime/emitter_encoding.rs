@@ -214,7 +214,7 @@ pub(super) async fn encode_pending_broker_payloads(
     batch: &EmitterPublishBatch,
     pending_rows: Vec<usize>,
 ) -> EmitterRuntimeResult<Vec<PendingRowPayload>> {
-    if codec.requires_blocking_encode() {
+    if codec.transforms_on_emitting() {
         let arrow_batch = batch.relay_batch().batch.clone();
         let emitter = context.emitter.clone();
         return context
@@ -610,7 +610,7 @@ async fn pack_pending_rows(
                 emitter.as_str()
             ))
     };
-    if !codec.requires_blocking_encode() {
+    if !codec.transforms_on_emitting() {
         return pack_buffered_batches(&codec, carriers, policy).map_err(initialization_failed);
     }
     // The charge stops growing at the relay body limit, so the running sum never needs more.

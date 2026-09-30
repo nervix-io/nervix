@@ -1235,7 +1235,7 @@ impl UdfExecutor {
 impl FunctionInjector for UdfExecutor {
     fn execution_policy(&self, function: &FunctionName) -> FunctionExecutionPolicy {
         if matches!(function, FunctionName::Udf(_)) {
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         } else {
             FunctionExecutionPolicy::Inline
         }
@@ -1556,7 +1556,7 @@ mod tests {
         let function = FunctionName::Udf("add_one".to_string());
         assert_eq!(
             executor.execution_policy(&function),
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         );
         let result = executor
             .inject_with_context(

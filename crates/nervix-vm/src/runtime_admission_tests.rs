@@ -189,7 +189,7 @@ async fn until(mut condition: impl FnMut() -> bool) {
 async fn a_small_batch_without_extension_calls_runs_inline() {
     let executor = Executor::default();
     let program = increment_program();
-    let batch = increment_batch(&program, SPAWN_BLOCKING_ROW_THRESHOLD);
+    let batch = increment_batch(&program, INLINE_ROW_LIMIT);
     let context = ExecutionContext::new(Timestamp::from_unix_nanos(1));
 
     execute_program_with_selection_in_context(&executor, &program, &batch, &context)
@@ -205,7 +205,7 @@ async fn a_small_batch_without_extension_calls_runs_inline() {
 async fn a_large_batch_runs_on_the_data_workers_under_a_relay_charge_of_its_columns() {
     let executor = Executor::default();
     let program = two_header_program();
-    let batch = header_batch(&program, SPAWN_BLOCKING_ROW_THRESHOLD + 1);
+    let batch = header_batch(&program, INLINE_ROW_LIMIT + 1);
     let expected_charge = batch.payload_bytes().expect("Arrow measures Utf8 columns");
     let (context, mut control) = scripted_injector(FunctionExecutionPolicy::Inline);
 
@@ -240,7 +240,7 @@ async fn an_extension_call_runs_on_the_extension_workers_whatever_the_batch_size
     let executor = Executor::default();
     let program = two_header_program();
     let batch = header_batch(&program, 1);
-    let (context, control) = scripted_injector(FunctionExecutionPolicy::SpawnBlocking);
+    let (context, control) = scripted_injector(FunctionExecutionPolicy::Extension);
     drop(control.release);
 
     let result = execute_program_with_selection_in_context(&executor, &program, &batch, &context)
@@ -260,7 +260,7 @@ async fn an_extension_call_runs_on_the_extension_workers_whatever_the_batch_size
 async fn a_full_class_refuses_the_execution_as_not_admitted() {
     let executor = single_worker_executor();
     let program = two_header_program();
-    let (held_context, mut held) = scripted_injector(FunctionExecutionPolicy::SpawnBlocking);
+    let (held_context, mut held) = scripted_injector(FunctionExecutionPolicy::Extension);
     let holding = nervix_primitives::task::spawn({
         let executor = executor.clone();
         let program = program.clone();
@@ -274,7 +274,7 @@ async fn a_full_class_refuses_the_execution_as_not_admitted() {
         .recv()
         .await
         .expect("the held execution takes the worker");
-    let (queued_context, queued) = scripted_injector(FunctionExecutionPolicy::SpawnBlocking);
+    let (queued_context, queued) = scripted_injector(FunctionExecutionPolicy::Extension);
     drop(queued.release);
     let waiting = nervix_primitives::task::spawn({
         let executor = executor.clone();
@@ -287,8 +287,7 @@ async fn a_full_class_refuses_the_execution_as_not_admitted() {
     });
     until(|| executor.snapshot().extension_cpu.pending == 1).await;
 
-    let (refused_context, refused_control) =
-        scripted_injector(FunctionExecutionPolicy::SpawnBlocking);
+    let (refused_context, refused_control) = scripted_injector(FunctionExecutionPolicy::Extension);
     let refused = execute_program_with_selection_in_context(
         &executor,
         &program,
@@ -321,7 +320,7 @@ async fn an_abandoned_execution_stops_at_its_next_instruction() {
     let executor = Executor::default();
     let program = two_header_program();
     let batch = header_batch(&program, 1);
-    let (context, mut control) = scripted_injector(FunctionExecutionPolicy::SpawnBlocking);
+    let (context, mut control) = scripted_injector(FunctionExecutionPolicy::Extension);
 
     let execution = nervix_primitives::task::spawn({
         let executor = executor.clone();

@@ -104,9 +104,8 @@ pub use regexp::{
 };
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
-    FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
-    SPAWN_BLOCKING_ROW_THRESHOLD, execute_predicate_in_context,
-    execute_program_with_selection_in_context,
+    FunctionInvocation, INLINE_ROW_LIMIT, InjectedResult, PredicateExecutionResult, RowSelection,
+    execute_predicate_in_context, execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,

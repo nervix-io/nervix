@@ -1170,7 +1170,7 @@ pub(super) async fn decode_ingested_payload(
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> error_stack::Result<usize, PayloadDecodeError> {
-    if !codec.requires_blocking_decode() {
+    if !codec.transforms_on_ingestion() {
         return decode_with_codec(codec, payload, decoder, builder)
             .map_err(|error| Report::new(PayloadDecodeError::Codec(error)));
     }

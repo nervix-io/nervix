@@ -102,7 +102,7 @@ use nervix_primitives::{
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
 #[cfg(test)]
-use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
+use nervix_vm::INLINE_ROW_LIMIT as VM_INLINE_ROW_LIMIT;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileNamespace as VmCompileNamespace,
     CompileOptions as VmCompileOptions, CompiledPredicate as VmCompiledPredicate,

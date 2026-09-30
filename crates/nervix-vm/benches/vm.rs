@@ -14,8 +14,8 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_execution::Executor;
 use nervix_models::Timestamp;
 use nervix_vm::{
-    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SMALL_SET_CAPACITY, SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
+    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, INLINE_ROW_LIMIT,
+    OutputMode, RuntimeError, SMALL_SET_CAPACITY, SemanticScopePolicy, TypedArray, TypedBatch,
     compile_program_with_options_for_bindings, execute_program_with_selection_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
@@ -30,8 +30,8 @@ mod workloads;
 #[path = "vm/allocation_probe.rs"]
 mod allocation_probe;
 
-/// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
-/// amortization curve below it and the cost of the blocking hop above it.
+/// Row counts spanning `INLINE_ROW_LIMIT` so the sweep shows both the
+/// amortization curve below it and the cost of the executor hop above it.
 const SWEEP_ROW_COUNTS: [usize; 8] = [1, 8, 64, 256, 1_024, 4_096, 16_384, 65_536];
 
 #[derive(Debug, Error)]
@@ -971,7 +971,7 @@ fn compile_correlate_output() -> Arc<CompiledProgram> {
 
 /// Rows in a numeric kernel batch. The batch stays at the inline execution threshold, so a
 /// measurement is the kernels themselves rather than the blocking-pool hop a larger batch takes.
-const NUMERIC_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+const NUMERIC_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 /// How many rows of a numeric kernel batch hold operands that make every checked operation in the
 /// program fail, which is what separates the kernel's clean path from its error reporting.
@@ -1795,7 +1795,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
 
 /// Rows in a datetime kernel batch, which stays at the inline execution threshold like a numeric
 /// kernel batch.
-const DATETIME_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+const DATETIME_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 fn datetime_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -2105,9 +2105,9 @@ fn calendar_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
-/// Rows in every membership benchmark batch. It stays at the blocking threshold so no batch pays
-/// the blocking hop.
-const MEMBERSHIP_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+/// Rows in every membership benchmark batch. It stays at the inline limit so no batch pays the
+/// executor hop.
+const MEMBERSHIP_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 /// Set sizes on both sides of `SMALL_SET_CAPACITY`, where a set stops comparing a value with each
 /// element and looks it up by key instead.
@@ -2219,9 +2219,9 @@ fn membership_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
-/// Rows in every network benchmark batch. It stays at the blocking threshold so no batch pays the
-/// blocking hop.
-const NETWORK_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+/// Rows in every network benchmark batch. It stays at the inline limit so no batch pays the
+/// executor hop.
+const NETWORK_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 fn network_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -2346,9 +2346,9 @@ fn network_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
-/// Rows in every JSON extraction benchmark batch. It stays at the blocking threshold so no batch
-/// pays the blocking hop.
-const JSON_EXTRACTION_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+/// Rows in every JSON extraction benchmark batch. It stays at the inline limit so no batch pays
+/// the executor hop.
+const JSON_EXTRACTION_ROWS: usize = INLINE_ROW_LIMIT;
 
 /// Four columns holding the same documents, so a program reading one field from each parses every
 /// document four times while a program reading four fields from one column parses it once.
@@ -2580,10 +2580,10 @@ fn compile_conditional(program: &ConditionalProgram) -> Arc<CompiledProgram> {
 /// narrowed to the rows it selects should cost in proportion to those rows, an arm no row selects
 /// should cost almost nothing, and an arm over a vectorized kernel should stay flat.
 ///
-/// The batch is the largest the VM executes inline, so no hop to the blocking pool blurs what the
-/// arm itself costs; the batch-size sweep above covers the hop.
+/// The batch is the largest the VM executes inline, so no hop to the executor's workers blurs what
+/// the arm itself costs; the batch-size sweep above covers the hop.
 fn conditional_arm_benches(c: &mut Criterion) {
-    const ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+    const ROWS: usize = INLINE_ROW_LIMIT;
 
     let runtime = benchmark_runtime();
     let mut group = c.benchmark_group("conditional_arm");

@@ -5,7 +5,7 @@
 
 use super::*;
 
-const INLINE_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+const INLINE_ROWS: usize = INLINE_ROW_LIMIT;
 
 fn sliced_batch(batch: &TypedBatch, offset: usize, rows: usize) -> TypedBatch {
     let columns = batch
@@ -103,7 +103,7 @@ pub(super) fn workload_shape_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("vm_workload_shape");
 
     // The existing 64–65,536 sweep remains the main throughput curve. These three points expose
-    // fixed per-batch cost and the exact transition from inline execution to the blocking pool.
+    // fixed per-batch cost and the exact transition from inline execution to the data workers.
     for rows in [1, 8, INLINE_ROWS + 1] {
         let batch = arithmetic_batch(rows);
         measure_batch(

@@ -704,9 +704,9 @@ The VM's entry point alone decides where a program runs:
 
 | Condition | Where it runs |
 | --- | --- |
-| At most `SPAWN_BLOCKING_ROW_THRESHOLD` (1,024) rows, and no injected function whose `FunctionExecutionPolicy` is `SpawnBlocking` | Inline, on the caller's task |
+| At most `INLINE_ROW_LIMIT` (1,024) rows, and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
 | More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
-| Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `SpawnBlocking` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
+| Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
 A caller hands the entry point the node's `Executor` and awaits the result; it chooses neither
 the class nor the charge. An admitted execution is charged to the relay memory class for the bytes

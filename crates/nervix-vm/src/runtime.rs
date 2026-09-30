@@ -95,7 +95,7 @@ use crate::{
     url_component::{self, UrlComponent},
 };
 
-pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
+pub const INLINE_ROW_LIMIT: usize = 1_024;
 
 /// One register's value during an execution.
 #[derive(Clone)]
@@ -671,7 +671,7 @@ pub struct FunctionInvocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionExecutionPolicy {
     Inline,
-    SpawnBlocking,
+    Extension,
 }
 
 /// Answers the calls a program makes out of the VM.
@@ -780,8 +780,8 @@ pub async fn execute_program_with_selection_in_context(
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> error_stack::Result<ExecutionResult, RuntimeError> {
-    let calls_extension = program_requires_spawn_blocking(program, context);
-    if batch.row_count() <= SPAWN_BLOCKING_ROW_THRESHOLD && !calls_extension {
+    let calls_extension = program_calls_extension(program, context);
+    if batch.row_count() <= INLINE_ROW_LIMIT && !calls_extension {
         return execute_program_with_selection_in_context_sync(program, batch, context, None);
     }
     let class = if calls_extension {
@@ -826,15 +826,15 @@ pub async fn execute_program_with_selection_in_context(
     }
 }
 
-fn program_requires_spawn_blocking(program: &CompiledProgram, context: &ExecutionContext) -> bool {
+fn program_calls_extension(program: &CompiledProgram, context: &ExecutionContext) -> bool {
     program.instructions.iter().any(|instruction| {
         let InstructionKind::Inject { function, .. } = &instruction.kind else {
             return false;
         };
         context.injector.as_ref().is_some_and(|injector| {
-            injector.execution_policy(function) == FunctionExecutionPolicy::SpawnBlocking
+            injector.execution_policy(function) == FunctionExecutionPolicy::Extension
         }) || program.injector.as_ref().is_some_and(|injector| {
-            injector.execution_policy(function) == FunctionExecutionPolicy::SpawnBlocking
+            injector.execution_policy(function) == FunctionExecutionPolicy::Extension
         })
     })
 }
@@ -5987,14 +5987,14 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct BlockingPolicyInjector {
+    struct ExtensionPolicyInjector {
         release: Mutex<mpsc::Receiver<()>>,
     }
 
-    impl FunctionInjector for BlockingPolicyInjector {
+    impl FunctionInjector for ExtensionPolicyInjector {
         fn execution_policy(&self, function: &FunctionName) -> FunctionExecutionPolicy {
             assert_eq!(*function, FunctionName::ReadHeader);
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         }
 
         fn inject_with_context(
@@ -6012,7 +6012,7 @@ mod tests {
                 .map_err(|error| {
                     Report::new(RuntimeError::InjectedFunctionFailed {
                         function: function.as_str().to_string(),
-                        message: format!("blocking injector was not released: {error}"),
+                        message: format!("extension injector was not released: {error}"),
                     })
                 })?;
             TestHeaderInjector.inject_with_context(
@@ -9085,7 +9085,7 @@ mod tests {
     }
 
     #[nervix_primitives::test(flavor = "current_thread")]
-    async fn blocking_injector_policy_offloads_small_batches() {
+    async fn extension_injector_policy_offloads_small_batches() {
         let parsed = parse_program("SET route = read_header(input.header_name)")
             .expect("program must parse");
         let input_schema = schema(vec![
@@ -9115,7 +9115,7 @@ mod tests {
         let executor = Executor::default();
         let context = ExecutionContext {
             now: Timestamp::from_unix_nanos(1),
-            injector: Some(triomphe::Arc::new(Box::new(BlockingPolicyInjector {
+            injector: Some(triomphe::Arc::new(Box::new(ExtensionPolicyInjector {
                 release: Mutex::new(release_rx),
             }))),
         };
@@ -9126,10 +9126,10 @@ mod tests {
                 nervix_primitives::task::yield_now().await;
                 release_tx
                     .send(())
-                    .expect("blocking injector must still be waiting");
+                    .expect("extension injector must still be waiting");
             }
         );
-        let result = result.expect("blocking injector execution must succeed");
+        let result = result.expect("extension injector execution must succeed");
         let TypedArray::Utf8(route) = output_column(&result.batch, "route") else {
             panic!("route must be Utf8");
         };

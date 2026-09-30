@@ -2763,7 +2763,7 @@ mod tests {
             None,
         )
         .expect("reorderer key program should compile");
-        let records = (0..=VM_SPAWN_BLOCKING_ROW_THRESHOLD)
+        let records = (0..=VM_INLINE_ROW_LIMIT)
             .map(|sequence| {
                 test_runtime_row([
                     (
@@ -2774,7 +2774,7 @@ mod tests {
                         "sequence".to_string(),
                         RuntimeValue::U32(
                             u32::try_from(sequence)
-                                .assured("the VM blocking threshold fits a u32 test field"),
+                                .assured("the VM inline row limit fits a u32 test field"),
                         ),
                     ),
                     (
@@ -2799,9 +2799,6 @@ mod tests {
         .await
         .expect("large VM batch should execute");
 
-        assert_eq!(
-            output.batch.row_count(),
-            VM_SPAWN_BLOCKING_ROW_THRESHOLD + 1
-        );
+        assert_eq!(output.batch.row_count(), VM_INLINE_ROW_LIMIT + 1);
     }
 }

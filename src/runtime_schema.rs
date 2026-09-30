@@ -745,7 +745,7 @@ impl CompiledCodec {
         self.schema.clone()
     }
 
-    pub fn requires_blocking_decode(&self) -> bool {
+    pub fn transforms_on_ingestion(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_ingestion.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -784,7 +784,7 @@ impl CompiledCodec {
         }))
     }
 
-    pub(crate) fn requires_blocking_encode(&self) -> bool {
+    pub(crate) fn transforms_on_emitting(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_emitting.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -7851,8 +7851,8 @@ mod tests {
             }),
         )
         .expect("codec should compile");
-        assert!(compiled_codec.requires_blocking_decode());
-        assert!(!compiled_codec.requires_blocking_encode());
+        assert!(compiled_codec.transforms_on_ingestion());
+        assert!(!compiled_codec.transforms_on_emitting());
 
         let payload = [
             0x08, 42, 0x12, 4, b'a', b'c', b'm', b'e', 0x1a, 5, b'h', b'e', b'l', b'l', b'o',
@@ -7928,8 +7928,8 @@ mod tests {
             }),
         )
         .expect("codec should compile");
-        assert!(!compiled_codec.requires_blocking_decode());
-        assert!(compiled_codec.requires_blocking_encode());
+        assert!(!compiled_codec.transforms_on_ingestion());
+        assert!(compiled_codec.transforms_on_emitting());
 
         let record = test_runtime_row([
             ("user_id".to_string(), RuntimeValue::U32(42)),
