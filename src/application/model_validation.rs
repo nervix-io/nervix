@@ -820,4 +820,40 @@ mod tests {
         assert_eq!(after.completed - before.completed, 1);
         let _ = std::fs::remove_dir_all(&path);
     }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_model_the_bulk_workers_cannot_take_now_is_refused_as_an_inspection_task() {
+        let executor = crate::runtime::single_worker_executor();
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service_with_executor(
+            false,
+            executor.clone(),
+        )
+        .await;
+        let processor = inferencer();
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+        let filled = crate::runtime::FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
+
+        let refused = service
+            .validate_inferencer_model_metadata(&processor, &model)
+            .await
+            .expect_err("a full bulk class refuses the inspection");
+
+        assert!(
+            matches!(
+                refused.current_context(),
+                InferencerBindingValidationError::InspectionTask { node, .. }
+                    if node == &processor.name
+            ),
+            "{refused:?}"
+        );
+        assert!(refused.contains::<ExecutionError>(), "{refused:?}");
+        filled.release().await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }

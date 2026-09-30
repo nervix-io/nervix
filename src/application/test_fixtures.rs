@@ -561,16 +561,6 @@ pub(in crate::application) async fn build_test_service_with_executor(
     .await
 }
 
-/// A service whose runtime admits its work through `executor`, so a test can fill a class the
-/// service's own work is admitted into.
-#[cfg(not(feature = "testing"))]
-pub(in crate::application) async fn build_test_service_with_executor(
-    create_default_domain_flag: bool,
-    executor: nervix_execution::Executor,
-) -> TestService {
-    build_test_service_inner(create_default_domain_flag, Runtime::with_executor(executor)).await
-}
-
 #[cfg(feature = "testing")]
 pub(in crate::application) async fn build_test_service_with_probe(
     create_default_domain_flag: bool,
