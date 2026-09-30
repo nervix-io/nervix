@@ -619,6 +619,7 @@ async fn select_subscription_rows(
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
     sampler: &SubscriptionSampler,
+    executor: &nervix_execution::Executor,
     clock: &Result<
         crate::runtime::DomainClockLifecycle,
         Report<crate::runtime::DomainClockAccessError>,
@@ -661,7 +662,7 @@ async fn select_subscription_rows(
         if let (Some(predicate), Some(now)) = (predicate, now) {
             let passed = match batch.runtime_row(row) {
                 Ok(record) => execute_subscription_predicate_on_record(
-                    runtime.executor(),
+                    executor,
                     predicate,
                     &record,
                     now,

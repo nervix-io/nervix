@@ -217,6 +217,7 @@ impl ActiveDelivery {
             self.predicate.as_ref(),
             self.batch_sample_rate,
             &self.service.inner.subscription_sampler,
+            self.service.inner.runtime.executor(),
             &self.clock,
         )
         .await;
