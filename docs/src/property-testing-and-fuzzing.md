@@ -179,8 +179,12 @@ excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
 PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
 libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
-manual campaigns. Job limits reserve additional time for compilation, artifacts and cleanup. A
-cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
+manual campaigns. The sanitizer job is bounded by 120 minutes on PRs and 300 minutes in scheduled
+or manual campaigns, including ordinary property checks, compiled discovery, cold instrumented
+builds, failure qualification, artifacts and cleanup. The current 34-target inventory alone needs
+17 minutes of PR engine time or 170 minutes of campaign engine time, before those prerequisites.
+The per-build deadline remains 1,800 seconds. A cache may seed a campaign but cannot skip a target
+or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
