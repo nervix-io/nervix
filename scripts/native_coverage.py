@@ -3,7 +3,8 @@
 """Collect LLVM source coverage from the extra checks during the runs CI already makes of them.
 
 `just coverage-native-extras [producer ...]` runs `run`. A producer is an extra check whose recipe
-executes Nervix code natively in ordinary mode: `bench-smoke` exercises every Criterion body once,
+executes Nervix code natively in ordinary mode: `test-typed-ratchet` qualifies compiler-resolved
+reports and fixtures, `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
 walks the NSPL completion graph. Without names every producer runs, in that order. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
@@ -17,6 +18,9 @@ coverage instrumentation, the configured compiler wrapper stays in place so kach
 build, and the build goes to `<target>/native-coverage-build`, so ordinary builds are not
 invalidated. The finish recipes complete the check outside instrumentation: compile-only checks,
 browser builds and modeled modes, whose coverage this command does not claim.
+When a producer selects a compiler, its prepare recipes install that toolchain before the
+collector resolves the compiler and validates its LLVM tools. Its attempt directory uses the
+requested toolchain's name, and the record gains the installed compiler identity after preparation.
 
 Each producer collects into a fresh directory,
 `<target>/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`, that no other run reads,
@@ -484,13 +488,13 @@ class Workspace:
     def build(self) -> Path:
         return self.target / BUILD_DIRECTORY
 
-    def new_attempt(self, producer: Producer, toolchain: Toolchain, name: str) -> Path:
+    def new_attempt(self, producer: Producer, toolchain: str, name: str) -> Path:
         directory = (
             self.target
             / COLLECTION_DIRECTORY
             / producer.name
             / producer.mode
-            / toolchain.label()
+            / toolchain
             / name
         )
         directory.parent.mkdir(parents=True, exist_ok=True)
@@ -1205,7 +1209,10 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
     """Run one producer's check with its native executions collected, and write its record."""
 
     workspace = context.workspace
-    attempt = workspace.new_attempt(producer, context.toolchain, context.run.attempt_name())
+    toolchain = context.toolchain
+    environment = dict(context.environment)
+    label = f"rust-{producer.toolchain}" if producer.toolchain else toolchain.label()
+    attempt = workspace.new_attempt(producer, label, context.run.attempt_name())
     record = Record(
         attempt / RECORD,
         {
@@ -1217,7 +1224,9 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
             "run": context.run.describe(),
             "attempt": attempt.name,
             "started_at": timestamp(context.clock()),
-            "toolchain": context.toolchain.describe(),
+            "toolchain": (
+                {"requested": producer.toolchain} if producer.toolchain else toolchain.describe()
+            ),
             "recipes": {
                 "prepare": list(producer.prepare),
                 "instrumented": producer.instrumented,
@@ -1235,9 +1244,15 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
                 return Collected(status, attempt, record)
 
+        if producer.toolchain:
+            environment["RUSTUP_TOOLCHAIN"] = producer.toolchain
+            toolchain = load_toolchain(commands, environment)
+            record.content["toolchain"] = toolchain.describe()
+            record.write()
+
         stage = Stage.INSTRUMENT
         instrumented = instrumentation(
-            commands, workspace, context.toolchain, attempt, context.environment
+            commands, workspace, toolchain, attempt, environment
         )
         record.content["instrumentation"] = instrumented.describe(workspace)
         record.write()
@@ -1252,7 +1267,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
                 return Collected(status, attempt, record)
             stage = Stage.EXPORT
-            exported = export(commands, workspace, context.toolchain, context.packages, attempt)
+            exported = export(commands, workspace, toolchain, context.packages, attempt)
         record.content["selection"] = exported.selection.describe(workspace)
         record.content["profiles"] = exported.selection.describe_profiles()
         record.content["export_warnings"] = list(exported.warnings)
@@ -1262,7 +1277,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
 
         stage = Stage.FINISH
         for recipe in producer.finish:
-            status = commands.stream(["just", recipe], environment=context.environment)
+            status = commands.stream(["just", recipe], environment=environment)
             if status != 0:
                 detail = f"`just {recipe}` exited with status {status}"
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
@@ -1351,15 +1366,7 @@ def run(
         environment=environment,
     )
     for producer in selected:
-        selected_context = context
-        if producer.toolchain:
-            selected_environment = dict(environment)
-            selected_environment["RUSTUP_TOOLCHAIN"] = producer.toolchain
-            selected_context = Context(workspace=context.workspace,
-                toolchain=load_toolchain(commands, selected_environment), revision=context.revision,
-                run=context.run, packages=context.packages, clock=context.clock,
-                environment=selected_environment)
-        collected = collect(commands, selected_context, producer)
+        collected = collect(commands, context, producer)
         lines = summary(workspace, producer, collected)
         print("\n".join(lines), flush=True)
         publish_step_summary(environment, lines)
