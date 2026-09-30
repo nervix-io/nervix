@@ -125,6 +125,7 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
@@ -425,6 +426,7 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    node_trace_export: Option<NodeTraceExport>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
     held_resource_upload: Option<HeldResourceUpload>,
     /// When the last signal was sent to the server process, taken before the signal is delivered
@@ -2371,6 +2373,53 @@ async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
         .await
         .expect("Jaeger test containers should start");
     refresh_dependency_configuration(world);
+}
+
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string} through fixture DNS"
+)]
+async fn when_node_trace_export(world: &mut ScenarioWorld, node_count: usize, receiver: String) {
+    let cluster = NodeTraceExport::start(
+        node_count,
+        grpc_receiver(world, &receiver),
+        world.test_id.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[then(expr = "OTLP receiver {string} eventually receives the server's own spans from every node")]
+async fn then_node_trace_export(world: &mut ScenarioWorld, receiver: String) {
+    world
+        .node_trace_export
+        .as_ref()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_exports(grpc_receiver(world, &receiver))
+        .await
+        .unwrap_or_else(|error| panic!("node trace export failed: {error}"));
+}
+
+#[when("every trace-exporting node receives SIGTERM")]
+async fn when_trace_exporting_nodes_receive_sigterm(world: &mut ScenarioWorld) {
+    world
+        .node_trace_export
+        .as_mut()
+        .verified("the preceding step started trace-exporting processes")
+        .signal_shutdown()
+        .unwrap_or_else(|error| panic!("could not signal trace-exporting processes: {error}"));
+}
+
+#[then("every trace-exporting node exits successfully")]
+async fn then_trace_exporting_nodes_exit_successfully(world: &mut ScenarioWorld) {
+    world
+        .node_trace_export
+        .as_mut()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting processes failed to stop: {error}"));
 }
 
 #[given("Sentry is running")]
@@ -27245,6 +27294,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.held_resource_upload = None;
                 world.server_process = None;
                 world.server_process_cluster = None;
+                world.node_trace_export = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
                 world.producers = client_producers::ScenarioProducers::default();

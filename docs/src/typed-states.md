@@ -41,6 +41,13 @@ the *state* is absent or different, not merely because a literal looks special.
 
 ## Absence And Distinct States
 
+**Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
+publication together. The publication carries `Option<DnsResolver>`: absence means startup has not
+installed the node resolver, and presence carries that same resolver's shared handle. A closed
+publication before installation is a distinct connection failure, not a choice of another resolver.
+The lazy connector waits through the publication primitive; its export connection timeout starts
+only after installation, preserving early startup spans.
+
 **Branching.** A validated branch declaration is either unbranched or carries its named branch
 and resolved schema together. The schema supplies the branch fields and their sensitivity, so a
 runtime plan cannot pair a present branch schema with an independently missing sensitivity set.
