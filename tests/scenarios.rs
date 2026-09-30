@@ -23903,7 +23903,22 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+}
+
+/// Like the step above, except that every payload arriving before the last fragment set matches
+/// must match a set not yet matched, so a record the scenario expects to be dropped fails the step
+/// even when it arrives among the expected ones.
+#[then(
+    expr = "within {string} the relay subscription receives exactly one payload for each fragment \
+            set"
+)]
+async fn then_within_duration_the_stream_subscription_receives_exactly_the_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail).await;
 }
 
 /// Like the step above, and every payload matching a fragment set carries the same value in the
@@ -23918,7 +23933,8 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     field: String,
     #[step] step: &Step,
 ) {
-    let matched = receive_subscription_fragment_sets(world, &duration, step).await;
+    let matched =
+        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
     let values = matched
         .iter()
         .map(|payload| {
@@ -23941,12 +23957,22 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     );
 }
 
+/// What a fragment-set wait does with a payload that matches none of the sets still expected.
+#[derive(Debug, Clone, Copy)]
+enum UnmatchedPayloads {
+    /// Other records share the subscription, so the payload is passed over.
+    Skip,
+    /// The sets name every record the subscription may deliver, so the payload fails the step.
+    Fail,
+}
+
 /// Waits until every docstring line's `|`-separated fragments are all found in one subscription
 /// payload, and returns the payloads that matched, in the order they arrived.
 async fn receive_subscription_fragment_sets(
     world: &mut ScenarioWorld,
     duration: &str,
     step: &Step,
+    unmatched: UnmatchedPayloads,
 ) -> Vec<String> {
     let duration =
         humantime::parse_duration(duration).expect("step duration must be a valid duration");
@@ -24002,12 +24028,19 @@ async fn receive_subscription_fragment_sets(
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
 
-        if let Some(index) = remaining
+        let position = remaining
             .iter()
-            .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)))
-        {
-            remaining.remove(index);
-            matched.push(payload);
+            .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)));
+        match (position, unmatched) {
+            (Some(index), _) => {
+                remaining.remove(index);
+                matched.push(payload);
+            }
+            (None, UnmatchedPayloads::Skip) => {}
+            (None, UnmatchedPayloads::Fail) => panic!(
+                "subscription payload {payload:?} matches no expected fragment set. expected \
+                 remaining {remaining:?}, observed {observed:?}"
+            ),
         }
     }
     matched

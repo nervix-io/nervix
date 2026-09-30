@@ -6,6 +6,8 @@
 //! - **Depends on.** Bound error-route plans, Arrow batches, the VM and relay delivery.
 //! - **Must not know.** Scheduled Models, NSPL parsing or route selection from declarations.
 
+use arrow_buffer::BooleanBuffer;
+
 use super::{vm_compile::RuntimeVmCompileError, *};
 
 #[derive(Debug, thiserror::Error)]
@@ -424,10 +426,51 @@ fn partial_output_batch(
     })
 }
 
-pub(super) fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<FieldPath> {
-    let mut invalid_fields = Vec::new();
-    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
-        let invalid = match column {
+/// The rows of one VM output batch whose required output fields are uninitialized or null.
+///
+/// The rows are found once for the batch, as one OR of the required columns' inverted validity
+/// bitmaps, so a batch whose required fields all hold values does no per-row work, and the fields
+/// are named only for a row that lacks one.
+pub(super) struct InvalidOutputRows<'a> {
+    batch: &'a VmTypedBatch,
+    rows: Option<BooleanBuffer>,
+}
+
+impl<'a> InvalidOutputRows<'a> {
+    pub(super) fn new(batch: &'a VmTypedBatch) -> Self {
+        Self {
+            batch,
+            rows: batch.rows_missing_required_values(),
+        }
+    }
+
+    /// The required output fields that are uninitialized or null on `row`, in schema order, and
+    /// none for a row that holds every one.
+    pub(super) fn fields(&self, row: usize) -> Vec<FieldPath> {
+        let Some(rows) = &self.rows else {
+            return Vec::new();
+        };
+        if !rows.value(row) {
+            return Vec::new();
+        }
+        let mut invalid_fields = Vec::new();
+        let schema = self.batch.schema();
+        for (field, column) in schema.fields().iter().zip(self.batch.columns()) {
+            if field.is_nullable() {
+                continue;
+            }
+            if Self::holds_no_value(column, row) {
+                invalid_fields.push(FieldPath::new(format!(
+                    "output.{}",
+                    field.name().strip_prefix("output.").unwrap_or(field.name())
+                )));
+            }
+        }
+        invalid_fields
+    }
+
+    fn holds_no_value(column: &VmTypedArray, row: usize) -> bool {
+        match column {
             VmTypedArray::Uninitialized { .. } => true,
             VmTypedArray::UInt8(array) => array.is_null(row),
             VmTypedArray::Int8(array) => array.is_null(row),
@@ -444,15 +487,8 @@ pub(super) fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<Fie
             VmTypedArray::Binary(array) => array.is_null(row),
             VmTypedArray::Datetime(array) => array.is_null(row),
             VmTypedArray::Generic(array) => array.is_null(row),
-        };
-        if invalid && !field.is_nullable() {
-            invalid_fields.push(FieldPath::new(format!(
-                "output.{}",
-                field.name().strip_prefix("output.").unwrap_or(field.name())
-            )));
         }
     }
-    invalid_fields
 }
 
 impl Runtime {
@@ -1019,6 +1055,71 @@ mod tests {
             SemanticScopePolicy::read_write("error_output", "error_output"),
         )
         .expect("the test error SET lowers")
+    }
+
+    #[test]
+    fn invalid_output_rows_name_required_fields_only_on_rows_that_lack_them() {
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("output.total", arrow_schema::DataType::Int64, false),
+            arrow_schema::Field::new("label", arrow_schema::DataType::Utf8, false),
+            arrow_schema::Field::new("note", arrow_schema::DataType::Utf8, true),
+        ]));
+        let rows = 70;
+        let totals =
+            arrow_array::Int64Array::from_iter((0..rows).map(|row| (row != 2).then_some(1)));
+        let labels = arrow_array::StringArray::from_iter(
+            (0..rows).map(|row| (row % 65 != 2).then_some("l")),
+        );
+        let notes = arrow_array::StringArray::from_iter((0..rows).map(|_| None::<&str>));
+        let batch = VmTypedBatch::try_new(
+            schema.clone(),
+            vec![
+                VmTypedArray::Int64(totals),
+                VmTypedArray::Utf8(labels),
+                VmTypedArray::Utf8(notes.clone()),
+            ],
+        )
+        .expect("the test columns match the test schema");
+
+        let invalid = InvalidOutputRows::new(&batch);
+
+        assert_eq!(
+            invalid.fields(2),
+            [
+                FieldPath::new("output.total"),
+                FieldPath::new("output.label")
+            ]
+        );
+        assert_eq!(invalid.fields(67), [FieldPath::new("output.label")]);
+        for row in (0..rows).filter(|row| ![2, 67].contains(row)) {
+            assert!(invalid.fields(row).is_empty(), "row {row}");
+        }
+
+        let complete = VmTypedBatch::try_new(
+            schema.clone(),
+            vec![
+                VmTypedArray::Int64(arrow_array::Int64Array::from(vec![1; 70])),
+                VmTypedArray::Utf8(arrow_array::StringArray::from(vec!["l"; 70])),
+                VmTypedArray::Utf8(notes),
+            ],
+        )
+        .expect("the test columns match the test schema");
+        let complete = InvalidOutputRows::new(&complete);
+        assert!(complete.rows.is_none());
+        assert!(complete.fields(0).is_empty());
+
+        let unset = VmTypedBatch::try_new(
+            schema,
+            vec![
+                VmTypedArray::Int64(arrow_array::Int64Array::from(vec![1, 2])),
+                VmTypedArray::uninitialized(arrow_schema::DataType::Utf8, 2),
+                VmTypedArray::uninitialized(arrow_schema::DataType::Utf8, 2),
+            ],
+        )
+        .expect("the test columns match the test schema");
+        let unset = InvalidOutputRows::new(&unset);
+        assert_eq!(unset.fields(0), [FieldPath::new("output.label")]);
+        assert_eq!(unset.fields(1), [FieldPath::new("output.label")]);
     }
 
     #[test]

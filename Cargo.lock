@@ -7673,6 +7673,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-primitives",
+ "nervix-simd-kernels",
  "nonzero_ext",
  "regex",
  "regex-automata 0.4.18",
