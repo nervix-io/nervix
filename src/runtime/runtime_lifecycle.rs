@@ -119,8 +119,7 @@ impl Runtime {
                 client_producer_budget: client_ingestor::ClientProducerBudget::default(),
                 client_emitters: DashMap::default(),
                 client_emitter_budget: client_emitter::ClientEmitterBudget::default(),
-                endpoint_bindings: DashMap::default(),
-                routed_endpoints: DashMap::default(),
+                endpoint_intake_routes: EndpointIntakeRoutes::default(),
                 relay_boundary_fanouts: DashMap::default(),
                 events,
                 fault_injection,
@@ -401,7 +400,7 @@ impl Runtime {
         domain: &DomainName,
         execution: DomainExecution,
     ) {
-        self.withdraw_routed_endpoints(domain, &execution);
+        self.inner.endpoint_intake_routes.withdraw_domain(domain);
         execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
@@ -555,7 +554,7 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
-        self.inner.endpoint_bindings.clear();
+        self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.compiled_wasm_modules.clear();
         self.inner.ingestor_readiness.clear();

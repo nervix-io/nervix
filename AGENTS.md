@@ -87,6 +87,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   contracts before a graph becomes active.
 - Runtime execution is materialized per concrete branch. Branch-local state, scheduling, buffering,
   and materialized views must remain visibly branch-local in types and ownership.
+- Server endpoint definitions and bound intakes form one immutable host-and-path publication.
+  A request resolves that publication once, and a WebSocket connection retains its selected route
+  and signaling protocol. Source close or drop ends its exact intake lifetime before withdrawing
+  the binding, so retained routes reject further intake and cannot attach to a replacement source.
+  A request admitted before that ending may finish through the intake it already borrowed.
 - Every server-side runtime entity that binds a configured listening port executes on every live
   Nervix node. Its listener is independent of leadership and placement and must remain present
   across all cluster events, including leader changes, node joins, node restarts, and recovery.

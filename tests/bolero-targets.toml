@@ -9,6 +9,21 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__endpoint_route_table__tests__bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes/corpus"
+domain_version = 1
+features = []
+id = "endpoint-route-table"
+invariant = "Bind, unbind, replace and teardown publish exactly the configured routes, preserve other domains, and prevent retained routes from admitting ended source lifetimes."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/endpoint_route_table_tests.rs"
+test = "runtime::endpoint_route_table::tests::bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/__fuzz__/tests__consumers__bolero_native_emitter_frames_round_trip/corpus"
 domain_version = 1
 features = []

@@ -26,6 +26,7 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "endpoint-route-table",
             "client-emitter-wire",
             "nspl-expression",
             "nspl-model",
@@ -65,6 +66,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-branch-instances",
             "nervix-simd-kernels",
             "nervix-lint-report",
+            "nervix-server",
             "nervix-checkpoint-replication",
         })
         for target in inventory.targets:
@@ -229,6 +231,24 @@ class DiscoveryTests(unittest.TestCase):
             "target": {"cfg(unix)": {"dev-dependencies": {"bolero": "0.13.4"}}}
         }))
 
+    def test_workspace_root_source_scan_keeps_package_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = root / "Cargo.toml"
+            manifest.write_text("[package]\nname = 'host'\n")
+            source = root / "src" / "owner.rs"
+            source.parent.mkdir()
+            source.write_text("fn bolero_host() { bolero::check!(); }")
+            for relative in ("crates/connector", "tests/qualification"):
+                package = root / relative
+                package.mkdir(parents=True)
+                (package / "Cargo.toml").write_text("[package]\nname = 'nested'\n")
+                (package / "lib.rs").write_text("fn bolero_nested() { bolero::check!(); }")
+            generated = root / "target" / "generated.rs"
+            generated.parent.mkdir()
+            generated.write_text("fn bolero_generated() { bolero::check!(); }")
+            self.assertEqual(bolero.static_targets(manifest), {"bolero_host": source})
+
     def test_source_scan_rejects_unregistered_macro_shapes(self) -> None:
         cases = (
             ("bolero::check!();", "no owning function"),
@@ -279,6 +299,22 @@ class ExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.inventory = bolero.load_inventory()
         self.target = self.inventory.targets[0]
+
+    def test_server_library_executable_is_selected_among_package_targets(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-server")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_server-1111"
+            binary = run / "nervix_server-2222"
+            for executable in (library, binary):
+                executable.write_bytes(b"")
+            output = (
+                f"  Executable unittests src/lib.rs ({library})\n"
+                f"  Executable unittests src/main.rs ({binary})\n"
+            )
+            build = subprocess.CompletedProcess([], 0, output, "")
+            with mock.patch.object(bolero, "command", return_value=build):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
 
     def test_command_propagates_engine_exit_and_timeout(self) -> None:
         with self.assertRaisesRegex(bolero.BoleroError, "exited 7"):
