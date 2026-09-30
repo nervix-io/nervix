@@ -3,7 +3,7 @@
 //! Layer: primitives.
 //!
 //! - **Owns.** Runtime SIMD selection, exact byte masks, bitmask words packed from per-lane flags,
-//!   checked integer arithmetic whose failures come out as bitmask words, and exact elapsed-time
+//!   checked integer arithmetic and constant division whose failures come out as bitmask words, and exact elapsed-time
 //!   histograms for callers with contiguous buffers.
 //! - **Depends on.** `fearless_simd`, pointer-width conversions, and self-contained error values.
 //! - **Must not know.** Arrow, Nervix models, codecs, metric recorders, or the consumers of a
@@ -11,6 +11,7 @@
 
 mod admission;
 mod checked;
+mod division;
 mod elapsed;
 mod flags;
 mod window;
@@ -28,6 +29,7 @@ pub use window::{
 pub use crate::{
     admission::AdmissionKernel,
     checked::{CheckedArithmetic, CheckedLane, CheckedLanes, LaneOperands, WidenedLane},
+    division::{ConstantDivision, DivisionLane, SignedDivisor, UnsignedDivisor},
     elapsed::{
         ElapsedBucket, ElapsedHistogram, ElapsedLayout, ElapsedLayoutError, elapsed_nanos,
         latest_instant,

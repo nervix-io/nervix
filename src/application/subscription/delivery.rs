@@ -213,6 +213,7 @@ impl ActiveDelivery {
     /// longer deliver.
     async fn deliver_batch(&mut self, batch: &RelayRecordBatch) -> Result<(), LaneClosed> {
         let selection = select_subscription_rows(
+            self.service.inner.runtime.executor(),
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,

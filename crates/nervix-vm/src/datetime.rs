@@ -37,6 +37,7 @@ use arrow_array::{
 use arrow_buffer::NullBuffer;
 use jiff::tz::Offset;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_simd_kernels::SignedDivisor;
 
 use crate::{
     batch::TypedArray,
@@ -153,6 +154,8 @@ fn truncate_at_offset(
     offset: Offset,
 ) -> Checked<TimestampNanosecondType> {
     let stride = unit.nanoseconds();
+    let divisor =
+        SignedDivisor::new(stride).assured("a fixed unit is a positive number of nanoseconds");
     let local_phase = match unit {
         FixedTimeUnit::Week => FIRST_MONDAY_AFTER_UNIX_EPOCH,
         FixedTimeUnit::Nanosecond
@@ -170,11 +173,12 @@ fn truncate_at_offset(
     // `local_phase - offset` past a multiple of it in UTC.
     let phase = local_phase
         .checked_sub(offset_nanoseconds)
-        .assured("a week and an offset of less than 26 hours in nanoseconds differ inside i64")
-        .checked_rem_euclid(stride)
+        .assured("a week and an offset of less than 26 hours in nanoseconds differ inside i64");
+    let phase = divisor
+        .checked_rem_euclid(phase)
         .assured("a stride is a positive number of nanoseconds");
     let lanes = Lanes::unary(values.values(), |value: i64| {
-        bin_start(value, phase, stride)
+        bin_start(value, phase, stride, divisor)
     });
     datetime_column(Checked::from_lanes(lanes, values.nulls().cloned()))
 }
@@ -187,14 +191,15 @@ pub(crate) fn bin(
     width: DateBinWidth,
 ) -> Checked<TimestampNanosecondType> {
     let stride = width.nanoseconds();
+    let divisor = SignedDivisor::new(stride).assured("a bin width is positive and fits i64");
     let lanes = Lanes::binary(
         values.values(),
         origins.values(),
         |value: i64, origin: i64| {
-            let phase = origin
-                .checked_rem_euclid(stride)
+            let phase = divisor
+                .checked_rem_euclid(origin)
                 .assured("a bin width is a positive number of nanoseconds");
-            bin_start(value, phase, stride)
+            bin_start(value, phase, stride, divisor)
         },
     );
     let nulls = NullBuffer::union(values.nulls(), origins.nulls());
@@ -207,16 +212,22 @@ pub(crate) fn bin(
 /// A start is never after its value, so a value before the epoch or before its origin belongs to
 /// the bin that starts at or before it. The lane fails when that start precedes the signed
 /// Unix-nanosecond range.
-fn bin_start(value: i64, phase: i64, stride: i64) -> (i64, bool) {
-    let past_multiple = value
-        .checked_rem_euclid(stride)
+fn bin_start(value: i64, phase: i64, stride: i64, divisor: SignedDivisor) -> (i64, bool) {
+    let past_multiple = divisor
+        .checked_rem_euclid(value)
         .assured("a stride is a positive number of nanoseconds");
     let past_phase = past_multiple
         .checked_sub(phase)
         .assured("both offsets lie in [0, stride), so their difference lies in (-stride, stride)");
-    let into_bin = past_phase
-        .checked_rem_euclid(stride)
-        .assured("a stride is a positive number of nanoseconds");
+    // Both phases lie in [0, stride), so their difference needs at most one stride,
+    // rather than another division, to become its Euclidean remainder.
+    let into_bin = if past_phase < 0 {
+        past_phase
+            .checked_add(stride)
+            .assured("a negative phase difference plus its stride lies in [0, stride)")
+    } else {
+        past_phase
+    };
     value.overflowing_sub(into_bin)
 }
 
@@ -403,13 +414,20 @@ fn count_elapsed(
     ends: &TimestampNanosecondArray,
     unit: FixedTimeUnit,
 ) -> Checked<Int64Type> {
-    let unit = i128::from(unit.nanoseconds());
+    let stride = unit.nanoseconds();
+    let divisor = SignedDivisor::new(stride).assured("a fixed unit is positive and fits i64");
     let lanes = Lanes::binary(starts.values(), ends.values(), |start: i64, end: i64| {
+        if let Some(elapsed) = end.checked_sub(start) {
+            let units = divisor
+                .checked_div(elapsed)
+                .assured("a positive unit cannot overflow a signed quotient");
+            return (units, false);
+        }
         let elapsed = i128::from(end)
             .checked_sub(i128::from(start))
             .assured("two i64 values differ by less than 2^64, which fits i128");
         let units = elapsed
-            .checked_div(unit)
+            .checked_div(i128::from(stride))
             .assured("a unit is at least one nanosecond, so the quotient exists");
         i64_lane(units)
     });
@@ -419,10 +437,11 @@ fn count_elapsed(
 /// Counts the whole units from the Unix epoch to every lane, rounding toward negative infinity, so
 /// an instant before the epoch counts back to the unit that starts at or before it.
 pub(crate) fn to_unix(values: &TimestampNanosecondArray, unit: FixedTimeUnit) -> Int64Array {
-    let unit = unit.nanoseconds();
+    let divisor =
+        SignedDivisor::new(unit.nanoseconds()).assured("a fixed unit is positive and fits i64");
     values.unary(|value| {
-        value
-            .checked_div_euclid(unit)
+        divisor
+            .checked_div_euclid(value)
             .assured("a unit is at least one nanosecond, so the quotient exists and fits i64")
     })
 }
