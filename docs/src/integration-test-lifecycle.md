@@ -109,6 +109,18 @@ the full builds: every kache-backed job and Docker image build uses a 1 TiB stor
 an upper bound, not a disk reservation. The runner's actual disk capacity remains the practical
 limit.
 
+CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
+name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its
+credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and
+`KACHE_BUCKET_SECRET_ACCESS_KEY`. The workflows pass these settings through kache's `KACHE_S3_*`
+environment variables and the setup action's S3 inputs. Docker image builds pass the same settings
+to their builder. The service URL is written into the daemon's TOML configuration before startup.
+
+For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_BUCKET_ENDPOINT` to
+`https://<account-id>.r2.cloudflarestorage.com`, without the bucket name in the URL. The bucket name
+belongs in `KACHE_BUCKET`. The configuration script rejects URLs with a bucket path; supplying the
+full bucket URL can make the remote cache appear empty.
+
 ## Product Deadlines And Harness Deadlines
 
 Two kinds of deadline meet in every scenario.
