@@ -72,6 +72,14 @@ name and source root. It selects the emitted executable by that identity, includ
 tests in folders and explicitly configured library or test paths. A missing or ambiguous Cargo
 target or executable fails the run before the campaign starts.
 
+The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
+bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
+remain enforced by the shared runner. Validation uses a 16-CPU runner and the same overall limit
+to complete Clippy, compiled discovery and the declared compiler synchronization matrix from a
+cold cache.
+The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
+instrumentation and the full modeled suite.
+
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent
 `__fuzz__/<test-name>/corpus` directory. Ordinary tests replay those files before

@@ -35,8 +35,9 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 60
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Cold validation includes Clippy, compiled discovery and the complete compiler matrix.
+    timeout-minutes: 120
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
@@ -752,11 +753,10 @@ jobs:
   # coverage from that same run.
   extra-tests:
     name: extra-tests
-    # Half the suite job's cores on purpose. The smaller runner saves capacity, but cold
-    # compilation and the full modeled suite can outlast the scenario job. A 45-minute bound
-    # cancelled Shuttle checks before primitive, Loom, and completion checks could start.
+    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation and
+    # all modeled builds; each check retains its own bounded runner contract.
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 75
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
