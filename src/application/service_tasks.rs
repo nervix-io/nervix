@@ -82,7 +82,9 @@ impl ServiceTasks {
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use nervix_primitives::time::Instant;
 
     use super::*;
     use crate::application::ShutdownCoordinator;
@@ -101,7 +103,7 @@ mod tests {
         let tasks = ServiceTasks::default();
         let deadline = deadline_after(Duration::from_secs(5));
         let task = tasks.spawn(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            nervix_primitives::time::sleep(Duration::from_secs(1)).await;
             7
         });
 

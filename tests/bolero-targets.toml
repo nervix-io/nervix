@@ -104,3 +104,45 @@ random_iterations = 128
 source = "crates/client-wire/src/tests/requests.rs"
 test = "tests::requests::bolero_processor_choice_request_round_trip"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
+domain_version = 1
+features = []
+id = "branch-membership"
+invariant = "Every owner step publishes exactly the current owner lifetime's branch membership, and a step that changes none publishes nothing."
+max_input_bytes = 256
+package = "nervix-branch-instances"
+random_iterations = 256
+source = "crates/branch-instances/src/membership_tests.rs"
+test = "membership::tests::bolero_owned_branches_publish_exactly_the_current_owners_membership"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
+domain_version = 1
+features = []
+id = "restore-installation-wire"
+invariant = "Every current restore installation action retains its complete authority, coordination, placement, payload and inventory through the production wire encoder and decoder."
+max_input_bytes = 128
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup.rs"
+test = "backup::wire_properties::bolero_restore_installation_requests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__backup__tests__bolero_restore_staging_and_publication_records_round_trip/corpus"
+domain_version = 1
+features = []
+id = "restore-installation-storage"
+invariant = "Current staged checkpoints and durable publication records decode to their complete original authority, placement, revision, payload and inventory."
+max_input_bytes = 128
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/backup.rs"
+test = "runtime::state_store::backup::tests::bolero_restore_staging_and_publication_records_round_trip"
+test_target = "lib"

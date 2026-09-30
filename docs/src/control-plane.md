@@ -535,18 +535,24 @@ records the `RESTORE` statement, the size and digest of its archive, every step 
 applied, and what its users step did. The terminal result stores the typed restore report beside
 the outcome, so a retry after the restore finished returns the same report.
 
-Two consensus commands change the cluster on a restore's behalf. Each is refused unless the
+Three consensus commands change the cluster on a restore's behalf. Each is refused unless the
 execution it names is an applying restore:
 
 - **Apply restore step** applies one step's effect and records the step in the restore's execution,
   in one command. The users step imports every archived user with its password hash under the
   user policy, and checks every user before it writes any. A domain step creates the domain stopped,
   with its declared resources and their version sequences, only under the restore's lease and only
-  where neither the domain nor a catalog of those resources exists. The resource and model steps of
-  a domain carry no effect of their own: they record that the commands which applied the domain's
-  versions or models are complete. A step already recorded changes nothing, and a step whose
+  where neither the domain nor a catalog of those resources exists. Creating the domain also
+  records a durable pending installation. The resource step records completion of its imports.
+  The model step carries the exact installation authority and releases the start gate only when
+  the currently admitted generation has published its complete state set everywhere. A step already recorded changes nothing, and a step whose
   prerequisite is not recorded is refused: a cluster restore imports its users before it creates a
   domain, and each domain is created, then given its resource versions, then its models.
+- **Begin restore state installation** admits a fresh generation for an applying restore after
+  resources complete and before models complete. It requires the stopped domain and authoritative
+  mutation lease and binds the generation to the committed entry, execution and leader tenure.
+  Local and remote storage mutations validate this authority while holding the applied-state read
+  guard through publication and handle clearing.
 - **Import resource version** publishes one completed version under its archived number, as
   [Restored Versions](./resource-versions.md#restored-versions) describes. It is refused before
   the domain is created, and, for a version not imported yet, once the domain's resource step is
@@ -556,7 +562,10 @@ A domain's models are applied as one direct model batch under the restore's leas
 validation and the leader's content checks, and without the statement and source-byte limits of a
 transaction. The lease keeps every other command from changing the domain while the restore holds
 it, so a leader that finds exactly the archived models already committed knows that an earlier
-attempt applied them, and records the step without applying them again.
+attempt applied them. It stages all compatible state before any node replaces its published set,
+then publishes one durable batch per node. Only after every publication succeeds does it record
+the model step and release the start gate. Terminal failure releases mutation leases but retains
+the gate, so an incomplete restored domain cannot start after failure or restart.
 
 A step's effect and its record commit together, and an import or a model batch that committed
 before its step was recorded is recognized rather than repeated, so a leader that resumes a restore

@@ -12,7 +12,7 @@ use nervix_client_wire::{
     UnsubscribeOutcome,
 };
 use nervix_models::SubscriptionName;
-use tokio::time::Instant;
+use nervix_primitives::time::Instant;
 
 use super::{DEADLINE, Loopback, domain, opened_reply, subscription};
 use crate::{SubscriptionEvent, SubscriptionLifecycle, SubscriptionRequest};
@@ -80,7 +80,7 @@ impl Loopback {
         expected: Option<SubscriptionLifecycle>,
     ) {
         let mut changed = self.client.inner.events.sinks.desired.watch();
-        tokio::time::timeout(DEADLINE, async {
+        nervix_primitives::time::timeout(DEADLINE, async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if self.client.subscription_lifecycle(&name(subscription_name)) == expected {

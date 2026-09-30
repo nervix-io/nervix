@@ -5,7 +5,7 @@
 //! - **Depends on.** The production consumer budget and the server's Shuttle runner.
 //! - **Must not know.** Session frames, scheduling decisions, or an emitter's Arrow contents.
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use bytes::Bytes;
 use meticulous::OptionExt as _;
@@ -14,7 +14,6 @@ use nervix_models::{
     RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::sync::atomic::Ordering;
-use tokio::time::Duration;
 use triomphe::Arc;
 use uuid::Uuid;
 

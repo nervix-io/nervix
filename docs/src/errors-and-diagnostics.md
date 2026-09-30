@@ -255,7 +255,13 @@ its reason, and changes nothing. Once admitted, a step that fails ends the resto
 `restore failed at step '<step>':` and its reason, with the restore's report: the consensus command
 that records a step refuses it with a `RestoreStepConflict` naming the step and the domain, user,
 resource, or version, and a resource import, domain model batch, or state installation keeps its own failure
-beneath the step. The steps before it stay applied, and the message says so. No restore
+beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
+blocks starting a domain from authority that no longer permits mutation. The runtime store reports
+a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
+Staging or publication failure leaves the durable start gate in place. The steps before it stay
+applied, and the message says so. Transaction planning reports a blocked `START` as
+`TransactionPlanningError::RestoreInstallation`, naming the domain and restore execution before
+lifecycle admission. The client receives a definitive failure. No restore
 diagnostic includes password hashes or resource bytes. When a state section's entity is absent
 from the restored schedule or its schema fingerprint differs, installation skips that section and
 the successful command carries an unlocated warning diagnostic. The same applies to a verified

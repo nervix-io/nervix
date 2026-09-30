@@ -31,6 +31,129 @@ use crate::common::{
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
 const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[given(expr = "restoring domain {string} fails before installing its first WASM checkpoint")]
+fn given_restored_wasm_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .fail_restored_wasm_checkpoint(scenario_domain(world, &domain));
+}
+
+#[given(expr = "restoring domain {string} by coordinator {string} pauses before state publication")]
+fn given_restore_publication_pauses(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    world.fault_injection.pause_restore_state_publication(
+        scenario_domain(world, &domain),
+        node_name(&expand_placeholders(world, &coordinator)),
+    );
+}
+
+#[then(expr = "restoring domain {string} by coordinator {string} has reached state publication")]
+async fn then_restore_publication_pauses(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        world.fault_injection.wait_for_restore_state_publication(
+            &scenario_domain(world, &domain),
+            &node_name(&expand_placeholders(world, &coordinator)),
+        ),
+    )
+    .await
+    .assured("restore reached its publication boundary");
+}
+
+#[when(expr = "state publication of domain {string} by coordinator {string} is released")]
+fn when_restore_publication_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    world.fault_injection.release_restore_state_publication(
+        &scenario_domain(world, &domain),
+        &node_name(&expand_placeholders(world, &coordinator)),
+    );
+}
+
+#[then(expr = "state publication of domain {string} by coordinator {string} is refused")]
+async fn then_restore_publication_refused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        world
+            .fault_injection
+            .wait_for_restore_state_publication_refusal(
+                &scenario_domain(world, &domain),
+                &node_name(&expand_placeholders(world, &coordinator)),
+            ),
+    )
+    .await
+    .assured("the stale storage mutation was refused");
+}
+
+#[then(
+    expr = "restore {string} of backup archive {string} completes on node {string} under \
+            execution reference {string}"
+)]
+async fn then_restore_eventually_completes(
+    world: &mut ScenarioWorld,
+    restore: String,
+    file: String,
+    node: String,
+    reference: String,
+) {
+    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let end = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+        let mut poll = nervix_primitives::time::interval(Duration::from_millis(100));
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            poll.tick().await;
+            let end = stream_restore(&request, None, None).await;
+            match &restore_outcome(&end).disposition {
+                CommandDisposition::Completed { .. } => break end,
+                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying) => {}
+                other => panic!("restore recovery did not complete: {other:?}"),
+            }
+        }
+    })
+    .await
+    .assured("restore completes under the new coordinator");
+    world.last_restore_end = Some(end);
+}
+
+#[then(
+    expr = "backup archives {string} and {string} have identical guest checkpoints and source \
+            offsets"
+)]
+fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, after: String) {
+    fn checkpoints(path: &Path) -> BTreeMap<String, Vec<u8>> {
+        let copy = copy_of_archive(path);
+        let entries = copy
+            .sections
+            .into_iter()
+            .filter(|(path, _)| path.ends_with("/guest.bin") || path.ends_with("/offsets.rkyv"))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            entries.len(),
+            3,
+            "two guest saves and domain offsets are visible"
+        );
+        entries
+    }
+    assert_eq!(
+        checkpoints(&archive_path(world, &before)),
+        checkpoints(&archive_path(world, &after)),
+        "a stale installer did not change published state"
+    );
+}
+
 /// A restore step pause a scenario armed, which it releases by the node it named.
 #[derive(Debug, Clone)]
 pub(crate) struct ArmedRestorePause {
@@ -800,7 +923,7 @@ async fn then_restore_pauses_at_step(
 ) {
     let step = restore_step(world, &kind, &domain);
     let node = expand_placeholders(world, &node);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         RESTORE_PAUSE_TIMEOUT,
         world
             .fault_injection

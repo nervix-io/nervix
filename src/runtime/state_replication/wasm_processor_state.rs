@@ -297,7 +297,7 @@ impl Runtime {
         // A runtime without a state store, which only unit tests construct, has no stable storage
         // for a checkpoint to reach.
         if let Some(store) = self.inner.state_store.as_ref() {
-            let written = tokio::time::timeout_at(
+            let written = nervix_primitives::time::timeout_at(
                 deadline,
                 store.persist_wasm_checkpoint(placement, captured.saved()),
             )

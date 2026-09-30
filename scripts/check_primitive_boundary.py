@@ -4,19 +4,29 @@
 
 `nervix-primitives` selects the execution-sensitive primitives of a build for its execution mode:
 atomics, orderings and fences; async and thread-blocking synchronization; tasks, the async runtime
-and its attributes and `select!`; streams over channels; publication; concurrent collections;
-threads and thread-local storage. Code that reaches one of them any other way escapes that
-selection: a modeled build would run it on a real primitive, or on a backend the rest of the graph
-does not use, and a check would claim coverage it does not have. The source rules reject every such
-path in every tracked or new Rust file outside the owner, including tests, benchmarks, examples and
-macro bodies, whether written as an import, a renamed or grouped import, a glob, a fully qualified
-path, an attribute, a renamed crate, or through an alias of `std`, `core` or their `sync` module.
-Comments and literal contents are blanked first, and conditional compilation is ignored, so an
-inactive `cfg` branch is checked like an active one. Each violation names the approved path.
+and its attributes and `select!`; timers and the monotonic clock; sockets; streams over channels;
+publication; concurrent collections; threads and thread-local storage. Code that reaches one of them
+any other way escapes that selection: a modeled build would run it on a real primitive, or on a
+backend the rest of the graph does not use, a simulated host would wait on the operating system's
+clock or reach its network, and a check would claim coverage it does not have. The source rules
+reject every such path in every tracked or new Rust file outside the owner, including tests,
+benchmarks, examples and macro bodies, whether written as an import, a renamed or grouped import, a
+glob, a fully qualified path, an attribute, a renamed crate, or through an alias of `std`, `core` or
+their `sync`, `time` or `net` module. Comments and literal contents are blanked first, and
+conditional compilation is ignored, so an inactive `cfg` branch is checked like an active one. Each
+violation names the approved path.
 
-Tokio's timers, networking, I/O, filesystem, processes, signals and its pure `pin!` and `join!`
-macros are not governed here yet; `extern crate shuttle_tokio as tokio` remains the one accepted
-alias, because it still selects Shuttle's timers for the crates that use them.
+Resolving a name through the operating system, with `tokio::net::lookup_host` or a
+`ToSocketAddrs` trait, goes around the node's resolver, so those paths are rejected too, naming the
+resolver instead. The boundary's CPU-job mechanism, `nervix_primitives::task::spawn_cpu`, belongs to
+the bounded executor, which admits, charges and cancels every job it runs; any other file that names
+it is rejected, so the mechanism gives no caller a way around admission. Tokio's I/O traits,
+filesystem, process and signal modules and its pure `pin!` and `join!` macros are real in every mode
+and are not governed here.
+
+Tokio's unstable runtime controls belong to the Turmoil build alone: `--cfg tokio_unstable` may
+appear only in a `justfile` recipe whose name names Turmoil, and never in Cargo configuration or a
+workflow, so no other build changes how Tokio schedules or reports.
 
 A selected atomic belongs to one model execution, so it never lives in a `static`, which outlives
 every execution, and it is never constructed in a const context, which Loom's atomics do not
@@ -36,7 +46,9 @@ permission nothing uses all fail. A real atomic may live in a `static`.
 
 The manifest rules keep mode selection in one place. Only the owner selects Loom, and the harness
 runs it, so no other package may depend on `loom`. Only the owner depends on the libraries whose
-families it selects and on their Shuttle wrappers. A package that owns a `loom`, `shuttle` or
+families it selects and on their Shuttle wrappers. Turmoil is also a runner, so beside the owner, a
+package whose harness drives a simulation may depend on it, as an optional dependency its own
+`turmoil` feature enables, and never names its network. A package that owns a `loom`, `shuttle` or
 `turmoil` feature depends on `nervix-primitives` directly and forwards the mode to it, and forwards
 it to every workspace dependency that owns the same mode, so the whole graph of that package uses
 one backend even when it is built on its own.
@@ -119,6 +131,8 @@ UNMODELED_ITEMS = frozenset(
         ("task", "consume_budget"),
         ("task", "spawn"),
         ("time", "sleep"),
+        ("time", "Instant"),
+        ("net", "TcpListener"),
         ("select",),
         ("task_local",),
     }
@@ -127,10 +141,16 @@ UNMODELED_ITEMS = frozenset(
 
 @dataclass(frozen=True)
 class Route:
-    """A governed path outside the owner, and the boundary path that replaces it."""
+    """A governed path outside the owner, and the path that replaces it."""
 
     prefix: tuple[str, ...]
     replacement: tuple[str, ...]
+    # What reaching the governed path does, in a violation's words.
+    verb: str = "bypasses the boundary"
+
+
+RESOLVES_AROUND = "resolves names around the node's resolver"
+NODE_RESOLVER = ("nervix_dns", "DnsResolver")
 
 
 # The families beyond atomics, which have rules of their own below. The longest matching prefix
@@ -141,6 +161,11 @@ ROUTES = (
     Route(("tokio", "spawn"), ("nervix_primitives", "task", "spawn")),
     Route(("tokio", "task_local"), ("nervix_primitives", "unmodeled", "task_local")),
     Route(("tokio", "runtime"), ("nervix_primitives", "runtime")),
+    Route(("tokio", "time"), ("nervix_primitives", "time")),
+    Route(("tokio", "time", "Duration"), ("std", "time", "Duration")),
+    Route(("tokio", "net"), ("nervix_primitives", "net")),
+    Route(("tokio", "net", "lookup_host"), NODE_RESOLVER, RESOLVES_AROUND),
+    Route(("tokio", "net", "ToSocketAddrs"), NODE_RESOLVER, RESOLVES_AROUND),
     Route(("tokio", "select"), ("nervix_primitives", "select")),
     Route(("tokio", "test"), ("nervix_primitives", "test")),
     Route(("tokio", "main"), ("nervix_primitives", "main")),
@@ -155,6 +180,13 @@ ROUTES = (
     Route(("flume",), ("nervix_primitives", "sync", "blocking", "mpsc")),
     Route(("std", "thread"), ("nervix_primitives", "thread")),
     Route(("std", "thread_local"), ("nervix_primitives", "thread_local")),
+    Route(("std", "time", "Instant"), ("nervix_primitives", "time", "Instant")),
+    Route(("std", "net", "TcpListener"), ("nervix_primitives", "net", "TcpListener")),
+    Route(("std", "net", "TcpStream"), ("nervix_primitives", "net", "TcpStream")),
+    Route(("std", "net", "UdpSocket"), ("nervix_primitives", "net", "UdpSocket")),
+    Route(("std", "net", "ToSocketAddrs"), NODE_RESOLVER, RESOLVES_AROUND),
+    Route(("std", "os", "unix", "net"), ("nervix_primitives", "net")),
+    Route(("turmoil", "net"), ("nervix_primitives", "net")),
     Route(("shuttle", "thread"), ("nervix_primitives", "thread")),
     Route(("shuttle", "thread_local"), ("nervix_primitives", "thread_local")),
     Route(("shuttle", "lazy_static"), ("nervix_primitives", "sync", "blocking")),
@@ -186,8 +218,24 @@ LOOM_MODELED_ITEMS = frozenset(
     {("nervix_primitives", "thread", item) for item in LOOM_MODELED_THREAD}
     | {("nervix_primitives", "thread_local")}
 )
-# The one accepted crate alias: it still selects Shuttle's timers for the crates that use them.
-ACCEPTED_ALIAS = ("shuttle_tokio", "tokio")
+# Modules below which the routes govern some items but not others, such as `std::time`, whose
+# `Instant` is governed and whose `Duration` is a value. A file that imports one of them reaches its
+# governed items through the name it binds.
+PARTLY_GOVERNED_MODULES = (("std", "time"), ("std", "net"), ("std", "os", "unix"))
+# Items of the boundary only their owners may name, each with the files that own it and what it is.
+CONFINED = {
+    ("nervix_primitives", "task", "spawn_cpu"): (
+        frozenset({"crates/execution/src/workers.rs"}),
+        "the bounded executor's mechanism for an admitted CPU job",
+    ),
+}
+# Tokio's unstable runtime controls, which only the Turmoil recipes pass.
+TOKIO_UNSTABLE = re.compile(r"--cfg[\s=]+['\"]?tokio_unstable|rustc-cfg=tokio_unstable")
+JUSTFILE = "justfile"
+CONFIGURATION_GLOBS = (".cargo/config.toml", ".cargo/config", ".github/workflows/*.yaml", ".github/workflows/*.yml")
+# A recipe header starts at the first column and ends its name and parameters with a colon that does
+# not begin an assignment.
+_RECIPE = re.compile(r"^@?(?P<name>[A-Za-z_][A-Za-z0-9_-]*)[^:\n]*:(?!=)")
 # Packages whose families the owner selects. No other package depends on them.
 OWNER_ONLY_PACKAGES = frozenset(
     {
@@ -198,11 +246,15 @@ OWNER_ONLY_PACKAGES = frozenset(
         "parking_lot",
         "shuttle-dashmap",
         "shuttle-parking_lot",
+        "shuttle-tokio",
         "shuttle-tokio-stream",
         "shuttle-tokio-util",
         "tokio-stream",
     }
 )
+# Turmoil is a runner as well as the network the owner selects, so a package whose harness drives a
+# simulation may depend on it behind its own `turmoil` feature.
+TURMOIL = "turmoil"
 
 _USE_ITEM = re.compile(r"(?<![A-Za-z0-9_])use\s+(?P<tree>[^;]*);")
 _EXTERN_CRATE = re.compile(
@@ -323,8 +375,19 @@ def _contains_sync_atomic(path: Sequence[str]) -> bool:
     return any(path[index : index + 2] == ("sync", "atomic") for index in range(len(path) - 1))
 
 
-def route_of(path: Sequence[str]) -> tuple[str, ...] | None:
-    """The boundary path that replaces a governed `path`, or `None` when it is not governed.
+@dataclass(frozen=True)
+class Routed:
+    """Where a governed path goes instead, and what reaching it directly does."""
+
+    replacement: tuple[str, ...]
+    verb: str
+
+    def describe(self, path: Sequence[str]) -> str:
+        return f"`{'::'.join(path)}` {self.verb}; use `{'::'.join(self.replacement)}`"
+
+
+def route_of(path: Sequence[str]) -> Routed | None:
+    """The path that replaces a governed `path`, or `None` when it is not governed.
 
     Atomic paths have rules of their own and are not answered here.
     """
@@ -336,11 +399,22 @@ def route_of(path: Sequence[str]) -> tuple[str, ...] | None:
             if best is None or len(route.prefix) > len(best.prefix):
                 best = route
     if best is not None:
-        return best.replacement + path[len(best.prefix) :]
+        if best.replacement == NODE_RESOLVER:
+            return Routed(best.replacement, best.verb)
+        return Routed(best.replacement + path[len(best.prefix) :], best.verb)
     for module in SYNC_MODULES:
         if path[: len(module)] == module and len(path) > len(module):
             if path[len(module)] not in SYNC_UNGOVERNED:
-                return BLOCKING + path[len(module) :]
+                return Routed(BLOCKING + path[len(module) :], "bypasses the boundary")
+    return None
+
+
+def confined_item(path: Sequence[str]) -> tuple[str, ...] | None:
+    """The confined boundary item `path` names, or `None`."""
+
+    for item in CONFINED:
+        if tuple(path[: len(item)]) == item:
+            return item
     return None
 
 
@@ -704,6 +778,22 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
     use_spans: list[tuple[int, int]] = []
     sync_aliases: set[str] = set()
     sync_module_aliases: set[str] = set()
+    # Names this file binds to a partly governed module, and to a boundary module holding a confined
+    # item, each with the module's path.
+    module_aliases: dict[str, tuple[str, ...]] = {}
+    confining_aliases: dict[str, tuple[str, ...]] = {}
+
+    def confine(offset: int, item: tuple[str, ...]) -> None:
+        owners, meaning = CONFINED[item]
+        if file.path in owners:
+            return
+        violations.append(
+            file.site(
+                offset,
+                f"{RULE}: `{'::'.join(item)}` is {meaning}; only "
+                f"{', '.join(sorted(owners))} may name it",
+            )
+        )
 
     for match in _USE_ITEM.finditer(code):
         use_spans.append((match.start(), match.end()))
@@ -715,6 +805,15 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
         for leaf in leaves:
             names.bind(leaf)
             path = leaf.path
+            item = confined_item(path)
+            if item is not None:
+                confine(match.start(), item)
+            for confined in CONFINED:
+                parent = confined[:-1]
+                if path == parent:
+                    confining_aliases[leaf.alias or parent[-1]] = parent
+                elif path == parent + ("*",):
+                    confine(match.start(), confined)
             if path[:1] == ("nervix_primitives",):
                 if path[:2] == UNMODELED_ROOT:
                     rest = path[len(UNMODELED_ROOT) :]
@@ -768,6 +867,9 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             if path in SYNC_MODULES:
                 sync_module_aliases.add(leaf.alias or "sync")
                 continue
+            if path in PARTLY_GOVERNED_MODULES and leaf.alias is None:
+                module_aliases[path[-1]] = path
+                continue
             if path in (("std",), ("core",)) and leaf.alias is not None:
                 violations.append(
                     file.site(
@@ -777,15 +879,9 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
                     )
                 )
                 continue
-            replacement = route_of(path)
-            if replacement is not None:
-                violations.append(
-                    file.site(
-                        match.start(),
-                        f"{RULE}: `{'::'.join(path)}` bypasses the boundary; use "
-                        f"`{'::'.join(replacement)}`",
-                    )
-                )
+            routed = route_of(path)
+            if routed is not None:
+                violations.append(file.site(match.start(), f"{RULE}: {routed.describe(path)}"))
                 continue
             if path[-1:] == ("*",) and governs_below(path[:-1]):
                 violations.append(
@@ -824,11 +920,7 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
                     "its own name",
                 )
             )
-        if (
-            alias is not None
-            and name in GOVERNED_ROOTS - {"std", "core"}
-            and (name, alias) != ACCEPTED_ALIAS
-        ):
+        if alias is not None and name in GOVERNED_ROOTS - {"std", "core"}:
             violations.append(
                 file.site(
                     match.start(),
@@ -881,6 +973,16 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
     for match in _QUALIFIED_PATH.finditer(body):
         path = _segments(match.group("path"))
         root = path[0]
+        item = confined_item(path)
+        if item is not None:
+            confine(match.start(), item)
+            continue
+        if root in confining_aliases:
+            expanded = confining_aliases[root] + path[1:]
+            item = confined_item(expanded)
+            if item is not None:
+                confine(match.start(), item)
+                continue
         if root in sync_module_aliases and path[1] not in SYNC_UNGOVERNED:
             violations.append(
                 file.site(
@@ -890,18 +992,25 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
                 )
             )
             continue
+        if root in module_aliases:
+            module = module_aliases[root]
+            routed = route_of(module + path[1:])
+            if routed is not None:
+                violations.append(
+                    file.site(
+                        match.start(),
+                        f"{RULE}: `{'::'.join(path)}` reaches `{'::'.join(module + path[1:])}` "
+                        f"through an imported `{'::'.join(module)}` module; "
+                        f"use `{'::'.join(routed.replacement)}`",
+                    )
+                )
+            continue
         if root not in GOVERNED_ROOTS:
             continue
-        replacement = route_of(path)
-        if replacement is None:
+        routed = route_of(path)
+        if routed is None:
             continue
-        violations.append(
-            file.site(
-                match.start(),
-                f"{RULE}: `{'::'.join(path)}` bypasses the boundary; use "
-                f"`{'::'.join(replacement)}`",
-            )
-        )
+        violations.append(file.site(match.start(), f"{RULE}: {routed.describe(path)}"))
     for match in _BARE_THREAD_LOCAL.finditer(body):
         violations.append(
             file.site(
@@ -1106,6 +1215,22 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
                             f"{package.manifest}: {RULE}: `loom` must be an optional {kind} "
                             "entry, so no ordinary graph contains it"
                         )
+        turmoil = package.every_kind.get(TURMOIL)
+        if turmoil is not None:
+            enabled = package.features.get(TURMOIL, ())
+            for kind, entry in turmoil.items():
+                optional = isinstance(entry, dict) and entry.get("optional") is True
+                if not optional or kind != "dependencies":
+                    problems.append(
+                        f"{package.manifest}: {RULE}: `turmoil` must be an optional dependencies "
+                        f"entry, not a {kind} one, so no ordinary graph contains it"
+                    )
+                elif package.name != OWNER and f"dep:{TURMOIL}" not in enabled:
+                    problems.append(
+                        f"{package.manifest}: {RULE}: only {OWNER} selects Turmoil's network; a "
+                        "package whose harness runs Turmoil enables it through its own `turmoil` "
+                        "feature"
+                    )
         if package.name == OWNER:
             continue
         for mode in MODES:
@@ -1135,6 +1260,41 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
     return problems
 
 
+def check_tokio_unstable(root: Path) -> list[str]:
+    """Hold Tokio's unstable runtime controls to the Turmoil recipes."""
+
+    problems: list[str] = []
+    justfile = root / JUSTFILE
+    if justfile.is_file():
+        recipe: str | None = None
+        for number, line in enumerate(justfile.read_text(encoding="utf-8").splitlines(), start=1):
+            header = _RECIPE.match(line)
+            if header is not None:
+                recipe = header.group("name")
+            if line.lstrip().startswith("#") or not TOKIO_UNSTABLE.search(line):
+                continue
+            if recipe is None or TURMOIL not in recipe:
+                problems.append(
+                    f"{JUSTFILE}:{number}: {RULE}: `--cfg tokio_unstable` changes how Tokio "
+                    f"schedules and reports, so only a Turmoil recipe passes it, and "
+                    f"`{recipe}` is not one"
+                )
+    for pattern in CONFIGURATION_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if line.lstrip().startswith("#") or not TOKIO_UNSTABLE.search(line):
+                    continue
+                problems.append(
+                    f"{relative}:{number}: {RULE}: `--cfg tokio_unstable` would change how Tokio "
+                    f"schedules and reports in every build this configures; only a Turmoil recipe "
+                    "passes it"
+                )
+    return problems
+
+
 def rust_sources(root: Path) -> list[str]:
     completed = subprocess.run(
         ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -1153,9 +1313,15 @@ def check(root: Path) -> list[str]:
     problems: list[str] = []
     uses: dict[str, FileUses] = {}
     for path in rust_sources(root):
+        source = (root / path).read_text(encoding="utf-8")
+        if PurePosixPath(path).name == "build.rs" and TOKIO_UNSTABLE.search(source):
+            problems.append(
+                f"{path}: {RULE}: a build script that sets `tokio_unstable` changes how Tokio "
+                "schedules and reports in every build; only a Turmoil recipe passes it"
+            )
         if path.startswith(OWNER_SOURCES):
             continue
-        file = RustFile(path, (root / path).read_text(encoding="utf-8"))
+        file = RustFile(path, source)
         violations, file_uses = check_source(file)
         problems.extend(site.render() for site in violations)
         uses[path] = file_uses
@@ -1166,6 +1332,7 @@ def check(root: Path) -> list[str]:
         return [*problems, f"{PERMISSIONS}: {RULE}: {error}"]
     problems.extend(check_permissions(uses, permissions))
     problems.extend(check_manifests(load_packages(root)))
+    problems.extend(check_tokio_unstable(root))
     return problems
 
 

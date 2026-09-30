@@ -236,8 +236,8 @@ browser session has no file to read.
 - **Users.** Each archived user, with its password hash exactly as the archive holds it.
 - **Domains.** Each restored domain is created stopped, with its archived pace and placement
   default, its start count, and the point its latest start began from. `LIST DOMAINS` shows it
-  with its archived pace and the status `STOPPED`, and `START` in a session that selected it
-  starts it as any stopped domain starts. A restore never starts a domain.
+  with its archived pace and the status `STOPPED`. `START` becomes available after the complete
+  state installation succeeds. A restore never starts a domain.
 - **Resources.** Each resource the domain declared, and each completed version under its archived
   number, with its checksums, file count, sizes, creation time and creating node as
   `DESCRIBE RESOURCE` showed them in the source cluster. A number the source assigned to an upload
@@ -247,11 +247,14 @@ browser session has no file to read.
 - **Models.** Every model of the domain, bound to exactly the resource versions it was bound to in
   the source cluster. `SHOW CREATE` prints each restored model as it printed it in the source.
 
-A restore installs the archive's compatible branch lifecycle, WASM guest checkpoints, and Kafka
-source positions into every newly assigned owner and replica after its models are scheduled. A
-source uses its restored next offset when it starts, clamped to the partitions its current source
-assignment contains. Each target node clears any in-memory state handle created before the install,
-so the next `START` loads the checkpoint from storage. The domain remains stopped. Relays and
+A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, and Kafka
+source positions on every newly assigned owner and replica after its models are scheduled. Each
+node validates the complete staged inventory, then atomically replaces the target domain's
+checkpoints in one durable database batch. Nodes without assigned checkpoints publish an empty
+set. In-memory state handles are cleared only after that publication. A replicated installation
+gate prevents `START` until every target node has published the complete set; it survives failure,
+lease release and node restart. A source uses its restored next offset when it starts, clamped to
+the partitions its current source assignment contains. The domain remains stopped. Relays and
 materialized state start empty.
 
 ### Order Of Steps
@@ -283,10 +286,11 @@ completes:
    3. **Apply its models** as one batch, with full graph validation and the leader's content
       checks: TLS material loads, lookup data loads, WASM modules compile, inference models load,
       and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
-      transaction. Before recording this step, purge state for the target on every live node,
-      then install compatible archived branch lifecycle, source offsets, and WASM guest saves on
-      the newly scheduled owners and replicas. `WITHOUT STATE` stops after the purge, and
-      `WITHOUT SOURCE OFFSETS` skips source positions.
+      transaction. Before recording this step, admit an installation generation bound to the
+      leader tenure, restore execution and mutation lease. Stage compatible branch lifecycle,
+      source offsets and WASM saves on the newly scheduled owners and replicas, then publish the
+      complete set on every target node. Recording completion releases the replicated start gate.
+      `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits source positions.
 
 A completed restore reports what it recreated, and each step:
 
@@ -312,10 +316,13 @@ step and the reason, followed by the report of every step:
 restore failed at step 'apply models of domain 'payments'': ...; the steps before it stay applied
 ```
 
-A domain the failed restore created stays, stopped, with the resource versions it imported. A
-restore never creates a domain whose name exists, so restore the archived domain again under
-another name with `AS`, or create the missing models in the created domain yourself. A cluster
-restore that failed before it reached some domains leaves them for `RESTORE DOMAIN`.
+A domain the failed restore created stays stopped, with the resource versions and models it
+committed. Its durable installation gate keeps `START` blocked if state installation did not
+complete. Staging failures leave the complete previously published set visible on each node; a
+failure during distributed publication may leave nodes at different complete generations, but
+the domain cannot run. A restore never creates a domain whose name exists, so restore the archived
+domain again under another name with `AS`. A cluster restore that failed before it reached some
+domains leaves them for `RESTORE DOMAIN`.
 
 ### Retries, Disconnects And Leader Changes
 
@@ -337,7 +344,10 @@ no other command changes those domains while it applies.
   restarts, while a restore applies, the restore stays applying, and the next leader resumes it
   from its first step not recorded once the client sends the archive again with the same execution
   reference. The Rust client does so when it is redirected or its connection fails. A step is
-  recorded together with its effect, so no step is applied twice.
+  recorded together with its effect, so no step is applied twice. Resuming an unfinished state
+  installation admits a new generation. Local and remote staging and publication revalidate
+  authority at the storage mutation boundary; a delayed request from the preceding coordinator
+  cannot replace the completed generation or clear its runtime handles.
 - If no client sends the archive to the new leader before the retry validity of the execution
   reference ends, 15 minutes by default, the new leader ends the restore as failed. The steps it
   recorded stay applied, and the outcome says how many.
@@ -477,6 +487,7 @@ secrets. Store it as a secret.
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched or expired |
+| Complete restore publication per node | Admitted to the bulk working-memory budget; four times staged payload bytes plus 64 KiB per checkpoint |
 
 A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.
@@ -484,7 +495,9 @@ area is full, until retained archives are downloaded or expire and snapshot tran
 A restore stages its archive under the same limits, and is refused rather than kept waiting when
 the archive is larger than one archive may be, or the leader's staging area cannot hold it now; send
 it again once retained archives are released and snapshot transfers finish. A restore's model batch
-is not bounded by the statement and source-byte limits of a transaction.
+is not bounded by the statement and source-byte limits of a transaction. Each node must admit the
+complete publication batch within its bulk working-memory budget (32 MiB by default). An
+installation that cannot be admitted fails with the start gate still closed.
 
 ## Failures
 

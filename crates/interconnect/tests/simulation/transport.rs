@@ -285,7 +285,7 @@ async fn bind(name: &'static str, credentials: Credentials, seed: u64) -> Transp
 
 async fn wait_for(signal: &mut watch::Receiver<bool>) {
     if !*signal.borrow() {
-        tokio::time::timeout(HOST_DEADLINE, signal.changed())
+        nervix_primitives::time::timeout(HOST_DEADLINE, signal.changed())
             .await
             .assured("peer announces readiness within the simulated deadline")
             .assured("the fixture sender remains alive until the peer is ready");
@@ -293,7 +293,7 @@ async fn wait_for(signal: &mut watch::Receiver<bool>) {
 }
 
 async fn wait_for_count(signal: &mut watch::Receiver<usize>, expected: usize) {
-    tokio::time::timeout(HOST_DEADLINE, async {
+    nervix_primitives::time::timeout(HOST_DEADLINE, async {
         while *signal.borrow() < expected {
             nervix_primitives::task::consume_budget().await;
             signal.changed().await.assured("fixture hosts remain alive");
@@ -365,7 +365,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         ClusterNodeName::parse("server").assured("fixture node name is valid"),
                     ]));
                     ready_tx.send_replace(true);
-                    let received = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
+                    let received = nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
                         .await
                         .assured("the relay reaches the server within the simulated deadline")
                         .assured("the relay receiver stays open");
@@ -752,10 +752,10 @@ impl NetworkFault {
 }
 
 async fn wait_for_connection(transport: &Transport, peer: &ClusterNodeName) {
-    tokio::time::timeout(HOST_DEADLINE, async {
+    nervix_primitives::time::timeout(HOST_DEADLINE, async {
         while !transport.is_connected_to(peer) {
             nervix_primitives::task::consume_budget().await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
@@ -804,7 +804,7 @@ async fn assert_liveness(transport: &Transport, peer: &ClusterNodeName) {
 }
 
 async fn wait_for_liveness_recovery(transport: &Transport, peer: &ClusterNodeName) {
-    let recovered = tokio::time::timeout(Duration::from_secs(55), async {
+    let recovered = nervix_primitives::time::timeout(Duration::from_secs(55), async {
         loop {
             nervix_primitives::task::consume_budget().await;
             match transport.request(peer, LivenessRequest).await {
@@ -812,7 +812,7 @@ async fn wait_for_liveness_recovery(transport: &Transport, peer: &ClusterNodeNam
                     assert_eq!(response.peer, *transport.node_id());
                     break;
                 }
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(_) => nervix_primitives::time::sleep(Duration::from_millis(10)).await,
             }
         }
     })
@@ -917,7 +917,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                                 .assured("the client remains alive during repair");
                         }
                     };
-                    tokio::time::timeout(Duration::from_secs(70), completed)
+                    nervix_primitives::time::timeout(Duration::from_secs(70), completed)
                         .await
                         .assured("the client completes before the server budget expires");
                     assert_bounded(&server);
@@ -963,17 +963,17 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                                     if failures > 0 {
                                         break;
                                     }
-                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                    nervix_primitives::time::sleep(Duration::from_millis(10)).await;
                                 }
                             };
-                            tokio::time::timeout(HOST_DEADLINE, setup_failed)
+                            nervix_primitives::time::timeout(HOST_DEADLINE, setup_failed)
                                 .await
                                 .assured("the partitioned dial reports a setup failure");
                             assert!(!client.is_connected_to(&peer));
                             assert_liveness_timeout(&client, &peer).await;
                             let disruption_deadline =
-                                tokio::time::Instant::now() + Duration::from_secs(12);
-                            tokio::time::sleep_until(disruption_deadline).await;
+                                nervix_primitives::time::Instant::now() + Duration::from_secs(12);
+                            nervix_primitives::time::sleep_until(disruption_deadline).await;
                             assert!(!client.is_connected_to(&peer));
                             assert_bounded(&client);
                             trace.record("client", "setup failed through prolonged partition");
@@ -1041,7 +1041,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
         });
         simulation.client("observer", async move {
             let mut finished = finished_rx;
-            tokio::time::timeout(Duration::from_secs(80), async {
+            nervix_primitives::time::timeout(Duration::from_secs(80), async {
                 while *finished.borrow() < 2 {
                     nervix_primitives::task::consume_budget().await;
                     finished.changed().await.assured("the fixture hosts remain alive");

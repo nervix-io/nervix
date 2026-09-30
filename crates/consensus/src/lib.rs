@@ -10,9 +10,6 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -42,6 +39,7 @@ use nervix_primitives::{
         broadcast, watch,
     },
     task::JoinHandle,
+    time::{Instant, timeout},
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -73,7 +71,6 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tokio::time::{Instant, timeout};
 use tracing::{error, info};
 use triomphe::Arc;
 
@@ -97,7 +94,9 @@ pub use command_execution::{
     CommandExecutionTransactionTarget, DiagnosticSpan,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
-pub use restore::{RestoreExecution, RestoreStepEffect, RestoredResource};
+pub use restore::{
+    RestoreExecution, RestoreStateInstallationError, RestoreStepEffect, RestoredResource,
+};
 pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -337,6 +336,8 @@ impl DomainPlanningInputs {
 pub struct TransactionControlSnapshot {
     pub planning_inputs: DomainPlanningInputs,
     pub resources: ResourceVersionStatus,
+    /// The restore whose incomplete state generation prevents this domain from starting.
+    pub restore_installation: Option<nervix_models::CommandExecutionReference>,
 }
 
 #[derive(
@@ -458,6 +459,12 @@ pub enum ConsensusCommand {
         reference: nervix_models::CommandExecutionReference,
         step: nervix_models::RestoreStep,
         effect: Box<RestoreStepEffect>,
+    },
+    /// Admits one complete runtime state installation under this leader's tenure.
+    BeginRestoreStateInstallation {
+        reference: nervix_models::CommandExecutionReference,
+        domain: DomainName,
+        tenure: LeaderTenure,
     },
     /// Records a resource version a restore imports under its archived number, published with the
     /// leader's ready copy.
@@ -725,6 +732,9 @@ impl std::fmt::Display for ConsensusCommand {
             Self::ApplyRestoreStep {
                 reference, step, ..
             } => write!(f, "apply-restore-step:{reference}:{step}"),
+            Self::BeginRestoreStateInstallation {
+                reference, domain, ..
+            } => write!(f, "begin-restore-state-installation:{reference}:{domain}"),
             Self::ImportResourceVersion {
                 reference,
                 resource,
@@ -1137,6 +1147,7 @@ struct StateMachineData {
     cordoned_node_ids: Records<ClusterNodeName, ()>,
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
     domain_mutations: Records<DomainName, DomainMutationLease>,
+    domain_restore_installations: Records<DomainName, restore::DomainRestoreInstallation>,
     transactions: Records<String, ReplicatedTransaction>,
     transaction_commit_plans: transaction_plan::TransactionCommitPlanRecords,
     transaction_reports: TransactionReportRecords,
@@ -2467,6 +2478,10 @@ impl Observer {
         TransactionControlSnapshot {
             planning_inputs: state.domain_planning_inputs(domain),
             resources: (&state.resources).into(),
+            restore_installation: state
+                .domain_restore_installations
+                .get(domain)
+                .map(|installation| installation.execution().clone()),
         }
     }
     pub async fn current_revision(&self) -> u64 {
@@ -2519,6 +2534,22 @@ impl Observer {
             .domain_mutations
             .get(domain)
             .cloned()
+    }
+
+    /// Runs a synchronous storage publication while the applied authority revision is held.
+    /// A newer installation or START cannot be published between validation and the mutation.
+    pub fn with_restore_state_installation<T>(
+        &self,
+        domain: &DomainName,
+        authority: &nervix_models::RestoreStateAuthority,
+        publish: impl FnOnce() -> T,
+    ) -> error_stack::Result<T, RestoreStateInstallationError> {
+        self.inner.store.inner.with_restore_state_installation(
+            domain,
+            authority,
+            || self.current_leader_tenure(),
+            publish,
+        )
     }
     pub async fn current_command_execution(
         &self,
@@ -3322,6 +3353,51 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
+    pub async fn begin_restore_state_installation(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        domain: DomainName,
+    ) -> error_stack::Result<nervix_models::RestoreStateAuthority, ConsensusError> {
+        let tenure = self
+            .current_leader_tenure()
+            .ok_or_else(|| Report::new(ConsensusError::LeadershipLost { leader_id: None }))?;
+        if tenure.leader_id() != self.local_node_id() {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: Some(tenure.leader_id().clone()),
+            }));
+        }
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            })
+            .await?;
+        Self::applied_response(response.data)?;
+        let state = self.inner.store.inner.state();
+        let Some(restore::DomainRestoreInstallation::Installing(authority)) =
+            state.domain_restore_installations.get(&domain)
+        else {
+            return Err(Report::new(ConsensusError::Conflict(
+                "restore installation has no admitted generation"
+                    .to_string()
+                    .into(),
+            )));
+        };
+        if authority.execution != reference
+            || authority.term != tenure.term()
+            || self.current_leader_tenure().as_ref() != Some(&tenure)
+        {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: self
+                    .current_leader_tenure()
+                    .map(|tenure| tenure.leader_id().clone()),
+            }));
+        }
+        Ok(authority.clone())
+    }
+
     pub async fn create_resource_catalog(
         &self,
         domain: &DomainName,
@@ -3896,7 +3972,7 @@ impl ConsensusState {
             let reclaimed = timeout(deadline, async {
                 loop {
                     nervix_primitives::task::consume_budget().await;
-                    tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
+                    nervix_primitives::time::sleep(RETENTION_ADMISSION_POLL).await;
                     if self.store.retained_log_bytes() <= cap {
                         return;
                     }
@@ -4926,6 +5002,11 @@ fn apply_consensus_command_at(
             schedule,
             mutation,
         } => {
+            if domain.status != DomainStatus::Stopped
+                && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
+            {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4945,6 +5026,11 @@ fn apply_consensus_command_at(
             changes.schedule_changed = true;
         }
         ConsensusCommand::PutDomain { domain, mutation } => {
+            if domain.status != DomainStatus::Stopped
+                && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
+            {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4958,6 +5044,9 @@ fn apply_consensus_command_at(
             authority,
             mutation,
         } => {
+            if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4990,6 +5079,9 @@ fn apply_consensus_command_at(
             domain_id,
             mutation,
         } => {
+            if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -5078,6 +5170,81 @@ fn apply_consensus_command_at(
             {
                 return AppliedConsensusCommand::conflict(format!("{error:#}"));
             }
+        }
+        ConsensusCommand::BeginRestoreStateInstallation {
+            reference,
+            domain,
+            tenure,
+        } => {
+            if context.leader_term != tenure.term {
+                return AppliedConsensusCommand::conflict(
+                    "restore installer leader tenure changed".to_string(),
+                );
+            }
+            let Some(execution) = state.command_executions.get(reference) else {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation execution is absent".to_string(),
+                );
+            };
+            let Some(restore) = execution.restore_execution() else {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation execution is not applying".to_string(),
+                );
+            };
+            if !restore.is_recorded(&nervix_models::RestoreStep::ImportResources(domain.clone()))
+                || restore.is_recorded(&nervix_models::RestoreStep::ApplyModels(domain.clone()))
+            {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation is out of order".to_string(),
+                );
+            }
+            let Some(lease) = execution.domain_mutation(domain) else {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation mutation lease is absent".to_string(),
+                );
+            };
+            if let Err(reason) = validate_domain_mutation(state, domain, Some(lease)) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            if state
+                .domains
+                .get(domain)
+                .is_none_or(|domain| domain.status != DomainStatus::Stopped)
+            {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation domain is not stopped".to_string(),
+                );
+            }
+            let belongs_to_execution = match state.domain_restore_installations.get(domain) {
+                Some(restore::DomainRestoreInstallation::Pending { execution }) => {
+                    execution == reference
+                }
+                Some(restore::DomainRestoreInstallation::Installing(authority)) => {
+                    &authority.execution == reference
+                }
+                None => false,
+            };
+            if !belongs_to_execution {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation does not own the pending domain".to_string(),
+                );
+            }
+            let generation = state
+                .last_applied_log_id
+                .as_ref()
+                .verified("a committed installation has its applied log identity")
+                .index;
+            let authority = nervix_models::RestoreStateAuthority {
+                leader: tenure.leader_id.clone(),
+                term: tenure.term,
+                execution: reference.clone(),
+                mutation_revision: lease.recovery_fence().revision(),
+                generation,
+            };
+            state.domain_restore_installations.insert(
+                domain.clone(),
+                restore::DomainRestoreInstallation::Installing(authority),
+            );
         }
         ConsensusCommand::ImportResourceVersion {
             reference,
@@ -6036,6 +6203,15 @@ fn validate_transaction_step_effect(
         }));
     }
 
+    if matches!(effect, TransactionStepEffect::StartDomain { .. })
+        && let Err(reason) =
+            restore::validate_restored_domain_start(state, effect.inputs().domain())
+    {
+        return Err(Report::new(TransactionMutationError::StepConflict {
+            id: transaction.id.clone(),
+            reason: reason.to_string(),
+        }));
+    }
     match validate_domain_planning_inputs(state, effect.inputs()) {
         Err(reason) => Err(Report::new(TransactionMutationError::StepConflict {
             id: transaction.id.clone(),

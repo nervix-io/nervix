@@ -401,3 +401,16 @@ transfer snapshots more often; smaller covered suffixes make a lagging follower 
 sooner. Larger thresholds and suffixes retain more log and require a retained-log cap large enough
 for the working set. The cap should leave room for entries newer than the latest completed snapshot,
 because those entries cannot be purged regardless of the covered-log settings.
+
+## Restored Domain Installation Gate
+
+The consensus state machine persists each restored domain's pending or installing state alongside
+its restore execution and mutation lease. Creating the domain establishes a pending start gate;
+admitting state installation records leader tenure, execution, lease revision and the committed
+log index as its generation. Recording the model step removes the gate only for that exact
+authority. The record is included in snapshots and restored after restart, independently of lease
+release or terminal execution failure. Runtime state bytes remain in the node-owned state store.
+A local storage mutation holds the applied-state read guard through its authority validation,
+checkpoint mutation and handle clearing; a newer applied authority or start-gate release cannot
+cross that boundary. The current state encoding requires these records and rejects a database
+whose encoding does not match, requiring recreation under the alpha persistence contract.

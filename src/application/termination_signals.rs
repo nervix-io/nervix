@@ -418,9 +418,7 @@ impl ForcedExit {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
-    use nervix_primitives::sync::blocking::mpsc;
+    use nervix_primitives::{sync::blocking::mpsc, time::Instant};
     use nervix_recovery::NoReceiver as _;
     use signal_hook::consts::SIGHUP;
 

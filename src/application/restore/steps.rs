@@ -19,10 +19,11 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, ConsensusError, RestoreStepEffect};
-use nervix_interconnect::{RuntimeState, StatePlacementEnvelope};
+use nervix_interconnect::{RuntimeState, StatePlacementEnvelope, backup::RestoreStateInventory};
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef, ResourceId,
-    ResourceUploadIdentity, ResourceUploadKey, RestoreState, RestoreStep, UserName,
+    ResourceUploadIdentity, ResourceUploadKey, RestoreState, RestoreStateAuthority, RestoreStep,
+    UserName,
 };
 
 use super::{
@@ -138,46 +139,53 @@ impl SessionServiceImpl {
                 let domain = planned_domain(plan, target)?;
                 self.apply_restored_models(execution, domain, archive)
                     .await?;
-                self.install_restored_state(domain, archive, state).await?;
-                self.record_restore_step(execution, step, RestoreStepEffect::Completion)
-                    .await
+                let authority = self
+                    .install_restored_state(execution, domain, archive, state)
+                    .await?;
+                self.record_restore_step(
+                    execution,
+                    step,
+                    RestoreStepEffect::InstalledState(authority),
+                )
+                .await
             }
         }
     }
 
     /// Installs state only after models have published their new stopped-domain schedule. A
-    /// retry of the unrecorded model step repeats this idempotently after purging the target.
+    /// retry stages a new fenced generation and replaces the complete stopped-domain set.
     async fn install_restored_state(
         &self,
+        execution: &CommandExecution,
         domain: &PlannedDomain,
         archive: &VerifiedArchive,
         state: RestoreState,
-    ) -> Result<(), StepFailure> {
-        let coordination = self
+    ) -> Result<RestoreStateAuthority, StepFailure> {
+        let authority = match self
             .inner
-            .interconnect
-            .next_coordination_identity()
-            .map_err(|error| {
-                StepFailure::Failed(format!(
-                    "failed to identify restore state installation: {error}"
-                ))
-            })?;
-        self.purge_restored_state_everywhere(&domain.target, &coordination)
-            .await?;
-        if state == RestoreState::ConfigurationOnly {
-            return Ok(());
-        }
-        let schedule = self.inner.consensus.current_schedule().await;
-        let Some(scheduled) = schedule.domain(&domain.target) else {
-            return Err(StepFailure::Failed(format!(
-                "restored domain '{}' has no published schedule",
-                domain.target
-            )));
+            .consensus
+            .begin_restore_state_installation(execution.reference.clone(), domain.target.clone())
+            .await
+        {
+            Ok(authority) => authority,
+            Err(error) => return Err(self.consensus_step_failure(&error).await),
         };
-        // Lifecycle is installed first: a WASM branch save cannot be admitted into a branch
-        // incarnation the owner has not learned exists.
+        let mut nodes = self.inner.cluster.live_node_ids().await;
+        nodes.push(self.inner.consensus.local_node_id().clone());
+        let mut inventories = nodes
+            .into_iter()
+            .map(|node| (node, RestoreStateInventory::default()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let schedule = self.inner.consensus.current_schedule().await;
+        let scheduled = schedule.domain(&domain.target);
+        // Stage lifecycle before guest saves; the published generation contains both at once.
         for first_lifecycle in [true, false] {
+            nervix_primitives::task::consume_budget().await;
+            if state == RestoreState::ConfigurationOnly {
+                break;
+            }
             for archived in archive.states_for(&domain.source) {
+                nervix_primitives::task::consume_budget().await;
                 let is_lifecycle =
                     matches!(archived, DescribedRuntimeState::BranchLifecycle { .. });
                 if is_lifecycle != first_lifecycle {
@@ -277,7 +285,9 @@ impl SessionServiceImpl {
                         )
                     }
                 };
-                let Some(node) = scheduled.nodes.get(&NodeRef::new(kind, entity.clone())) else {
+                let Some(node) = scheduled
+                    .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())))
+                else {
                     tracing::warn!(domain = %domain.target, entity = %entity, "skipped state for an entity absent from the restored schedule");
                     continue;
                 };
@@ -313,78 +323,76 @@ impl SessionServiceImpl {
                     payload,
                 };
                 for owner_or_replica in &node.assigned_nodes {
-                    self.install_restored_checkpoint_on(owner_or_replica, checkpoint.clone())
-                        .await?;
+                    nervix_primitives::task::consume_budget().await;
+                    let inventory = inventories.entry(owner_or_replica.clone()).or_default();
+                    inventory.checkpoints =
+                        inventory.checkpoints.checked_add(1).ok_or_else(|| {
+                            StepFailure::Failed(
+                                "restore checkpoint count exceeds address space".to_string(),
+                            )
+                        })?;
+                    inventory.payload_bytes = inventory
+                        .payload_bytes
+                        .checked_add(u64::try_from(checkpoint.payload.len()).map_err(|_| {
+                            StepFailure::Failed(
+                                "restore checkpoint length exceeds address space".to_string(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            StepFailure::Failed(
+                                "restore state length exceeds address space".to_string(),
+                            )
+                        })?;
+                    self.install_restored_checkpoint_on(
+                        owner_or_replica,
+                        &authority,
+                        checkpoint.clone(),
+                    )
+                    .await?;
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn purge_restored_state_everywhere(
-        &self,
-        domain: &DomainName,
-        coordination: &CoordinationIdentity,
-    ) -> Result<(), StepFailure> {
-        let mut nodes = self.inner.cluster.live_node_ids().await;
-        if !nodes.contains(self.inner.consensus.local_node_id()) {
-            nodes.push(self.inner.consensus.local_node_id().clone());
-        }
-        nodes.sort();
-        nodes.dedup();
-        for node in nodes {
+        // No published checkpoint changes until every compatible section has staged successfully.
+        let local = self.inner.consensus.local_node_id().clone();
+        let local_inventory = inventories
+            .remove(&local)
+            .verified("the coordinator is an installation target");
+        for (node, inventory) in std::iter::once((local, local_inventory)).chain(inventories) {
+            nervix_primitives::task::consume_budget().await;
             if &node == self.inner.consensus.local_node_id() {
-                self.inner
-                    .runtime
-                    .purge_restored_domain_state(domain)
-                    .map_err(|error| {
-                        StepFailure::Failed(format!(
-                            "failed to purge state of '{domain}' on '{node}': {error}"
-                        ))
-                    })?;
+                self.publish_restored_state_generation(&domain.target, &authority, inventory)
+                    .await
+                    .map_err(|failure| StepFailure::Failed(failure.to_string()))?;
             } else {
-                let result = self
+                let coordination = self
                     .inner
                     .interconnect
-                    .request(
-                        &node,
-                        InstallRestoredStateRequest {
-                            coordination: coordination.clone(),
-                            domain: domain.clone(),
-                            action: InstallRestoredStateAction::PurgeDomain,
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        StepFailure::Failed(format!(
-                            "failed to purge state of '{domain}' on '{node}': {error}"
-                        ))
-                    })?;
-                result.map_err(|failure| {
-                    StepFailure::Failed(format!(
-                        "failed to purge state of '{domain}' on '{node}': {failure}"
-                    ))
-                })?;
+                    .next_coordination_identity()
+                    .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                self.send_restored_state_action(
+                    &node,
+                    &coordination,
+                    &domain.target,
+                    &authority,
+                    InstallRestoredStateAction::Publish { inventory },
+                )
+                .await?;
             }
         }
-        Ok(())
+        Ok(authority)
     }
 
     async fn install_restored_checkpoint_on(
         &self,
         node: &ClusterNodeName,
+        authority: &RestoreStateAuthority,
         checkpoint: CapturedRuntimeState,
     ) -> Result<(), StepFailure> {
         if node == self.inner.consensus.local_node_id() {
             return self
-                .inner
-                .runtime
-                .install_restored_domain_state(checkpoint)
-                .map_err(|error| {
-                    StepFailure::Failed(format!(
-                        "failed to install restored state on '{node}': {error}"
-                    ))
-                });
+                .stage_restored_state_checkpoint(authority, checkpoint)
+                .await
+                .map_err(|error| StepFailure::Failed(error.to_string()));
         }
         let coordination = self
             .inner
@@ -404,6 +412,7 @@ impl SessionServiceImpl {
             node,
             &coordination,
             &domain,
+            authority,
             InstallRestoredStateAction::Begin {
                 placement: checkpoint.placement,
                 branch_fingerprint: checkpoint
@@ -416,6 +425,7 @@ impl SessionServiceImpl {
         )
         .await?;
         for (index, chunk) in checkpoint.payload.chunks(64 * 1024).enumerate() {
+            nervix_primitives::task::consume_budget().await;
             let offset = u64::try_from(index)
                 .map_err(|_| {
                     StepFailure::Failed(
@@ -430,6 +440,7 @@ impl SessionServiceImpl {
                 node,
                 &coordination,
                 &domain,
+                authority,
                 InstallRestoredStateAction::Chunk {
                     offset,
                     payload: chunk.to_vec(),
@@ -441,6 +452,7 @@ impl SessionServiceImpl {
             node,
             &coordination,
             &domain,
+            authority,
             InstallRestoredStateAction::Finish,
         )
         .await
@@ -451,6 +463,7 @@ impl SessionServiceImpl {
         node: &ClusterNodeName,
         coordination: &CoordinationIdentity,
         domain: &DomainName,
+        authority: &RestoreStateAuthority,
         action: InstallRestoredStateAction,
     ) -> Result<(), StepFailure> {
         let result = self
@@ -461,6 +474,7 @@ impl SessionServiceImpl {
                 InstallRestoredStateRequest {
                     coordination: coordination.clone(),
                     domain: domain.clone(),
+                    authority: authority.clone(),
                     action,
                 },
             )

@@ -1,11 +1,12 @@
-//! TCP and name-resolution operations used by the interconnect transport.
+//! The resolver a peer's advertised host name goes through before the transport dials it.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Selection of the socket and resolver implementation at the I/O boundary.
-//! - **Depends on.** Tokio sockets and the node's Hickory resolver in production, and Turmoil's
-//!   simulated sockets and DNS in the dedicated simulation build.
-//! - **Must not know.** TLS, HTTP/2, peer identity, or transport operations.
+//! - **Owns.** Which resolver answers a peer's name: the node's Hickory resolver in production, and
+//!   the simulated host's DNS table in the dedicated simulation build.
+//! - **Depends on.** The node's resolver in `nervix-dns`, and the simulated name lookup the
+//!   primitive boundary offers only in its Turmoil mode.
+//! - **Must not know.** Sockets, TLS, HTTP/2, peer identity, or transport operations.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -15,10 +16,6 @@ use nervix_dns::DnsLookupError;
 use nervix_dns::DnsLookupFailure;
 #[cfg(not(feature = "turmoil"))]
 use nervix_dns::DnsResolver;
-#[cfg(not(feature = "turmoil"))]
-pub(crate) use tokio::net::{TcpListener, TcpStream};
-#[cfg(feature = "turmoil")]
-pub(crate) use turmoil::net::{TcpListener, TcpStream};
 
 /// Resolves the host a peer advertised into the addresses the transport dials.
 ///
@@ -65,7 +62,7 @@ impl PeerResolver {
         port: u16,
         _budget: Duration,
     ) -> Result<Vec<SocketAddr>, Report<DnsLookupError>> {
-        let resolved = match turmoil::net::lookup_host((host, port)).await {
+        let resolved = match nervix_primitives::net::lookup_host((host, port)).await {
             Ok(resolved) => resolved,
             Err(error) => {
                 let failure = DnsLookupError::new(host, DnsLookupFailure::NameNotFound);

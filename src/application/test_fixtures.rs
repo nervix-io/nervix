@@ -6,7 +6,7 @@
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
 
-use std::{path::PathBuf, sync::Arc as StdArc};
+use std::{path::PathBuf, sync::Arc as StdArc, time::Duration};
 
 use ahash::RandomState;
 use clap::Parser;
@@ -35,7 +35,6 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
-use tokio::time::Duration;
 use triomphe::Arc;
 
 #[cfg(feature = "shuttle")]
@@ -522,7 +521,7 @@ pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw
         if consensus.put_domain(state.clone(), None).await.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
         assert!(attempt < 49, "test domain should persist");
     }
 }
@@ -613,7 +612,7 @@ async fn build_test_service_inner(
         if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     }
     let interconnect_addr = interconnect.local_addr();
     let cluster = Arc::new(

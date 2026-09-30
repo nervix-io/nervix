@@ -1510,7 +1510,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     if self.mode.is_reusable() && reusable_was_running && start_retries < 3 =>
                 {
                     start_retries += 1;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
                 Err(error) if self.mode.is_reusable() && reusable_was_running => {
@@ -1542,7 +1542,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     // Another process may have won the deterministic-name race after our
                     // preflight inspect. Let it finish startup, then attach on the next attempt.
                     start_retries += 1;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
                 Err(error) => return Err(testcontainers_error(operation)(error)),
@@ -1933,13 +1933,15 @@ impl ReusableStartupLock {
             .write(true)
             .truncate(false)
             .open(&path)?;
-        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+        let deadline = nervix_primitives::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
             nervix_primitives::task::consume_budget().await;
             match file.try_lock() {
                 Ok(()) => return Ok(Self(file)),
-                Err(fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                Err(fs::TryLockError::WouldBlock)
+                    if nervix_primitives::time::Instant::now() < deadline =>
+                {
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(fs::TryLockError::WouldBlock) => {
                     return Err(io::Error::other(format!(
@@ -2138,18 +2140,18 @@ async fn wait_for_container_tcp<I: Image>(
         .get_host_port_ipv4(port)
         .await
         .map_err(testcontainers_error(dependency))?;
-    let deadline = tokio::time::Instant::now() + REUSABLE_READY_TIMEOUT;
+    let deadline = nervix_primitives::time::Instant::now() + REUSABLE_READY_TIMEOUT;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let connection_error = match tokio::net::TcpStream::connect(("127.0.0.1", host_port)).await
-        {
-            Ok(stream) => {
-                drop(stream);
-                return Ok(());
-            }
-            Err(error) => error,
-        };
-        if tokio::time::Instant::now() >= deadline {
+        let connection_error =
+            match nervix_primitives::net::TcpStream::connect(("127.0.0.1", host_port)).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return Ok(());
+                }
+                Err(error) => error,
+            };
+        if nervix_primitives::time::Instant::now() >= deadline {
             return Err(io::Error::other(format!(
                 "{dependency} container {} did not accept TCP connections on random host port \
                  {host_port} within {} seconds: {}",
@@ -2158,7 +2160,7 @@ async fn wait_for_container_tcp<I: Image>(
                 connection_error
             )));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -2177,7 +2179,7 @@ async fn provision_gcs_bucket(endpoint: &str) -> io::Result<()> {
     let client = reqwest::Client::new();
     let create_url = format!("{endpoint}/storage/v1/b?project=nervix");
     let inspect_url = format!("{endpoint}/storage/v1/b/nervix-iceberg");
-    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    let deadline = nervix_primitives::time::Instant::now() + STARTUP_TIMEOUT;
     loop {
         nervix_primitives::task::consume_budget().await;
         let attempt_error = match client
@@ -2202,13 +2204,13 @@ async fn provision_gcs_bucket(endpoint: &str) -> io::Result<()> {
             }
             Err(error) => error.to_string(),
         };
-        if tokio::time::Instant::now() >= deadline {
+        if nervix_primitives::time::Instant::now() >= deadline {
             return Err(io::Error::other(format!(
                 "fake GCS did not provision bucket 'nervix-iceberg' before timeout: \
                  {attempt_error}"
             )));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 

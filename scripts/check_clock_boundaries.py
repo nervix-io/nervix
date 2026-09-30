@@ -18,9 +18,15 @@ PHYSICAL_TIME_OWNER = Path("crates/connector/src/physical_time.rs")
 PHYSICAL_DEADLINE_CONSTRUCTION = "PhysicalDeadlineCapability::operational"
 ACTUAL_UTC_READ = "actual_utc_now"
 
-# The data plane the physical-time rules govern: the server's runtime, the connector contract crate,
-# and every integration crate under `crates/connectors`.
-PHYSICAL_TIME_ROOTS = ("src/runtime", "crates/connector/src", "crates/connectors/*/src")
+# The data plane the physical-time rules govern: the server's runtime, the branch instance lifetimes
+# its tasks own, the connector contract crate, and every integration crate under
+# `crates/connectors`.
+PHYSICAL_TIME_ROOTS = (
+    "src/runtime",
+    "crates/branch-instances/src",
+    "crates/connector/src",
+    "crates/connectors/*/src",
+)
 
 
 def physical_time_sources() -> list[Path]:

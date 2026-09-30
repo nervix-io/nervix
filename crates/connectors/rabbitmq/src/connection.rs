@@ -43,9 +43,8 @@ use meticulous::OptionExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, read_tls_file};
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::collections::ConcurrentQueue;
+use nervix_primitives::{collections::ConcurrentQueue, time::timeout};
 use thiserror::Error;
-use tokio::time::timeout;
 use url::{Host, Url};
 
 /// How long one connection may spend resolving the broker host, reaching one of its addresses and,

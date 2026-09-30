@@ -33,6 +33,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
+    net::{TcpListener, TcpStream},
     publication::ArcSwap,
     sync::{
         CancellationToken, Notify, OwnedSemaphorePermit, Semaphore,
@@ -40,9 +41,9 @@ use nervix_primitives::{
         mpsc,
     },
     task::TaskTracker,
+    time::{Instant, sleep, sleep_until, timeout},
 };
 use strum::EnumCount as _;
-use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -58,8 +59,8 @@ use crate::{
         ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, StreamResetReason,
         TransportObservations, TransportSnapshot,
     },
+    peer_resolver::PeerResolver,
     request::RequestAdmission,
-    socket::{PeerResolver, TcpListener, TcpStream},
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,

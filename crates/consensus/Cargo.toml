@@ -13,11 +13,10 @@ default = []
 # Selects Loom's primitives for the whole graph, so a Loom model of a consensus owner runs on them.
 loom = ["nervix-execution/loom", "nervix-primitives/loom"]
 shuttle = [
+  "dep:shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
-  "dep:shuttle-tokio",
   "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
 ]
 testing = []
 
@@ -37,10 +36,7 @@ nervix-recovery = { workspace = true }
 openraft = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "full",
-  "test-util",
-], optional = true }
+shuttle = { workspace = true, optional = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true, features = ["derive"] }

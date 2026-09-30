@@ -35,22 +35,26 @@ fault model, supervision, replay and failure records, the scenario matrix, the c
 budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
 plugs into. Each seam has one production behavior, which is what every node uses:
 
-- **Sockets and name resolution.** The TCP listener and outbound streams use Tokio's
-  operating-system sockets, and peer names resolve through the node's own resolver, described in
-  [Peer Name Resolution](#peer-name-resolution). The dedicated `turmoil` test build selects
-  Turmoil's simulated TCP and its simulated DNS table at that one boundary and never constructs the
-  node resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in every
+- **Sockets and name resolution.** The TCP listener and outbound streams are the sockets of the
+  primitive boundary, `nervix_primitives::net`, which are Tokio's operating-system sockets, and
+  peer names resolve through the node's own resolver, described in
+  [Peer Name Resolution](#peer-name-resolution). In the dedicated `turmoil` test build the boundary
+  selects Turmoil's simulated TCP, and the peer resolver answers from the simulated DNS table
+  through the lookup the boundary offers in that build alone, never constructing the node
+  resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above them are the same code in every
   build.
 - **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production is the operating system's secure random source.
-- **Deadlines.** Every transport deadline is a Tokio instant, so it follows the clock of the runtime
-  it runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
+- **Deadlines.** Every transport deadline is an instant of the boundary's clock,
+  `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
+  runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
   lifetimes, and the drain deadline derived from certificate expiry.
-- **CPU work.** Encoding and decoding run through `nervix-execution`. Its Turmoil build runs bounded
-  CPU jobs as tasks on the simulated scheduler under the same admission, charge, and cancellation
+- **CPU work.** Encoding and decoding run through `nervix-execution`, which submits each admitted
+  CPU job through the boundary's CPU-job mechanism. In the Turmoil build that mechanism runs the
+  job as a task on the simulated scheduler, under the same admission, charge, and cancellation
   policy.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
@@ -873,12 +877,26 @@ The fetch stream authenticates that process identity before its handler can cons
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 
 Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
-published. The leader purges the target domain on every live node, then sends each newly assigned
-owner and replica a begin request with placement, length and digest, ordered chunks of at most
-64 KiB, and a finish request. The receiver charges a staging file to its node quota, checks each
-chunk offset and the complete digest, then installs the checkpoint. Each transfer carries a fresh
-coordination identity and is refused if its sender is not the current leader. An incomplete staged
-transfer expires without becoming runtime state.
+published. The leader admits a replicated installation authority carrying its identity and term,
+the restore execution, mutation lease revision and installation generation. Every request carries
+that authority. A receiver waits for its generation to apply and authenticates the sending leader.
+A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
+finish verifies the staged file and stages the checkpoint without changing published state.
+Incomplete transfers expire under the node's staging quota.
+
+After all checkpoints are staged, the leader sends each target node a publish request with the
+complete checkpoint and byte counts. The receiver admits the database batch's memory, validates
+that inventory, and atomically replaces the domain's checkpoints with durable synchronization.
+An empty inventory clears unassigned nodes and implements configuration-only restoration. Local
+and remote mutations revalidate the exact authority under the applied-state read guard, held
+through the storage mutation and clearing of runtime handles. Publication of a new authority or
+release of the replicated start gate requires the corresponding write guard, so a delayed
+coordinator cannot mutate after its successor completes installation. The store also retains the
+published generation to reject lower or competing generations and make exact retries idempotent.
+The domain's replicated start gate is released only after all nodes acknowledge publication.
+Staging and publication run on the admitted filesystem worker class. Authority is checked inside
+the storage job after admission, so waiting for a worker cannot preserve an expired installation
+right. Durable synchronization does not run on the async reactor.
 
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,

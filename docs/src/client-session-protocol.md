@@ -1490,6 +1490,12 @@ A restore that failed at a step is `RequestFailed`, and its report names the ste
 steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
 `Planned`, and is never admitted or recorded.
 
+A domain whose restore has not published its complete runtime-state generation refuses `START`
+with a definitive command failure naming the incomplete installation. Planning rejects it before
+admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+restore, release of its mutation lease, and node restart do not release this gate. Only completion
+of the whole installation does.
+
 The call is not bounded by the request deadline, because an archive can take far longer to send
 than a command takes to run; the Rust client bounds each frame by it, and then the wait for the
 reply once the last frame was sent. Once the leader has received the whole archive, the restore is

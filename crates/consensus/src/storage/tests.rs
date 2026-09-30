@@ -30,6 +30,187 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[nervix_primitives::test]
+async fn restore_installation_authority_and_start_gate_survive_restart() -> TestResult {
+    use nervix_models::{
+        ArchiveDigest, Restore, RestoreArchive, RestoreMode, RestoreScope, RestoreState,
+        RestoreStep,
+    };
+
+    use crate::{
+        CommandExecution, CommandExecutionEffect, LeaderTenure, RestoreExecution, RestoreStepEffect,
+    };
+    let mut harness = Harness::new().await?;
+    let domain = DomainName::parse("restored")?;
+    let reference = Harness::command_reference(1);
+    let execution = CommandExecution::applying(
+        reference.clone(),
+        nervix_models::UserName::parse("operator")?,
+        None,
+        [1; 32],
+        nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+        CommandExecutionEffect::Restore(Box::new(RestoreExecution::new(
+            Restore {
+                scope: RestoreScope::Domain {
+                    domain: domain.clone(),
+                    target: None,
+                },
+                source: "archive.nvxb".into(),
+                mode: RestoreMode::Apply,
+                state: RestoreState::All,
+            },
+            RestoreArchive {
+                total_bytes: NonZeroU64::MIN,
+                digest: ArchiveDigest::from_bytes([1; 32]),
+            },
+        ))),
+    );
+    harness
+        .apply(
+            1,
+            ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution),
+                mutation_domains: BTreeSet::from([domain.clone()]),
+                policy: Harness::command_policy(),
+            },
+        )
+        .await?;
+    harness
+        .apply(
+            2,
+            ConsensusCommand::ApplyRestoreStep {
+                reference: reference.clone(),
+                step: RestoreStep::CreateDomain(domain.clone()),
+                effect: Box::new(RestoreStepEffect::Domain {
+                    state: Box::new(Harness::domain("restored")),
+                    resources: vec![],
+                }),
+            },
+        )
+        .await?;
+    harness
+        .apply(
+            3,
+            ConsensusCommand::ApplyRestoreStep {
+                reference: reference.clone(),
+                step: RestoreStep::ImportResources(domain.clone()),
+                effect: Box::new(RestoreStepEffect::Completion),
+            },
+        )
+        .await?;
+    let tenure = LeaderTenure {
+        leader_id: Harness::node(),
+        term: 3,
+    };
+    harness
+        .apply(
+            4,
+            ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            },
+        )
+        .await?;
+    let mut harness = harness.reopen().await?;
+    let state = harness.store.inner.state();
+    let Some(crate::restore::DomainRestoreInstallation::Installing(authority)) =
+        state.domain_restore_installations.get(&domain)
+    else {
+        panic!("installation authority must recover");
+    };
+    let authority = authority.clone();
+    assert_eq!(authority.generation, 4);
+    assert!(crate::restore::validate_restored_domain_start(&state, &domain).is_err());
+    harness
+        .store
+        .inner
+        .with_restore_state_installation(&domain, &authority, || Some(tenure.clone()), || ())
+        .assured("current authority enters mutation boundary");
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || None,
+                || panic!("no leader cannot mutate")
+            )
+            .is_err()
+    );
+    let successor = LeaderTenure {
+        leader_id: ClusterNodeName::parse("node-2")?,
+        term: 4,
+    };
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(successor),
+                || panic!("stale tenure cannot mutate")
+            )
+            .is_err()
+    );
+    harness
+        .apply(
+            5,
+            ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            },
+        )
+        .await?;
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(tenure.clone()),
+                || panic!("stale generation cannot mutate")
+            )
+            .is_err()
+    );
+    let state = harness.store.inner.state();
+    let Some(crate::restore::DomainRestoreInstallation::Installing(current)) =
+        state.domain_restore_installations.get(&domain)
+    else {
+        panic!("new authority was admitted");
+    };
+    harness
+        .apply(
+            6,
+            ConsensusCommand::ApplyRestoreStep {
+                reference,
+                step: RestoreStep::ApplyModels(domain.clone()),
+                effect: Box::new(RestoreStepEffect::InstalledState(current.clone())),
+            },
+        )
+        .await?;
+    let harness = harness.reopen().await?;
+    crate::restore::validate_restored_domain_start(&harness.store.inner.state(), &domain)
+        .assured("completed installation releases durable start gate");
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(tenure),
+                || panic!("completed installation cannot mutate")
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
 struct Harness {
     directory: TempDir,
     store: FjallStore,
@@ -582,7 +763,7 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
                 }
             }
         });
-        tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+        nervix_primitives::time::timeout(Duration::from_secs(10), pause.entered()).await?;
         assert!(
             !task.is_finished(),
             "{operation} acknowledged before the durable write"
@@ -623,7 +804,7 @@ async fn a_committed_range_is_published_once_after_its_single_durable_write() ->
     let task = nervix_primitives::task::spawn(async move {
         store.apply(futures_util::stream::iter(entries)).await
     });
-    tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+    nervix_primitives::time::timeout(Duration::from_secs(10), pause.entered()).await?;
     assert!(
         !task.is_finished(),
         "the range was acknowledged before its durable write"
@@ -747,7 +928,7 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), append_pause.entered()).await?;
+    nervix_primitives::time::timeout(Duration::from_secs(10), append_pause.entered()).await?;
     let vote_pause = harness
         .store
         .inner
@@ -757,7 +938,7 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
     let vote = nervix_primitives::task::spawn(async move {
         log.save_vote(&VoteOf::new(4, Harness::node())).await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         while harness.executor.snapshot().consensus_storage.pending == 0 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
@@ -765,8 +946,8 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
     })
     .await?;
     append_pause.release();
-    tokio::time::timeout(Duration::from_secs(10), vote_pause.entered()).await?;
-    let append_result = tokio::time::timeout(Duration::from_secs(10), append).await?;
+    nervix_primitives::time::timeout(Duration::from_secs(10), vote_pause.entered()).await?;
+    let append_result = nervix_primitives::time::timeout(Duration::from_secs(10), append).await?;
     let append_result = append_result?;
     append_result?;
     vote_pause.release();
@@ -952,7 +1133,7 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
         log.blocking_append([EntryOf::<TypeConfig>::new_blank(Harness::log_id(1))])
             .await
     });
-    tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+    nervix_primitives::time::timeout(Duration::from_secs(10), pause.entered()).await?;
 
     append.abort();
     let Err(cancelled) = append.await else {
@@ -962,7 +1143,7 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
 
     let store = harness.store.clone();
     let idle = nervix_primitives::task::spawn(async move { store.wait_for_idle().await });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         while harness.executor.snapshot().consensus_storage.pending == 0 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
@@ -1280,7 +1461,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
     let mut builder = source.store.clone();
     let mut build = nervix_primitives::task::spawn(async move { builder.build_snapshot().await });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         nervix_primitives::select! {
             () = pause.entered() => Ok(()),
             result = &mut build => match result {
@@ -1319,7 +1500,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
             ))])
             .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         while executor.snapshot().consensus_storage.pending < 1 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
@@ -1333,7 +1514,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         .faults
         .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
     pause.release();
-    tokio::time::timeout(Duration::from_secs(10), next_pause.entered())
+    nervix_primitives::time::timeout(Duration::from_secs(10), next_pause.entered())
         .await
         .map_err(|_| "the snapshot did not reach its next section within 10 seconds")?;
     append.await??;
@@ -1347,7 +1528,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
             .apply(futures_util::stream::iter([Ok((following, None))]))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         while executor.snapshot().consensus_storage.pending < 1 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
@@ -1362,7 +1543,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
     next_pause.release();
     apply.await??;
-    tokio::time::timeout(Duration::from_secs(10), following_pause.entered())
+    nervix_primitives::time::timeout(Duration::from_secs(10), following_pause.entered())
         .await
         .map_err(|_| "the snapshot did not reach its following section within 10 seconds")?;
     let concurrent_log_bytes = source

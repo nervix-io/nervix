@@ -289,22 +289,23 @@ impl Client {
         let mut client = tonic::client::Grpc::new(channel)
             .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
             .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
-        let opened = tokio::time::timeout(self.inner.connector.request_timeout(), async {
-            client
-                .ready()
-                .await
-                .map_err(|error| Status::from_error(Box::new(error)))?;
-            let mut request = Request::new(request);
-            self.inner.connector.authorize(&mut request);
-            client
-                .server_streaming(
-                    request,
-                    PathAndQuery::from_static(DOWNLOAD_BACKUP_PATH),
-                    ClientBackupDownloadCodec::new(SESSION_LIMITS),
-                )
-                .await
-        })
-        .await;
+        let opened =
+            nervix_primitives::time::timeout(self.inner.connector.request_timeout(), async {
+                client
+                    .ready()
+                    .await
+                    .map_err(|error| Status::from_error(Box::new(error)))?;
+                let mut request = Request::new(request);
+                self.inner.connector.authorize(&mut request);
+                client
+                    .server_streaming(
+                        request,
+                        PathAndQuery::from_static(DOWNLOAD_BACKUP_PATH),
+                        ClientBackupDownloadCodec::new(SESSION_LIMITS),
+                    )
+                    .await
+            })
+            .await;
         match opened {
             Ok(Ok(response)) => Ok(response.into_inner()),
             Ok(Err(status)) => Err(BackupDownloadError::transport(status)),
@@ -317,8 +318,11 @@ impl Client {
         &self,
         frames: &mut Streaming<VerifiedFrame<BackupDownloadFrame>>,
     ) -> Result<BackupDownloadMessage, Report<BackupDownloadError>> {
-        let received =
-            tokio::time::timeout(self.inner.connector.request_timeout(), frames.message()).await;
+        let received = nervix_primitives::time::timeout(
+            self.inner.connector.request_timeout(),
+            frames.message(),
+        )
+        .await;
         let frame = match received {
             Err(_) => return Err(Report::new(BackupDownloadError::Stalled)),
             Ok(Err(status)) => return Err(BackupDownloadError::transport(status)),

@@ -134,7 +134,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                     ]));
                     ready.send_replace(true);
                     if !*done.borrow() {
-                        tokio::time::timeout(Duration::from_secs(70), done.changed())
+                        nervix_primitives::time::timeout(Duration::from_secs(70), done.changed())
                             .await
                             .assured("the partitioned fetch finishes within its deadline")
                             .assured("the fixture client remains alive");
@@ -285,7 +285,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
         });
         simulation.client("observer", async move {
             let mut finished = finished_rx;
-            tokio::time::timeout(Duration::from_secs(70), async {
+            nervix_primitives::time::timeout(Duration::from_secs(70), async {
                 while *finished.borrow() < 2 {
                     nervix_primitives::task::consume_budget().await;
                     finished.changed().await.assured("fixture hosts stay alive");

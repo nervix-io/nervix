@@ -194,17 +194,13 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        if !execution.relay_registries.contains_key(relay) {
+        let Some(services) = execution.relay_services.get(relay) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
             });
-        }
-        let relay_registry = execution
-            .relay_registries
-            .get(relay)
-            .verified("the missing-relay branch above already returned");
-        Ok(relay_registry.contains_key(key))
+        };
+        Ok(services.branch_presence.contains(key.as_ref()))
     }
 
     pub(crate) fn describe_metrics_for(
@@ -322,11 +318,16 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        let Some(registry) = execution.relay_registries.get(relay) else {
+        let Some(services) = execution.relay_services.get(relay) else {
             return Vec::new();
         };
-        registry
-            .keys()
+        let membership = services.branch_presence.load();
+        let mut branches = membership
+            .branches()
+            .map(|branch| branch.as_str().to_string())
+            .collect::<Vec<_>>();
+        branches.sort();
+        branches
             .into_iter()
             .map(|branch| nervix_dataflow_graph::DataflowBranchStatistics {
                 branch,
@@ -704,12 +705,13 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use fjall::Database;
     use futures_util::FutureExt as _;
     use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
     use tempfile::tempdir;
-    use tokio::time::Duration;
     use triomphe::Arc;
 
     use super::*;

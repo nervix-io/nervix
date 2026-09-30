@@ -216,7 +216,19 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
 
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
     found = {}
-    for source in manifest.parent.rglob("*.rs"):
+    sources = []
+    for directory, children, files in os.walk(manifest.parent):
+        directory = pathlib.Path(directory)
+        # Each nested Cargo package owns its sources. Build artifacts and dependency trees
+        # contain generated or external Rust and never belong to this package's inventory.
+        children[:] = [
+            child for child in children
+            if not child.startswith(".")
+            and child not in {"target", "node_modules"}
+            and not (directory / child / "Cargo.toml").is_file()
+        ]
+        sources.extend(directory / name for name in files if name.endswith(".rs"))
+    for source in sorted(sources):
         content = source.read_text()
         for macro in MACRO.finditer(content):
             preceding = list(FUNCTION.finditer(content, 0, macro.start()))

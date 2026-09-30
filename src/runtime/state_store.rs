@@ -621,6 +621,11 @@ pub(crate) enum RuntimePersistenceError {
     EncodeState(String),
     #[error("failed to decode runtime state: {0}")]
     DecodeState(String),
+    #[error(
+        "restore installation generation {requested} cannot replace published generation \
+         {published}"
+    )]
+    RestoreGeneration { requested: u64, published: u64 },
     #[error("failed to seal or restore a window snapshot")]
     WindowSnapshot,
     #[error("deduplicator snapshot has an invalid format header")]
@@ -651,12 +656,13 @@ pub(in crate::runtime) struct RuntimeStateStore {
     db: Database,
     latest: Keyspace,
     lsm_index: Keyspace,
+    restore_staging: Keyspace,
+    restore_publications: Keyspace,
     handoff_preparations: Keyspace,
     handoff_activations: Keyspace,
     forced_recovery_preparations: Keyspace,
     forced_recovery_completions: Keyspace,
-    /// Held by every replica installation, which compares with the stored snapshot before it
-    /// replaces it. The storage job that installs a replica holds its own handle.
+    /// Serializes checkpoint writes, replica installation and complete restore publication.
     replica_installs: Arc<nervix_primitives::sync::blocking::Mutex<()>>,
     /// Makes applied writes durable, one synchronization for every writer waiting at once. The
     /// storage job that synchronizes holds its own handle.
@@ -691,29 +697,39 @@ impl LatestSnapshotWriter {
         payload: &[u8],
         require_newer: bool,
     ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        self.with_installation(|| {
+            // A periodic encode can finish after the backup's forced publication. Preserve the
+            // greater revision even when storage workers complete in the opposite order.
+            if self
+                .latest_lsm(placement)?
+                .is_some_and(|current| current > lsm || require_newer && current == lsm)
+            {
+                return Ok(false);
+            }
+            let entry = PersistedRuntimeStateEntry {
+                lsm,
+                payload: payload.to_vec(),
+            };
+            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
+                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+            let placement_key = placement.as_storage_key();
+            self.latest
+                .insert(placement_key.clone(), encoded.to_vec())
+                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            self.lsm_index
+                .insert(placement.as_lsm_index_key(lsm), placement_key)
+                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            Ok(true)
+        })
+    }
+
+    /// Serializes every publication that replaces stored checkpoints, including a restored set.
+    fn with_installation<T>(
+        &self,
+        operation: impl FnOnce() -> error_stack::Result<T, RuntimePersistenceError>,
+    ) -> error_stack::Result<T, RuntimePersistenceError> {
         let _installation = self.replica_installs.lock();
-        // A periodic encode can finish after the backup's forced publication. Preserve the
-        // greater revision even when storage workers complete in the opposite order.
-        if self
-            .latest_lsm(placement)?
-            .is_some_and(|current| current > lsm || require_newer && current == lsm)
-        {
-            return Ok(false);
-        }
-        let entry = PersistedRuntimeStateEntry {
-            lsm,
-            payload: payload.to_vec(),
-        };
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
-            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-        let placement_key = placement.as_storage_key();
-        self.latest
-            .insert(placement_key.clone(), encoded.to_vec())
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.lsm_index
-            .insert(placement.as_lsm_index_key(lsm), placement_key)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        Ok(true)
+        operation()
     }
 
     fn persist(&self, mode: PersistMode) -> error_stack::Result<(), RuntimePersistenceError> {
@@ -990,6 +1006,18 @@ impl RuntimeStateStore {
         let lsm_index = db
             .keyspace("runtime_state_lsm", KeyspaceCreateOptions::default)
             .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+        let restore_staging = db
+            .keyspace(
+                "runtime_state_restore_staging",
+                KeyspaceCreateOptions::default,
+            )
+            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+        let restore_publications = db
+            .keyspace(
+                "runtime_state_restore_publications",
+                KeyspaceCreateOptions::default,
+            )
+            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
         let handoff_preparations = db
             .keyspace(
                 "runtime_state_handoff_preparations",
@@ -1018,6 +1046,8 @@ impl RuntimeStateStore {
             db,
             latest,
             lsm_index,
+            restore_staging,
+            restore_publications,
             handoff_preparations,
             handoff_activations,
             forced_recovery_preparations,

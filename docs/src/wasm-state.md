@@ -52,13 +52,20 @@ reading durable WASM saves together with its other state from one database snaps
 The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
 branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
 separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published
-checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them.
+checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them. Capture filters the
+current scheduled identity and active lifecycle before reconstructing branch keys. Retained
+checkpoints for TTL or LRU evicted branches are omitted; they remain available for local branch
+reappearance without preventing a backup of the current lifecycle.
 
 A restore creates the target domain stopped and publishes its models and schedule before installing
-state. It purges state previously stored for that target on all live nodes. It accepts a guest save
+state. It stages a complete replacement state set on each target node. It accepts a guest save
 only when its entity and schema fingerprint match the restored schedule, maps the saved branch to
-the generation that schedule names, and installs the checkpoint on the assigned owner and replicas.
-Branch lifecycle is installed before the guest save, so branch identity is available first. A
+the generation that schedule names, and stages the checkpoint on the assigned owner and replicas.
+Branch lifecycle is staged first. Each node publishes lifecycle, offsets and saves together in one
+durable database batch, then clears its passive handles under the same installation authority.
+The replicated start gate remains closed until every node completes publication, even if the
+restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
+and installation generation; stale local and remote requests cannot republish or clear handles. A
 checkpoint from a different schema or an entity absent from the schedule is skipped with a
 diagnostic. The source domain name and owner node are not carried into the restored placement.
 The guest still validates its saved bytes when the restored domain later starts. The Rust SDK

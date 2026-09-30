@@ -21,12 +21,12 @@ use std::{
 };
 
 use futures_util::{Stream, stream};
-use nervix_primitives::sync::{CancellationToken, WaitForCancellationFutureOwned};
-use nervix_recovery::Reported as _;
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+use nervix_primitives::{
     net::{TcpListener, TcpStream},
+    sync::{CancellationToken, WaitForCancellationFutureOwned},
 };
+use nervix_recovery::Reported as _;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tonic::transport::server::Connected;
 
 /// A public listener whose accepted connections end when admission closes.

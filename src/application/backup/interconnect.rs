@@ -7,23 +7,20 @@
 //!   typed state placements.
 //! - **Must not know.** Archive encoding, database keys, or the client's backup destination.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::stream;
 use meticulous::OptionExt as _;
 use nervix_backup::{RecordKind, SectionContent};
-use nervix_execution::{ChargedBytes, MemoryClass};
+use nervix_execution::{ChargedBytes, MemoryClass, Reservation, StorageClass};
 use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::DomainName;
-use nervix_primitives::sync::Mutex as AsyncMutex;
+use nervix_models::{DomainName, RestoreStateAuthority};
+use nervix_primitives::{sync::Mutex as AsyncMutex, time::Instant};
 
 use super::{
     CaptureSectionKey, CapturedSectionStage, PlannedContent, state_sections::plan_state_sections,
@@ -41,6 +38,7 @@ pub(in crate::application) struct RestoreUploadEntry {
 
 pub(in crate::application) struct RestoreUploadStage {
     domain: DomainName,
+    authority: RestoreStateAuthority,
     placement: StatePlacementEnvelope,
     branch_fingerprint: Option<[u8; 32]>,
     revision: u64,
@@ -54,7 +52,7 @@ use nervix_interconnect::backup::CapturedStateSectionKind;
 pub(in crate::application) use nervix_interconnect::backup::{
     BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest, CaptureDomainStateRequest,
     CaptureInventoryRequest, CapturedSectionInventory, FetchCapturedSection,
-    InstallRestoredStateAction, InstallRestoredStateRequest,
+    InstallRestoredStateAction, InstallRestoredStateRequest, RestoreStateInventory,
 };
 
 fn section_kind(content: SectionContent) -> Option<CapturedStateSectionKind> {
@@ -289,7 +287,7 @@ impl SessionServiceImpl {
         self.inner.captured_backup_sections.retain(|key, _| {
             key.coordination != request.coordination || key.domain != request.domain
         });
-        let expires_at = std::time::Instant::now() + Duration::from_secs(600);
+        let expires_at = Instant::now() + Duration::from_secs(600);
         for (key, content, artifact) in staged {
             self.inner.captured_backup_sections.insert(
                 key,
@@ -390,18 +388,27 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: InstallRestoredStateRequest,
     ) -> Result<(), RemoteOperationFailure> {
-        if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
+        if peer != &request.authority.leader {
             return Err(failed(
                 &request.domain,
-                "state installer is not the current leader",
+                "state installer differs from the admitted leader",
             ));
         }
+        self.wait_for_restore_installation_revision(&request.authority, &request.domain)
+            .await?;
+        self.inner
+            .consensus
+            .with_restore_state_installation(&request.domain, &request.authority, || ())
+            .map_err(|error| failed(&request.domain, &error.to_string()))?;
         match request.action {
-            InstallRestoredStateAction::PurgeDomain => self
-                .inner
-                .runtime
-                .purge_restored_domain_state(&request.domain)
-                .map_err(|error| failed(&request.domain, &error.to_string())),
+            InstallRestoredStateAction::Publish { inventory } => {
+                self.publish_restored_state_generation(
+                    &request.domain,
+                    &request.authority,
+                    inventory,
+                )
+                .await
+            }
             InstallRestoredStateAction::Begin {
                 placement,
                 branch_fingerprint,
@@ -426,6 +433,7 @@ impl SessionServiceImpl {
                     RestoreUploadEntry {
                         stage: Arc::new(AsyncMutex::new(RestoreUploadStage {
                             domain: request.domain,
+                            authority: request.authority,
                             placement,
                             branch_fingerprint,
                             revision,
@@ -456,7 +464,10 @@ impl SessionServiceImpl {
                 let stage = Arc::clone(&entry.stage);
                 drop(entry);
                 let mut stage = stage.lock().await;
-                if stage.domain != request.domain || stage.next_offset != offset {
+                if stage.domain != request.domain
+                    || stage.authority != request.authority
+                    || stage.next_offset != offset
+                {
                     return Err(failed(
                         &request.domain,
                         "restored state upload offset differs",
@@ -503,7 +514,10 @@ impl SessionServiceImpl {
                         failed(&request.domain, "restored state upload was not started")
                     })?;
                 let mut stage = entry.stage.lock().await;
-                if stage.domain != request.domain || stage.next_offset != stage.length {
+                if stage.domain != request.domain
+                    || stage.authority != request.authority
+                    || stage.next_offset != stage.length
+                {
                     return Err(failed(
                         &request.domain,
                         "restored state upload is incomplete",
@@ -522,11 +536,13 @@ impl SessionServiceImpl {
                         "restored state upload digest differs",
                     ));
                 }
-                let _charge = self
+                let working_bytes =
+                    restore_checkpoint_working_bytes(&request.domain, stage.length)?;
+                let charge = self
                     .inner
                     .runtime
                     .executor()
-                    .reserve(MemoryClass::Bulk, stage.length.max(1))
+                    .reserve(MemoryClass::Bulk, working_bytes)
                     .await
                     .map_err(|error| failed(&request.domain, &error.to_string()))?;
                 let capacity = usize::try_from(stage.length).map_err(|_| {
@@ -545,25 +561,178 @@ impl SessionServiceImpl {
                     .await
                     .map_err(|error| failed(&request.domain, &error.to_string()))?
                 {
+                    nervix_primitives::task::consume_budget().await;
                     payload.extend_from_slice(chunk.as_ref());
                 }
-                self.inner
-                    .runtime
-                    .install_restored_domain_state(CapturedRuntimeState {
+                self.stage_reserved_restore_checkpoint(
+                    &request.authority,
+                    CapturedRuntimeState {
                         placement: stage.placement.clone(),
                         branch_fingerprint: stage
                             .branch_fingerprint
                             .map(nervix_models::BranchKeyFingerprint::new),
                         revision: stage.revision,
                         payload,
-                    })
-                    .map_err(|error| failed(&request.domain, &error.to_string()))
+                    },
+                    charge,
+                )
+                .await
             }
         }
     }
 
+    async fn wait_for_restore_installation_revision(
+        &self,
+        authority: &RestoreStateAuthority,
+        domain: &DomainName,
+    ) -> Result<(), RemoteOperationFailure> {
+        let mut applied = self.inner.consensus.subscribe_applied();
+        nervix_primitives::time::timeout(Duration::from_secs(5), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                if *applied.borrow_and_update() >= authority.generation {
+                    return Ok(());
+                }
+                applied
+                    .changed()
+                    .await
+                    .map_err(|_| failed(domain, "restore installation authority is unavailable"))?;
+            }
+        })
+        .await
+        .map_err(|_| failed(domain, "restore installation revision has not applied"))?
+    }
+
+    pub(in crate::application) async fn stage_restored_state_checkpoint(
+        &self,
+        authority: &RestoreStateAuthority,
+        checkpoint: CapturedRuntimeState,
+    ) -> Result<(), RemoteOperationFailure> {
+        let domain = &checkpoint.placement.domain;
+        let length = u64::try_from(checkpoint.payload.len())
+            .map_err(|_| failed(domain, "restore checkpoint exceeds address space"))?;
+        let bytes = restore_checkpoint_working_bytes(domain, length)?;
+        let charge = self
+            .inner
+            .runtime
+            .executor()
+            .reserve(MemoryClass::Bulk, bytes)
+            .await
+            .map_err(|error| failed(domain, &error.to_string()))?;
+        self.stage_reserved_restore_checkpoint(authority, checkpoint, charge)
+            .await
+    }
+
+    async fn stage_reserved_restore_checkpoint(
+        &self,
+        authority: &RestoreStateAuthority,
+        checkpoint: CapturedRuntimeState,
+        charge: Reservation,
+    ) -> Result<(), RemoteOperationFailure> {
+        let domain = checkpoint.placement.domain.clone();
+        let domain_owned = domain.clone();
+        let authority = authority.clone();
+        let service = self.clone();
+        self.inner
+            .runtime
+            .executor()
+            .run_storage(
+                StorageClass::Filesystem,
+                charge,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .map_err(|error| failed(&domain_owned, &error.to_string()))?;
+                    service
+                        .inner
+                        .consensus
+                        .with_restore_state_installation(&domain_owned, &authority, || {
+                            service
+                                .inner
+                                .runtime
+                                .stage_restored_domain_state(&authority, checkpoint)
+                        })
+                        .map_err(|error| failed(&domain_owned, &error.to_string()))?
+                        .map_err(|error| failed(&domain_owned, &error.to_string()))
+                },
+            )
+            .await
+            .map_err(|error| failed(&domain, &error.to_string()))?
+    }
+
+    pub(in crate::application) async fn publish_restored_state_generation(
+        &self,
+        domain: &DomainName,
+        authority: &RestoreStateAuthority,
+        inventory: RestoreStateInventory,
+    ) -> Result<(), RemoteOperationFailure> {
+        // The complete database batch is admitted before validation at the mutation boundary.
+        let payload_bytes = inventory
+            .payload_bytes
+            .checked_mul(4)
+            .ok_or_else(|| failed(domain, "restore state publication exceeds address space"))?;
+        let metadata_bytes = inventory
+            .checkpoints
+            .checked_mul(64 * 1024)
+            .ok_or_else(|| failed(domain, "restore state publication exceeds address space"))?;
+        let bytes = payload_bytes
+            .checked_add(metadata_bytes)
+            .ok_or_else(|| failed(domain, "restore state publication exceeds address space"))?;
+        let charge = self
+            .inner
+            .runtime
+            .executor()
+            .reserve(MemoryClass::Bulk, bytes.max(1))
+            .await
+            .map_err(|error| failed(domain, &error.to_string()))?;
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_restore_state_publication_if_armed(domain, &authority.leader)
+            .await;
+        let domain_owned = domain.clone();
+        let authority = authority.clone();
+        let service = self.clone();
+        self.inner
+            .runtime
+            .executor()
+            .run_storage(
+                StorageClass::Filesystem,
+                charge,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .map_err(|error| failed(&domain_owned, &error.to_string()))?;
+                    service
+                        .inner
+                        .consensus
+                        .with_restore_state_installation(&domain_owned, &authority, || {
+                            service.inner.runtime.publish_restored_domain_state(
+                                &domain_owned,
+                                &authority,
+                                inventory,
+                            )
+                        })
+                        .map_err(|error| {
+                            #[cfg(feature = "testing")]
+                            service
+                                .inner
+                                .runtime
+                                .mark_restore_state_publication_refused(
+                                    &domain_owned,
+                                    &authority.leader,
+                                );
+                            failed(&domain_owned, &error.to_string())
+                        })?
+                        .map_err(|error| failed(&domain_owned, &error.to_string()))
+                },
+            )
+            .await
+            .map_err(|error| failed(domain, &error.to_string()))?
+    }
+
     pub(in crate::application) fn sweep_captured_backup_sections(&self) {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         self.inner
             .captured_backup_sections
             .retain(|_, stage| stage.expires_at > now);
@@ -575,4 +744,16 @@ impl SessionServiceImpl {
 
 fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
     RemoteOperationFailure::failed(RemoteOperationSubject::domain(domain), reason.to_string())
+}
+
+fn restore_checkpoint_working_bytes(
+    domain: &DomainName,
+    length: u64,
+) -> Result<u64, RemoteOperationFailure> {
+    let payload_bytes = length
+        .checked_mul(4)
+        .ok_or_else(|| failed(domain, "restore checkpoint exceeds address space"))?;
+    payload_bytes
+        .checked_add(64 * 1024)
+        .ok_or_else(|| failed(domain, "restore checkpoint exceeds address space"))
 }

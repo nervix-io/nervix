@@ -243,6 +243,6 @@ async fn then_server_process_cluster_describes_ingestor_with(
             Instant::now() < deadline,
             "DESCRIBE INGESTOR {ingestor} never reported {missing:?}; last output:\n{output}"
         );
-        tokio::time::sleep(DESCRIBE_POLL_INTERVAL).await;
+        nervix_primitives::time::sleep(DESCRIBE_POLL_INTERVAL).await;
     }
 }

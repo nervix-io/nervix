@@ -450,7 +450,7 @@ async fn then_background_command_request_reports_unknown_outcome(world: &mut Sce
         .background_command_result
         .take()
         .expect("a background command request must be active");
-    let result = tokio::time::timeout(Duration::from_secs(60), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
@@ -497,7 +497,7 @@ async fn then_node_redirects_without_an_endpoint(
             Ok(session) => session,
             Err(error) => {
                 last = Some(format!("session failed: {error}"));
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
         };
@@ -518,7 +518,7 @@ async fn then_node_redirects_without_an_endpoint(
             }
             Err(error) => last = Some(format!("request failed: {error}")),
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -560,7 +560,7 @@ async fn then_console_websocket_closes_with_code(
     loop {
         nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let received = tokio::time::timeout(remaining, socket.next())
+        let received = nervix_primitives::time::timeout(remaining, socket.next())
             .await
             .unwrap_or_else(|_| panic!("the console WebSocket was not closed in time"));
         match received {
@@ -615,7 +615,7 @@ async fn then_background_command_request_ends_without_an_answer(world: &mut Scen
         .background_command_result
         .take()
         .expect("a background command request must be active");
-    let result = tokio::time::timeout(Duration::from_secs(60), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"));

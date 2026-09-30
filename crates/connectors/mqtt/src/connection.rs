@@ -30,9 +30,9 @@ use std::{io, time::Duration};
 
 use error_stack::Report;
 use nervix_dns::{ConnectionBudget, DnsLookupError, DnsLookupFailure, DnsResolver};
+use nervix_primitives::{net::TcpStream, time::timeout};
 use rumqttc::{ConnectionError, MqttOptions, NetworkOptions};
 use thiserror::Error;
-use tokio::{net::TcpStream, time::timeout};
 
 /// Why an MQTT client's event loop could not connect to its broker, or lost the connection.
 #[derive(Debug, Error)]

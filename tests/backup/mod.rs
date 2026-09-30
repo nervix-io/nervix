@@ -103,7 +103,7 @@ async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) 
         TEST_AUTH_PASSWORD,
     ]);
     command.args(arguments);
-    let output = tokio::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+    let output = nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
         .await
         .expect("the CLI finishes within its budget")
         .expect("the CLI process starts");
@@ -169,7 +169,7 @@ fn when_cli_backup_begins_in_background(
                 .arg("--output")
                 .arg(&archive)
                 .args(["--format", "json"]);
-            tokio::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+            nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
                 .await
                 .expect("the background backup finishes within its budget")
                 .expect("the CLI process starts")
@@ -180,7 +180,7 @@ fn when_cli_backup_begins_in_background(
 #[then(expr = "the backup cut for domain {string} has reached its pause")]
 async fn then_backup_cut_paused(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(30),
         world.fault_injection.wait_for_backup_cut_pause(&domain),
     )
@@ -206,7 +206,7 @@ async fn then_background_backup_finishes(world: &mut ScenarioWorld) {
 #[then(expr = "the background CLI backup remains pending for {string}")]
 async fn then_background_backup_remains_pending(world: &mut ScenarioWorld, duration: String) {
     let duration = humantime::parse_duration(&duration).expect("a valid duration");
-    tokio::time::sleep(duration).await;
+    nervix_primitives::time::sleep(duration).await;
     assert!(
         !world
             .background_backup
@@ -937,7 +937,7 @@ async fn when_backup_retry_validity_has_ended(world: &mut ScenarioWorld) {
         if now > retained_until {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

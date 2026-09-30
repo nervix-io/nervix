@@ -33,9 +33,13 @@ class InventoryTests(unittest.TestCase):
             "backup-record-manifest",
             "backup-runtime-state-records",
             "client-processor-choice-request",
+            "branch-membership",
+            "restore-installation-wire",
+            "restore-installation-storage",
         })
         self.assertEqual({target.package for target in inventory.targets},
-                         {"nervix-client-wire", "nervix-nspl", "nervix-backup"})
+                         {"nervix-client-wire", "nervix-nspl", "nervix-backup",
+                          "nervix-branch-instances", "nervix-interconnect", "nervix-server"})
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
@@ -214,6 +218,29 @@ class DiscoveryTests(unittest.TestCase):
                 (manifest.parent / "lib.rs").write_text(content)
                 with self.assertRaisesRegex(bolero.BoleroError, message):
                     bolero.static_targets(manifest)
+
+    def test_source_scan_obeys_package_ownership_and_excludes_generated_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = root / "Cargo.toml"
+            manifest.write_text("[package]\nname = 'root'\n")
+            source = root / "src" / "lib.rs"
+            source.parent.mkdir()
+            source.write_text("fn bolero_root() { bolero::check!(); }")
+            (source.parent / "notes.txt").write_text("check!();")
+            member = root / "crates" / "member"
+            member.mkdir(parents=True)
+            member_manifest = member / "Cargo.toml"
+            member_manifest.write_text("[package]\nname = 'member'\n")
+            member_source = member / "lib.rs"
+            member_source.write_text("fn bolero_member() { bolero::check!(); }")
+            for generated in ("target", "node_modules", ".cache"):
+                tree = root / generated
+                tree.mkdir()
+                (tree / "generated.rs").write_text("check!();")
+            self.assertEqual(bolero.static_targets(manifest), {"bolero_root": source})
+            self.assertEqual(bolero.static_targets(member_manifest),
+                             {"bolero_member": member_source})
 
     def test_compiled_selection_must_match_inventory_and_work_directory(self) -> None:
         def listed(package: str, test_target: str, ignored: bool) -> list[str]:

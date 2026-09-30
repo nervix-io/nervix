@@ -7,7 +7,10 @@
 //! - **Depends on.** The interconnect to drive each step and the entity gate to hold the entity.
 //! - **Must not know.** Which schedule change asked for the move.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use error_stack::Report;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -28,7 +31,7 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
     OwnershipTransition, ScheduledNode,
 };
-use tokio::time::{Duration, sleep};
+use nervix_primitives::time::sleep;
 use tracing::{debug, info, warn};
 
 use super::{
@@ -65,9 +68,9 @@ pub(in crate::application) struct PlannedOwnershipHandoff {
     preparations: ClusterOwnershipHandoffPreparations,
     gate: ClusterEntityGate,
     pub(in crate::application) moves: Vec<PlannedOwnershipMove>,
-    pub(in crate::application) started_at: tokio::time::Instant,
-    preparation_deadline: tokio::time::Instant,
-    activation_deadline: tokio::time::Instant,
+    pub(in crate::application) started_at: nervix_primitives::time::Instant,
+    preparation_deadline: nervix_primitives::time::Instant,
+    activation_deadline: nervix_primitives::time::Instant,
 }
 
 struct ClusterOwnershipHandoffPreparations {
@@ -380,8 +383,8 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
             preparations.push(async move {
                 let result = match destination_incarnation {
                     Some(destination_incarnation) => {
-                        let deadline =
-                            tokio::time::Instant::now() + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                        let deadline = nervix_primitives::time::Instant::now()
+                            + FORCED_OWNERSHIP_RECOVERY_BUDGET;
                         let preparation = async {
                             let request = RemotePrepareForcedOwnershipRecoveryRequest {
                                 operation_id: transition_id.clone(),
@@ -410,7 +413,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                                 OwnershipHandoffError::participant(failure.to_string())
                             })
                         };
-                        match tokio::time::timeout_at(deadline, preparation).await {
+                        match nervix_primitives::time::timeout_at(deadline, preparation).await {
                             Ok(result) => result,
                             Err(_) => Err(OwnershipHandoffError::deadline(
                                 "state preparation exceeded its five-second budget",
@@ -912,7 +915,7 @@ impl SessionServiceImpl {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let started_at = tokio::time::Instant::now();
+        let started_at = nervix_primitives::time::Instant::now();
         let phase_budget = self.inner.runtime.entity_gate_deadline();
         let preparation_deadline = started_at.checked_add(phase_budget).ok_or_else(|| {
             Report::new(DomainAlterError::EntityGate {
@@ -975,7 +978,7 @@ impl SessionServiceImpl {
         );
         for moved in &moves {
             nervix_primitives::task::consume_budget().await;
-            let capture = tokio::time::timeout_at(
+            let capture = nervix_primitives::time::timeout_at(
                 preparation_deadline,
                 self.capture_ownership_handoff_state(
                     &coordination,
@@ -1036,7 +1039,7 @@ impl SessionServiceImpl {
             };
 
             preparations.record_attempt(moved);
-            let result = tokio::time::timeout_at(
+            let result = nervix_primitives::time::timeout_at(
                 preparation_deadline,
                 self.prepare_ownership_handoff_state(RemotePrepareOwnershipHandoffStateRequest {
                     coordination: coordination.clone(),
@@ -1342,7 +1345,7 @@ impl SessionServiceImpl {
         &self,
         node: &ClusterNodeName,
         request: RemoteConfirmOwnershipHandoffStateRequest,
-        deadline: tokio::time::Instant,
+        deadline: nervix_primitives::time::Instant,
     ) -> OwnershipHandoffResult<()> {
         let confirmation = async {
             if node == self.inner.consensus.local_node_id() {
@@ -1366,7 +1369,7 @@ impl SessionServiceImpl {
                 }
             }
         };
-        match tokio::time::timeout_at(deadline, confirmation).await {
+        match nervix_primitives::time::timeout_at(deadline, confirmation).await {
             Ok(result) => result,
             Err(_) => Err(OwnershipHandoffError::deadline(format!(
                 "timed out confirming ownership handoff participant node '{node}'"
@@ -1870,8 +1873,8 @@ impl SessionServiceImpl {
                 let incarnations = self.available_node_incarnations().await;
                 let observation = (tenure, incarnations);
                 let changed = observed.as_ref() != Some(&observation);
-                let followup_due =
-                    followup_at.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                let followup_due = followup_at
+                    .is_some_and(|deadline| nervix_primitives::time::Instant::now() >= deadline);
                 if changed || followup_due {
                     match self
                         .reconcile_cluster_ownership_handoff_preparations()
@@ -1883,7 +1886,9 @@ impl SessionServiceImpl {
                                 let followup_delay =
                                     self.inner.runtime.entity_gate_deadline().checked_mul(2);
                                 followup_at = match followup_delay {
-                                    Some(delay) => tokio::time::Instant::now().checked_add(delay),
+                                    Some(delay) => {
+                                        nervix_primitives::time::Instant::now().checked_add(delay)
+                                    }
                                     None => None,
                                 };
                             } else {
@@ -1929,7 +1934,7 @@ impl SessionServiceImpl {
         &self,
         request: &RemoteActivateOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
-        let deadline = tokio::time::Instant::now()
+        let deadline = nervix_primitives::time::Instant::now()
             .checked_add(request.activation_budget)
             .ok_or_else(|| {
                 OwnershipHandoffError::deadline(
@@ -2013,7 +2018,7 @@ impl SessionServiceImpl {
                 .await
         };
 
-        tokio::time::timeout_at(deadline, activation)
+        nervix_primitives::time::timeout_at(deadline, activation)
             .await
             .map_err(|_| {
                 OwnershipHandoffError::deadline(format!(
@@ -2044,7 +2049,7 @@ impl SessionServiceImpl {
                 .verified("every planned destination has a bound incarnation");
             let remaining = handoff
                 .activation_deadline
-                .saturating_duration_since(tokio::time::Instant::now());
+                .saturating_duration_since(nervix_primitives::time::Instant::now());
             if remaining.is_zero() {
                 return Err(OwnershipHandoffError::deadline(format!(
                     "timed out waiting for {} '{}' to activate on node '{}'",

@@ -71,7 +71,7 @@ pub(in crate::application) struct CaptureSectionKey {
 pub(in crate::application) struct CapturedSectionStage {
     pub(in crate::application) artifact: StdArc<StagedArtifact>,
     pub(in crate::application) content: SectionContent,
-    pub(in crate::application) expires_at: std::time::Instant,
+    pub(in crate::application) expires_at: nervix_primitives::time::Instant,
 }
 
 /// Why a backup failed. No variant carries archive contents: an archive holds secrets, password
@@ -359,7 +359,7 @@ impl SessionServiceImpl {
             unreachable!()
         };
         let timeout = timeout.unwrap_or_else(|| self.inner.runtime.domain_drain_timeout());
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let owner = execution
             .owner()
             .cloned()
@@ -388,9 +388,9 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(acquired) => break acquired,
-                Err(error) if tokio::time::Instant::now() < deadline => {
+                Err(error) if nervix_primitives::time::Instant::now() < deadline => {
                     tracing::debug!(domain = %domain, error = %error, "waiting for backup domain mutation lease");
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(error) => {
                     return Err(Report::new(BackupError::CaptureTimeout {
@@ -434,13 +434,13 @@ impl SessionServiceImpl {
                 if let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain) {
                     break guard;
                 }
-                if tokio::time::Instant::now() >= deadline {
+                if nervix_primitives::time::Instant::now() >= deadline {
                     return Err(Report::new(BackupError::CaptureTimeout {
                         domain: domain.clone(),
                         reason: "domain alteration guard is busy".to_string(),
                     }));
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
             };
             let schedule = self.inner.consensus.current_schedule().await;
             let timed_out = || {
@@ -449,14 +449,14 @@ impl SessionServiceImpl {
                     reason: "quiesced cut exceeded its timeout".to_string(),
                 })
             };
-            let before = tokio::time::timeout_at(
+            let before = nervix_primitives::time::timeout_at(
                 deadline,
                 self.read_backup_quiesce_counters(domain, schedule.domain(domain)),
             )
             .await
             .map_err(|_| timed_out())??;
             let engaged_at = current_timestamp();
-            let now = tokio::time::Instant::now();
+            let now = nervix_primitives::time::Instant::now();
             let remaining = if deadline > now {
                 deadline - now
             } else {
@@ -479,7 +479,7 @@ impl SessionServiceImpl {
                     reason: error.to_string(),
                 })
             })?;
-            let cut_result = tokio::time::timeout_at(deadline, async {
+            let cut_result = nervix_primitives::time::timeout_at(deadline, async {
                 #[cfg(feature = "testing")]
                 self.inner.runtime.pause_backup_cut_if_armed(domain).await;
                 if self.inner.consensus.current_leader_tenure().as_ref()

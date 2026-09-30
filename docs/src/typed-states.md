@@ -283,6 +283,17 @@ Error-route branch validation carries the node, source route, error relay, and b
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
 target by name and requires explicit leakage; neither error needs the source payload value.
 
+## Restore Installation Authority
+
+A restored domain has a replicated `Pending` installation from creation and an `Installing`
+authority once its state generation is admitted. Neither state permits `START`. Completion of the
+exact current generation removes the installation; terminal command failure does not. Authority
+carries leader identity and term, execution reference, mutation lease revision and generation.
+Checkpoint revision remains guest history and cannot grant installation authority. Validation at
+the applied-state boundary holds its read guard across the storage mutation and handle clearing.
+The state store validates the complete staged inventory before a single durable batch publishes
+it, and retains the successful generation for retry and stale-attempt rejection.
+
 ## Qualification Evidence
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)

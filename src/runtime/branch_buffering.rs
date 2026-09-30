@@ -448,7 +448,7 @@ mod tests {
             .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
             .assured("the fixture timeout fits the monotonic clock range");
 
-        tokio::time::advance(Duration::from_micros(50)).await;
+        nervix_primitives::time::advance(Duration::from_micros(50)).await;
         timer
             .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
             .assured("an armed timer does not schedule a second deadline");
@@ -458,7 +458,7 @@ mod tests {
                 .assured("the bound clock remains installed")
         );
 
-        tokio::time::advance(Duration::from_micros(50)).await;
+        nervix_primitives::time::advance(Duration::from_micros(50)).await;
         assert!(
             timer
                 .is_due(&clock, &snapshot)
@@ -495,7 +495,7 @@ mod tests {
                 .is_reached()
                 .assured("the bound clock remains installed")
         );
-        tokio::time::timeout(Duration::from_secs(2), wake.wait())
+        nervix_primitives::time::timeout(Duration::from_secs(2), wake.wait())
             .await
             .assured("the monotonic deadline arrives long before the logical one")
             .assured("the bound clock remains installed");

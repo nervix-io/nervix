@@ -6529,6 +6529,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-branch-instances"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "alloc_count",
+ "bolero",
+ "criterion 0.5.1",
+ "imbl",
+ "indexmap 2.14.2",
+ "meticulous",
+ "nervix-models",
+ "nervix-primitives",
+ "triomphe",
+]
+
+[[package]]
 name = "nervix-cli"
 version = "0.1.0-dev"
 dependencies = [
@@ -6584,7 +6600,6 @@ dependencies = [
  "nervix-test-environment",
  "rustls",
  "shuttle",
- "shuttle-tokio",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
@@ -6608,7 +6623,6 @@ dependencies = [
  "nervix-primitives",
  "serde_json",
  "strum 0.26.3",
- "tokio",
  "tonic 0.13.1",
  "triomphe",
 ]
@@ -6630,7 +6644,6 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "tokio",
  "tokio-tungstenite 0.24.0",
  "tonic 0.13.1",
  "url",
@@ -6674,10 +6687,8 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
- "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "triomphe",
  "upon",
@@ -6705,7 +6716,6 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
- "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6728,7 +6738,6 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
- "shuttle-tokio",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -6767,7 +6776,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "shuttle-tokio",
  "tempfile",
  "tokio",
  "tracing",
@@ -6790,9 +6798,7 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "rdkafka",
- "shuttle-tokio",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "triomphe",
 ]
@@ -6834,7 +6840,6 @@ dependencies = [
  "nonzero_ext",
  "rumqttc-core-next",
  "rumqttc-next",
- "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6859,9 +6864,7 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "serde_json",
- "shuttle-tokio",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
 ]
 
@@ -6879,9 +6882,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
- "shuttle-tokio",
  "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]
@@ -6973,10 +6974,8 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "pulsar",
- "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "tokio-util",
  "tracing",
 ]
@@ -6997,7 +6996,6 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
- "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7020,7 +7018,6 @@ dependencies = [
  "redis",
  "rustls",
  "rustls-pki-types",
- "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7150,7 +7147,7 @@ dependencies = [
  "openraft",
  "rkyv",
  "serde",
- "shuttle-tokio",
+ "shuttle",
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
@@ -7214,11 +7211,8 @@ dependencies = [
  "nervix-model-harness",
  "nervix-primitives",
  "shuttle",
- "shuttle-tokio",
  "thiserror 2.0.21",
- "tokio",
  "triomphe",
- "turmoil",
  "ubyte",
 ]
 
@@ -7243,6 +7237,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
@@ -7266,7 +7261,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shuttle",
- "shuttle-tokio",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
@@ -7404,6 +7398,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "turmoil",
 ]
 
 [[package]]
@@ -7474,6 +7469,7 @@ dependencies = [
  "base64 0.22.1",
  "base64-simd",
  "blake3",
+ "bolero",
  "bytes",
  "chitchat",
  "chrono",
@@ -7509,6 +7505,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-backup",
  "nervix-bounded-write",
+ "nervix-branch-instances",
  "nervix-client-core",
  "nervix-client-ffi",
  "nervix-client-wire",
@@ -7578,7 +7575,6 @@ dependencies = [
  "serde",
  "serde_json",
  "shuttle",
- "shuttle-tokio",
  "signal-hook 0.4.4",
  "simd-json",
  "sorted-vec",
@@ -7712,7 +7708,6 @@ dependencies = [
  "nonzero_ext",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "tokio",
  "triomphe",
  "wasmtime",
 ]

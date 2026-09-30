@@ -212,13 +212,14 @@ state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wa
 the detailed handoff, checkpoint, duplicate-window, and restart guarantees.
 
 An archive restore first publishes the restored models as a stopped domain and recomputes its
-schedule. Archived node assignments are never installation authority. The coordinator purges
-the target domain's state on every live node, requires each archived entity's schema fingerprint
-to match the new schedule, and installs its checkpoints on the scheduled owner and replicas.
-Branch lifecycle is installed before WASM guest saves, and each save uses the state generation
-from the published schedule. Installation clears passive runtime state handles so a later
-`START` reloads the installed checkpoints under the running revision. Repeating an unfinished
-model-installation step repeats the purge and installation before recording its completion.
+schedule. Archived node assignments are never installation authority. The coordinator requires
+each archived entity's schema fingerprint to match the new schedule and stages its checkpoints on
+the scheduled owner and replicas. Branch lifecycle is staged before WASM guest saves, and each
+save uses the state generation from the published schedule. Each node atomically publishes its
+complete replacement set, including an empty set on unassigned nodes, then clears passive handles.
+The replicated installation gate prevents `START` until all nodes finish. A retry of an unfinished
+model step admits a new installation generation bound to its leader tenure, execution and lease;
+a delayed preceding attempt cannot mutate the state or its handles after completion.
 [Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
 sections, and the operator-visible restore guarantees.
 

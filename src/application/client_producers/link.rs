@@ -47,10 +47,10 @@ use nervix_primitives::{
         atomic::{AtomicU64, Ordering},
         mpsc, oneshot, watch,
     },
+    time::{Instant, MissedTickBehavior},
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::time::{Instant, MissedTickBehavior};
 use tracing::debug;
 use triomphe::Arc;
 
@@ -286,7 +286,9 @@ impl ProducerLinks {
             let link = self.link_to(owner);
             match link.commands.send(command) {
                 Ok(()) => {
-                    return match tokio::time::timeout(FORWARDED_OPEN_DEADLINE, answer).await {
+                    return match nervix_primitives::time::timeout(FORWARDED_OPEN_DEADLINE, answer)
+                        .await
+                    {
                         Ok(Ok(opened)) => opened,
                         // The link ended before the owning node answered.
                         Ok(Err(_)) => Err(ClientProducerRefusal::EndpointUnavailable),
@@ -497,7 +499,7 @@ impl ServingLink {
                     };
                     self.command(command, &items);
                 }
-                () = tokio::time::sleep_until(last_heard + LINK_SILENCE_LIMIT) => {
+                () = nervix_primitives::time::sleep_until(last_heard + LINK_SILENCE_LIMIT) => {
                     debug!(owner = %self.owner, "the owning node fell silent on a client producer link");
                     break;
                 }
@@ -717,7 +719,7 @@ async fn write_link(
     mut sender: DuplexSender<OpenClientProducerLink>,
     mut items: mpsc::UnboundedReceiver<ClientProducerLinkItem>,
 ) {
-    let mut heartbeat = tokio::time::interval(LINK_HEARTBEAT_INTERVAL);
+    let mut heartbeat = nervix_primitives::time::interval(LINK_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -780,7 +782,7 @@ struct OwnerLink {
 
 impl OwnerLink {
     async fn run(mut self, mut items: DuplexItems<ClientProducerLinkItem>) {
-        let mut heartbeat = tokio::time::interval(LINK_HEARTBEAT_INTERVAL);
+        let mut heartbeat = nervix_primitives::time::interval(LINK_HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
         loop {
@@ -815,7 +817,7 @@ impl OwnerLink {
                         break;
                     }
                 }
-                () = tokio::time::sleep_until(last_heard + LINK_SILENCE_LIMIT) => {
+                () = nervix_primitives::time::sleep_until(last_heard + LINK_SILENCE_LIMIT) => {
                     debug!(
                         serving_node = %self.serving_node,
                         "a serving node fell silent on a client producer link"

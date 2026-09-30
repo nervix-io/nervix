@@ -159,8 +159,8 @@ pub use resource::{
 pub use resource_binding::ResourceRebinding;
 pub use restore::{
     ExistingUserPolicy, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
-    RestoreState, RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain,
-    RestoredUsers,
+    RestoreState, RestoreStateAuthority, RestoreStep, RestoreStepOutcome, RestoreStepReport,
+    RestoredDomain, RestoredUsers,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,

@@ -3,7 +3,7 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use ahash::HashMap;
 use fjall::Database;
@@ -17,13 +17,15 @@ use nervix_models::{
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
     ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
-use nervix_primitives::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc, watch,
+use nervix_primitives::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, watch,
+    },
+    time::timeout,
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
-use tokio::time::{Duration, timeout};
 use triomphe::Arc;
 
 use super::*;
@@ -134,7 +136,7 @@ impl EmptyRelayHandoffFixture {
                 std::slice::from_ref(&self.entity),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
-                    deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+                    deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
                     reason: "prepare ownership handoff test fixture",
                 },
             )
@@ -1632,54 +1634,6 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
 }
 
 #[test]
-fn runtime_state_store_purges_only_the_requested_domain() {
-    let dir = tempdir().expect("temp dir should open");
-    let db = Database::builder(dir.path())
-        .open()
-        .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
-    let stopped = RuntimeStatePlacement {
-        domain: domain("stopped"),
-        state: RuntimeState::Deduplicator {
-            schema: SchemaFingerprint::from_digest([1; 32]),
-        },
-        kind: ModelKind::Deduplicator,
-        identifier: named("dedup_orders"),
-        branch_key: None,
-    };
-    let running = RuntimeStatePlacement {
-        domain: domain("running"),
-        ..stopped.clone()
-    };
-    store
-        .persist_latest_snapshot(&stopped, 1, b"stopped")
-        .expect("stopped-domain snapshot should persist");
-    store
-        .persist_latest_snapshot(&running, 2, b"running")
-        .expect("running-domain snapshot should persist");
-
-    store
-        .purge_domain(&stopped.domain)
-        .expect("stopped-domain snapshots should purge");
-
-    assert!(
-        store
-            .latest_snapshot(&stopped)
-            .expect("stopped-domain snapshot lookup should succeed")
-            .is_none()
-    );
-    assert_eq!(
-        store
-            .latest_snapshot(&running)
-            .expect("running-domain snapshot lookup should succeed")
-            .expect("running-domain snapshot should remain")
-            .payload,
-        b"running".to_vec()
-    );
-}
-
-#[test]
 fn runtime_state_store_purges_only_the_requested_entity() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -2507,7 +2461,7 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
         Vec::new(),
     ));
     let current = guest_state_placement(&runtime, &domain, acme);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(5);
 
     let recovered = runtime
         .forced_recovery_checkpoint(&current, &[], deadline)

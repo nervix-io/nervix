@@ -312,7 +312,7 @@ impl RestoreStreamAttempt {
             Err(_) => Feeding::ReadFailed(io::ErrorKind::Interrupted),
         };
         match feeding {
-            Feeding::Sent => match tokio::time::timeout(frame_timeout, call).await {
+            Feeding::Sent => match nervix_primitives::time::timeout(frame_timeout, call).await {
                 Ok(reply) => reply.map_err(|status| AttemptFailure::Transport(Box::new(status))),
                 Err(_) => Err(AttemptFailure::Transport(Box::new(
                     Status::deadline_exceeded(
@@ -342,7 +342,7 @@ async fn feed(
     frame_timeout: Duration,
     on_progress: impl Fn(u64) + Send + Sync + 'static,
 ) -> Feeding {
-    match tokio::time::timeout(frame_timeout, frames.send(start)).await {
+    match nervix_primitives::time::timeout(frame_timeout, frames.send(start)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => return Feeding::CallEnded,
         Err(_) => return Feeding::Stalled,
@@ -361,7 +361,7 @@ async fn feed(
             "a non-empty chunk of at most half a frame, as a const assertion holds it, always \
              encodes",
         );
-        match tokio::time::timeout(frame_timeout, frames.send(chunk)).await {
+        match nervix_primitives::time::timeout(frame_timeout, frames.send(chunk)).await {
             Ok(Ok(())) => on_progress(read.arch_into()),
             Ok(Err(_)) => return Feeding::CallEnded,
             Err(_) => return Feeding::Stalled,

@@ -10,6 +10,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc as StdArc,
+    time::Duration,
 };
 
 use error_stack::{Report, ResultExt};
@@ -35,7 +36,6 @@ use nervix_nspl::client_statement::ClientStatement;
 use nervix_primitives::sync::{OwnedMutexGuard, Semaphore, blocking::Mutex as ParkingMutex};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::time::Duration;
 use tracing::{info, warn};
 
 use super::{
@@ -1337,6 +1337,16 @@ impl SessionServiceImpl {
             .consensus
             .transaction_control_snapshot(domain)
             .await;
+        if let Some(execution) = &control.restore_installation
+            && statements
+                .iter()
+                .any(|statement| matches!(statement, Statement::StartDomain(_)))
+        {
+            return Err(Report::new(TransactionPlanningError::RestoreInstallation {
+                domain: domain.clone(),
+                execution: execution.clone(),
+            }));
+        }
         let schedule_inputs = self
             .capture_domain_schedule_planning_snapshot(&control.planning_inputs)
             .await;

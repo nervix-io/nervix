@@ -7,9 +7,6 @@
 //! - **Depends on.** Execution admission and the vocabulary carried by internal operations.
 //! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{collections::BTreeMap, io, net::SocketAddr, time::Duration};
 
 use error_stack::Report;
@@ -35,6 +32,7 @@ mod entropy;
 mod identity;
 mod observation;
 mod operation;
+mod peer_resolver;
 mod peer_target;
 mod pool;
 mod request;
@@ -44,7 +42,6 @@ mod shuttle_test;
 #[cfg(all(test, feature = "turmoil"))]
 #[path = "../tests/simulation/runner.rs"]
 mod simulation_runner;
-mod socket;
 mod wasm_state;
 mod wire;
 
@@ -60,6 +57,7 @@ pub use observation::{
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
 };
 pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
+pub use peer_resolver::PeerResolver;
 pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
 pub use request::{
@@ -76,7 +74,6 @@ pub use runtime_state::{
     StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
     StateSyncRequest, StateSyncResponse,
 };
-pub use socket::PeerResolver;
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
     RecoverWasmProcessorStateRequest, RecoverWasmProcessorStateResponse,

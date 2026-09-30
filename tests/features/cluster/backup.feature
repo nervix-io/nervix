@@ -381,6 +381,228 @@ Feature: Configuration backup into a public archive
     When the CLI describes backup archive "interrupted.nvxb" as text
     Then the CLI output contains "cut: quiesced"
 
+  Scenario: A stale restore coordinator cannot republish after a new leader starts the domain
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE wasm_filter;
+      UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR metric_source
+        FROM KAFKA kafka_ingress TOPIC backup_wasm_in_{{test_id}}
+          OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING metric_codec
+        TO raw_metrics
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":11,"tenant":"beta"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":12,"tenant":"beta"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "value":2
+      key={"tenant":"beta"} | "value":12
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And a node other than placeholder "leader" is saved as placeholder "survivor"
+    Given restoring domain "{{domain}}_copy" by coordinator "{{leader}}" pauses before state publication
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" in the background
+    Then restoring domain "{{domain}}_copy" by coordinator "{{leader}}" has reached state publication
+    When leadership is transferred from node "{{leader}}" to node "{{survivor}}"
+    Then node "{{survivor}}" eventually reports a leader other than "{{leader}}"
+    And node "{{leader}}" eventually reports a leader other than "{{leader}}"
+    And restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" completes on node "{{survivor}}" under execution reference "restore_reference"
+    Given the active domain is "{{domain}}_copy"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":3,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":13,"tenant":"beta"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":4,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":14,"tenant":"beta"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "value":4
+      key={"tenant":"beta"} | "value":14
+      """
+    When the CLI backs up "domain {{domain}}" from node "{{survivor}}" into "before-stale.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When state publication of domain "{{domain}}" by coordinator "{{leader}}" is released
+    Then state publication of domain "{{domain}}" by coordinator "{{leader}}" is refused
+    When the CLI backs up "domain {{domain}}" from node "{{survivor}}" into "after-stale.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "before-stale.nvxb" and "after-stale.nvxb" have identical guest checkpoints and source offsets
+
+  Scenario Outline: A quiesced backup omits guest checkpoints after WASM branch TTL eviction
+    Given branched relay expiration scan interval is configured as "100ms"
+    And Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE wasm_filter;
+      UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR metric_source
+        FROM KAFKA kafka_ingress TOPIC backup_wasm_in_{{test_id}}
+          OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING metric_codec
+        TO raw_metrics
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":11,"tenant":"beta"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "backup_wasm_in_{{test_id}}"
+      """
+      {"value":12,"tenant":"beta"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "value":2
+      key={"tenant":"beta"} | "value":12
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "wasm_processor" "filter_even_rows" is saved as placeholder "wasm_owner"
+    And node "{{wasm_owner}}" observability metric "nervix_branch_evictions_total" with labels eventually reaches at least 2
+      """
+      domain="{{domain}}"
+      branch="by_tenant"
+      physical_node_id="{{wasm_owner}}"
+      reason="ttl"
+      """
+    And node "{{wasm_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_tenant"
+      physical_node_id="{{wasm_owner}}"
+      """
+    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "expired.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "expired.nvxb" as json
+    Then the described backup has exactly 0 "wasm_processor" state sections
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A quiesced backup restores two WASM branches and Kafka domain offsets
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
@@ -461,6 +683,16 @@ Feature: Configuration backup into a public archive
     And the CLI output contains "kafka_ingestor=metric_source"
     And the CLI output contains "branch_lifecycle=metric_source"
     And the CLI output contains "branch_lifecycle=filter_even_rows"
+    Given the active domain is saved as placeholder "source_domain"
+    And restoring domain "{{domain}}_incomplete" fails before installing its first WASM checkpoint
+    When the CLI restores "domain {{domain}} --as {{domain}}_incomplete" from "stateful.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
+    Given the active domain is "{{domain}}_incomplete"
+    When these NSPL commands fail with "restore state installation is incomplete"
+      """
+      START;
+      """
+    Given the active domain is "{{source_domain}}"
     When the CLI backs up "domain {{domain}} --without-state" from node "{{leader}}" into "configuration-stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the CLI describes backup archive "configuration-stateful.nvxb" as json

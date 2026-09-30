@@ -118,7 +118,8 @@ impl ChannelClosures {
         if channel.status().connected() || !connection.status().connected() {
             return ChannelClosure::Unattributed(observed);
         }
-        let reported = tokio::time::timeout(CLOSE_REASON_BUDGET, self.next_error()).await;
+        let reported =
+            nervix_primitives::time::timeout(CLOSE_REASON_BUDGET, self.next_error()).await;
         match reported {
             Ok(Some(reason)) => ChannelClosure::from(reason),
             Ok(None) | Err(_) => ChannelClosure::Unattributed(observed),

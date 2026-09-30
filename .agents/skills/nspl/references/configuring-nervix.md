@@ -357,7 +357,8 @@ Choose checks relevant to the configured graph:
   `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` recreates users, domains,
   resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
-  `nervix-cli` or a native client. Restored domains are stopped; a domain name that exists is
+  `nervix-cli` or a native client. Restored domains are stopped; `START` remains blocked until the complete state installation
+  succeeds, including after a failed restore or restart. A domain name that exists is
   refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
   each domain's impact report without changing anything.

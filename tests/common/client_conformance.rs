@@ -26,11 +26,10 @@ use std::{
     time::Duration,
 };
 
-use nervix_primitives::{sync::mpsc, task::JoinHandle};
+use nervix_primitives::{sync::mpsc, task::JoinHandle, time::Instant};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
     process::{Child, Command},
-    time::Instant,
 };
 
 /// The checked-in frames the Rust encoder wrote, and the report of them every reader prints.
@@ -375,7 +374,7 @@ impl ClientProbe {
         let deadline = Instant::now() + within;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, self.lines.recv()).await {
+            match nervix_primitives::time::timeout_at(deadline, self.lines.recv()).await {
                 Ok(Some(line)) => {
                     let found = line == expected;
                     self.received.push(line);
@@ -409,7 +408,7 @@ impl ClientProbe {
         let deadline = Instant::now() + within;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, self.lines.recv()).await {
+            match nervix_primitives::time::timeout_at(deadline, self.lines.recv()).await {
                 Ok(Some(line)) => self.received.push(line),
                 Ok(None) => break,
                 Err(_) => {
@@ -422,7 +421,7 @@ impl ClientProbe {
                 }
             }
         }
-        let ending = tokio::time::timeout_at(deadline, self.ended()).await;
+        let ending = nervix_primitives::time::timeout_at(deadline, self.ended()).await;
         match ending {
             Ok(Ok(())) => Ok(ProbeReport {
                 lines: self.received,
@@ -441,7 +440,7 @@ impl ClientProbe {
 
     /// Why a probe that stopped reporting ended, for a diagnostic.
     async fn ending(&mut self) -> String {
-        match tokio::time::timeout(Duration::from_secs(30), self.ended()).await {
+        match nervix_primitives::time::timeout(Duration::from_secs(30), self.ended()).await {
             Ok(Ok(())) => "it exited successfully".to_string(),
             Ok(Err(error)) => error.to_string(),
             Err(_) => "it closed its report and kept running".to_string(),

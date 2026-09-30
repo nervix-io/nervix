@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::Arc as StdArc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use arch_into::ArchInto as _;
@@ -47,16 +47,21 @@ use nervix_interconnect::{
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint};
-use nervix_primitives::sync::blocking::{LazyLock, OnceLock};
+use nervix_primitives::{
+    sync::blocking::{LazyLock, OnceLock},
+    time::Instant,
+};
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
     ClusterNodeName::parse(raw).expect("cucumber node ids are valid cluster node names")
 }
 use nervix_primitives::{
+    net::{TcpListener as TokioTcpListener, TcpStream},
     stream::StreamExt,
     sync::{CancellationToken, blocking::Mutex, mpsc, oneshot, watch},
     task::JoinHandle,
+    time::{sleep, timeout},
 };
 use nervix_server::{
     FaultInjection, SchedulerMode,
@@ -85,11 +90,7 @@ use rustls::{
 };
 use rustls_pki_types::pem::PemObject;
 use tempfile::{TempDir, tempdir};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener as TokioTcpListener, TcpStream},
-    time::{sleep, timeout},
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::{
     WebSocketStream, client_async, connect_async,
@@ -4469,7 +4470,7 @@ async fn publish_kafka_payloads(
             Duration::from_secs(5),
         ));
     }
-    let results = tokio::time::timeout(
+    let results = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         futures_util::future::join_all(deliveries),
     )
@@ -4512,7 +4513,7 @@ async fn publish_kafka_record(
     // Kafka topic creation and consumer assignment can lag slightly behind setup.
     let mut last_error = None;
     for attempt in 0..3 {
-        let delivery = tokio::time::timeout(
+        let delivery = nervix_primitives::time::timeout(
             Duration::from_secs(6),
             producer.send(
                 {

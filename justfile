@@ -116,6 +116,10 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
+test-scenarios-binary binary *args: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}
+
 # Focused columnar admission kernel and vocabulary tests.
 test-admission-kernels *args:
     cargo test --package nervix-simd-kernels --lib -- {{ args }}
@@ -210,19 +214,35 @@ test-execution *args:
 
 # Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
 # contract scripts of every family against its own backend and checks that it selected that backend,
-# so an operation a backend lacks or answers differently fails here. The Shuttle build also shows
-# that its adapters let the scheduler reach a publication between a read and a waiter's
-# registration, and the Loom build that it takes the ordinary libraries for the families Loom does
-# not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
-# is its own build, because Cargo would unify the features of one.
+# so an operation a backend lacks or answers differently fails here. The ordinary build with the
+# `test-util` capability measures every timer on a paused clock. The Shuttle build also shows that
+# its adapters let the scheduler reach a publication between a read and a waiter's registration,
+# that its timers are scheduling points whose timeouts a check triggers, and that a socket fails a
+# check; the Turmoil build that sockets, name lookup, timers and admitted CPU jobs belong to the
+# simulated host that uses them; and the Loom build that it takes the ordinary libraries for the
+# families Loom does not model. The documentation tests show that a runtime attribute refuses a
+# crate path. Every mode is its own build, because Cargo would unify the features of one.
 # The portable surface is also built for the browser target.
-test-primitives:
+test-primitives: test-primitives-ordinary test-primitives-modeled test-primitives-compile
+
+# The conformance checks in ordinary native execution: the portable surface alone, then with the
+# native families, then with the `test-util` capability, which measures every timer on a paused
+# clock. `coverage-native-extras test-primitives` runs these under instrumentation.
+test-primitives-ordinary:
     cargo test --package nervix-primitives --lib
     cargo test --package nervix-primitives --features native --lib
-    cargo test --package nervix-primitives --features native --doc
+    cargo test --package nervix-primitives --features 'native test-util' --lib
+
+# The conformance checks under each model checker's backend, each mode its own build.
+test-primitives-modeled:
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
     cargo test --package nervix-primitives --features 'turmoil native' --lib
+
+# The conformance checks that compile rather than run: the documentation tests that a runtime
+# attribute refuses a crate path, and the portable surface's browser build.
+test-primitives-compile:
+    cargo test --package nervix-primitives --features native --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
@@ -232,7 +252,7 @@ test-primitives:
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    shuttle_packages=(nervix-execution nervix-interconnect nervix-client-core nervix-server)
+    shuttle_packages=(nervix-execution nervix-interconnect nervix-client-core nervix-consensus nervix-server)
     for shuttle_package in "${shuttle_packages[@]}"; do
         just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
         SHUTTLE_CHECK_NONDETERMINISM=1 \
@@ -311,17 +331,20 @@ test-loom-replay failure:
 test-loom-qualification: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
-# Run the Turmoil suite: the execution and library simulation checks, then every interconnect
-# scenario over its committed regression seeds. Tokio's unstable runtime knobs seed per-host
-# scheduling and turn unhandled task panics into runtime failures; the cfg is scoped to this test
-# mode, and ordinary and Shuttle builds keep their flags. After the build, the tests run inside a
-# real-time budget of `budget_seconds` and end with status 124 when it expires. A failed scenario
-# leaves a failure record under target/turmoil-failures for `test-turmoil-replay`.
+# Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
+# simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's
+# unstable runtime knobs seed per-host scheduling and turn unhandled task panics into runtime
+# failures; the cfg is scoped to this test mode, and ordinary and Shuttle builds keep their flags.
+# After the build, the tests run inside a real-time budget of `budget_seconds` and end with status
+# 124 when it expires. A failed scenario leaves a failure record under target/turmoil-failures for
+# `test-turmoil-replay`.
 test-turmoil budget_seconds="480":
     #!/usr/bin/env bash
     set -euo pipefail
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-primitives --features 'turmoil native' --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-execution --features turmoil --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
@@ -342,6 +365,8 @@ test-turmoil budget_seconds="480":
         fi
         return "${status}"
     }
+    within_budget cargo test --package nervix-primitives --features 'turmoil native' --lib -- \
+        simulated_host turmoil_mode --test-threads=1
     within_budget cargo test --package nervix-execution --features turmoil --lib -- \
         --test-threads=1
     within_budget cargo test --package nervix-interconnect --features turmoil --lib -- \
@@ -657,6 +682,16 @@ test-coverage-backup-packages:
         --package nervix-client-wire --package nervix-consensus --package nervix-interconnect \
         --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-primitives
 
+# Extend an existing instrumented profile with focused public regressions after a correction.
+test-coverage-scenario-filter feature filter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server \
+        --test scenarios -- --input {{ quote(feature) }} --name {{ quote(filter) }} \
+        --concurrency 1 --retry 0
+
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps
     #!/usr/bin/env bash
@@ -910,6 +945,9 @@ coverage-turmoil output:
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
     cargo llvm-cov --no-report \
+        --package nervix-primitives --features 'turmoil native' --lib -- \
+        simulated_host turmoil_mode --test-threads=1
+    cargo llvm-cov --no-report \
         --package nervix-execution --features turmoil --lib
     cargo llvm-cov --no-report \
         --package nervix-interconnect --features turmoil --lib -- \
@@ -919,19 +957,45 @@ coverage-turmoil output:
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
+# Run the extra checks that execute Nervix code natively in ordinary mode, `bench-smoke`,
+# `test-primitives` and `nspl-completion-walk`, exactly as their recipes do but with LLVM source
+# coverage, and fail as they do. Prerequisites build outside the instrumentation, and the parts of a
+# check that compile, target the browser or run a model checker stay uninstrumented. Each producer
+# writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
+# target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
+# Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
+coverage-native-extras *producers: llvm-tools
+    python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
+
+# Exercise the native coverage collector: its producer inventory, source policy, selection and
+# failure handling, then instrumented runs of a fixture crate through the real toolchain.
+test-native-coverage: llvm-tools
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
+
+# Add the LLVM tools that read coverage profiles to the toolchain rust-toolchain.toml pins, which
+# must be the compiler's own: a toolchain installed under another name does not provide them.
+llvm-tools:
+    rustup component add llvm-tools
+
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
 bench *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+    cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console
+bench-smoke: build-web-console bench-smoke-bodies
+
+# The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
+# `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
+bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
@@ -941,6 +1005,11 @@ bench-smoke: build-web-console
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
 bench-relay-interaction *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+
+# Measure the branch owner a relay owner task holds: batches for established branches, which
+# publish nothing, and branch churn, which creates, evicts and publishes once per batch.
+bench-branch-instances *args:
+    cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
 
 # Build the SIMD kernel crate's optimized unit-test binary for the x86-64-v3 payload the Docker
 # image ships, in its own target directory, so the generated instructions of each dispatch level can
@@ -1174,6 +1243,7 @@ cargo-clippy-all:
         --package nervix-model-harness \
         --package nervix-wasm
     cargo clippy --all-targets --features native --package nervix-primitives
+    cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package 'nervix-connector*' \

@@ -39,7 +39,10 @@ use nervix_interconnect::{
     InterconnectDuplexRequest as _, Transport,
 };
 use nervix_models::ClusterNodeName;
-use nervix_primitives::sync::{CancellationToken, DropGuard, mpsc};
+use nervix_primitives::{
+    sync::{CancellationToken, DropGuard, mpsc},
+    time::{Instant, sleep_until, timeout},
+};
 use nervix_recovery::Discarded as _;
 use openraft::{
     error::{RPCError, Unreachable},
@@ -47,7 +50,6 @@ use openraft::{
     raft::{AppendEntriesRequest, StreamAppendResult},
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until, timeout};
 use tracing::debug;
 
 use crate::{LogIdOf, ProtocolReceiver, TypeConfig, validate_protocol_origin, wire};
@@ -488,7 +490,7 @@ impl ProtocolReceiver {
 mod tests {
     use std::{cell::Cell, future::pending};
 
-    use tokio::time::sleep;
+    use nervix_primitives::time::sleep;
 
     use super::*;
 

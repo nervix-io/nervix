@@ -8,8 +8,15 @@
 
 use std::time::Duration;
 
-use nervix_models::{CoordinationIdentity, DomainName};
+use nervix_models::{CoordinationIdentity, DomainName, RestoreStateAuthority};
 use rkyv::{Archive, Deserialize, Serialize};
+
+/// The complete checkpoint set a receiving node must validate before replacing domain state.
+#[derive(Debug, Clone, Copy, Default, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreStateInventory {
+    pub checkpoints: u64,
+    pub payload_bytes: u64,
+}
 
 use crate::{
     InterconnectRequest, InterconnectStreamRequest, PoolClass, RemoteOperationFailure,
@@ -143,12 +150,15 @@ impl InterconnectStreamRequest for FetchCapturedSection {
 pub struct InstallRestoredStateRequest {
     pub coordination: CoordinationIdentity,
     pub domain: DomainName,
+    pub authority: RestoreStateAuthority,
     pub action: InstallRestoredStateAction,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub enum InstallRestoredStateAction {
-    PurgeDomain,
+    Publish {
+        inventory: RestoreStateInventory,
+    },
     Begin {
         placement: StatePlacementEnvelope,
         branch_fingerprint: Option<[u8; 32]>,
@@ -172,6 +182,137 @@ impl InterconnectRequest for InstallRestoredStateRequest {
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
+    }
+}
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod wire_properties {
+    use meticulous::ResultExt as _;
+    use nervix_execution::{CpuClass, Executor, MemoryClass};
+    use nervix_models::{
+        ClusterNodeName, CommandExecutionReference, ModelKind, ModelName, RemoteRuntimeField,
+        RemoteRuntimeValue, SchemaFingerprint, WasmStateGeneration,
+    };
+
+    use super::*;
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct RestoreWireCase {
+        term: u64,
+        lease: u64,
+        generation: u64,
+        revision: u64,
+        value: i64,
+        byte: u8,
+        length: u8,
+        branched: bool,
+    }
+
+    #[test]
+    fn bolero_restore_installation_requests_round_trip() {
+        let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .assured("the ordinary test runtime builds");
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(128)
+            .with_type::<RestoreWireCase>()
+            .for_each(|case| {
+                runtime.block_on(async {
+                    let executor = Executor::default();
+                    let leader = ClusterNodeName::parse(&format!("node-{}", case.byte))
+                        .assured("the generated node name is valid");
+                    let domain = DomainName::parse("orders").assured("the domain is valid");
+                    let authority = RestoreStateAuthority {
+                        leader: leader.clone(),
+                        term: case.term.max(1),
+                        execution: CommandExecutionReference::parse(format!(
+                            "restore-{}",
+                            case.generation
+                        ))
+                        .assured("the generated reference is valid"),
+                        mutation_revision: case.lease.max(1),
+                        generation: case.generation.max(1),
+                    };
+                    let json = serde_json::to_vec(&authority).assured("the authority encodes");
+                    assert_eq!(
+                        serde_json::from_slice::<RestoreStateAuthority>(&json)
+                            .assured("the authority decodes"),
+                        authority
+                    );
+                    let branch_key = case.branched.then(|| {
+                        vec![RemoteRuntimeField {
+                            name: "tenant".to_string(),
+                            value: RemoteRuntimeValue::I64(case.value),
+                        }]
+                    });
+                    let actions = [
+                        InstallRestoredStateAction::Begin {
+                            placement: StatePlacementEnvelope {
+                                domain: domain.clone(),
+                                state: crate::RuntimeState::WasmProcessor {
+                                    schema: SchemaFingerprint::from_digest([case.byte; 32]),
+                                    generation: WasmStateGeneration::try_from(
+                                        case.generation.max(1),
+                                    )
+                                    .assured("the generated state generation is positive"),
+                                },
+                                kind: ModelKind::WasmProcessor,
+                                identifier: ModelName::parse("accumulator")
+                                    .assured("the processor name is valid"),
+                                branch_key,
+                            },
+                            branch_fingerprint: case.branched.then_some([case.byte; 32]),
+                            revision: case.revision,
+                            length: u64::from(case.length),
+                            digest: [case.byte; 32],
+                        },
+                        InstallRestoredStateAction::Chunk {
+                            offset: case.revision,
+                            payload: vec![case.byte; usize::from(case.length)],
+                        },
+                        InstallRestoredStateAction::Finish,
+                        InstallRestoredStateAction::Publish {
+                            inventory: RestoreStateInventory {
+                                checkpoints: case.revision,
+                                payload_bytes: u64::from(case.length),
+                            },
+                        },
+                    ];
+                    for action in actions {
+                        nervix_primitives::task::consume_budget().await;
+                        let request = InstallRestoredStateRequest {
+                            coordination: CoordinationIdentity::new(
+                                leader.clone(),
+                                case.term.max(1),
+                                case.revision,
+                            ),
+                            domain: domain.clone(),
+                            authority: authority.clone(),
+                            action,
+                        };
+                        let encoded = crate::wire::encode_rkyv(
+                            &executor,
+                            MemoryClass::Bulk,
+                            CpuClass::Bulk,
+                            4096,
+                            request.clone(),
+                        )
+                        .await
+                        .assured("the bounded current request encodes");
+                        let decoded = crate::wire::decode_rkyv::<InstallRestoredStateRequest>(
+                            &executor,
+                            MemoryClass::Bulk,
+                            CpuClass::Bulk,
+                            encoded,
+                        )
+                        .await
+                        .assured("the bounded current request decodes");
+                        assert_eq!(decoded.into_value(), request);
+                    }
+                });
+            });
     }
 }
 

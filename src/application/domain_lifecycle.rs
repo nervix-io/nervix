@@ -8,6 +8,8 @@
 //!   gate to hold the domain while it changes.
 //! - **Must not know.** How the domain's graph is scheduled or executed.
 
+use std::time::Duration;
+
 use error_stack::{Report, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease};
 use nervix_interconnect::{
@@ -19,8 +21,8 @@ use nervix_models::{
     DomainClockState, DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel,
     StartDomain, StopDomain, TimestampError,
 };
+use nervix_primitives::time::interval;
 use thiserror::Error;
-use tokio::time::{Duration, interval};
 
 use super::{
     command_result::CommandResult,
@@ -337,9 +339,9 @@ impl SessionServiceImpl {
         }
         nodes.sort();
         nodes.dedup();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
-        polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut confirming = false;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -399,7 +401,7 @@ impl SessionServiceImpl {
             } else {
                 confirming = false;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if nervix_primitives::time::Instant::now() >= deadline {
                 return Err(Report::new(DomainAlterError::BackupQuiesceTimeout {
                     domain: domain.clone(),
                     details: if details.is_empty() {
@@ -443,9 +445,9 @@ impl SessionServiceImpl {
             }));
         }
 
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
-        polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut last_pending = None::<(ClusterNodeName, DomainDrainStatusEnvelope)>;
         let mut last_status_error = None;
 
@@ -468,7 +470,7 @@ impl SessionServiceImpl {
                     Err(error) => {
                         all_drained = false;
                         last_status_error = Some(format!("{error:#}"));
-                        if tokio::time::Instant::now() >= deadline {
+                        if nervix_primitives::time::Instant::now() >= deadline {
                             break;
                         }
                     }
@@ -477,7 +479,7 @@ impl SessionServiceImpl {
             if all_drained {
                 return Ok(());
             }
-            if tokio::time::Instant::now() < deadline {
+            if nervix_primitives::time::Instant::now() < deadline {
                 continue;
             }
 

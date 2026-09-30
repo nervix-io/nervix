@@ -9,7 +9,7 @@
 use error_stack::{Report, ResultExt as _};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
-    BranchKeyFingerprint, DomainName, ModelKind, ModelName, RemoteRuntimeField, Timestamp,
+    BranchKeyFingerprint, DomainName, ModelName, NodeRef, RemoteRuntimeField, Timestamp,
 };
 use thiserror::Error;
 
@@ -46,8 +46,6 @@ pub(crate) enum BackupStateCaptureError {
     Storage,
     #[error("branch lifecycle of processor '{entity}' could not be decoded")]
     Lifecycle { entity: ModelName },
-    #[error("saved state of processor '{entity}' has no typed branch key in its lifecycle")]
-    MissingBranch { entity: ModelName },
     #[error("restored guest state branch fingerprint does not match its typed branch key")]
     BranchFingerprint,
     #[error("a restored state placement is invalid")]
@@ -165,26 +163,21 @@ impl Runtime {
         }
     }
 
-    pub(crate) fn purge_restored_domain_state(
+    /// Validates and stages one archive checkpoint without changing published runtime state.
+    pub(crate) fn stage_restored_domain_state(
         &self,
-        domain: &DomainName,
-    ) -> error_stack::Result<(), BackupStateCaptureError> {
-        let Some(store) = self.inner.state_store.as_ref() else {
-            return Err(Report::new(BackupStateCaptureError::Unavailable));
-        };
-        store
-            .purge_domain(domain)
-            .change_context(BackupStateCaptureError::Storage)?;
-        self.clear_runtime_state_for_domain(domain);
-        Ok(())
-    }
-
-    /// Installs one archive checkpoint in its recomputed placement's state lifetime. The caller
-    /// purges the stopped domain first and installs branch lifecycle before branch guest saves.
-    pub(crate) fn install_restored_domain_state(
-        &self,
+        authority: &nervix_models::RestoreStateAuthority,
         checkpoint: CapturedRuntimeState,
     ) -> error_stack::Result<(), BackupStateCaptureError> {
+        #[cfg(feature = "testing")]
+        if checkpoint.placement.state.kind() == RuntimeStateKind::WasmProcessor
+            && self
+                .inner
+                .fault_injection
+                .restored_wasm_checkpoint_fails(&checkpoint.placement.domain)
+        {
+            return Err(Report::new(BackupStateCaptureError::Storage));
+        }
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
         };
@@ -196,11 +189,32 @@ impl Runtime {
             return Err(Report::new(BackupStateCaptureError::BranchFingerprint));
         }
         store
-            .publish_sealed_snapshot(&placement, checkpoint.revision, &checkpoint.payload)
+            .stage_restored_checkpoint(
+                authority,
+                &placement,
+                checkpoint.revision,
+                &checkpoint.payload,
+            )
             .change_context(BackupStateCaptureError::Storage)?;
-        // A stopped domain may already have built a state handle when its model schedule was
-        // published. Its next START must reload the newly installed checkpoint from storage.
-        self.clear_runtime_state_for_domain(&placement.domain);
+        Ok(())
+    }
+
+    /// The caller holds the applied installation authority across this synchronous publication.
+    pub(crate) fn publish_restored_domain_state(
+        &self,
+        domain: &DomainName,
+        authority: &nervix_models::RestoreStateAuthority,
+        inventory: nervix_interconnect::backup::RestoreStateInventory,
+    ) -> error_stack::Result<(), BackupStateCaptureError> {
+        let store = self
+            .inner
+            .state_store
+            .as_ref()
+            .ok_or_else(|| Report::new(BackupStateCaptureError::Unavailable))?;
+        store
+            .publish_restored_state(domain, authority, inventory)
+            .change_context(BackupStateCaptureError::Storage)?;
+        self.clear_runtime_state_for_domain(domain);
         Ok(())
     }
 
@@ -244,11 +258,21 @@ impl Runtime {
                 .publish_sealed_snapshot(placement, state.value().lsm, &state.value().payload)
                 .change_context(BackupStateCaptureError::Storage)?;
         }
-        let snapshots = store
+        let stored_snapshots = store
             .snapshot_backup_domain(domain)
             .change_context(BackupStateCaptureError::Storage)?;
+        let mut snapshots = Vec::new();
+        for (placement, snapshot) in stored_snapshots {
+            let node = NodeRef::new(placement.kind, placement.identifier.clone()).in_domain(domain);
+            let Some(identity) = self.inner.state_identities.get(&node) else {
+                continue;
+            };
+            if identity.names(placement.state, placement.branch.as_ref()) {
+                snapshots.push((placement, snapshot));
+            }
+        }
         let mut keys =
-            ahash::HashMap::<(ModelKind, ModelName, BranchKeyFingerprint), BranchKey>::default();
+            ahash::HashMap::<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>::default();
         for (placement, snapshot) in &snapshots {
             if placement.state.kind() != RuntimeStateKind::BranchLru {
                 continue;
@@ -260,30 +284,28 @@ impl Runtime {
                     }
                 })?;
             for branch in branches {
-                if let Some(key) = branch.key {
-                    keys.insert(
-                        (
-                            placement.kind,
-                            placement.identifier.clone(),
-                            key.fingerprint(),
-                        ),
-                        key,
-                    );
-                }
+                keys.insert(
+                    (
+                        NodeRef::new(placement.kind, placement.identifier.clone()),
+                        branch.key.as_ref().map(BranchKey::fingerprint),
+                    ),
+                    branch.key,
+                );
             }
         }
-        snapshots
-            .into_iter()
-            .map(|(stored, snapshot)| {
-                let placement = restored_placement(domain, stored, &keys)?;
-                Ok(CapturedRuntimeState {
-                    placement: placement.to_remote(),
-                    branch_fingerprint: placement.branch_key.as_ref().map(BranchKey::fingerprint),
-                    revision: snapshot.lsm,
-                    payload: snapshot.payload,
-                })
-            })
-            .collect()
+        let mut captured = Vec::new();
+        for (stored, snapshot) in snapshots {
+            let Some(placement) = restored_placement(domain, stored, &keys) else {
+                continue;
+            };
+            captured.push(CapturedRuntimeState {
+                placement: placement.to_remote(),
+                branch_fingerprint: placement.branch_key.as_ref().map(BranchKey::fingerprint),
+                revision: snapshot.lsm,
+                payload: snapshot.payload,
+            });
+        }
+        Ok(captured)
     }
 }
 
@@ -343,25 +365,101 @@ pub(crate) fn encode_restored_branch_lifecycle(
 fn restored_placement(
     domain: &DomainName,
     stored: StoredPlacement,
-    keys: &ahash::HashMap<(ModelKind, ModelName, BranchKeyFingerprint), BranchKey>,
-) -> error_stack::Result<RuntimeStatePlacement, BackupStateCaptureError> {
-    let branch_key = match stored.branch {
-        Some(fingerprint) => Some(
-            keys.get(&(stored.kind, stored.identifier.clone(), fingerprint))
-                .cloned()
-                .ok_or_else(|| {
-                    Report::new(BackupStateCaptureError::MissingBranch {
-                        entity: stored.identifier.clone(),
-                    })
-                })?,
-        ),
-        None => None,
+    keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
+) -> Option<RuntimeStatePlacement> {
+    let branch_key = if stored.state.kind() == RuntimeStateKind::WasmProcessor {
+        // Eviction removes the lifecycle entry, while its durable guest checkpoint may remain.
+        // Only a currently active execution has a typed key worth reconstructing for this cut.
+        keys.get(&(
+            NodeRef::new(stored.kind, stored.identifier.clone()),
+            stored.branch,
+        ))?
+        .clone()
+    } else {
+        None
     };
-    Ok(RuntimeStatePlacement {
+    Some(RuntimeStatePlacement {
         domain: domain.clone(),
         state: stored.state,
         kind: stored.kind,
         identifier: stored.identifier,
         branch_key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_interconnect::RuntimeState;
+    use nervix_models::{ModelKind, SchemaFingerprint, WasmStateGeneration};
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn backup_omits_a_guest_checkpoint_after_its_branch_leaves_the_lifecycle() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let db = fjall::Database::builder(dir.path())
+            .open()
+            .assured("database opens");
+        let runtime = Runtime::with_persistence(Some(db), std::time::Duration::from_secs(60))
+            .assured("runtime opens");
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("state store is configured");
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let entity = ModelName::parse("accumulator").assured("processor is valid");
+        let schema = SchemaFingerprint::from_digest([4; 32]);
+        runtime.inner.state_identities.insert(
+            nervix_models::DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::WasmProcessor,
+                entity.clone(),
+            ),
+            super::super::ScheduledStateIdentity {
+                schema_fingerprint: schema,
+                wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
+            },
+        );
+        let key = super::super::string_branch_key("tenant", "alpha");
+        let lifecycle = RuntimeStatePlacement {
+            domain: domain.clone(),
+            kind: ModelKind::WasmProcessor,
+            identifier: entity,
+            state: RuntimeState::BranchLru { schema },
+            branch_key: None,
+        };
+        let guest = RuntimeStatePlacement {
+            state: RuntimeState::WasmProcessor {
+                schema,
+                generation: WasmStateGeneration::FIRST,
+            },
+            branch_key: key,
+            ..lifecycle.clone()
+        };
+        store
+            .publish_sealed_snapshot(&guest, 8, b"saved-alpha")
+            .assured("guest persists");
+        store
+            .publish_sealed_snapshot(
+                &lifecycle,
+                9,
+                &encode_branch_lru_snapshot(&[]).assured("empty current lifecycle encodes"),
+            )
+            .assured("eviction persists");
+        let captured = runtime
+            .capture_backup_state(&domain, true)
+            .assured("a retained inactive guest does not fail the cut");
+        assert_eq!(
+            captured.len(),
+            1,
+            "the scheduled current lifecycle is retained"
+        );
+        assert!(
+            captured
+                .iter()
+                .all(|entry| entry.placement.state.kind() != RuntimeStateKind::WasmProcessor)
+        );
+    }
 }
