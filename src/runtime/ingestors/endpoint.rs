@@ -307,7 +307,8 @@ mod tests {
 
         assert!(outcome.is_accepted());
         let RuntimeEvent::Error(message) = events
-            .try_recv()
+            .recv()
+            .await
             .expect("the rejected payload is reported to the node's observers");
         assert_eq!(
             message,
