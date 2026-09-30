@@ -23,8 +23,8 @@ use nervix_models::{
     FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
     MessageErrorOperation, StructuredMessageError, Timestamp,
 };
+use nervix_primitives::time::Instant;
 use thiserror::Error;
-use tokio::time::Instant;
 use triomphe::Arc;
 
 use crate::physical_time::PhysicalDeadline;

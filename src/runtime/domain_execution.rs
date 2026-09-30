@@ -34,7 +34,6 @@ pub(super) enum DomainRoutingError {
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct DomainRoutingSnapshot {
     pub(super) passive_only: bool,
-    pub(super) relay_registries: HashMap<RelayName, RelayRegistry>,
     pub(super) relay_schemas: HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) lookups: HashMap<LookupName, Arc<LookupRuntime>>,
@@ -350,7 +349,7 @@ impl Runtime {
 
         let Some(revision) = revision else {
             self.withdraw_undeclared_relay_subscriptions(domain, |_| false);
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         };
         let stopped = self
@@ -359,7 +358,7 @@ impl Runtime {
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
         if stopped || !self.inner.domains.contains_key(domain) {
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         }
         let domain_clock =
@@ -404,16 +403,16 @@ impl Runtime {
             .await?;
 
         for relay in activation_plan.relays.values() {
-            let expiring_state = if branch_relays.contains(&relay.name) {
-                let state = self
-                    .expiring_stream_state(domain, &relay.name)
+            // A branch relay shares its presence with the relay's state placement, which outlives
+            // this execution; any other relay starts from a presence of its own.
+            let branch_presence = if branch_relays.contains(&relay.name) {
+                self.relay_branch_presence(domain, &relay.name)
                     .map_err(|error| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: error.to_string(),
-                    })?;
-                Some(state)
+                    })?
             } else {
-                None
+                Arc::new(BranchPresence::new())
             };
             let fanout = self
                 .relay_boundary_fanout_with_capacity(
@@ -423,17 +422,13 @@ impl Runtime {
                     RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
                 )
                 .await;
-            let registry = match expiring_state.as_ref() {
-                Some(state) => state.registry.clone(),
-                None => RelayRegistry::new(),
-            };
             relay_builders.insert(
                 relay.name.clone(),
                 RelayBoundaryBuilder {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    registry,
+                    branch_presence,
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -524,10 +519,6 @@ impl Runtime {
             processor_input_specs.push((node_spec.clone(), inputs));
         }
 
-        let relay_registries = relay_builders
-            .iter()
-            .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
-            .collect::<HashMap<_, _>>();
         let relay_services = relay_builders
             .into_iter()
             .map(|(identifier, relay)| {
@@ -539,6 +530,7 @@ impl Runtime {
                         relay.detached_runtime_consumer_count,
                         relay.remote_runtime_consumers,
                         None,
+                        relay.branch_presence,
                     )),
                 )
             })
@@ -546,16 +538,11 @@ impl Runtime {
         let relay_owner_tasks = relay_services
             .iter()
             .map(|(relay, services)| {
-                let registry = relay_registries.get(relay).cloned().verified(
-                    "the registries were built from the same relay set as the services this loop \
-                     walks",
-                );
                 (
                     relay.clone(),
                     self.spawn_relay_owner_task(
                         domain,
                         relay,
-                        registry,
                         services.clone(),
                         RelayRetention::default(),
                     ),
@@ -575,7 +562,6 @@ impl Runtime {
                 runtime: self,
                 domain,
                 relay_schemas: &relay_schemas,
-                relay_registries: &relay_registries,
                 relay_services: &relay_services,
                 relay_branchings: &relay_branchings,
                 materialized_stream_specs: &materialized_stream_specs,
@@ -593,7 +579,6 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
-                    relay_registries: &relay_registries,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookup_runtimes,
@@ -639,14 +624,8 @@ impl Runtime {
         };
 
         for generator in resource_plans.generators.values() {
-            let spec = GeneratorTaskSpec::bind(
-                domain,
-                generator,
-                &relay_registries,
-                &relay_services,
-                &udf_executor,
-            )
-            .map_err(|report| RuntimeError::BuildDomainExecution {
+            let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!("generator binding failed: {report:#}"),
             })?;
@@ -685,7 +664,6 @@ impl Runtime {
                 execution_build_deps,
                 &shutdown_tx,
                 RelayRuntimeHandles {
-                    registries: &relay_registries,
                     services: &relay_services,
                 },
                 reingestor_inputs,
@@ -707,7 +685,6 @@ impl Runtime {
                     domain,
                     DomainRoutingSnapshot {
                         passive_only: false,
-                        relay_registries,
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,

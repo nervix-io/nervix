@@ -35,22 +35,26 @@ fault model, supervision, replay and failure records, the scenario matrix, the c
 budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
 plugs into. Each seam has one production behavior, which is what every node uses:
 
-- **Sockets and name resolution.** The TCP listener and outbound streams use Tokio's
-  operating-system sockets, and peer names resolve through the node's own resolver, described in
-  [Peer Name Resolution](#peer-name-resolution). The dedicated `turmoil` test build selects
-  Turmoil's simulated TCP and its simulated DNS table at that one boundary and never constructs the
-  node resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in every
+- **Sockets and name resolution.** The TCP listener and outbound streams are the sockets of the
+  primitive boundary, `nervix_primitives::net`, which are Tokio's operating-system sockets, and
+  peer names resolve through the node's own resolver, described in
+  [Peer Name Resolution](#peer-name-resolution). In the dedicated `turmoil` test build the boundary
+  selects Turmoil's simulated TCP, and the peer resolver answers from the simulated DNS table
+  through the lookup the boundary offers in that build alone, never constructing the node
+  resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above them are the same code in every
   build.
 - **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production is the operating system's secure random source.
-- **Deadlines.** Every transport deadline is a Tokio instant, so it follows the clock of the runtime
-  it runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
+- **Deadlines.** Every transport deadline is an instant of the boundary's clock,
+  `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
+  runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
   lifetimes, and the drain deadline derived from certificate expiry.
-- **CPU work.** Encoding and decoding run through `nervix-execution`. Its Turmoil build runs bounded
-  CPU jobs as tasks on the simulated scheduler under the same admission, charge, and cancellation
+- **CPU work.** Encoding and decoding run through `nervix-execution`, which submits each admitted
+  CPU job through the boundary's CPU-job mechanism. In the Turmoil build that mechanism runs the
+  job as a task on the simulated scheduler, under the same admission, charge, and cancellation
   policy.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes

@@ -8,13 +8,7 @@
 //!   real-process fixture.
 //! - **Must not know.** Registry, consensus, runtime, or connector implementation internals.
 
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, time::Duration};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -28,9 +22,9 @@ use nervix_client_wire::{
     UploadReply, UploadStart, VerifiedFrame,
 };
 use nervix_models::{DomainName, ResourceName};
+use nervix_primitives::time::{Instant, timeout};
 use serde::{Deserialize, Serialize};
 use tikv_jemalloc_ctl::{epoch, stats};
-use tokio::time::timeout;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message as WebSocketMessage, client::IntoClientRequest as _, http::HeaderValue},

@@ -826,6 +826,9 @@ Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` c
 application acknowledgment. Every live cluster node runs the listener; it is independent of the
 leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
+An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
+file and its underlying cause. A frame or connection failure keeps its cause in the source
+diagnostic. These failures do not acknowledge a message; Syslog has no application ACK.
 
 ### SQS
 
@@ -989,6 +992,9 @@ connection ids, timestamps, or echoed parameters still match.
 A matcher that errors on a frame of a different shape counts as a non-match
 rather than a connection failure. On timeout, the error names the matchers the
 current step was still waiting on.
+Invalid signaling programs fail validation with the protocol, clause, step, and compiler cause.
+Handshake send, capture, encoding, and transport failures retain their causes in the source
+diagnostic. A failed handshake delivers no frame to the relay.
 
 ### Data Arriving During The Handshake
 

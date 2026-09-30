@@ -28,9 +28,6 @@
 //! The sink does not remember the limit a refusal named, and checks no later message against it:
 //! the broker's setting may change, and a message is rejected only on the broker's own answer.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod channel_closure;
 mod connection;
 mod source;
@@ -57,12 +54,12 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, QueueName};
+use nervix_primitives::time::{Instant, sleep};
 pub use source::{
     RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError, RabbitMqSourceMessage,
     RabbitMqSourcePlan, RabbitMqSourcePosition,
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep};
 
 const RABBITMQ: &str = "rabbitmq";
 

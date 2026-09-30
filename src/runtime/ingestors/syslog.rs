@@ -30,7 +30,11 @@ impl SyslogIngestorStartPlan {
         let connector = SyslogSourcePlan::new(resolved.entries, |configured| {
             runtime.syslog_ingestor_bind_addr(configured)
         })
-        .map_err(|error| ingestor.start_failure(error.to_string()))?;
+        .map_err(|report| RuntimeError::SyslogSourcePlan {
+            domain: ingestor.domain.clone(),
+            ingestor: ingestor.name.clone(),
+            report,
+        })?;
         BrokerSourceStart {
             connector,
             instances: NonZeroU64::MIN,

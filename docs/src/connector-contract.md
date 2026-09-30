@@ -34,6 +34,14 @@ through their sessions; it has no connector crate, because the session protocol 
 and its host is the client ingestor endpoint described under
 [Integration-specific boundaries](#integration-specific-boundaries).
 
+The contract and every integration crate take their execution-sensitive primitives from
+`nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
+backoff are measured with, and every socket a connector opens itself. A modeled build therefore
+selects them for the whole graph, as [Data-Plane Concurrency](./data-plane-concurrency.md)
+describes. The sockets and timers a driver library creates inside itself stay the driver's and are
+outside that selection, and a connector never resolves a name through the operating system: it
+resolves through the node's resolver, as the sections below describe.
+
 ### DNS for HTTP and Iceberg
 
 The node loads and validates one `nervix-dns` resolver at startup. Composition passes its handle
@@ -719,6 +727,21 @@ status and events, retries infrastructure failures, and preserves the configured
 general error policies. A commit failure keeps staged ACKs pending and visible until retry or
 drain failure; it never turns staging into success. A forced ending loses in-memory batches and
 ACK state, leaving external redelivery to each source's contract.
+
+Connector-owned fallible helpers return contextual reports. Syslog configuration and frame
+decoding create a report at the failed parse, read, or framing check; the source adds its
+connection or lifecycle context before the host receives it. WebSocket signaling keeps its jaq,
+frame encoding, and transport causes beneath the compiled protocol or session failure. The server
+retains the Syslog plan and signaling compiler reports in its runtime startup errors. A connector
+may turn a report into the existing source or sink outcome only at that boundary, while preserving
+the typed cause and rendering only non-sensitive configuration or transport details.
+
+For OTEL, each selected row's conversion report becomes that row's existing invalid-record
+outcome, with its signal key as the affected field. Postgres, MySQL, and ClickHouse inspect the
+typed insert error before deciding whether to isolate a rejected row or fail the whole attempt.
+The whole-attempt report retains a transport driver or pool cause beneath `SinkPublishError`; a row
+rejection keeps the destination's safe SQLSTATE, error code, or named rejection reason. These
+context changes do not alter request grouping, successful delivery, retries, or ACK ownership.
 
 The host owns ingestor and emitter metric updates, transient status, and runtime events. Source
 open, resume, suspend, and close transitions have lifecycle logs; publish, retry, and commit

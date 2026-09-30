@@ -38,9 +38,8 @@ use nervix_models::{
     DomainName, NodeEndpoint, NodeServiceUrl, NodeServiceUrlParseError, ResourceName,
     ResourceUploadIdentity, ResourceUploadKey, UserName,
 };
-use nervix_primitives::{sync::CancellationToken, task::JoinSet};
+use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
 use rustls::ServerConfig;
-use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,

@@ -22,11 +22,10 @@ loom = [
   "nervix-execution/loom",
   "nervix-primitives/loom",
 ]
-# Replaces synchronization primitives with scheduler-visible Shuttle implementations. The edge
-# I/O modules remain Tokio's real implementations through the wrapper crates.
+# Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
+# I/O modules remain Tokio's real implementations, outside every model.
 shuttle = [
   "dep:shuttle",
-  "dep:shuttle-tokio",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
   "nervix-connector-clickhouse/shuttle",
@@ -51,7 +50,6 @@ shuttle = [
   "nervix-interconnect/shuttle",
   "nervix-primitives/shuttle",
   "nervix-wasm/shuttle",
-  "shuttle-tokio/shuttle",
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
@@ -103,6 +101,7 @@ multer = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
+nervix-branch-instances = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-columnar-json = { workspace = true }
@@ -171,7 +170,6 @@ rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = ["full"], optional = true }
 signal-hook = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
@@ -221,6 +219,8 @@ mongodb = { workspace = true }
 mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
+# The runtime's timer tests advance a paused clock.
+nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["fs", "signal", "term"] }
 # The features the OTEL connector builds the crate with, so the scenarios decode the Export
@@ -284,6 +284,7 @@ members = [
   "crates/backup",
   "crates/benchmark",
   "crates/bounded-write",
+  "crates/branch-instances",
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-wire",
@@ -497,6 +498,7 @@ nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-int
 nervix-arbitrary = { package = "nervix-arbitrary", path = "crates/arbitrary" }
 nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
+nervix-branch-instances = { package = "nervix-branch-instances", path = "crates/branch-instances" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }

@@ -9,9 +9,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub use rdkafka as testing_rdkafka;
@@ -30,6 +27,7 @@ use nervix_connector::{
     SinkStartError, SinkStartResult,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use nervix_primitives::time::{Instant, sleep};
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
@@ -42,7 +40,6 @@ pub use source::{
     KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceMessage, KafkaSourceOffsetMode,
     KafkaSourcePlan, TopicPartitionInspector,
 };
-use tokio::time::{Instant, sleep};
 
 const KAFKA: &str = "kafka";
 

@@ -297,7 +297,7 @@ pub(super) fn wasm_callback_decided_tokens(outputs: &[WasmMaterializedOutput]) -
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::timeout;
+    use nervix_primitives::time::timeout;
 
     use super::*;
     use crate::runtime_ack::AckOutcome;

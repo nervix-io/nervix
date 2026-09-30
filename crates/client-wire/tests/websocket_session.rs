@@ -17,7 +17,7 @@ use nervix_client_wire::{
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
     websocket::{ClientWebSocketCodec, ServerWebSocketCodec, WebSocketData, WebSocketError},
 };
-use tokio::net::{TcpListener, TcpStream};
+use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
     WebSocketStream, accept_async_with_config, client_async_with_config,
     tungstenite::{
@@ -156,7 +156,7 @@ async fn next_message(
     websocket: &mut WebSocketStream<TcpStream>,
     codec: &ClientWebSocketCodec,
 ) -> ServerMessage {
-    let message = tokio::time::timeout(DEADLINE, websocket.next())
+    let message = nervix_primitives::time::timeout(DEADLINE, websocket.next())
         .await
         .assured("the server answers within the deadline")
         .assured("the connection stays open")
@@ -244,7 +244,7 @@ async fn close_code_after(message: Message) -> CloseCode {
         .assured("the server reads the message");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let received = tokio::time::timeout(DEADLINE, websocket.next())
+        let received = nervix_primitives::time::timeout(DEADLINE, websocket.next())
             .await
             .assured("the server answers within the deadline")
             .assured("the connection closes with a close message")

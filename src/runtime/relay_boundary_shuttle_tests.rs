@@ -7,8 +7,7 @@
 
 use std::time::Duration;
 
-use nervix_primitives::sync::oneshot;
-use tokio::time::Instant;
+use nervix_primitives::{sync::oneshot, time::Instant};
 
 use super::*;
 use crate::{runtime_ack::AckOutcome, shuttle_test::check_random};

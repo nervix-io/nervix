@@ -9,7 +9,7 @@
 //!   client sends.
 //! - **Must not know.** How a transport frames, correlates or delivers what the pipeline returns.
 
-use std::sync::Arc as StdArc;
+use std::{sync::Arc as StdArc, time::Duration};
 
 use ahash::RandomState;
 use futures_util::future::BoxFuture;
@@ -41,7 +41,6 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded;
 use nervix_vm::program::FunctionName;
-use tokio::time::Duration;
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -312,7 +311,9 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     },
                 );
             };
-            let Some(deadline) = tokio::time::Instant::now().checked_add(readiness_timeout) else {
+            let Some(deadline) =
+                nervix_primitives::time::Instant::now().checked_add(readiness_timeout)
+            else {
                 return Err(
                     crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                         node_unavailability_timeout,

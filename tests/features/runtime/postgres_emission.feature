@@ -181,6 +181,7 @@ Feature: Postgres emission
       );
       CREATE SCHEMA emitter_error (
         error_code STRING,
+        error_message STRING,
         source_user_id I64,
         source_action STRING
       );
@@ -227,6 +228,7 @@ Feature: Postgres emission
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
+          error_message = error.message,
           source_user_id = input.user_id,
           source_action = input.action
       ON GENERAL ERROR LOG;
@@ -241,7 +243,7 @@ Feature: Postgres emission
       """
     Then within "10s" the relay subscription receives a payload
       """
-      "source_action":"POISON","source_user_id":2
+      "error_message":"Postgres rejected record with SQLSTATE 23514","source_action":"POISON","source_user_id":2
       """
     And the relay subscription does not receive a payload within "1s"
     And the Postgres table eventually contains a row

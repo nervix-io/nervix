@@ -27,10 +27,13 @@ use nervix_interconnect::{
     ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome, RequestOutcome,
     RequestSubquota, StreamResetReason, TransferDirection, Transport, TransportSnapshot,
 };
-use nervix_primitives::sync::{
-    CancellationToken,
-    atomic::{AtomicU64, Ordering},
-    blocking::RwLock,
+use nervix_primitives::{
+    sync::{
+        CancellationToken,
+        atomic::{AtomicU64, Ordering},
+        blocking::RwLock,
+    },
+    time::{Instant, MissedTickBehavior, interval},
 };
 use prometheus::{
     CounterVec, GaugeVec, Opts,
@@ -38,7 +41,6 @@ use prometheus::{
     proto::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use strum::IntoEnumIterator as _;
-use tokio::time::{Instant, MissedTickBehavior, interval};
 use triomphe::Arc;
 
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is

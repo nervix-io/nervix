@@ -321,7 +321,10 @@ impl Runtime {
             descriptors,
         )
         .map(Arc::new)
-        .map_err(|error| build_error(error.to_string()))
+        .map_err(|report| RuntimeError::SignalingProtocolCompile {
+            domain: domain.clone(),
+            report,
+        })
     }
 
     /// Compiles the descriptors of the one resource version a codec or signaling protocol pins.
@@ -539,7 +542,8 @@ mod tests {
     use std::path::PathBuf;
 
     use nervix_models::{
-        ClientConfigEntry, ClientResourceMount, ClusterNodeName, DomainName, ResourceId, Timestamp,
+        ClientConfigEntry, ClientResourceMount, ClusterNodeName, DomainName, ResourceId,
+        SignalingProtocolOnConnect, SignalingStep, Timestamp,
     };
     use tempfile::tempdir;
 
@@ -665,6 +669,42 @@ mod tests {
                 domain: error_domain,
                 resource: error_resource,
             } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
+    #[nervix_primitives::test]
+    async fn signaling_compile_failure_keeps_the_connector_report_at_runtime_startup() {
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let protocol = PlannedSignalingProtocol {
+            name: named("handshake"),
+            format: SignalingWireFormat::Json,
+            on_connect: SignalingProtocolOnConnect {
+                accept_data: false,
+                steps: vec![SignalingStep::Send(vec![".[".to_string()])],
+                fail_matchers: Vec::new(),
+                timeout: "5s".to_string(),
+            },
+        };
+        let error = Runtime::new()
+            .compile_signaling_protocol(&domain, &protocol)
+            .await
+            .expect_err("a signaling program must compile before installation");
+        let RuntimeError::SignalingProtocolCompile {
+            domain: error_domain,
+            report,
+        } = error
+        else {
+            panic!("the compiler failure must retain its connector report: {error:?}");
+        };
+        assert_eq!(error_domain, domain);
+        assert!(report.contains::<nervix_jaq::JaqProgramError>());
+        assert!(matches!(
+            report.current_context(),
+            nervix_connector_websockets::SignalingProtocolCompileError::InvalidJaqProgram {
+                clause: "SEND JAQ",
+                index: 1,
+                ..
+            }
         ));
     }
 

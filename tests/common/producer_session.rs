@@ -15,12 +15,7 @@
 //! The reader runs for as long as the session lives, so the instant a reply is filed with is the
 //! instant it arrived, whatever step happens to ask for it later.
 
-use std::{
-    collections::BTreeMap,
-    io,
-    num::NonZeroU64,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, io, num::NonZeroU64, time::Duration};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use nervix_client_wire::{
@@ -31,6 +26,7 @@ use nervix_client_wire::{
 use nervix_primitives::{
     sync::{Notify, blocking::Mutex, mpsc},
     task::AbortOnDropHandle,
+    time::Instant,
 };
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use triomphe::Arc;
@@ -155,7 +151,7 @@ impl Inbox {
         what: &str,
         mut found: impl FnMut(&Filed) -> Option<T>,
     ) -> io::Result<T> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         loop {
             nervix_primitives::task::consume_budget().await;
             let changed = self.changed.notified();
@@ -172,7 +168,10 @@ impl Inbox {
                     )));
                 }
             }
-            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+            if nervix_primitives::time::timeout_at(deadline, changed)
+                .await
+                .is_err()
+            {
                 return Err(io::Error::other(format!(
                     "timed out after {timeout:?} waiting for {what}"
                 )));

@@ -32,6 +32,7 @@ class InventoryTests(unittest.TestCase):
             "nspl-archive-model",
             "backup-record-manifest",
             "client-processor-choice-request",
+            "branch-membership",
             "nspl-statement",
             "nspl-statement-text",
             "nspl-format-document",
@@ -56,6 +57,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-nspl-format",
             "nervix-models",
             "nervix-backup",
+            "nervix-branch-instances",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

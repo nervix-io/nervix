@@ -18,13 +18,13 @@ use nervix_connector::{
 };
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, QueueName, Timestamp};
-use nervix_primitives::task::JoinHandle;
+use nervix_primitives::{
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
+};
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::{
     SQS, SqsPublishingMode, SqsSink, SqsSourceError, SqsSourcePlan, connection::FailedRequest,

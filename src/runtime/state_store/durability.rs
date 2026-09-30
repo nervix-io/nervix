@@ -262,7 +262,7 @@ mod tests {
             .expect("nothing else runs a synchronization");
         drop(abandoned);
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), store.synchronize())
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(5), store.synchronize())
             .await
             .expect("a freed barrier must not keep writers waiting")
             .expect("the synchronization should succeed");

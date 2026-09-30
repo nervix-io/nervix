@@ -763,7 +763,9 @@ impl AckSet {
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::{Duration, timeout};
+    use std::time::Duration;
+
+    use nervix_primitives::time::timeout;
     use triomphe::Arc;
 
     use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};

@@ -10,9 +10,6 @@
 //! - **Must not know.** Domain clocks, runtime collectors, relays, branches, schedules, registry
 //!   state, or placement computation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod sink;
 
 use async_trait::async_trait;

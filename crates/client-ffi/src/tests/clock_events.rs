@@ -28,12 +28,12 @@ use nervix_client_core::{
 };
 use nervix_models::{DomainClockPeriod, DomainClockSkew, DomainClockState, DomainTimeRate};
 use nervix_primitives::{
+    net::TcpListener,
     runtime::Runtime,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::mpsc,
     thread,
 };
-use tokio::net::TcpListener;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -546,7 +546,7 @@ impl ServerExchange {
 
     /// The next request the session sends on this exchange.
     async fn next_request(&mut self) -> ClientMessage {
-        let frame = tokio::time::timeout(DEADLINE, self.requests.message())
+        let frame = nervix_primitives::time::timeout(DEADLINE, self.requests.message())
             .await
             .assured("the session sends its request within the test deadline")
             .assured("the exchange stays open")
@@ -664,7 +664,7 @@ impl TestServer {
     pub(super) fn next_exchange(&mut self) -> ServerExchange {
         let exchanges = &mut self.exchanges;
         self.runtime.block_on(async {
-            tokio::time::timeout(DEADLINE, exchanges.recv())
+            nervix_primitives::time::timeout(DEADLINE, exchanges.recv())
                 .await
                 .assured("the session opens an exchange within the test deadline")
                 .assured("the server keeps handing exchanges to the test")

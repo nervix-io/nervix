@@ -52,6 +52,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
 | `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v1 | 256 | 4096 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
+| `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent

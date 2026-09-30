@@ -14,7 +14,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
@@ -41,6 +41,7 @@ use nervix_primitives::{
     stream::StreamExt,
     sync::{CancellationToken, blocking::Mutex, broadcast, mpsc, watch},
     task::JoinHandle,
+    time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -782,7 +783,7 @@ impl PeerHealthStateWatcher {
                     }
                     _ = async {
                         match next_transition {
-                            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                            Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
                             None => std::future::pending::<()>().await,
                         }
                     } => return,
@@ -2509,7 +2510,7 @@ mod tests {
                 .load()
                 .contains(&subscriber, "sales", "events", minimum_version)
         );
-        tokio::time::timeout(Duration::from_secs(30), visible)
+        nervix_primitives::time::timeout(Duration::from_secs(30), visible)
             .await
             .assured("publishing the renewed interest releases its visibility wait");
         assert!(!publication.load().contains(

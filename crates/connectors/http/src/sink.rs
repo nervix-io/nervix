@@ -25,13 +25,11 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::net::TcpStream;
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt as _},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio_rustls::TlsConnector;
 use url::{Host, Position, Url};
 
@@ -89,7 +87,11 @@ impl HttpSink {
                 .attach_printable("HTTP timeout_ms must be a positive integer")
         })?;
         let timeout = Duration::from_millis(timeout_ms);
-        if timeout_ms == 0 || std::time::Instant::now().checked_add(timeout).is_none() {
+        if timeout_ms == 0
+            || nervix_primitives::time::Instant::now()
+                .checked_add(timeout)
+                .is_none()
+        {
             return Err(
                 Report::new(SinkStartError::InvalidConfiguration { sink: HTTP_SINK })
                     .attach_printable("HTTP timeout_ms cannot be scheduled"),
@@ -110,7 +112,7 @@ impl HttpSink {
     }
 
     async fn send(&self, request: &SinkHttpRequest) -> HttpAttemptResult<FinalResponse> {
-        match tokio::time::timeout(self.timeout, self.exchange(request)).await {
+        match nervix_primitives::time::timeout(self.timeout, self.exchange(request)).await {
             Ok(result) => result,
             Err(_) => Err(Report::new(HttpAttemptError::Timeout)),
         }
@@ -505,7 +507,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_refused_connection_keeps_its_cause_and_the_sink_keeps_its_client() {
-        let unused = std::net::TcpListener::bind("127.0.0.1:0")
+        let unused = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
+            .await
             .assured("the test host has a free loopback port");
         let port = unused
             .local_addr()

@@ -138,10 +138,13 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                     server.replace_live_nodes(&live);
                     ready.send_replace(true);
                     if !matches!(case, RelayCase::CancelBeforeGrant) {
-                        let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                            .await
-                            .assured("the relay reaches the receiver before the simulated deadline")
-                            .assured("the relay receiver remains open");
+                        let envelope =
+                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured(
+                                    "the relay reaches the receiver before the simulated deadline",
+                                )
+                                .assured("the relay receiver remains open");
                         let Envelope::RelayPayload(ref body) = envelope.envelope else {
                             panic!("the relay channel carries a relay payload");
                         };
@@ -353,10 +356,11 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                                 .send(&peer, Envelope::RelayPayload(body))
                                 .await
                                 .assured("same-epoch retry reconciles admitted attempt");
-                            let outcome = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                                .await
-                                .assured("the semantic ACK arrives")
-                                .assured("sender queue remains open");
+                            let outcome =
+                                nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                    .await
+                                    .assured("the semantic ACK arrives")
+                                    .assured("sender queue remains open");
                             assert!(matches!(
                                 outcome.envelope,
                                 Envelope::Ack(RemoteAckResolution {
@@ -543,10 +547,11 @@ fn restarted_receiver_fences_unresolved_relay(
                             *count = count.checked_add(1).assured("two incarnations start")
                         });
                         if incarnation == 0 {
-                            let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                                .await
-                                .assured("the first relay reaches the receiver")
-                                .assured("the first receiver queue remains open");
+                            let envelope =
+                                nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                    .await
+                                    .assured("the first relay reaches the receiver")
+                                    .assured("the first receiver queue remains open");
                             let Envelope::RelayPayload(ref body) = envelope.envelope else {
                                 panic!("the first receiver gets a relay body");
                             };
@@ -582,10 +587,11 @@ fn restarted_receiver_fences_unresolved_relay(
                         }
                         assert_eq!(incarnation, 1, "only one receiver restart is scheduled");
                         wait_for(&mut fresh).await;
-                        let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                            .await
-                            .assured("fresh relay reaches the restarted receiver")
-                            .assured("restarted receiver queue remains open");
+                        let envelope =
+                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured("fresh relay reaches the restarted receiver")
+                                .assured("restarted receiver queue remains open");
                         let Envelope::RelayPayload(ref body) = envelope.envelope else {
                             panic!("restarted receiver gets a relay body");
                         };
@@ -741,7 +747,7 @@ fn restarted_receiver_fences_unresolved_relay(
             });
             simulation.client("observer", async move {
                 let mut finished = finished_rx;
-                tokio::time::timeout(Duration::from_secs(60), async {
+                nervix_primitives::time::timeout(Duration::from_secs(60), async {
                     while *finished.borrow() < 2 {
                         nervix_primitives::task::consume_budget().await;
                         finished

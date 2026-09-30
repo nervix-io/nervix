@@ -11,6 +11,8 @@ use nervix_primitives::unmodeled::sync::OnceLock;
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
+use std::time::Duration;
+
 use ahash::HashMap;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;
@@ -23,12 +25,14 @@ use nervix_models::{
     OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
     ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
-use nervix_primitives::sync::watch;
+use nervix_primitives::{
+    sync::watch,
+    time::{sleep, timeout},
+};
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
-use tokio::time::{Duration, sleep, timeout};
 use triomphe::Arc;
 
 use super::{
@@ -300,6 +304,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         0,
         Vec::new(),
         None,
+        triomphe::Arc::new(super::BranchPresence::new()),
     ))
 }
 
