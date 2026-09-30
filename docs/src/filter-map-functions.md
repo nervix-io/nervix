@@ -103,11 +103,14 @@ Several builtins run on libraries that choose SIMD instructions at run time from
 node's CPU offers: JSON extraction finds a document's structure that way, base64 and hexadecimal
 encoding and decoding process their octets that way, `sha256` uses the SHA instructions of x86-64
 CPUs that have them, and substring searches such as `contains_any` and regular expressions scan
-text that way. `xxh3_64` uses the SIMD instructions of the CPU target the binary is built for. The
-checked numeric kernels and the other passes over value buffers are written as loops the compiler
-can turn into vector instructions for that target, and Nervix makes no claim about which of them it
-does. None of these choices changes a result. The one exception is the transcendental functions,
-whose last places come from the platform's C math library; see [Numeric Functions](#numeric-functions).
+text that way. `xxh3_64` uses the SIMD instructions of the CPU target the binary is built for.
+Integer `+` and `-`, and `*` over every integer type but `I64` and `U64`, run on Nervix's own
+kernels, which also choose vector instructions at run time from the ones the node's CPU offers.
+The other checked numeric kernels and passes over value buffers are written as loops the compiler
+can turn into vector instructions for the CPU target the binary is built for, and Nervix makes no
+claim about which of them it does. None of these choices changes a result. The one exception is the
+transcendental functions, whose last places come from the platform's C math library; see
+[Numeric Functions](#numeric-functions).
 
 The compiler applies three optimizations that preserve results in the same way:
 
