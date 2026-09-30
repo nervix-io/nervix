@@ -366,15 +366,15 @@ impl Runtime {
             let Some(acknowledgement) = plan.transport_acknowledgement() else {
                 continue;
             };
-            if let Err(error) =
+            if let Err(report) =
                 Self::parse_ingest_acknowledgement(domain, &plan.ingestor.name, acknowledgement)
             {
                 self.record_ingestor_transient_error(
                     domain,
                     &plan.ingestor.name,
-                    error.to_string(),
+                    format!("{report:#}"),
                 );
-                return Err(error);
+                return Err(RuntimeError::IngestorStart { report });
             }
         }
         for wasm in resource_plans.wasm.values() {
@@ -894,10 +894,10 @@ impl Runtime {
         for plan in local_ingestors {
             let ingestor_name = &plan.ingestor.name;
             self.clear_ingestor_transient_error(domain, ingestor_name);
-            if let Err(error) = Box::pin(self.start_ingestor(&plan)).await {
-                self.record_ingestor_transient_error(domain, ingestor_name, error.to_string());
+            if let Err(report) = Box::pin(self.start_ingestor(&plan)).await {
+                self.record_ingestor_transient_error(domain, ingestor_name, format!("{report:#}"));
                 Box::pin(self.abort_domain_execution_start(domain)).await;
-                return Err(error);
+                return Err(RuntimeError::IngestorStart { report });
             }
         }
 

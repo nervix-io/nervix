@@ -296,7 +296,9 @@ impl Runtime {
                         reason: error.to_string(),
                     })?;
                 if start_ingestors {
-                    Box::pin(self.start_missing_domain_ingestors(&domain.domain)).await?;
+                    Box::pin(self.start_missing_domain_ingestors(&domain.domain))
+                        .await
+                        .map_err(|report| RuntimeError::IngestorStart { report })?;
                 }
                 self.release_domain_ingestor_quiesce(&domain.domain);
             }
@@ -1012,7 +1014,9 @@ impl Runtime {
                     self.stop_ingestor(domain, &ingestor).await?;
                 }
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
-                    self.start_ingestor(&desired_plan).await?;
+                    self.start_ingestor(&desired_plan)
+                        .await
+                        .map_err(|report| RuntimeError::IngestorStart { report })?;
                 }
                 continue;
             }

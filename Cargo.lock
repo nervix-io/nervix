@@ -6471,6 +6471,15 @@ name = "nervix-approx-into"
 version = "0.1.0-dev"
 
 [[package]]
+name = "nervix-arbitrary"
+version = "0.1.0-dev"
+dependencies = [
+ "meticulous",
+ "nervix-models",
+ "strum 0.26.3",
+]
+
+[[package]]
 name = "nervix-backup"
 version = "0.1.0-dev"
 dependencies = [
@@ -7309,12 +7318,14 @@ dependencies = [
  "arrow-buffer",
  "arrow-schema",
  "blake3",
+ "bolero",
  "chrono",
  "error-stack",
  "humantime",
  "indexmap 2.14.2",
  "meticulous",
  "nervix-approx-into",
+ "nervix-arbitrary",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -7344,6 +7355,7 @@ dependencies = [
  "humantime",
  "meticulous",
  "nervix-approx-into",
+ "nervix-arbitrary",
  "nervix-backup",
  "nervix-models",
  "nervix-primitives",
@@ -7364,10 +7376,12 @@ name = "nervix-nspl-format"
 version = "0.1.0-dev"
 dependencies = [
  "ariadne 0.5.1",
+ "bolero",
  "clap",
  "error-stack",
  "ignore",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-models",
  "nervix-nspl",
  "nervix-recovery",
@@ -7605,6 +7619,7 @@ name = "nervix-simd-kernels"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "bolero",
  "criterion 0.5.1",
  "error-stack",
  "fastrand",
@@ -7657,6 +7672,7 @@ dependencies = [
  "criterion 0.5.1",
  "error-stack",
  "faster-hex",
+ "fastrand",
  "humantime",
  "indexmap 2.14.2",
  "jiff",

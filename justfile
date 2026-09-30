@@ -133,6 +133,17 @@ test-admission-kernels *args:
 bench-window-admission *args:
     cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
+# Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
+# run each. Extra arguments are forwarded to Criterion.
+bench-checked-lanes *args:
+    cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
+
+# The same measurement built for the x86-64-v3 payload the Docker image ships, in its own target
+# directory: the lane loop compiles for AVX2 as the payload's does, and the kernels still select
+# their level from the CPU at run time.
+bench-checked-lanes-x86-64-v3 *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
+
 test-admission-runtime *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
@@ -213,6 +224,11 @@ check-package-lib package *args:
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
+
+# Run one integration test target of one workspace package whose tests need no server test
+# dependencies, such as the vocabulary's representation properties.
+test-package-test package test *args:
+    cargo test --package {{ package }} --test {{ test }} -- {{ args }}
 
 # Run the unit tests in the binary targets of one workspace package, such as the web console's
 # view logic in its `main.rs`.

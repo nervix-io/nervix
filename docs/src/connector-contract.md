@@ -39,33 +39,44 @@ The contract and every integration crate take their execution-sensitive primitiv
 backoff are measured with, and every socket a connector opens itself. A modeled build therefore
 selects them for the whole graph, as [Data-Plane Concurrency](./data-plane-concurrency.md)
 describes. The sockets and timers a driver library creates inside itself stay the driver's and are
-outside that selection, and a connector never resolves a name through the operating system: it
-resolves through the node's resolver, as the sections below describe.
+outside that selection. A connector's own code never resolves a name through the operating system:
+it resolves through the node's resolver, as the sections below describe, and a driver that resolves
+inside itself is one of the residual paths [Residual
+Resolution](./name-resolution.md#residual-resolution) lists.
 
 ### DNS for HTTP and Iceberg
 
-The node loads and validates one `nervix-dns` resolver at startup. Composition passes its handle
-into the HTTP polling and Prometheus source plans and into the HTTP request, Sentry, OTEL HTTP, and
-Iceberg sink plans. The shared `HttpClientConfig` installs it on every Nervix-owned Reqwest 0.13
-HTTP client. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg
-object storage uses OpenDAL 0.57 with a configured Reqwest 0.13 client installed through
-`HttpClientLayer`; the layer also supplies HTTP calls made by OpenDAL's credential providers through
-its accessor info.
-The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled trust
-roots, including in an isolated Iceberg connector build.
-The three Iceberg backends keep their S3, GCS, and Azure property mappings, URL-derived bucket or
-container, timeout and retry layers, and commit boundary. The standalone OpenDAL S3
-`detect_region` helper constructs its own client, but Nervix does not call it; S3 operator
-construction requires its configured region or the driver's environment policy.
+The node loads and validates one `nervix-dns` resolver at startup, and every integration below
+connects through it. [Name Resolution](./name-resolution.md) owns that resolver: its
+configuration, answer order, cache and TTL bounds, lookup budgets and failures, the dependency
+features that select it, and the drivers that still resolve by themselves. These sections own how
+each integration connects through it.
 
-No migrated client constructs Reqwest's default Hickory resolver. That default could choose a
-public name server if reading system DNS configuration failed. A bad node resolver configuration
-therefore fails node startup, while a lookup failure reaches the existing source or sink failure
-path. Request URLs, HTTP authority, proxy behavior, TLS verification, custom trust and identity,
-and connection pools remain with the HTTP client. The request timeout includes DNS resolution,
-connection setup, TLS and response handling; the resolver's own 30 second ceiling only bounds
-clients without a shorter request timeout. DNS failures use the host's existing retry policy and
-do not create application-level probes or acknowledgements.
+Composition passes the resolver's handle into the HTTP polling and Prometheus source plans and into
+the HTTP request, Sentry, OTEL HTTP, and Iceberg sink plans. The shared `HttpClientConfig` installs
+it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. The HTTP request
+sink resolves each request's target host itself, as its [request transport](#sink-boundary)
+describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
+storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
+resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
+OpenDAL's credential providers through its accessor info. That client takes no `timeout_ms`, CA file
+or client identity from the client's configuration; OpenDAL's own timeout layer bounds each storage
+operation. The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
+trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
+S3, GCS, and Azure property mappings, URL-derived bucket or container, timeout and retry layers, and
+commit boundary. The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
+Nervix does not call it; S3 operator construction requires its configured region or the driver's
+environment policy.
+
+No client Nervix builds ever initializes Reqwest's default Hickory resolver: each replaces it with
+the node resolver before its first request. That default could choose a public name server if
+reading system DNS configuration failed. A bad node resolver configuration therefore fails node
+startup, while a lookup failure reaches the existing source or sink failure path. Request URLs, HTTP
+authority, proxy behavior, TLS verification, custom trust and identity, and connection pools remain
+with the HTTP client. A client's `timeout_ms` includes DNS resolution, connection setup, TLS and
+response handling; the resolver's own 30 second ceiling only bounds clients without a shorter
+request timeout, which includes both Iceberg clients. DNS failures use the host's existing retry
+policy and do not create application-level probes or acknowledgements.
 
 ### DNS for RabbitMQ
 
@@ -91,16 +102,16 @@ the feature off in the isolated RabbitMQ connector and in the server, and checks
 stays on AWS-LC.
 
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
-unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their
-own variants. A source reports the failure as a resume failure and retries on its declared
-`RETRY POLICY`. A sink reports an invalid address or CA file as a configuration failure and every
-other connection failure as an initialization failure, and the emitter host reopens it on its
-backoff. Neither path acknowledges undelivered data: a source that cannot connect holds no
-delivery, and a sink that cannot connect confirms nothing, so the input stays unacknowledged until
-a later connection delivers it. A connection that fails before its AMQP handshake has started no
-Lapin thread, and a failed handshake ends that thread and closes the socket. An established
-connection is not closed because its host's answer changed or expired; the next connection uses
-the new answer.
+unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their own
+variants, as is a Lapin runtime that could not be created. A source reports the failure as a resume
+failure and retries on its declared `RETRY POLICY`. A sink reports an invalid address or CA file as
+a configuration failure and every other connection failure as an initialization failure, and the
+emitter host reopens it on its backoff. Neither path acknowledges undelivered data: a source that
+cannot connect holds no delivery, and a sink that cannot connect confirms nothing, so the input
+stays unacknowledged until a later connection delivers it. A connection that fails before its AMQP
+handshake has started no Lapin thread, and a failed handshake ends that thread and closes the
+socket. An established connection is not closed because its host's answer changed or expired; the
+next connection uses the new answer.
 
 ### DNS for Redis
 
@@ -125,12 +136,13 @@ client. Without a CA file both paths use native roots; a configured `tls_ca_file
 roots in both paths. The shared TLS configuration helper exposes that replacement policy
 explicitly because other connectors add a configured CA to their default roots.
 
-The Redis hook gives a lookup at most 30 seconds, and the driver's connection timeout can cancel
-it sooner. Pub/Sub connection attempts have one 30-second budget. Missing names, empty answers,
-silence and transport failures are connection outcomes. They do not reject a record or confirm a
-publish; the host resumes the source and retries failed sink work according to its existing
-policy. A Pub/Sub connection broken by the broker or network is dropped and reopened with a new
-lookup, while an established connection is not interrupted solely because its answer expires.
+The Redis hook gives a lookup at most 30 seconds, inside the 30-second connection timeout the pool
+sets on the driver for the whole connection. Pub/Sub connection attempts have one 30-second budget.
+Missing names, empty answers, silence and transport failures are connection outcomes. They do not
+reject a record or confirm a publish; the host resumes the source and retries failed sink work
+according to its existing policy. A Pub/Sub connection broken by the broker or network is dropped
+and reopened with a new lookup, while an established connection is not interrupted solely because
+its answer expires.
 
 ### DNS for MQTT
 
@@ -179,32 +191,35 @@ driver TLS feature: an `https` address fails its request, and the connector keep
 60-second TCP keepalive and 2-second pool idle timeout. With `tls_ca_file` or client identity
 entries the same connector is wrapped in the AWS-LC rustls configuration those entries build,
 trusting the bundled WebPKI roots, the platform's native roots and the configured CA, and serving
-`http` or `https` addresses. Hyper
-dials a literal IPv4 or IPv6 host without asking the resolver, tries a name's answers in order, and
-applies the URL's port or its scheme's default. The connector's `timeout_ms` bounds the send and the
-response of an insert, and the connection and its lookup run inside that response wait.
+`http` or `https` addresses. Hyper dials a literal IPv4 or IPv6 host without asking the resolver,
+dials a name's answers under its dual-stack policy, described in [Dialling The
+Answers](./name-resolution.md#dialling-the-answers), and applies the URL's port or its scheme's
+default. The connector's `timeout_ms` bounds the send and the response of an insert, and the
+connection and its lookup run inside that response wait.
 
-An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver
-with `build_with_resolver`. Without `tls_ca_file` the client is the SDK's default HTTPS client with
-that resolver: AWS-LC, the platform's native roots, and a proxy taken from `HTTP_PROXY`,
-`HTTPS_PROXY` and `NO_PROXY`, whose host the node resolver resolves while the proxy resolves the
-service. With `tls_ca_file` it trusts that CA alone and uses no proxy, as before. The SDK signs each
-request with SigV4 for the configured endpoint before the connector resolves its host, so the
-signature, the `Host` header and the certificate check all name that host, whichever address
-accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
-attempt timeouts a sink's `timeout_ms` sets, include the lookup. The client names static
-credentials and its region, so `aws-config` never consults the default credential or region chains
-that could reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS
-never asks for a token because it signs with SigV4; the loader receives the same HTTP client, so
-that chain would use the node resolver too.
+An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver with
+`build_with_resolver`. Without `tls_ca_file` the client is the SDK's default HTTPS client with that
+resolver: AWS-LC, the platform's native roots, and a proxy taken from `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY` and `NO_PROXY` or their lowercase forms, whose host the node resolver resolves while the
+proxy resolves the service. With `tls_ca_file` it trusts that CA alone and uses no proxy, as before.
+The SDK signs each request with SigV4 for the configured endpoint before the connector resolves its
+host, so the signature, the `Host` header and the certificate check all name that host, whichever
+address accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
+attempt timeouts a sink's `timeout_ms` sets, include the lookup. The client names static credentials
+and its region, so `aws-config` never consults the default credential or region chains that could
+reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
+a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
+use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
 cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
 lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
 error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
 existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
-source open, read or acknowledgement failure. The report's message names the host and the lookup
-failure. Any other failure to reach the service, including a certificate that does not name the
+source read or acknowledgement failure. The report's message names the host and the lookup
+failure. An SQS source looks its queue up when its ingestor starts; a failure there, a lookup
+failure included, fails that start, and the runtime keeps the failure's text as the start failure's
+reason. Any other failure to reach the service, including a certificate that does not name the
 configured host, is described by every cause of the driver's connection error, which describes the
 connection and never a record; a service's own response keeps its existing description. None of
 these failures rejects a record or acknowledges input. The host retries each on its declared
@@ -216,18 +231,21 @@ host's answer changes or expires; the next connection resolves again.
 ### DNS for OTEL gRPC
 
 The OTEL sink receives the node's resolver in its typed sink configuration. Its gRPC transport
-builds Tonic's lazy channel with a custom Hyper `HttpConnector` that resolves through that
+builds a Tonic 0.14 lazy channel with a custom Hyper `HttpConnector` that resolves through that
 resolver. Constructing the sink or channel asks no DNS question and opens no connection. When an
-export first needs a connection, Hyper resolves the configured endpoint's host, tries its IPv4 and
-IPv6 answers in order, and applies the endpoint port. Tonic keeps the original URI for HTTP/2
+export first needs a connection, Hyper resolves the configured endpoint's host, dials its answers
+under its dual-stack policy, and applies the endpoint port. Tonic keeps the original URI for HTTP/2
 authority and TLS server-name verification, and retains its configured roots, optional client
-identity, metadata, compression, and request timeout. Its connection timeout encloses DNS, address
-attempts, and TLS; the DNS hook has a 30-second ceiling when there is no shorter deadline.
+identity, metadata, compression, and request timeout. A client that sets `timeout_ms` uses it as
+both the request timeout and the connection timeout, which encloses DNS, address attempts, and TLS.
+Without `timeout_ms` the channel has no connection deadline, and only the DNS hook's 30-second
+ceiling bounds the lookup.
 
 An unresolved name or failed connection remains an infrastructure export failure under the sink
-host's existing retry and ACK policy. A successful pooled channel may outlive an answer's TTL; a
-new connection resolves again through the node resolver. OTEL HTTP protobuf continues to use the
-shared Reqwest path described above.
+host's existing retry and ACK policy; the export failure reports the gRPC outcome, not the lookup
+failure beneath it. A successful pooled channel may outlive an answer's TTL; a new connection
+resolves again through the node resolver. OTEL HTTP protobuf continues to use the shared Reqwest
+path described above.
 
 ```mermaid
 sequenceDiagram
@@ -579,7 +597,8 @@ execution's served sources and branches. It sends them in their handed-over orde
 fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
 configuration. The connection closes after final headers; no unread body can be reused. Its one
 physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers.
-The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
+The connector resolves the target's host through the node resolver within that timeout and tries
+the answers in order without dividing it among them. The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
 authentication challenge with another request, and has no independent retry policy. The host
 alone schedules another application attempt.
 
@@ -746,6 +765,21 @@ frame encoding, and transport causes beneath the compiled protocol or session fa
 retains the Syslog plan and signaling compiler reports in its runtime startup errors. A connector
 may turn a report into the existing source or sink outcome only at that boundary, while preserving
 the typed cause and rendering only non-sensitive configuration or transport details.
+
+The host's source start keeps every connector report it composes an ingestor from. A client
+configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
+WebSocket, Pulsar or SQS plan, an instance whose `open` fails, and a domain cadence that does not
+bind all stay beneath the ingestor's initialize failure, which names the ingestor and its domain.
+Host-owned refusals, such as a missing node resolver, signaling protocol or endpoint, Kafka
+`DOMAIN` offsets this node does not own, or a delivery-mode duration that does not parse, are typed
+causes in the same place. Host decoding returns the codec's report through the ingest group
+unchanged and keeps it beneath the intake's decode failure, which a source loop reports with its
+whole chain; the host never renders a codec failure into text before that boundary. A context whose
+parser or driver error is its `#[source]` leaves that error out of its own message, because the
+report carries the source as the frame beneath it: a rendered chain names each cause once. A
+Syslog `max_message_size` or `addr` value that does not parse therefore reads as the key and value
+followed by the parser's error, both at the source's start and in the Syslog sink's configuration
+diagnostic.
 
 For OTEL, each selected row's conversion report becomes that row's existing invalid-record
 outcome, with its signal key as the affected field. Postgres, MySQL, and ClickHouse inspect the

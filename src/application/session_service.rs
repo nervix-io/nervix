@@ -384,7 +384,10 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 );
                 continue;
             }
-            runtime.start_running_domain_ingestors().await?;
+            runtime
+                .start_running_domain_ingestors()
+                .await
+                .map_err(|report| crate::runtime::RuntimeError::IngestorStart { report })?;
             debug!(
                 %local_node_id,
                 revision = state.revision,

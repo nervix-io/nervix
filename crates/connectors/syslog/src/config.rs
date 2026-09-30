@@ -64,13 +64,13 @@ pub enum SyslogConfigError {
          found '{value}'"
     )]
     Framing { value: String },
-    #[error("invalid Syslog client config key 'max_message_size' value '{value}': {source}")]
+    #[error("invalid Syslog client config key 'max_message_size' value '{value}'")]
     MessageSize {
         value: String,
         #[source]
         source: std::num::ParseIntError,
     },
-    #[error("invalid Syslog client config key 'addr' value '{value}': {source}")]
+    #[error("invalid Syslog client config key 'addr' value '{value}'")]
     AddressParse {
         value: String,
         #[source]
@@ -589,6 +589,29 @@ mod tests {
                 .expect_err("the invalid setting must be rejected");
             assert!(error.to_string().contains(*expected), "{error}");
         }
+    }
+
+    #[test]
+    fn a_setting_that_does_not_parse_keeps_its_parser_error_beneath_it() {
+        let error = SyslogClientConfig::parse(
+            &entries(&[
+                ("protocol", "tcp"),
+                ("addr", "localhost:5514"),
+                ("max_message_size", "many"),
+            ]),
+            SyslogDirection::Emit,
+        )
+        .expect_err("a message size must be a positive integer");
+
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::MessageSize { value, .. } if value == "many"
+        ));
+        assert_eq!(
+            format!("{error:#}"),
+            "invalid Syslog client config key 'max_message_size' value 'many': invalid digit \
+             found in string"
+        );
     }
 
     #[test]

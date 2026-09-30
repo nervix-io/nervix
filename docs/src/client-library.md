@@ -62,11 +62,13 @@ Native connections resolve a hostname through Hickory. By default the client loa
 resolver configuration and hosts file once at connection setup. `ConnectOptions::dns` can name a
 different `DnsConfiguration` or an already loaded `DnsResolver` shared with the caller's runtime.
 The same resolver is reused for initial connections, seeds, redirects, and reconnects. Each new
-connection uses its current cached DNS answer, tries its addresses in order, and keeps the URL's
-hostname for HTTP/2 authority and TLS verification. The connection timeout includes lookup and
-all connection work; a failed DNS configuration returns `LoadDnsConfiguration`, and a failed lookup
-stays in the connection error's cause chain. DNS does not change execution identities,
-subscriptions, transactions, or cancellation.
+connection uses its current cached DNS answer, tries the addresses of the first answer's family in
+order, starts the other family's addresses when 300 milliseconds pass without a connection, and
+keeps the URL's hostname for HTTP/2 authority and TLS verification. The connection timeout, ten
+seconds by default, includes lookup and all connection work; a failed DNS configuration returns
+`LoadDnsConfiguration`, and a failed lookup stays in the connection error's cause chain. DNS does
+not change execution identities, subscriptions, transactions, or cancellation.
+[Name Resolution](name-resolution.md) describes the resolver.
 
 Minimal example:
 

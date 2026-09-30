@@ -7,28 +7,41 @@
 //! - **Must not know.** Sessions, consensus, parsing, command effects, or runtime application.
 
 use error_stack::Report;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
+    rancor::{Fallible, Source},
+};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::Timestamp;
 
 const MAX_COMMAND_EXECUTION_REFERENCE_BYTES: usize = 128;
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+/// A reference is decoded through [`CommandExecutionReference::parse`], so its serde and archived
+/// forms admit exactly the text the rule allows.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Archive, RkyvSerialize)]
 pub struct CommandExecutionReference(String);
+
+impl<'de> Deserialize<'de> for CommandExecutionReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(|report| D::Error::custom(report.current_context()))
+    }
+}
+
+impl<D> RkyvDeserialize<CommandExecutionReference, D> for ArchivedCommandExecutionReference
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, _: &mut D) -> Result<CommandExecutionReference, D::Error> {
+        CommandExecutionReference::parse(self.0.as_str())
+            .map_err(|report| D::Error::new(report.current_context().clone()))
+    }
+}
 
 impl CommandExecutionReference {
     pub fn parse(value: impl Into<String>) -> Result<Self, Report<CommandExecutionReferenceError>> {
@@ -137,6 +150,29 @@ mod tests {
     use meticulous::ResultExt as _;
 
     use super::*;
+
+    #[test]
+    fn decoders_refuse_references_parsing_rejects() {
+        for raw in [
+            "",
+            "has/slash",
+            &"r".repeat(MAX_COMMAND_EXECUTION_REFERENCE_BYTES + 1),
+        ] {
+            let json = serde_json::to_string(raw)
+                .assured("a string has an infallible JSON string representation");
+            assert!(
+                serde_json::from_str::<CommandExecutionReference>(&json).is_err(),
+                "{raw:?}"
+            );
+            let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&raw.to_owned())
+                .assured("a string has an inline archived string representation");
+            assert!(
+                rkyv::from_bytes::<CommandExecutionReference, rkyv::rancor::Error>(&archived)
+                    .is_err(),
+                "{raw:?}"
+            );
+        }
+    }
 
     #[test]
     fn every_accepted_reference_can_derive_distinct_step_references() {
