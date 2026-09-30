@@ -279,8 +279,9 @@ pub(super) enum IngestorDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        CodecName, FieldName, GeneralErrorPolicy, IngestQuiesceOverflow, IngestSourceKind,
-        Inheritance, ModelKind, ModelName, NodeRef,
+        BinaryOperator, CodecName, Expression, FieldName, FieldReference, FieldScope,
+        GeneralErrorPolicy, IngestQuiesceOverflow, IngestSourceKind, Inheritance, Literal,
+        ModelKind, ModelName, NodeRef,
     };
 
     use super::{IngestorDraft, TimestampDraft};
@@ -405,6 +406,24 @@ mod tests {
             .map(|route| route.relay.as_str().to_string())
             .collect::<Vec<_>>();
         assert_eq!(relays, ["first", "third"]);
+    }
+
+    #[test]
+    fn a_filter_reads_a_backslash_in_a_string_literal_verbatim() {
+        let mut draft = complete();
+        draft.filter = r"message.message = 'a\nb'".into();
+        let built = draft.build().assured("the complete ingestor builds");
+        assert_eq!(
+            built.filter_where,
+            Some(Expression::Binary {
+                operator: BinaryOperator::Equal,
+                left: Box::new(Expression::Field(FieldReference::scoped(
+                    FieldScope::Message,
+                    FieldName::parse("message").assured("valid field"),
+                ))),
+                right: Box::new(Expression::Literal(Literal::String(r"a\nb".to_string()))),
+            })
+        );
     }
 
     #[test]

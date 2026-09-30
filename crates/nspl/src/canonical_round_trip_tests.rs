@@ -19,22 +19,50 @@ use strum::IntoEnumIterator as _;
 
 use crate::{
     client_statement::{ClientStatement, parse_client_statement, parse_client_statements},
-    parse_expression,
-    parser_support::render_expression_tokens,
-    schema::ParseFromSourceError,
+    parse_expression, parse_expression_list, parse_route_construction,
     statement::parse_statement,
 };
 
-/// Reads expression text the way a statement reads an expression it embeds: the statement lexer
-/// tokenizes it, taking every string literal verbatim, and the expression grammar parses those
-/// tokens as the statement hands them over.
-fn read_embedded_expression(text: &str) -> error_stack::Result<Expression, ParseFromSourceError> {
-    let spanned = crate::lex(text).unwrap_or_else(|errors| panic!("{text} must lex: {errors:?}"));
-    let tokens = spanned
-        .into_iter()
-        .map(|spanned| spanned.token)
-        .collect::<Vec<_>>();
-    parse_expression(&render_expression_tokens(&tokens))
+/// Asserts that `text` reads as `expression` through every entry point that builds an expression
+/// from NSPL: a statement that embeds it, and the standalone readers of an expression, an
+/// expression list and a route construction, which the web console's forms, `nervix-cli subscribe
+/// --where` and the client library call.
+fn assert_every_entry_point_reads(text: &str, expression: &Expression) {
+    let statement = format!("CREATE SUBSCRIPTION literal TO events WHERE {text};");
+    let embedded = match parse_client_statement(&statement) {
+        Ok(ClientStatement::CreateSubscription(subscription)) => subscription.where_clause,
+        Ok(other) => panic!("{statement}\nread as another statement: {other:?}"),
+        Err(error) => panic!("{statement}\nmust reparse: {error:?}"),
+    };
+    assert_eq!(
+        embedded.as_ref(),
+        Some(expression),
+        "{text} changed when a statement read it"
+    );
+
+    let standalone =
+        parse_expression(text).unwrap_or_else(|error| panic!("{text} must reparse: {error:?}"));
+    assert_eq!(
+        &standalone, expression,
+        "{text} changed when it was read alone"
+    );
+
+    let listed = parse_expression_list(text)
+        .unwrap_or_else(|error| panic!("{text} must reparse as a list: {error:?}"));
+    assert_eq!(
+        listed,
+        std::slice::from_ref(expression),
+        "{text} changed when it was read as a list"
+    );
+
+    let route = format!("WHERE {text}");
+    let construction = parse_route_construction(&route)
+        .unwrap_or_else(|error| panic!("{route} must reparse: {error:?}"));
+    assert_eq!(
+        construction.where_clause.as_ref(),
+        Some(expression),
+        "{text} changed when a route construction read it"
+    );
 }
 
 /// The session-only statement forms, which the client grammar reads beside every server statement.
@@ -141,12 +169,7 @@ fn bolero_expression_roundtrip_minimal_parentheses() {
             let expression = arbitrary.expression();
             let rendered = nervix_models::expression_to_nspl(&expression)
                 .unwrap_or_else(|error| panic!("{expression:?} must render: {error:?}"));
-            let reparsed = read_embedded_expression(&rendered)
-                .unwrap_or_else(|error| panic!("{rendered} must reparse: {error:?}"));
-            assert_eq!(
-                expression, reparsed,
-                "{rendered} changed when it was reparsed"
-            );
+            assert_every_entry_point_reads(&rendered, &expression);
         });
 }
 
@@ -219,6 +242,41 @@ fn every_statement_form_round_trips_canonically() {
             };
             assert_statement_round_trips(&statement);
         }
+    }
+}
+
+/// Every region that ends at a keyword a builtin or a field scope also spells reads the call or the
+/// field back as itself, whether it was written in parentheses or not: canonical NSPL writes it
+/// without them. A clause that goes straight on with an expression still begins at its keyword
+/// when that expression opens with a parenthesis.
+#[test]
+fn calls_and_scopes_named_like_clause_keywords_round_trip_in_every_region() {
+    for source in [
+        "CREATE REORDERER peaks_in_order FROM sensors WHERE max(input.readings) > 0 BY \
+         (input.first + input.second) * 2 MAX TIME 10s UNBRANCHED TO ordered_readings INHERIT ALL \
+         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE EMITTER send FROM source WHERE output.total > 0 TO HTTP api METHOD input.method \
+         PATH (input.prefix + input.tenant) * 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+         WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE JUNCTION peaks FROM sensors WHERE (max(input.readings) > 10) FILTER WHERE \
+         (output.total > 0) UNBRANCHED TO alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE DEDUPLICATOR distinct_peaks FROM sensors FILTER WHERE max(input.readings) > 0 \
+         DEDUPLICATE ON max(input.readings), input.id MAX TIME 10m UNBRANCHED TO \
+         distinct_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE REORDERER peaks_in_order FROM sensors BY (max(input.readings)) MAX TIME 10s \
+         UNBRANCHED TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE (right(left.name, 2) = \
+         right.suffix) RIGHT FROM labels WHERE max(right.readings) > output.id CORRELATE WHERE \
+         left.id = right.id MATCH EARLIEST MAX TIME 5s ON CORRELATION TIMEOUT DROP, DROP \
+         UNBRANCHED TO matched SET id = left.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) \
+         != '', ADD FROM labels WHERE max(input.readings) > output.total, SET DETACHED;",
+        "ALTER DEDUPLICATOR distinct_peaks SET DEDUPLICATE ON input.id, replace(input.name, 'a', \
+         'b'), SET MAX TIME 20m;",
+    ] {
+        let statement = parse_client_statement(source)
+            .unwrap_or_else(|error| panic!("{source}\nmust parse: {error:?}"));
+        assert_statement_round_trips(&statement);
     }
 }
 

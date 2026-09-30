@@ -2,6 +2,7 @@ use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
 use error_stack::Report;
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::Executor;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
@@ -46,6 +47,9 @@ pub(super) struct ReplicatedMaterializedRelayState {
     /// Admits one snapshot build per placement. Requesters that arrive while a build is running
     /// wait for its result instead of starting a second scan of the same state.
     build: nervix_primitives::sync::Mutex<()>,
+    /// What each replica reported holding and the offer of the newest snapshot to them while this
+    /// node originates the state, and the owner's announcements while it replicates it.
+    replication: CheckpointReplication,
 }
 
 /// Read-only access to materialized records and snapshots.
@@ -146,7 +150,12 @@ impl ReplicatedMaterializedRelayState {
             last_persisted_lsm: AtomicU64::new(0),
             sealed: nervix_primitives::sync::blocking::Mutex::new(None),
             build: nervix_primitives::sync::Mutex::new(()),
+            replication: CheckpointReplication::new(),
         }
+    }
+
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     pub(super) fn bind(
@@ -198,6 +207,10 @@ impl ReplicatedMaterializedRelayState {
 impl MaterializedRelayStateRead {
     pub(super) fn placement(&self) -> &RuntimeStatePlacement {
         &self.state.placement
+    }
+
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.state.replication
     }
 
     pub(super) fn schema(&self) -> &StdArc<arrow_schema::Schema> {

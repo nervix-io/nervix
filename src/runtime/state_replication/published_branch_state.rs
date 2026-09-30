@@ -23,6 +23,13 @@ impl PublishedBranchState {
         }
     }
 
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        match self {
+            Self::Deduplicator(state) => state.replication(),
+            Self::WindowProcessor(state) => state.replication(),
+        }
+    }
+
     fn is_live_dirty(&self) -> bool {
         match self {
             Self::Deduplicator(state) => state.generations.is_live_dirty(),
