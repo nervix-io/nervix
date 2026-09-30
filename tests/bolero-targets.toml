@@ -135,6 +135,20 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_text_reads_alike_at_every_entry_point/corpus"
+domain_version = 1
+features = []
+id = "nspl-expression-text"
+invariant = "Edited expression text reads as the same expression through a statement and every standalone expression reader, or none of them reads it as one."
+max_input_bytes = 512
+package = "nervix-nspl"
+random_iterations = 256
+source = "crates/nspl/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_expression_text_reads_alike_at_every_entry_point"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
 domain_version = 2
 features = []

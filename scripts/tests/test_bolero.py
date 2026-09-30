@@ -36,6 +36,7 @@ class InventoryTests(unittest.TestCase):
             "branch-membership",
             "nspl-statement",
             "nspl-statement-text",
+            "nspl-expression-text",
             "nspl-format-document",
             "nspl-format-text",
             "models-names",

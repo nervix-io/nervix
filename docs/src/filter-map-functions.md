@@ -225,7 +225,7 @@ names:
 | Literal | Type | Form |
 | --- | --- | --- |
 | Integer | `I64` | Decimal digits, such as `42`. A value above the largest `I64` is rejected. There is no negative literal: `-5` applies unary minus to `5` |
-| Float | `F64` | Decimal digits with a fraction, such as `2.5`. An exponent, a leading `.`, and a trailing `.` are not float literals; write `'1e5' AS F64` |
+| Float | `F64` | Decimal digits with a fraction, written as one word, such as `2.5`. An exponent, a leading `.`, a trailing `.`, and a space beside the `.`, as in `2 .5`, are not float literals; write `'1e5' AS F64` |
 | String | `STRING` | `'text'`, `"text"`, or dollar-quoted `$$text$$` and `$tag$text$tag$`, where the tag is letters, digits, and underscores. A quoted string cannot hold its own quote or a line break; a dollar-quoted string can hold anything but its closing delimiter, line breaks included. No escape sequence is interpreted, so `'a\nb'` is four characters |
 | Boolean | `BOOL` | `TRUE`, `FALSE`, in any letter case |
 | Null | the type its destination supplies | `NULL`, only as the whole value of an assignment to an optional field or as a result of a conditional whose other results give it a type |
@@ -291,6 +291,13 @@ start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the firs
 and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
 before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
 expression.
+
+A statement reads the expression it embeds from its own words, with the same lexer and grammar that
+read an expression in a web console form, in `nervix-cli subscribe --where`, and through the client
+library. Keywords, literals, comments, and spacing therefore mean the same wherever an expression is
+written: text one of them accepts reads as the same expression in all of them, and text one of them
+rejects all of them reject. A rejected expression is reported at the word of the statement where it
+went wrong, with the message a web console form shows for the same text.
 
 ## Logical Operators
 

@@ -36,6 +36,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v4 | 64 | 4096 bytes |
 | `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v2 | 256 | 2048 bytes |
 | `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v2 | 256 | 2048 bytes |
+| `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v1 | 256 | 512 bytes |
 | `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v2 | 256 | 4096 bytes |
 | `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v2 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
@@ -102,6 +103,14 @@ Rejection targets start from valid canonical text and edit up to three character
 deleting or replacing delimiters, quotes, comment markers, line endings, digits and non-ASCII
 characters. The result is mostly no longer NSPL and sometimes still is, so both the rejection and
 the acceptance paths are exercised.
+
+The expression-text target edits a canonical expression up to four times, deleting a character or
+inserting a piece or putting one in a character's place. The pieces are whitespace and line
+comments, a `.` with and without spaces beside it, exponent letters, digits and a minus, statement
+punctuation an expression never reads, and keywords only an expression reserves beside ones it reads
+as names. It asserts that every entry point agrees on the result: a subscription's `WHERE`, the
+standalone expression reader, a one-element expression list and a route construction's `WHERE` read
+it as the same expression, or none of them reads it as one.
 
 ## Uncovered Boundaries
 
