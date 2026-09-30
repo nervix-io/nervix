@@ -329,7 +329,7 @@ nervix-cli --domain quickstart subscribe sampled orders \
 | `--dropping` | drop deliveries when the session transport queue is full |
 | `--blocking` | block instead of dropping; this is the default, so the flag is only ever explicit |
 | `--batch-sample-rate <0.0-1.0>` | sampling of each row the predicate selected |
-| `--where <expression>` | NSPL predicate over delivered records, validated locally before the subscription opens |
+| `--where <expression>` | NSPL predicate over delivered records, read exactly as the `WHERE` clause of a typed `CREATE SUBSCRIPTION` and validated locally before the subscription opens |
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).

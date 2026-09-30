@@ -1381,7 +1381,7 @@ mod tests {
     fn a_rendered_json_extraction_reparses_to_the_same_expression() {
         for source in [
             "JSON_VALUE(input.doc, '$.count' AS I64)",
-            r#"TRY_JSON_VALUE(input.doc, "$[\"it's\"]" AS VEC<ARRAY<F64, 2>>)"#,
+            r#"TRY_JSON_VALUE(input.doc, $path$$["it's"]$path$ AS VEC<ARRAY<F64, 2>>)"#,
             r#"JSON_VALUE(input.doc, '$["odd key"].y[3]' AS ARRAY<U8, 2, 2>) AS STRING"#,
             "JSON_EXISTS(coalesce(input.doc, '{}'), '$.a.b')",
             "NOT JSON_EXISTS(input.doc, '$')",
@@ -1407,6 +1407,87 @@ mod tests {
             let rendered = nervix_models::expression_to_nspl(&expression)
                 .unwrap_or_else(|error| panic!("`{source}` must render: {error}"));
             assert_eq!(parsed(&rendered), expression, "`{rendered}` regrouped");
+        }
+    }
+
+    /// Backslash sequences that other languages read as escapes, a lone backslash before the
+    /// closing delimiter among them.
+    const ESCAPE_LOOKALIKES: [&str; 11] = [
+        r"a\\b",
+        r"a\'b",
+        r#"a\"b"#,
+        r"a\nb",
+        r"a\rb",
+        r"a\tb",
+        r"a\0b",
+        r"a\x41b",
+        r"a\u{e9}b",
+        r"a\$b",
+        r"a\",
+    ];
+
+    /// Every way to write `value` as a string literal that reads back verbatim: dollar-quoted, and
+    /// in each quote style the value does not hold.
+    fn verbatim_spellings(value: &str) -> Vec<String> {
+        let mut spellings = vec![format!("$q${value}$q$")];
+        if !value.contains('\'') {
+            spellings.push(format!("'{value}'"));
+        }
+        if !value.contains('"') {
+            spellings.push(format!("\"{value}\""));
+        }
+        spellings
+    }
+
+    /// Reads `predicate` as a statement reads an expression it embeds, here the `WHERE` clause of a
+    /// subscription.
+    fn read_in_statement(
+        predicate: &str,
+    ) -> error_stack::Result<Option<Expression>, ParseFromSourceError> {
+        let statement = format!("CREATE SUBSCRIPTION literal TO events WHERE {predicate};");
+        let parsed = crate::client_statement::parse_client_statement(&statement)?;
+        let crate::client_statement::ClientStatement::CreateSubscription(subscription) = parsed
+        else {
+            panic!("`{statement}` must read as a subscription");
+        };
+        Ok(subscription.where_clause)
+    }
+
+    #[test]
+    fn every_entry_point_reads_a_backslash_in_a_string_literal_verbatim() {
+        for value in ESCAPE_LOOKALIKES {
+            let expected = binary(BinaryOperator::Equal, field("tenant"), string(value));
+            for literal in verbatim_spellings(value) {
+                let predicate = format!("input.tenant = {literal}");
+                let standalone = parse_expression(&predicate)
+                    .unwrap_or_else(|error| panic!("`{predicate}` must parse: {error:?}"));
+                assert_eq!(
+                    standalone, expected,
+                    "`{predicate}` read another value alone"
+                );
+                let embedded = read_in_statement(&predicate).unwrap_or_else(|error| {
+                    panic!("`{predicate}` must parse in a statement: {error:?}")
+                });
+                assert_eq!(
+                    embedded,
+                    Some(expected.clone()),
+                    "`{predicate}` read another value in a statement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_backslash_leaves_the_closing_quote_closing_at_every_entry_point() {
+        for predicate in [r"input.tenant = 'a\'b'", r#"input.tenant = "a\"b""#] {
+            assert!(
+                parse_expression(predicate).is_err(),
+                "`{predicate}` must be rejected alone"
+            );
+            assert!(
+                read_in_statement(predicate).is_err(),
+                "`{predicate}` must be rejected in a statement"
+            );
         }
     }
 }
