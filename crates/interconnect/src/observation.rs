@@ -35,7 +35,7 @@ pub enum ConnectionFailureReason {
     Capacity,
     /// An established connection ended and the pool slot has to dial again.
     Closed,
-    /// The peer's advertised host did not resolve to an address in time.
+    /// Resolving the peer's advertised host failed, whichever lookup failure ended it.
     Resolution,
 }
 

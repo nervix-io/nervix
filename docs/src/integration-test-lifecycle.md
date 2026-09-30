@@ -825,12 +825,14 @@ The authority answers from memory and holds nothing else: it counts questions fo
 names, and a scenario can assert that its nodes asked nothing for their names. It answers until the
 cluster is dropped at the end of cleanup, after every node has stopped, so no node's lookup outlives
 it; dropping it aborts its answer loop, and its port goes back to the pool. How long a node waits
-for an answer is product behavior, bounded by its connection setup deadline and described in [Peer
-Name Resolution](./interconnect.md#peer-name-resolution); the scenario's own waits are status waits.
+for an answer is product behavior, bounded by the budget of the path that asked and described in
+[Bounds, Deadlines And Cancellation](./name-resolution.md#bounds-deadlines-and-cancellation); the
+scenario's own waits are status waits.
 
 The resolver crate's focused checks use the same authority, started on an unused port of their own,
 to observe DNS messages directly: TTL expiry, negative caching, refusals, silence, the lookup
 budget, the concurrency bound, and runtime teardown. `just test-dns` runs them.
+[Evidence](./name-resolution.md#evidence) states what each form of DNS evidence establishes.
 
 ## Client Probes
 
