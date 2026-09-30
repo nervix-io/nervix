@@ -720,6 +720,21 @@ general error policies. A commit failure keeps staged ACKs pending and visible u
 drain failure; it never turns staging into success. A forced ending loses in-memory batches and
 ACK state, leaving external redelivery to each source's contract.
 
+Connector-owned fallible helpers return contextual reports. Syslog configuration and frame
+decoding create a report at the failed parse, read, or framing check; the source adds its
+connection or lifecycle context before the host receives it. WebSocket signaling keeps its jaq,
+frame encoding, and transport causes beneath the compiled protocol or session failure. The server
+retains the Syslog plan and signaling compiler reports in its runtime startup errors. A connector
+may turn a report into the existing source or sink outcome only at that boundary, while preserving
+the typed cause and rendering only non-sensitive configuration or transport details.
+
+For OTEL, each selected row's conversion report becomes that row's existing invalid-record
+outcome, with its signal key as the affected field. Postgres, MySQL, and ClickHouse inspect the
+typed insert error before deciding whether to isolate a rejected row or fail the whole attempt.
+The whole-attempt report retains a transport driver or pool cause beneath `SinkPublishError`; a row
+rejection keeps the destination's safe SQLSTATE, error code, or named rejection reason. These
+context changes do not alter request grouping, successful delivery, retries, or ACK ownership.
+
 The host owns ingestor and emitter metric updates, transient status, and runtime events. Source
 open, resume, suspend, and close transitions have lifecycle logs; publish, retry, and commit
 failures carry connector identity without sensitive payload values. For metric names and

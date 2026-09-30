@@ -20,6 +20,12 @@ pub enum RuntimeError {
         ingestor: String,
         reason: String,
     },
+    #[error("failed to initialize ingestor '{ingestor}' in domain '{domain}': {report}")]
+    SyslogSourcePlan {
+        domain: DomainName,
+        ingestor: IngestorName,
+        report: Report<nervix_connector_syslog::SyslogConfigError>,
+    },
     #[error("codec '{codec}' in domain '{domain}' is not instantiated")]
     CodecNotInstantiated { domain: String, codec: String },
     #[error("relay '{relay}' in domain '{domain}' is not instantiated")]
@@ -34,6 +40,11 @@ pub enum RuntimeError {
     },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
+    #[error("failed to build domain execution for '{domain}': {report}")]
+    SignalingProtocolCompile {
+        domain: DomainName,
+        report: Report<nervix_connector_websockets::SignalingProtocolCompileError>,
+    },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     VmCompile {
         domain: String,

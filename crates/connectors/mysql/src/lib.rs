@@ -109,47 +109,67 @@ pub struct MySqlSink {
 
 #[derive(Debug, thiserror::Error)]
 enum MySqlWriteError {
-    #[error("invalid MySQL VALUES: {0}")]
-    InvalidValues(String),
-    #[error("{0}")]
-    Pool(String),
+    #[error("MySQL ON CONFLICT DO NOTHING requires at least one VALUES column")]
+    MissingInsertColumn,
+    #[error("MySQL ON CONFLICT DO UPDATE requires at least one VALUES column")]
+    MissingUpdateColumn,
+    #[error("{reason}")]
+    Pool { reason: String },
+    #[error("MySQL insert failed with SQLSTATE {state} and code {code}")]
+    Server { state: String, code: u16 },
     #[error("MySQL insert failed: {0}")]
-    Execute(mysql_async::Error),
+    Execute(#[source] mysql_async::Error),
 }
 
 impl MySqlWriteError {
+    fn report_execute(error: mysql_async::Error) -> Report<Self> {
+        match error {
+            // Server text can repeat a rejected parameter; its state and code are safe.
+            mysql_async::Error::Server(error) => Report::new(Self::Server {
+                state: error.state,
+                code: error.code,
+            }),
+            error => Report::new(Self::Execute(error)),
+        }
+    }
+
     fn is_record_error(&self) -> bool {
-        let Self::Execute(mysql_async::Error::Server(error)) = self else {
+        let Self::Server { state, code } = self else {
             return false;
         };
-        is_record_server_error(&error.state, error.code)
+        is_record_server_error(state, *code)
     }
 
     fn record_reason(&self) -> String {
         let server_error = match self {
-            Self::Execute(mysql_async::Error::Server(error)) => Some(error),
+            Self::Server { state, code } => Some((state, code)),
             _ => None,
         };
         match server_error {
-            Some(error) => format!(
+            Some((state, code)) => format!(
                 "MySQL rejected record with SQLSTATE {} and code {}",
-                error.state, error.code
+                state, code
             ),
             None => "MySQL rejected record".to_string(),
         }
     }
 
-    fn into_report(self) -> Report<SinkPublishError> {
-        let publish = || Report::new(SinkPublishError::Publish { sink: MYSQL });
-        match self {
-            Self::InvalidValues(reason) => publish().attach_printable(reason),
-            Self::Execute(mysql_async::Error::Server(error)) => {
-                publish().attach_printable(format!(
-                    "MySQL request failed with SQLSTATE {} and code {}",
-                    error.state, error.code
-                ))
+    fn into_report(report: Report<Self>) -> Report<SinkPublishError> {
+        let reason = match report.current_context() {
+            Self::MissingInsertColumn | Self::MissingUpdateColumn => {
+                Some(report.current_context().to_string())
             }
-            error => publish().attach_printable(error.to_string()),
+            Self::Server { state, code } => Some(format!(
+                "MySQL request failed with SQLSTATE {} and code {}",
+                state, code
+            )),
+            Self::Execute(error) => Some(format!("MySQL insert failed: {error}")),
+            Self::Pool { reason } => Some(reason.clone()),
+        };
+        let report = report.change_context(SinkPublishError::Publish { sink: MYSQL });
+        match reason {
+            Some(reason) => report.attach_printable(reason),
+            None => report,
         }
     }
 }
@@ -318,40 +338,33 @@ impl MySqlSink {
         statement: &MultiRowInsert,
         rows: usize,
         params: Vec<Value>,
-    ) -> Result<u64, MySqlWriteError> {
-        let mut conn = self
-            .connections
-            .connection()
-            .await
-            .map_err(|error| MySqlWriteError::Pool(format!("{error:?}")))?;
+    ) -> error_stack::Result<u64, MySqlWriteError> {
+        let mut conn = self.connections.connection().await.map_err(|error| {
+            let reason = format!("{error:?}");
+            error.change_context(MySqlWriteError::Pool { reason })
+        })?;
         conn.0
             .exec_drop(statement.sql(rows), Params::Positional(params))
             .await
-            .map_err(MySqlWriteError::Execute)?;
+            .map_err(MySqlWriteError::report_execute)?;
         Ok(conn.0.affected_rows())
     }
 
     fn conflict_clause(
         quoted_columns: &[String],
         conflict_action: MySqlConflictAction,
-    ) -> Result<String, MySqlWriteError> {
+    ) -> error_stack::Result<String, MySqlWriteError> {
         match conflict_action {
             MySqlConflictAction::None => Ok(String::new()),
             MySqlConflictAction::DoNothing => {
                 let Some(column) = quoted_columns.first() else {
-                    return Err(MySqlWriteError::InvalidValues(
-                        "MySQL ON CONFLICT DO NOTHING requires at least one VALUES column"
-                            .to_string(),
-                    ));
+                    return Err(Report::new(MySqlWriteError::MissingInsertColumn));
                 };
                 Ok(format!(" ON DUPLICATE KEY UPDATE {column} = {column}"))
             }
             MySqlConflictAction::DoUpdate => {
                 if quoted_columns.is_empty() {
-                    return Err(MySqlWriteError::InvalidValues(
-                        "MySQL ON CONFLICT DO UPDATE requires at least one VALUES column"
-                            .to_string(),
-                    ));
+                    return Err(Report::new(MySqlWriteError::MissingUpdateColumn));
                 }
                 let updates = quoted_columns
                     .iter()
@@ -446,7 +459,7 @@ impl RowSink for MySqlSink {
                 // A record-specific failure of a multi-row insert is isolated by inserting each of
                 // its rows alone, so healthy rows land and only the rejected ones follow the error
                 // policy. The values the failed insert took are bound again from the row's columns.
-                Err(error) if error.is_record_error() && written.len() > 1 => {
+                Err(error) if error.current_context().is_record_error() && written.len() > 1 => {
                     for index in written {
                         nervix_primitives::task::consume_budget().await;
                         let member = members[index];
@@ -456,30 +469,30 @@ impl RowSink for MySqlSink {
                             .row_values(member.row);
                         match self.insert(&statement, 1, params).await {
                             Ok(_) => outcome.deliver(rows.position(member)),
-                            Err(error) if error.is_record_error() => {
+                            Err(error) if error.current_context().is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
                                     rows.position(member),
                                     rows.occurred_at(member),
-                                    error.record_reason(),
+                                    error.current_context().record_reason(),
                                 ));
                             }
                             Err(error) => {
-                                outcome.fail(error.into_report());
+                                outcome.fail(MySqlWriteError::into_report(error));
                                 return outcome;
                             }
                         }
                     }
                 }
-                Err(error) if error.is_record_error() => {
+                Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
                     outcome.reject(RejectedSinkRecord::external(
                         rows.position(member),
                         rows.occurred_at(member),
-                        error.record_reason(),
+                        error.current_context().record_reason(),
                     ));
                 }
                 Err(error) => {
-                    outcome.fail(error.into_report());
+                    outcome.fail(MySqlWriteError::into_report(error));
                     return outcome;
                 }
             }
@@ -892,6 +905,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_insert_clause_keeps_its_typed_cause_at_the_host_boundary() {
+        let failure = MySqlSink::conflict_clause(&[], MySqlConflictAction::DoUpdate)
+            .expect_err("an update needs mapped values");
+        let report = MySqlWriteError::into_report(failure);
+        assert!(report.contains::<MySqlWriteError>());
+    }
+
+    #[test]
+    fn server_rejection_keeps_safe_classification_without_quoting_a_row() {
+        let report =
+            MySqlWriteError::report_execute(mysql_async::Error::Server(mysql_async::ServerError {
+                state: "22001".to_string(),
+                code: 1406,
+                message: "secret-row-value".to_string(),
+            }));
+        assert!(report.current_context().is_record_error());
+        let report = MySqlWriteError::into_report(report);
+        let diagnostic = format!("{report:?}");
+        assert!(report.contains::<MySqlWriteError>());
+        assert!(diagnostic.contains("22001"));
+        assert!(!diagnostic.contains("secret-row-value"));
+    }
+
+    #[test]
     fn classifies_only_definitive_mysql_server_errors_as_record_errors() {
         for state in ["22001", "22003", "22007", "23000"] {
             assert!(
@@ -981,9 +1018,10 @@ mod tests {
     #[async_trait]
     impl MySqlConnections for NoConnections {
         async fn connection(&self) -> SinkPublishResult<MySqlConnection> {
-            Err(Report::new(SinkPublishError::NotInitialized {
-                sink: MYSQL,
-            }))
+            Err(
+                Report::new(SinkPublishError::NotInitialized { sink: MYSQL })
+                    .attach_printable("pool-acquire-detail"),
+            )
         }
     }
 
@@ -999,6 +1037,25 @@ mod tests {
                 max_size: "1KiB".parse().expect("1KiB is a valid size"),
             }),
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn insert_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
+        let sink = test_sink(MySqlConflictAction::None);
+        let statement = sink
+            .insert_statement(&["seq".to_string()])
+            .expect("the statement is valid before connection acquisition");
+        let error = sink
+            .insert(&statement, 1, Vec::new())
+            .await
+            .expect_err("the test pool has no connection");
+        assert!(matches!(
+            error.current_context(),
+            MySqlWriteError::Pool { .. }
+        ));
+        let report = MySqlWriteError::into_report(error);
+        assert!(report.contains::<MySqlWriteError>());
+        assert!(format!("{report:?}").contains("pool-acquire-detail"));
     }
 
     /// The measured size is the statement a candidate executes and every value exactly as the

@@ -112,23 +112,23 @@ pub struct PostgresSink {
 #[derive(Debug, thiserror::Error)]
 enum PostgresWriteError {
     #[error("failed to load Postgres table metadata: {0}")]
-    Metadata(sqlx::Error),
+    Metadata(#[source] sqlx::Error),
     #[error("Postgres table '{table}' has no column '{column}'")]
     MissingColumn { table: String, column: String },
-    #[error("invalid Postgres VALUES: {0}")]
-    InvalidValues(String),
+    #[error("Postgres ON CONFLICT DO UPDATE requires a conflict target")]
+    MissingConflictTarget,
+    #[error(
+        "Postgres ON CONFLICT DO UPDATE requires at least one non-conflict VALUES column to update"
+    )]
+    MissingUpdateColumn,
+    #[error("Postgres ON CONFLICT target columns must not be empty")]
+    EmptyConflictColumn,
+    #[error("Postgres insert failed with SQLSTATE {code:?}")]
+    Server { code: Option<String> },
     #[error("Postgres insert failed: {0}")]
-    Execute(sqlx::Error),
-    #[error("{0}")]
-    Pool(String),
-}
-
-/// The SQLSTATE a database error carries, when it came from the server at all.
-fn sqlstate(error: &sqlx::Error) -> Option<String> {
-    let sqlx::Error::Database(error) = error else {
-        return None;
-    };
-    error.code().map(|code| code.into_owned())
+    Execute(#[source] sqlx::Error),
+    #[error("{reason}")]
+    Pool { reason: String },
 }
 
 /// A SQLSTATE the server reports for a row, or for a set of rows, it will never accept.
@@ -141,19 +141,26 @@ fn is_record_sqlstate(code: &str) -> bool {
 }
 
 impl PostgresWriteError {
+    fn report_execute(error: sqlx::Error) -> Report<Self> {
+        match error {
+            // A database response can quote rejected values. Retain its safe SQLSTATE only.
+            sqlx::Error::Database(error) => Report::new(Self::Server {
+                code: error.code().map(|code| code.into_owned()),
+            }),
+            error => Report::new(Self::Execute(error)),
+        }
+    }
+
     fn is_record_error(&self) -> bool {
-        let Self::Execute(error) = self else {
+        let Self::Server { code: Some(code) } = self else {
             return false;
         };
-        match sqlstate(error) {
-            Some(code) => is_record_sqlstate(&code),
-            None => false,
-        }
+        is_record_sqlstate(code)
     }
 
     fn record_reason(&self) -> String {
         let code = match self {
-            Self::Execute(error) => sqlstate(error),
+            Self::Server { code } => code.as_deref(),
             _ => None,
         };
         match code {
@@ -162,18 +169,20 @@ impl PostgresWriteError {
         }
     }
 
-    fn into_report(self) -> Report<SinkPublishError> {
-        let publish = || Report::new(SinkPublishError::Publish { sink: POSTGRES });
-        match self {
-            Self::InvalidValues(reason) => publish().attach_printable(reason),
-            Self::Execute(error) => {
-                let code = match sqlstate(&error) {
-                    Some(code) => code,
-                    None => "unknown".to_string(),
-                };
-                publish().attach_printable(format!("Postgres request failed with SQLSTATE {code}"))
+    fn into_report(report: Report<Self>) -> Report<SinkPublishError> {
+        let reason = match report.current_context() {
+            Self::Server { code } => {
+                let code = code.as_deref().unwrap_or("unknown");
+                Some(format!("Postgres request failed with SQLSTATE {code}"))
             }
-            error => publish().attach_printable(error.to_string()),
+            Self::Execute(_) => Some("Postgres request failed with SQLSTATE unknown".to_string()),
+            Self::Pool { reason } => Some(reason.clone()),
+            error => Some(error.to_string()),
+        };
+        let report = report.change_context(SinkPublishError::Publish { sink: POSTGRES });
+        match reason {
+            Some(reason) => report.attach_printable(reason),
+            None => report,
         }
     }
 }
@@ -319,12 +328,14 @@ impl PostgresSink {
 
     /// The declared type of each mapped column, read on a connection borrowed for this lookup
     /// alone and returned before the inserts that follow it.
-    async fn column_types(&self, columns: &[String]) -> Result<Vec<String>, PostgresWriteError> {
-        let mut connection = self
-            .connections
-            .connection()
-            .await
-            .map_err(|error| PostgresWriteError::Pool(format!("{error:?}")))?;
+    async fn column_types(
+        &self,
+        columns: &[String],
+    ) -> error_stack::Result<Vec<String>, PostgresWriteError> {
+        let mut connection = self.connections.connection().await.map_err(|error| {
+            let reason = format!("{error:?}");
+            error.change_context(PostgresWriteError::Pool { reason })
+        })?;
         let table_name = self.table.as_str().to_string();
         let column_refs = columns.to_vec();
         let rows = sqlx::query(
@@ -336,7 +347,7 @@ impl PostgresSink {
         .bind(column_refs)
         .fetch_all(&mut *connection.0)
         .await
-        .map_err(PostgresWriteError::Metadata)?;
+        .map_err(|error| Report::new(PostgresWriteError::Metadata(error)))?;
         let types_by_column = rows
             .into_iter()
             .map(|row| {
@@ -349,10 +360,10 @@ impl PostgresSink {
             .iter()
             .map(|column| {
                 types_by_column.get(column).cloned().ok_or_else(|| {
-                    PostgresWriteError::MissingColumn {
+                    Report::new(PostgresWriteError::MissingColumn {
                         table: self.table.as_str().to_string(),
                         column: column.clone(),
-                    }
+                    })
                 })
             })
             .collect()
@@ -392,7 +403,7 @@ impl PostgresSink {
         &self,
         inserts: &UnnestInserts,
         members: Range<usize>,
-    ) -> Result<u64, PostgresWriteError> {
+    ) -> error_stack::Result<u64, PostgresWriteError> {
         // Every value is a bound parameter and every identifier went through `quote_ident`, so the
         // only thing interpolated into this statement is a quoted name or a positional placeholder.
         let mut query = sqlx::query(AssertSqlSafe(inserts.sql.as_str()));
@@ -402,23 +413,22 @@ impl PostgresSink {
                 .assured("an insert carries rows of the write whose texts were bound");
             query = query.bind(texts);
         }
-        let mut connection = self
-            .connections
-            .connection()
-            .await
-            .map_err(|error| PostgresWriteError::Pool(format!("{error:?}")))?;
+        let mut connection = self.connections.connection().await.map_err(|error| {
+            let reason = format!("{error:?}");
+            error.change_context(PostgresWriteError::Pool { reason })
+        })?;
         let result = connection
             .0
             .execute(query)
             .await
-            .map_err(PostgresWriteError::Execute)?;
+            .map_err(PostgresWriteError::report_execute)?;
         Ok(result.rows_affected())
     }
 
     fn conflict_clause(
         columns: &[String],
         action: &PostgresConflictAction,
-    ) -> Result<String, PostgresWriteError> {
+    ) -> error_stack::Result<String, PostgresWriteError> {
         match action {
             PostgresConflictAction::None => Ok(String::new()),
             PostgresConflictAction::DoNothing { target } => {
@@ -427,9 +437,7 @@ impl PostgresSink {
             }
             PostgresConflictAction::DoUpdate { target } => {
                 if target.is_empty() {
-                    return Err(PostgresWriteError::InvalidValues(
-                        "Postgres ON CONFLICT DO UPDATE requires a conflict target".to_string(),
-                    ));
+                    return Err(Report::new(PostgresWriteError::MissingConflictTarget));
                 }
                 let assignments = columns
                     .iter()
@@ -440,11 +448,7 @@ impl PostgresSink {
                     })
                     .collect::<Vec<_>>();
                 if assignments.is_empty() {
-                    return Err(PostgresWriteError::InvalidValues(
-                        "Postgres ON CONFLICT DO UPDATE requires at least one non-conflict VALUES \
-                         column to update"
-                            .to_string(),
-                    ));
+                    return Err(Report::new(PostgresWriteError::MissingUpdateColumn));
                 }
                 let target = Self::conflict_target_sql(target)?;
                 Ok(format!(
@@ -455,13 +459,11 @@ impl PostgresSink {
         }
     }
 
-    fn conflict_target_sql(target: &[String]) -> Result<String, PostgresWriteError> {
+    fn conflict_target_sql(target: &[String]) -> error_stack::Result<String, PostgresWriteError> {
         if target.is_empty() {
             Ok(String::new())
         } else if target.iter().any(|column| column.is_empty()) {
-            Err(PostgresWriteError::InvalidValues(
-                "Postgres ON CONFLICT target columns must not be empty".to_string(),
-            ))
+            Err(Report::new(PostgresWriteError::EmptyConflictColumn))
         } else {
             Ok(format!(
                 " ({})",
@@ -501,7 +503,7 @@ impl RowSink for PostgresSink {
         let column_types = match self.column_types(rows.target_columns).await {
             Ok(column_types) => column_types,
             Err(error) => {
-                outcome.fail(error.into_report());
+                outcome.fail(PostgresWriteError::into_report(error));
                 return outcome;
             }
         };
@@ -551,7 +553,7 @@ impl RowSink for PostgresSink {
                 // A record-specific failure of a multi-row insert is isolated by inserting each of
                 // its rows alone, so healthy rows land and only the rejected ones follow the error
                 // policy.
-                Err(error) if error.is_record_error() && written.len() > 1 => {
+                Err(error) if error.current_context().is_record_error() && written.len() > 1 => {
                     for index in written {
                         nervix_primitives::task::consume_budget().await;
                         let member = members[index];
@@ -560,30 +562,30 @@ impl RowSink for PostgresSink {
                             .assured("a row of the write is followed by at most its end");
                         match self.insert(&inserts, index..alone).await {
                             Ok(_) => outcome.deliver(rows.position(member)),
-                            Err(error) if error.is_record_error() => {
+                            Err(error) if error.current_context().is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
                                     rows.position(member),
                                     rows.occurred_at(member),
-                                    error.record_reason(),
+                                    error.current_context().record_reason(),
                                 ));
                             }
                             Err(error) => {
-                                outcome.fail(error.into_report());
+                                outcome.fail(PostgresWriteError::into_report(error));
                                 return outcome;
                             }
                         }
                     }
                 }
-                Err(error) if error.is_record_error() => {
+                Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
                     outcome.reject(RejectedSinkRecord::external(
                         rows.position(member),
                         rows.occurred_at(member),
-                        error.record_reason(),
+                        error.current_context().record_reason(),
                     ));
                 }
                 Err(error) => {
-                    outcome.fail(error.into_report());
+                    outcome.fail(PostgresWriteError::into_report(error));
                     return outcome;
                 }
             }
@@ -938,6 +940,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_conflict_target_keeps_its_typed_cause_at_the_host_boundary() {
+        let failure = PostgresSink::conflict_target_sql(&[String::new()])
+            .expect_err("a target column must be named");
+        let report = PostgresWriteError::into_report(failure);
+        assert!(report.contains::<PostgresWriteError>());
+    }
+
+    #[test]
     fn classifies_only_data_and_constraint_sqlstates_as_record_errors() {
         for code in ["22001", "22003", "22P02", "23000", "23502", "23505"] {
             assert!(
@@ -1105,10 +1115,36 @@ mod tests {
     #[async_trait]
     impl PostgresConnections for NoConnections {
         async fn connection(&self) -> SinkPublishResult<PostgresConnection> {
-            Err(Report::new(SinkPublishError::NotInitialized {
-                sink: POSTGRES,
-            }))
+            Err(
+                Report::new(SinkPublishError::NotInitialized { sink: POSTGRES })
+                    .attach_printable("pool-acquire-detail"),
+            )
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn metadata_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
+        let sink = PostgresSink {
+            connections: Box::new(NoConnections),
+            table: TableName::parse("events").expect("the test table name is valid"),
+            conflict_action: PostgresConflictAction::None,
+            limits: RowRequestLimits::from(EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(1_u32)
+                    .expect("one is a valid message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a valid size"),
+            }),
+        };
+        let error = sink
+            .column_types(&["seq".to_string()])
+            .await
+            .expect_err("the test pool has no connection");
+        assert!(matches!(
+            error.current_context(),
+            PostgresWriteError::Pool { .. }
+        ));
+        let report = PostgresWriteError::into_report(error);
+        assert!(report.contains::<PostgresWriteError>());
+        assert!(format!("{report:?}").contains("pool-acquire-detail"));
     }
 
     #[test]

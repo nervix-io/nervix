@@ -167,6 +167,8 @@ absent. TLS verifies the server name derived from `addr`.
 Configuration fails with a key-specific error for an unknown protocol, malformed address,
 `framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, or only one half
 of an emitter client identity. TLS keys are invalid with UDP or plain TCP.
+Startup diagnostics retain the failed TLS file, certificate, or key cause beneath the Syslog
+configuration error, with the setting or path that failed. They do not include TLS file contents.
 
 ## Ingestor
 
@@ -241,6 +243,8 @@ Bind and listener-level socket failures appear as that node's ingestor transient
 with the standard reconnect backoff. A failure on one node does not stop listeners on other nodes.
 Recovery clears the error and resets the backoff. A malformed message body is a codec decode
 failure and skips only that frame.
+For a malformed stream frame, the connection closes and its debug diagnostic retains the framing
+cause without quoting the frame's payload.
 
 ## Emitter
 
