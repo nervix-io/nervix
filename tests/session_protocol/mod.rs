@@ -17,7 +17,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     CommandExecutionReference, ResourceUploadIdentity, SubscriptionName,
-    TransactionInspectionRejection, TransactionInspectionTarget,
+    TransactionInspectionRejection, TransactionInspectionTarget, parse_duration_text,
 };
 
 use super::*;
@@ -475,8 +475,7 @@ async fn then_node_redirects_without_an_endpoint(
     node_id: String,
     leader: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let leader = expand_placeholders(world, &leader);
     let server = world
@@ -670,8 +669,7 @@ async fn then_active_session_subscription_ends(
     subscription: String,
     cause: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let subscription = expand_placeholders(world, &subscription);
     let expected = match cause.as_str() {
         "removed" => SubscriptionEndReason::RelayRemoved,
@@ -708,8 +706,7 @@ async fn then_no_received_row_contains(world: &mut ScenarioWorld, fragment: Stri
 
 #[when(expr = "the active session reads its frames for {string}")]
 async fn when_active_session_reads_frames(world: &mut ScenarioWorld, duration: String) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     active_session(world)
         .read_for(duration)
         .await

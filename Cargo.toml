@@ -356,6 +356,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 as-conversions = "deny"
+disallowed-methods = "deny"
 disallowed-types = "deny"
 
 [workspace.dependencies]

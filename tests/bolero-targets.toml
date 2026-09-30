@@ -261,6 +261,34 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/__fuzz__/duration_text__tests__bolero_durations_round_trip_through_their_canonical_text/corpus"
+domain_version = 1
+features = []
+id = "models-durations"
+invariant = "Every duration reads back from the text humantime writes for it, and only a duration within one of each unit of the longest one is refused as too long."
+max_input_bytes = 16
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/duration_text.rs"
+test = "duration_text::tests::bolero_durations_round_trip_through_their_canonical_text"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/__fuzz__/duration_text__tests__bolero_duration_text_reads_as_humantime_reads_it_or_fails_typed/corpus"
+domain_version = 1
+features = []
+id = "models-duration-text"
+invariant = "Arbitrary duration text reads as the value humantime reads for it or fails with a typed error, and reading it never panics."
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/duration_text.rs"
+test = "duration_text::tests::bolero_duration_text_reads_as_humantime_reads_it_or_fails_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/json_paths__bolero_json_paths_round_trip_through_every_representation/corpus"
 domain_version = 1
 features = []

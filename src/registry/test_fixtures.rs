@@ -31,6 +31,10 @@ use crate::registry::{
     DomainActivationPlan, EntrypointPlanError, EntrypointPlans, storage::Registry,
 };
 
+/// Duration text `humantime` panicked on instead of refusing: spans that add up to the last second
+/// a duration holds, and fractions of exactly one more second.
+pub(in crate::registry) const TOO_LONG_DURATION_TEXT: &str = "18446744073709551615s 1000000000ns";
+
 pub(in crate::registry) fn temp_db_path() -> PathBuf {
     tempfile::Builder::new()
         .prefix("nervix-server-registry-test-")
