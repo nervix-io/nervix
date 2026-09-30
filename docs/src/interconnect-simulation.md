@@ -139,8 +139,8 @@ DNS packet, so a fault scenario cannot escape to the real network and no resolve
 between hosts. The layers above the socket, `tokio-rustls`, `h2`, the envelope codec, and Arrow IPC,
 are the production code. These scenarios exercise the transport over simulated names; Hickory's DNS
 protocol, cache, and failure handling are checked by the resolver crate's own tests against local
-DNS authorities outside the simulation, as described in [Peer Name
-Resolution](./interconnect.md#peer-name-resolution).
+DNS authorities outside the simulation, as [Name Resolution](./name-resolution.md#evidence)
+describes.
 
 ### Bounded CPU Execution
 

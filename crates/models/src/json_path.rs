@@ -7,31 +7,50 @@
 use std::fmt::{self, Display, Formatter};
 
 use error_stack::Report;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
+    rancor::{Fallible, Source},
+};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 /// A path from the root of a JSON document, written `$` followed by its steps.
 ///
 /// `.name` and `["name"]` step into the member of an object with that name, and `[n]` steps into
 /// the element of an array at the zero-based index `n`. A path with no steps names the whole
-/// document.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+/// document. Its serde and archived forms are decoded through [`JsonPath::new`], so a decoded path
+/// takes no more steps than a constructed one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Archive, RkyvSerialize)]
 pub struct JsonPath {
     steps: Vec<JsonPathStep>,
+}
+
+impl<'de> Deserialize<'de> for JsonPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        /// The steps as the serde form carries them, before the path bounds them.
+        #[derive(Deserialize)]
+        struct Steps {
+            steps: Vec<JsonPathStep>,
+        }
+
+        let Steps { steps } = Steps::deserialize(deserializer)?;
+        Self::new(steps).map_err(|report| D::Error::custom(report.current_context()))
+    }
+}
+
+impl<D> RkyvDeserialize<JsonPath, D> for ArchivedJsonPath
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+    <JsonPathStep as Archive>::Archived: RkyvDeserialize<JsonPathStep, D>,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<JsonPath, D::Error> {
+        let steps: Vec<JsonPathStep> = self.steps.deserialize(deserializer)?;
+        JsonPath::new(steps).map_err(|report| D::Error::new(report.current_context().clone()))
+    }
 }
 
 /// One step of a [`JsonPath`].
@@ -216,6 +235,23 @@ impl Display for JsonPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The archived layout of a path, so a test can archive more steps than a path takes.
+    #[derive(Archive, RkyvSerialize)]
+    struct ArchivedSteps {
+        steps: Vec<JsonPathStep>,
+    }
+
+    #[test]
+    fn decoders_refuse_more_steps_than_a_path_takes() {
+        let steps = vec![JsonPathStep::Element(0); JsonPath::MAX_STEPS + 1];
+        let json = serde_json::to_string(&serde_json::json!({ "steps": steps }))
+            .expect("steps have a JSON form");
+        assert!(serde_json::from_str::<JsonPath>(&json).is_err());
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&ArchivedSteps { steps })
+            .expect("the steps archive");
+        assert!(rkyv::from_bytes::<JsonPath, rkyv::rancor::Error>(&archived).is_err());
+    }
 
     fn member(name: &str) -> JsonPathStep {
         JsonPathStep::Member(name.to_string())

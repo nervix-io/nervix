@@ -22,4 +22,6 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }

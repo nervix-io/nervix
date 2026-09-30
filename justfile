@@ -198,6 +198,11 @@ check-package-lib package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
+# Run one integration test target of one workspace package whose tests need no server test
+# dependencies, such as the vocabulary's representation properties.
+test-package-test package test *args:
+    cargo test --package {{ package }} --test {{ test }} -- {{ args }}
+
 # Run the unit tests in the binary targets of one workspace package, such as the web console's
 # view logic in its `main.rs`.
 test-package-bins package *args:

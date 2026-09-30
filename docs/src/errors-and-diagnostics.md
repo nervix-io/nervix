@@ -83,6 +83,19 @@ same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
+The node resolver's own errors belong to `nervix-dns`. A resolver configuration that cannot be
+loaded is a `DnsConfigurationError`, which fails node startup beneath
+`failed to load the name resolver configuration` and a native client's connection as
+`ClientError::LoadDnsConfiguration`. A lookup that fails is a `DnsLookupError`: the host as the
+caller wrote it and one `DnsLookupFailure`, the closed set that
+[Lookup Outcomes](./name-resolution.md#lookup-outcomes) lists. A client library that resolves
+through one of the resolver's hooks receives the `DnsLookupError` itself and keeps it among the
+causes of its own connection error, where `DnsLookupError::find_in` recovers it. The HTTP request
+sink, RabbitMQ, Syslog, WebSocket, Redis, MQTT, ClickHouse, SQS and the native session client keep
+it beneath their own failure, as the paragraphs below describe. HTTP polling, Prometheus, Sentry,
+OTEL and Iceberg report their failed request, export or catalog call without it, so their
+diagnostics do not name the lookup failure.
+
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
@@ -114,13 +127,14 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 sink failure and retry path; they do not release a staged record's acknowledgement before commit.
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
-module: an invalid address or CA file, a lookup failure that keeps the resolver's
-`DnsLookupFailure` as a typed field, no address that accepted a connection, a failed or overdue
-TLS handshake, or a failed AMQP handshake, each naming the broker host. The source keeps it beneath
-its connect and resume contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the
-resolver's own lookup error. The sink changes it into a configuration failure for an invalid
-address or CA file and an initialization failure otherwise, leading with the connection error's
-message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
+as a typed field, no address that accepted a connection, a failed or overdue TLS handshake, a Lapin
+runtime that could not be created, or a failed AMQP handshake, each naming the broker host where one
+is involved. The source keeps it beneath its connect and resume contexts, so `DESCRIBE INGESTOR`
+shows the deepest cause, such as the resolver's own lookup error. The sink changes it into a
+configuration failure for an invalid address or CA file and an initialization failure otherwise,
+leading with the connection error's message, which `DESCRIBE EMITTER` shows. Neither attaches
+credentials from the address.
 
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
@@ -157,13 +171,14 @@ driver the resolver's `DnsLookupError` as the failure of the lookup. The driver 
 cause of its connection error, and the connector finds it there by type and keeps it as the context
 beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
 an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
-`SqsSourceError` of opening the queue, receiving or deleting beneath the source's `SourceError`.
-The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER` and
-`DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection or a
-certificate that does not name the configured host, is described by every cause of the driver's
-connection error, which describes the connection and carries neither credentials nor a record; a
-response from the service keeps its existing description. None is a record rejection, and none
-acknowledges input.
+`SqsSourceError` of receiving or deleting beneath the source's `SourceError`. An SQS source looks
+its queue up while its ingestor starts; the runtime keeps that failure's text, the lookup failure
+included, as the reason of the ingestor's start failure rather than as a typed cause. The failure's
+message names the host and the lookup failure, which `DESCRIBE EMITTER` and `DESCRIBE INGESTOR`
+show. Any other failure to reach the service, such as a refused connection or a certificate that
+does not name the configured host, is described by every cause of the driver's connection error,
+which describes the connection and carries neither credentials nor a record; a response from the
+service keeps its existing description. None is a record rejection, and none acknowledges input.
 
 The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MySQL and ClickHouse
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
@@ -681,7 +696,11 @@ owns where these outcomes occur during stop and drain.
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
-in the type. A dropped result with no stated recovery class does not establish that it was handled.
+in the type. A dependency that panics on input a caller can supply is such a failure too: its owner
+refuses that input with a typed error before the dependency reads it, as the vocabulary's duration
+parser does with `DurationTextError::TooLong` for text whose spans would overflow `humantime`'s
+duration arithmetic. A dropped result with no stated recovery class does not establish that it was
+handled.
 
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
