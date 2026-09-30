@@ -44,6 +44,8 @@ class InventoryTests(unittest.TestCase):
             "models-timestamp-text",
             "models-domain-clock",
             "models-domain-clock-validation",
+            "models-durations",
+            "models-duration-text",
             "models-json-paths",
             "models-json-path-validation",
             "models-batch-limits",

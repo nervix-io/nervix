@@ -1,4 +1,8 @@
+disallowed-methods = [
+  { path = "humantime::parse_duration", reason = "read duration text through nervix_models::parse_duration_text, which refuses the text humantime panics on", allow-invalid = true },
+]
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "use ahash::HashMap instead" },
   { path = "std::collections::HashSet", reason = "use ahash::HashSet instead" },
+  { path = "humantime::Duration", reason = "its FromStr reads through humantime::parse_duration; read duration text through nervix_models::parse_duration_text", allow-invalid = true },
 ]

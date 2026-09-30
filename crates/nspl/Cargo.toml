@@ -18,7 +18,6 @@ ahash-compile-time = { workspace = true }
 arrow-schema = { workspace = true }
 chumsky = { workspace = true }
 error-stack = { workspace = true }
-humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }

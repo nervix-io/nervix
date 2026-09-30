@@ -15,6 +15,7 @@ use nervix_models::{
     CreateGenerator, CreateInferencer, CreateLookup, CreateSchema, CreateWindowProcessor,
     DomainName, Expression, FieldName, FlushPolicy, ModelIndex, ModelKind, ModelName, NodeRef,
     ProcessorOutput, ProcessorOutputs, RelayName, RouteConstruction, SchemaField, SchemaName,
+    parse_duration_text,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
@@ -128,7 +129,7 @@ fn ensure_input_collect_policy(
     let Some(policy) = policy else {
         return Ok(());
     };
-    let duration = humantime::parse_duration(&policy.collect_for).map_err(|error| {
+    let duration = parse_duration_text(&policy.collect_for).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -572,15 +573,13 @@ pub(in crate::registry) fn parse_window_bound_duration(
     let Some(duration) = duration else {
         return Ok(());
     };
-    humantime::parse_duration(duration)
-        .map(|_| ())
-        .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!("invalid window {bound_name} duration '{duration}': {error}"),
-            })
+    parse_duration_text(duration).map(|_| ()).map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("invalid window {bound_name} duration '{duration}': {error}"),
         })
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -656,7 +655,7 @@ pub(in crate::registry) fn ensure_processor_output_flush_policies(
         else {
             continue;
         };
-        humantime::parse_duration(interval).map_err(|error| {
+        parse_duration_text(interval).map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -1118,7 +1117,7 @@ pub(in crate::registry) fn validate_correlator(
     left_schemas: &[(&RelayName, &CreateSchema)],
     right_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
-    humantime::parse_duration(&correlator.max_time).map_err(|error| {
+    parse_duration_text(&correlator.max_time).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -1753,6 +1752,8 @@ pub(in crate::registry) fn validate_generator_output(
 #[cfg(test)]
 #[path = "processor/bytes_tests.rs"]
 mod bytes_tests;
+#[cfg(test)]
+mod duration_tests;
 #[cfg(test)]
 mod vm_report_tests;
 #[cfg(test)]
