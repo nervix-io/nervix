@@ -345,8 +345,8 @@ struct ScenarioWorld {
     saved_relocation_plan: Option<String>,
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
-    /// The node whose bulk workers and bulk wait queue a scenario filled, until it releases them.
-    saturated_bulk_node: Option<String>,
+    /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
+    saturated_credentials_node: Option<String>,
     broker_observer: Option<BrokerObserver>,
     /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
@@ -473,7 +473,10 @@ impl fmt::Debug for ScenarioWorld {
                 "last_auth_attempts_elapsed",
                 &self.last_auth_attempts_elapsed,
             )
-            .field("saturated_bulk_node", &self.saturated_bulk_node)
+            .field(
+                "saturated_credentials_node",
+                &self.saturated_credentials_node,
+            )
             .field(
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
@@ -13962,6 +13965,18 @@ async fn connect_to_leader_with_credentials(
     username: String,
     password: String,
 ) {
+    let leader = current_leader_node(world).await;
+    connect_to_node_with_credentials(world, &leader, username, password).await;
+}
+
+/// Connect to `node_id` directly, without first asking the cluster for its leader, and run one
+/// status command as the given user.
+async fn connect_to_node_with_credentials(
+    world: &mut ScenarioWorld,
+    node_id: &str,
+    username: String,
+    password: String,
+) {
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -13970,11 +13985,10 @@ async fn connect_to_leader_with_credentials(
     world.active_session_has_subscription = false;
     let username = expand_placeholders(world, &username);
     let password = expand_placeholders(world, &password);
-    let leader = current_leader_node(world).await;
     let grpc_uri = world
         .cluster()
-        .grpc_uri(&leader)
-        .expect("failed to resolve leader gRPC URI");
+        .grpc_uri(node_id)
+        .expect("failed to resolve node gRPC URI");
     let mut options =
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
     options.username = Some(username);
@@ -14986,32 +15000,50 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
-/// Fill every bulk worker and every place in the bulk wait queue on the leader, so the next bulk
-/// job the leader is handed is refused rather than queued.
-#[when("bulk execution on the leader node is saturated")]
-async fn when_bulk_execution_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
+/// Fill the credentials worker and every place in its wait queue on the leader, so the next
+/// password the leader is asked to verify is refused rather than queued. The leader is the node
+/// the scenario created its user through, so the user is already visible there.
+#[when("credential verification on the leader node is saturated")]
+async fn when_credential_verification_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(60),
         fault_injection.saturate_execution(
             &crate::common::cluster::node_name(&leader),
-            nervix_execution::CpuClass::Bulk,
+            nervix_execution::CpuClass::Credentials,
         ),
     )
     .await
     .unwrap_or_else(|error| {
-        panic!("bulk execution on '{leader}' never filled its workers and wait queue: {error}")
+        panic!(
+            "credential verification on '{leader}' never filled its worker and wait queue: {error}"
+        )
     });
-    world.saturated_bulk_node = Some(leader);
+    world.saturated_credentials_node = Some(leader);
 }
 
-#[when("the saturated bulk execution is released")]
-async fn when_the_saturated_bulk_execution_is_released(world: &mut ScenarioWorld) {
+/// Finding the leader opens status sessions, which a node whose credential verification is
+/// saturated cannot authenticate, so this connects to the saturated node it recorded instead.
+#[when(expr = "the client connects to the saturated node as user {string} with password {string}")]
+async fn when_the_client_connects_to_the_saturated_node_as_user_with_password(
+    world: &mut ScenarioWorld,
+    username: String,
+    password: String,
+) {
     let node_id = world
-        .saturated_bulk_node
+        .saturated_credentials_node
+        .clone()
+        .expect("an earlier step saturated credential verification on a node");
+    connect_to_node_with_credentials(world, &node_id, username, password).await;
+}
+
+#[when("the saturated credential verification is released")]
+async fn when_the_saturated_credential_verification_is_released(world: &mut ScenarioWorld) {
+    let node_id = world
+        .saturated_credentials_node
         .take()
-        .expect("an earlier step saturated bulk execution on a node");
+        .expect("an earlier step saturated credential verification on a node");
     world
         .fault_injection
         .release_execution(&crate::common::cluster::node_name(&node_id));

@@ -22,13 +22,13 @@ Feature: Bounded execution and transient memory
       """
       CREATE USER busy_user WITH PASSWORD 'busy-password';
       """
-    And bulk execution on the leader node is saturated
-    And the client connects to the leader node as user "busy_user" with password "busy-password"
+    And credential verification on the leader node is saturated
+    And the client connects to the saturated node as user "busy_user" with password "busy-password"
     Then the last command error contains
       """
       the node could not verify credentials now; retry
       """
-    When the saturated bulk execution is released
+    When the saturated credential verification is released
     And the client connects to the leader node as user "busy_user" with password "busy-password"
     Then the last command output contains
       """

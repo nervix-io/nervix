@@ -167,6 +167,7 @@ fn single_worker_executor() -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             control_cpu: one,
+            credentials_cpu: one,
             data_cpu: one,
             extension_cpu: one,
             bulk_cpu: one,

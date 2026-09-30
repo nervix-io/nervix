@@ -203,6 +203,7 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                         let executor = Executor::default();
                         for (cpu, memory) in [
                             (CpuClass::Control, MemoryClass::Management),
+                            (CpuClass::Credentials, MemoryClass::Credentials),
                             (CpuClass::Data, MemoryClass::Commands),
                             (CpuClass::Bulk, MemoryClass::Relay),
                             (CpuClass::Bulk, MemoryClass::Bulk),
@@ -223,6 +224,7 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                         let snapshot = executor.snapshot();
                         for workers in [
                             snapshot.control_cpu,
+                            snapshot.credentials_cpu,
                             snapshot.data_cpu,
                             snapshot.extension_cpu,
                             snapshot.bulk_cpu,
@@ -235,6 +237,7 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                             snapshot.commands_memory,
                             snapshot.relay_memory,
                             snapshot.bulk_memory,
+                            snapshot.credentials_memory,
                         ] {
                             assert_eq!(budget.reserved_bytes, 0);
                         }

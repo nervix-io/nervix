@@ -338,7 +338,8 @@ choose a backend.
 - Work a node runs off its async workers goes through the bounded executor in `nervix-execution`:
   it takes the CPU or storage class of its work, charges the memory class it allocates in, and
   checks its `Cancellation` between bounded units. Operator-supplied code the node cannot bound,
-  such as a UDF call or a JAQ transformation, takes the extension class. A refusal from the
+  such as a UDF call or a JAQ transformation, takes the extension class, and password hashing
+  takes the credentials class. A refusal from the
   executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
   stays retryable rather than becoming a decode, encode or authentication failure.
   `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other

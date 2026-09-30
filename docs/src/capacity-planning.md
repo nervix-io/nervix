@@ -41,16 +41,17 @@ and never a worker another class needs. See the
 ## Bounded Execution And Transient Memory
 
 Every variable-size encode, decode, validation, hash, compilation and program execution a node
-runs off its asynchronous runtime is admitted into one of six bounded classes, and is charged
+runs off its asynchronous runtime is admitted into one of seven bounded classes, and is charged
 against a reserved byte budget before it allocates. Each class has its own admission, so work
 saturating one cannot take the slots another is entitled to.
 
 | Class | Concurrent jobs | Work |
 | --- | --- | --- |
 | Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
+| Credentials | 1 | Password hashing and verification for users being created or authenticated |
 | Data | available CPUs − 1 | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, ingest branch preparation and model inference |
 | Extension | available CPUs − 1 | Operator-supplied code the node cannot bound: UDF-bearing expressions and JAQ transformations |
-| Bulk | available CPUs − 1 | Whole-transfer work: resource archives, large read results, password hashing, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
+| Bulk | available CPUs − 1 | Whole-transfer work: resource archives, large read results, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
 
@@ -62,16 +63,19 @@ inspection, which wait on the broker, and the one read of the resolver configura
 Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that is refused, and
 the work that submitted it reports the refusal as its own failure.
 
-Transient memory is 256 MiB per node, divided into ceilings that cannot borrow from each other:
-8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work and 32 MiB for
-bulk buffers. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
+Transient memory is 275 MiB per node, divided into ceilings that cannot borrow from each other:
+8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work, 32 MiB for
+bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
 and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
 once so one blocked channel cannot exhaust the capacity another needs.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
+The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
+hash at a time and a burst of login attempts waits there without touching any other class. A stored
+hash whose parameters need more memory than that never verifies.
 
-These budgets cover work in flight between nodes. They are separate from the process memory a
-running graph holds, which the [memory-pressure watermarks](metrics-and-observability.md) govern.
+These budgets cover transient work: data in flight between nodes and the working memory of the
+jobs the classes admit. They are separate from the process memory a running graph holds, which the [memory-pressure watermarks](metrics-and-observability.md) govern.
 The limits are checked against each other when a node starts: a budget that could not hold the
 largest operation of its class is reported with that class and size rather than discovered by
 stalling on the first such operation.

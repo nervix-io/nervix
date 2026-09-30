@@ -144,6 +144,7 @@ fn executor(pending_jobs: usize) -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             control_cpu: NonZeroUsize::MIN,
+            credentials_cpu: NonZeroUsize::MIN,
             data_cpu: NonZeroUsize::MIN,
             extension_cpu: NonZeroUsize::MIN,
             bulk_cpu: NonZeroUsize::MIN,
@@ -261,6 +262,7 @@ impl HostBounds {
         let executor = &observation.executor;
         for workers in [
             executor.control_cpu,
+            executor.credentials_cpu,
             executor.data_cpu,
             executor.extension_cpu,
             executor.bulk_cpu,
@@ -281,6 +283,7 @@ impl HostBounds {
             executor.commands_memory,
             executor.relay_memory,
             executor.bulk_memory,
+            executor.credentials_memory,
         ] {
             assert!(
                 budget.reserved_bytes <= budget.capacity_bytes,
@@ -345,7 +348,13 @@ impl Observation {
         assert_eq!(self.transport.relay_attempts, 0, "{host}: {self:?}");
         assert_eq!(self.transport.relay_grants, 0, "{host}: {self:?}");
         let executor = &self.executor;
-        for workers in [executor.control_cpu, executor.data_cpu, executor.bulk_cpu] {
+        for workers in [
+            executor.control_cpu,
+            executor.credentials_cpu,
+            executor.data_cpu,
+            executor.extension_cpu,
+            executor.bulk_cpu,
+        ] {
             assert_eq!(workers.running, 0, "{host}: {self:?}");
             assert_eq!(workers.pending, 0, "{host}: {self:?}");
         }
@@ -354,6 +363,7 @@ impl Observation {
             executor.commands_memory,
             executor.relay_memory,
             executor.bulk_memory,
+            executor.credentials_memory,
         ] {
             assert_eq!(budget.reserved_bytes, 0, "{host}: {self:?}");
         }

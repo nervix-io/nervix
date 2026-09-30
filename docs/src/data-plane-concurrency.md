@@ -727,7 +727,9 @@ execution and synchronous filesystem or database work through the bounded execut
 each job into a CPU or storage class, charges its memory, and gives it the cancellation it checks
 between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call or a JAQ
 transformation, takes the extension class, so a program that never returns holds only that class's
-workers. The executor's storage workers are the one built-in owner of the runtime's blocking pool.
+workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
+listener spends only those, and saturated data, extension or bulk work never delays a login. The
+executor's storage workers are the one built-in owner of the runtime's blocking pool.
 
 Everything else that blocks a thread is a declared owner in
 `crates/primitives/blocking-permissions.toml`, which names the file, the owner, why it stays outside

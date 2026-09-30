@@ -733,11 +733,19 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             class: "bulk",
             budget: executor.bulk_memory,
         },
+        MemoryClassSample {
+            class: "credentials",
+            budget: executor.credentials_memory,
+        },
     ];
     let workers = [
         WorkerClassSample {
             class: "control_cpu",
             workers: executor.control_cpu,
+        },
+        WorkerClassSample {
+            class: "credentials_cpu",
+            workers: executor.credentials_cpu,
         },
         WorkerClassSample {
             class: "data_cpu",

@@ -153,7 +153,7 @@ pub(in crate::application) enum PasswordHashError {
     Compute,
     #[error("the node's bounded execution could not take the password hash now")]
     Busy,
-    #[error("the password hash needs more working memory than the node's bulk budget holds")]
+    #[error("the password hash needs more working memory than the node's credentials budget holds")]
     ExceedsBudget,
     #[error("the caller stopped waiting for the password hash before it started")]
     Cancelled,
@@ -162,7 +162,8 @@ pub(in crate::application) enum PasswordHashError {
 }
 
 impl PasswordHashError {
-    /// A charge the bulk budget could not grant: waiting for room is the budget's own backpressure,
+    /// A charge the credentials budget could not grant: waiting for room is the budget's own
+    /// backpressure,
     /// so only a hash larger than the whole budget or a closed budget reaches here.
     fn from_admission(error: Report<AdmissionError>) -> Report<Self> {
         let failure = match error.current_context() {
@@ -203,23 +204,24 @@ fn argon2_working_bytes(params: &Params) -> u64 {
         .assured("a KiB count held in a u32 is far below u64::MAX / 1024")
 }
 
-/// Hash `password` on the node's bulk workers, charged the working memory Argon2 allocates.
+/// Hash `password` on the node's credentials worker, charged the working memory Argon2 allocates.
 ///
-/// Argon2 is deliberately expensive in both time and memory, and anyone who can reach an endpoint
-/// can make a node hash or verify. The bulk class keeps that work off the control and data workers,
-/// and its budget bounds how much Argon2 memory the node holds at once: a burst of hashes waits for
-/// room instead of allocating past it.
+/// Argon2 is deliberately expensive in both time and memory, and anyone who can reach a listener
+/// can make a node hash or verify. The credentials class keeps that work apart from every other
+/// class: a burst of attempts never takes what control, data or bulk work needs, and saturated work
+/// there never keeps an operator from authenticating. Its budget bounds how much Argon2 memory the
+/// node holds at once, so a burst of hashes waits for room instead of allocating past it.
 async fn hash_password(
     executor: &Executor,
     password: String,
 ) -> error_stack::Result<String, PasswordHashError> {
     let argon2 = password_argon2();
     let reservation = executor
-        .reserve(MemoryClass::Bulk, argon2_working_bytes(argon2.params()))
+        .reserve(MemoryClass::Credentials, argon2_working_bytes(argon2.params()))
         .await
         .map_err(PasswordHashError::from_admission)?;
     let hashed = executor
-        .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+        .run_cpu(CpuClass::Credentials, reservation, move |_charge, cancellation| {
             cancellation
                 .check()
                 .change_context(PasswordHashError::Cancelled)?;
@@ -236,9 +238,10 @@ async fn hash_password(
     }
 }
 
-/// Whether `password` matches `password_hash`, verified on the node's bulk workers under a charge of
-/// the working memory the stored hash's own parameters make Argon2 allocate. A hash that does not
-/// parse matches nothing.
+/// Whether `password` matches `password_hash`, verified on the node's credentials worker under a
+/// charge of the working memory the stored hash's own parameters make Argon2 allocate. A hash that
+/// does not parse matches nothing, and neither does one whose parameters need more memory than the
+/// credentials budget holds.
 pub(in crate::application) async fn verify_password_hash(
     executor: &Executor,
     password_hash: String,
@@ -251,11 +254,11 @@ pub(in crate::application) async fn verify_password_hash(
         return Ok(false);
     };
     let reservation = executor
-        .reserve(MemoryClass::Bulk, argon2_working_bytes(&params))
+        .reserve(MemoryClass::Credentials, argon2_working_bytes(&params))
         .await
         .map_err(PasswordHashError::from_admission)?;
     let verified = executor
-        .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+        .run_cpu(CpuClass::Credentials, reservation, move |_charge, cancellation| {
             cancellation
                 .check()
                 .change_context(PasswordHashError::Cancelled)?;
@@ -500,6 +503,7 @@ impl SessionServiceImpl {
 mod tests {
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
+    use nervix_execution::OperationLimits;
     use nervix_models::{CreateStatement, CreateUser, UserName};
 
     use super::*;
@@ -689,22 +693,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_credentials_budget_holds_one_default_hash() {
+        assert_eq!(
+            argon2_working_bytes(&Params::default()),
+            OperationLimits::default().credential_working_bytes.as_u64()
+        );
+    }
+
     #[nervix_primitives::test]
-    async fn passwords_are_hashed_and_verified_on_the_bulk_workers() {
+    async fn passwords_are_hashed_and_verified_on_the_credentials_worker() {
         let executor = Executor::default();
         let password_hash = hash_password(&executor, "secret".to_string())
             .await
-            .expect("the bulk workers hash the password");
+            .expect("the credentials worker hashes the password");
         let matched = verify_password_hash(&executor, password_hash, "secret".to_string())
             .await
-            .expect("the bulk workers verify the password");
+            .expect("the credentials worker verifies the password");
 
         assert!(matched);
         let snapshot = executor.snapshot();
-        assert_eq!(snapshot.bulk_cpu.admitted, 2);
-        assert_eq!(snapshot.bulk_cpu.completed, 2);
-        assert_eq!(snapshot.bulk_memory.granted, 2);
-        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
+        assert_eq!(snapshot.credentials_cpu.admitted, 2);
+        assert_eq!(snapshot.credentials_cpu.completed, 2);
+        assert_eq!(snapshot.credentials_memory.granted, 2);
+        assert_eq!(snapshot.credentials_memory.reserved_bytes, 0);
+        assert_eq!(snapshot.bulk_cpu.admitted, 0);
     }
 
     #[nervix_primitives::test]
@@ -734,7 +747,7 @@ mod tests {
             password: "busy-secret".to_string(),
         };
 
-        let filled = FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
+        let filled = FilledCpuClass::fill(&executor, CpuClass::Credentials).await;
         let refused = service.authenticate_basic_credentials(&credentials).await;
         assert_eq!(refused, Err(CredentialRejection::Busy));
         // Nothing judged the credentials, so the user is not paced as after a failed attempt.
