@@ -617,8 +617,14 @@ def scoped_build_env(target: Target, path: pathlib.Path) -> dict[str, str]:
 
 
 def build_instrumented(
-    inventory: Inventory, target: Target, path: pathlib.Path, *, timeout: int = 1800
+    inventory: Inventory, target: Target, path: pathlib.Path, *, timeout: int | None = None
 ) -> pathlib.Path:
+    budget_name = "BOLERO_BUILD_TIMEOUT_SECONDS"
+    try:
+        build_timeout = int(os.environ.get(budget_name, "1800")) if timeout is None else timeout
+    except ValueError as error:
+        raise BoleroError(f"{budget_name} must be a positive integer") from error
+    positive_int(build_timeout, budget_name)
     empty_corpus = path / "build-corpus"
     empty_crashes = path / "build-crashes"
     empty_corpus.mkdir()
@@ -632,8 +638,9 @@ def build_instrumented(
         str(empty_crashes),
         target.test,
     ]
+    print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
     build = command(
-        args, env=scoped_build_env(target, path), timeout=timeout, log=path / "build.log"
+        args, env=scoped_build_env(target, path), timeout=build_timeout, log=path / "build.log"
     )
     executables = EXECUTABLE.findall(build.stdout)
     matches = []

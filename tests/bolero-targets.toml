@@ -415,6 +415,35 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__task_status__tests__bolero_status_sequences_publish_complete_transitions/corpus"
+domain_version = 1
+features = []
+id = "task-status-transitions"
+invariant = "Every status transition publishes the complete failure and retry, and retained observations remain immutable."
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/task_status.rs"
+test = "runtime::task_status::tests::bolero_status_sequences_publish_complete_transitions"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__entity_gate__tests__bolero_freeze_sequences_publish_exact_coordination_owners/corpus"
+domain_version = 1
+features = []
+id = "entity-freeze-transitions"
+invariant = "Every engagement and release publishes exactly its active coordination owners and every retained watch sees that publication."
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/entity_gate.rs"
+test = "runtime::entity_gate::tests::bolero_freeze_sequences_publish_exact_coordination_owners"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
 domain_version = 1
 features = []
@@ -426,6 +455,7 @@ random_iterations = 128
 source = "crates/client-wire/src/tests/properties/requests.rs"
 test = "tests::properties::requests::bolero_client_requests_keep_complete_values"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
@@ -441,6 +471,7 @@ source = "crates/client-wire/src/tests/properties/replies.rs"
 test = "tests::properties::replies::bolero_replies_keep_complete_values"
 test_target = "lib"
 
+
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
@@ -454,6 +485,7 @@ random_iterations = 128
 source = "crates/client-wire/src/tests/properties/events.rs"
 test = "tests::properties::events::bolero_events_keep_complete_values_and_owned_views"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
@@ -469,6 +501,7 @@ source = "crates/client-wire/src/tests/properties/streams.rs"
 test = "tests::properties::streams::bolero_stream_frames_keep_values_and_chunk_ownership"
 test_target = "lib"
 
+
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_reply_transfers_keep_exact_bytes_and_reject_without_effects/corpus"
@@ -482,6 +515,7 @@ random_iterations = 128
 source = "crates/client-wire/src/tests/properties/streams.rs"
 test = "tests::properties::streams::bolero_reply_transfers_keep_exact_bytes_and_reject_without_effects"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
@@ -497,6 +531,7 @@ source = "crates/client-wire/src/tests/properties/rows.rs"
 test = "tests::properties::rows::bolero_row_views_keep_complete_cells_and_buffer_ownership"
 test_target = "lib"
 
+
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_arbitrary_frames_verify_and_decode_within_limits/corpus"
@@ -510,6 +545,7 @@ random_iterations = 256
 source = "crates/client-wire/src/tests/properties/malformed.rs"
 test = "tests::properties::malformed::bolero_arbitrary_frames_verify_and_decode_within_limits"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
@@ -525,6 +561,7 @@ source = "crates/client-wire/src/tests/properties/malformed.rs"
 test = "tests::properties::malformed::bolero_current_frame_corruption_is_bounded"
 test_target = "lib"
 
+
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__malformed__bolero_discriminators_are_validated_before_use/corpus"
@@ -538,6 +575,7 @@ random_iterations = 256
 source = "crates/client-wire/src/tests/properties/malformed.rs"
 test = "tests::properties::malformed::bolero_discriminators_are_validated_before_use"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
@@ -553,6 +591,7 @@ source = "src/subscription_row/properties.rs"
 test = "subscription_row::properties::bolero_arrow_rows_preserve_exact_values_or_explicit_redaction"
 test_target = "lib"
 
+
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/subscription_row/__fuzz__/subscription_row__properties__bolero_invalid_arrow_selection_has_no_partial_emission/corpus"
@@ -566,6 +605,7 @@ random_iterations = 128
 source = "src/subscription_row/properties.rs"
 test = "subscription_row::properties::bolero_invalid_arrow_selection_has_no_partial_emission"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10

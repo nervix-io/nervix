@@ -56,6 +56,7 @@ Feature: Redis ingestion
       | 3            | 0             |
       | 3            | 1             |
 
+  @retained_task_handles
   Scenario Outline: Redis ingestor reports transient source failures and recovers
     Given Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

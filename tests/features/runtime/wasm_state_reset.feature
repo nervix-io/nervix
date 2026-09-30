@@ -425,6 +425,7 @@ Feature: Coordinated WASM processor state reset
       | 1            | 0             |
       | 3            | 1             |
 
+  @retained_task_handles
   Scenario Outline: Resetting every WASM branch replaces two interleaved branch lifetimes together
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

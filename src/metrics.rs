@@ -1468,20 +1468,16 @@ struct PrometheusMetrics {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct IngestorQuiesceMetricLabels {
-    domain: String,
-    ingestor: String,
-    physical_node_id: Option<ClusterNodeName>,
+pub(crate) struct IngestorQuiesceMetrics {
+    series: Arc<IngestorQuiesceSeries>,
 }
 
-impl IngestorQuiesceMetricLabels {
-    fn values(&self) -> [&str; 3] {
-        [
-            self.domain.as_str(),
-            self.ingestor.as_str(),
-            physical_node_label(self.physical_node_id.as_ref()),
-        ]
-    }
+#[derive(Debug)]
+struct IngestorQuiesceSeries {
+    buffered_records: IntGauge,
+    buffered_bytes: IntGauge,
+    dropped: IntCounter,
+    rejected: IntCounter,
 }
 
 struct JemallocMetricsCollector {
@@ -2858,32 +2854,32 @@ impl RuntimeMetrics {
         domain: &DomainName,
         ingestor: &IngestorName,
         physical_node_id: Option<&ClusterNodeName>,
-    ) -> IngestorQuiesceMetricLabels {
-        let labels = IngestorQuiesceMetricLabels {
-            domain: domain.as_str().to_string(),
-            ingestor: ingestor.as_str().to_string(),
-            physical_node_id: physical_node_id.cloned(),
+    ) -> IngestorQuiesceMetrics {
+        let values = [
+            domain.as_str(),
+            ingestor.as_str(),
+            physical_node_label(physical_node_id),
+        ];
+        let prometheus = &self.series.prometheus;
+        let series = IngestorQuiesceSeries {
+            buffered_records: prometheus
+                .ingestor_quiesce_buffered_records
+                .with_label_values(&values),
+            buffered_bytes: prometheus
+                .ingestor_quiesce_buffered_bytes
+                .with_label_values(&values),
+            dropped: prometheus
+                .ingestor_quiesce_dropped_total
+                .with_label_values(&values),
+            rejected: prometheus
+                .ingestor_quiesce_rejected_total
+                .with_label_values(&values),
         };
-        let values = labels.values();
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_records
-            .with_label_values(&values)
-            .set(0);
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_bytes
-            .with_label_values(&values)
-            .set(0);
-        self.series
-            .prometheus
-            .ingestor_quiesce_dropped_total
-            .with_label_values(&values);
-        self.series
-            .prometheus
-            .ingestor_quiesce_rejected_total
-            .with_label_values(&values);
-        labels
+        series.buffered_records.set(0);
+        series.buffered_bytes.set(0);
+        IngestorQuiesceMetrics {
+            series: Arc::new(series),
+        }
     }
 
     /// Records how many open session subscriptions this node delivers from `relay`. A relay the
@@ -2930,9 +2926,11 @@ impl RuntimeMetrics {
             admitted_batches: prometheus
                 .client_ingestor_admitted_batches
                 .with_label_values(&labels),
-            submissions: prometheus.client_ingestor_submissions_total.clone(),
-            domain: domain.clone(),
-            ingestor: ingestor.clone(),
+            submissions: ClientSubmissionCounters::new(
+                &prometheus.client_ingestor_submissions_total,
+                domain,
+                ingestor,
+            ),
         }
     }
 
@@ -2982,64 +2980,47 @@ impl RuntimeMetrics {
     }
 
     /// Records rows a dropping session subscription to `relay` discarded.
-    pub(crate) fn increment_session_subscription_dropped_rows(
+    pub(crate) fn session_subscription_dropped_rows(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        rows: u64,
-    ) {
+    ) -> IntCounter {
         self.series
             .prometheus
             .session_subscription_dropped_rows_total
             .with_label_values(&[domain.as_str(), relay.as_str()])
-            .inc_by(rows);
     }
 
     pub(crate) fn set_ingestor_quiesce_buffered(
         &self,
-        labels: &IngestorQuiesceMetricLabels,
+        metrics: &IngestorQuiesceMetrics,
         records: usize,
         bytes: usize,
     ) {
-        let values = labels.values();
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_records
-            .with_label_values(&values)
-            .set(i64::try_from(records).assured(
-                "buffered records occupy memory and cannot exceed the allocator's isize limit",
-            ));
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_bytes
-            .with_label_values(&values)
-            .set(i64::try_from(bytes).assured(
-                "buffered bytes occupy memory and cannot exceed the allocator's isize limit",
-            ));
+        metrics
+            .series
+            .buffered_records
+            .set(i64::try_from(records).assured("buffered records occupy memory and fit in i64"));
+        metrics
+            .series
+            .buffered_bytes
+            .set(i64::try_from(bytes).assured("buffered bytes occupy memory and fit in i64"));
     }
 
     pub(crate) fn increment_ingestor_quiesce_dropped(
         &self,
-        labels: &IngestorQuiesceMetricLabels,
+        metrics: &IngestorQuiesceMetrics,
         count: u64,
     ) {
-        self.series
-            .prometheus
-            .ingestor_quiesce_dropped_total
-            .with_label_values(&labels.values())
-            .inc_by(count);
+        metrics.series.dropped.inc_by(count);
     }
 
     pub(crate) fn increment_ingestor_quiesce_rejected(
         &self,
-        labels: &IngestorQuiesceMetricLabels,
+        metrics: &IngestorQuiesceMetrics,
         count: u64,
     ) {
-        self.series
-            .prometheus
-            .ingestor_quiesce_rejected_total
-            .with_label_values(&labels.values())
-            .inc_by(count);
+        metrics.series.rejected.inc_by(count);
     }
 
     pub(crate) fn register_branch(
@@ -4638,22 +4619,74 @@ pub(crate) struct ClientIngestorSeries {
     outstanding_batches: IntGauge,
     outstanding_bytes: IntGauge,
     admitted_batches: IntGauge,
-    /// Answered batches, whose outcome and cause labels vary per batch.
-    submissions: IntCounterVec,
-    domain: DomainName,
-    ingestor: IngestorName,
+    /// Every bounded outcome child is resolved before the endpoint accepts its first batch.
+    submissions: ClientSubmissionCounters,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct ClientSubmissionMetricKey {
+    class: &'static str,
+    cause: &'static str,
+}
+
+impl From<&nervix_models::ClientSubmissionOutcome> for ClientSubmissionMetricKey {
+    fn from(outcome: &nervix_models::ClientSubmissionOutcome) -> Self {
+        Self {
+            class: outcome.class_label(),
+            cause: outcome.cause_label(),
+        }
+    }
+}
+
+struct ClientSubmissionCounters {
+    children: ahash::HashMap<ClientSubmissionMetricKey, IntCounter>,
+}
+
+impl ClientSubmissionCounters {
+    fn new(vector: &IntCounterVec, domain: &DomainName, ingestor: &IngestorName) -> Self {
+        use nervix_models::{
+            ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure,
+            ClientSubmissionOutcome, ClientSubmissionRefusal,
+        };
+        let mut outcomes = vec![ClientSubmissionOutcome::Completed];
+        for refusal in [
+            ClientSubmissionRefusal::InvalidBatch(ClientBatchDefect::Malformed),
+            ClientSubmissionRefusal::Suspended,
+            ClientSubmissionRefusal::Busy,
+            ClientSubmissionRefusal::Draining,
+            ClientSubmissionRefusal::ProducerEnded,
+            ClientSubmissionRefusal::CreditExceeded,
+        ] {
+            outcomes.push(ClientSubmissionOutcome::NotAdmitted(refusal));
+        }
+        for failure in ClientProcessingFailure::iter() {
+            outcomes.push(ClientSubmissionOutcome::ProcessingFailed(failure));
+        }
+        for uncertainty in ClientOutcomeUncertainty::iter() {
+            outcomes.push(ClientSubmissionOutcome::OutcomeUnknown(uncertainty));
+        }
+        let mut children = ahash::HashMap::default();
+        for outcome in outcomes {
+            let child = vector.with_label_values(&[
+                domain.as_str(),
+                ingestor.as_str(),
+                outcome.class_label(),
+                outcome.cause_label(),
+            ]);
+            children.insert(ClientSubmissionMetricKey::from(&outcome), child);
+        }
+        Self { children }
+    }
 }
 
 impl ClientIngestorSeries {
     /// Counts one batch the ingestor answered with `outcome`.
     pub(crate) fn count(&self, outcome: &nervix_models::ClientSubmissionOutcome) {
+        let key = ClientSubmissionMetricKey::from(outcome);
         self.submissions
-            .with_label_values(&[
-                self.domain.as_str(),
-                self.ingestor.as_str(),
-                outcome.class_label(),
-                outcome.cause_label(),
-            ])
+            .children
+            .get(&key)
+            .assured("every public outcome's metric child is bound at endpoint startup")
             .inc();
     }
 
@@ -4810,6 +4843,79 @@ impl ClientEmitterSeries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_client_outcome_children_cover_every_public_cause_and_batch_defect() {
+        use nervix_models::{
+            ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure,
+            ClientSubmissionOutcome, ClientSubmissionRefusal,
+        };
+
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("retained").assured("the domain is valid");
+        let ingestor = IngestorName::parse("source").assured("the ingestor is valid");
+        let series = metrics.client_ingestor_series(&domain, &ingestor);
+        let mut outcomes = vec![ClientSubmissionOutcome::Completed];
+        for defect in ClientBatchDefect::iter() {
+            outcomes.push(ClientSubmissionOutcome::NotAdmitted(
+                ClientSubmissionRefusal::InvalidBatch(defect),
+            ));
+        }
+        for refusal in [
+            ClientSubmissionRefusal::Suspended,
+            ClientSubmissionRefusal::Busy,
+            ClientSubmissionRefusal::Draining,
+            ClientSubmissionRefusal::ProducerEnded,
+            ClientSubmissionRefusal::CreditExceeded,
+        ] {
+            outcomes.push(ClientSubmissionOutcome::NotAdmitted(refusal));
+        }
+        for failure in ClientProcessingFailure::iter() {
+            outcomes.push(ClientSubmissionOutcome::ProcessingFailed(failure));
+        }
+        for uncertainty in ClientOutcomeUncertainty::iter() {
+            outcomes.push(ClientSubmissionOutcome::OutcomeUnknown(uncertainty));
+        }
+        let mut expected = ahash::HashMap::<ClientSubmissionMetricKey, u64>::default();
+        for outcome in outcomes {
+            series.count(&outcome);
+            *expected
+                .entry(ClientSubmissionMetricKey::from(&outcome))
+                .or_default() += 1;
+        }
+        assert_eq!(series.submissions.children.len(), expected.len());
+        for (key, count) in expected {
+            assert_eq!(
+                series
+                    .submissions
+                    .children
+                    .get(&key)
+                    .assured("every public cause has a retained metric")
+                    .get(),
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn retained_quiesce_children_keep_gauges_and_outcomes_in_the_registered_series() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("retained").assured("the domain is valid");
+        let ingestor = IngestorName::parse("source").assured("the ingestor is valid");
+        let children = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+        metrics.set_ingestor_quiesce_buffered(&children, 2, 13);
+        metrics.increment_ingestor_quiesce_dropped(&children, 3);
+        metrics.increment_ingestor_quiesce_rejected(&children, 5);
+        assert_eq!(children.series.buffered_records.get(), 2);
+        assert_eq!(children.series.buffered_bytes.get(), 13);
+        assert_eq!(children.series.dropped.get(), 3);
+        assert_eq!(children.series.rejected.get(), 5);
+        metrics.set_ingestor_quiesce_buffered(&children, 0, 0);
+        assert_eq!(children.series.buffered_records.get(), 0);
+        assert_eq!(children.series.buffered_bytes.get(), 0);
+        assert_eq!(children.series.dropped.get(), 3);
+        assert_eq!(children.series.rejected.get(), 5);
+    }
 
     fn record_value_at(histogram: &mut TimeRollingHistogram, value: f64, now_nanos: i64) {
         let samples = HistogramSamples::one(value)
