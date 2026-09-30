@@ -71,6 +71,15 @@ impl EndpointDispatchOutcome {
     }
 }
 
+/// What became of one payload a binding dispatched.
+enum EndpointBindingDispatch {
+    /// The binding took the payload: it dispatched it, or reported why its codec rejected it.
+    Taken,
+    /// The node's bounded execution could not take the payload's unfolding now. Nothing judged
+    /// the payload, so its sender is told to send it again.
+    NotAdmitted,
+}
+
 pub(super) fn normalize_http_host(host: &str) -> String {
     host.split(':')
         .next()
@@ -230,12 +239,22 @@ impl Runtime {
             );
             match binding.quiesce.intake(0, payload, true) {
                 IngestorQuiesceIntake::Dispatch(payload) => {
-                    outcome.accepted = outcome
-                        .accepted
-                        .checked_add(1)
-                        .assured("the bindings counted here are endpoint routes held in memory");
-                    self.dispatch_endpoint_binding(binding, payload, protocol)
-                        .await;
+                    match self
+                        .dispatch_endpoint_binding(binding, payload, protocol)
+                        .await
+                    {
+                        EndpointBindingDispatch::Taken => {
+                            outcome.accepted = outcome.accepted.checked_add(1).assured(
+                                "the bindings counted here are endpoint routes held in memory",
+                            );
+                        }
+                        EndpointBindingDispatch::NotAdmitted => {
+                            outcome.rejected = outcome.rejected.checked_add(1).assured(
+                                "the bindings counted here are endpoint routes held in memory",
+                            );
+                            retry_after.push(None);
+                        }
+                    }
                 }
                 IngestorQuiesceIntake::Buffered => {
                     outcome.accepted = outcome
@@ -275,7 +294,7 @@ impl Runtime {
         binding: &EndpointIngestBinding,
         payload: BufferedIngestPayload,
         protocol: &str,
-    ) {
+    ) -> EndpointBindingDispatch {
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector =
@@ -325,20 +344,14 @@ impl Runtime {
             }
             Err(error) => {
                 if let PayloadDecodeError::NotAdmitted = error.current_context() {
-                    self.inner.events.report_error(format!(
-                        "the node could not take {protocol} message for ingestor '{}' in domain \
-                         '{}' now: {error:?}",
-                        binding.ingestor.as_str(),
-                        binding.domain.as_str(),
-                    ));
-                    warn!(
+                    debug!(
                         domain = binding.domain.as_str(),
                         ingestor = binding.ingestor.as_str(),
                         error = ?error,
                         protocol,
-                        "the node could not take an endpoint message"
+                        "the node could not take an endpoint message now"
                     );
-                    return;
+                    return EndpointBindingDispatch::NotAdmitted;
                 }
                 self.inner.events.report_error(format!(
                     "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
@@ -355,6 +368,7 @@ impl Runtime {
                 );
             }
         }
+        EndpointBindingDispatch::Taken
     }
 }
 

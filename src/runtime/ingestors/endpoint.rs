@@ -170,8 +170,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_connector::NoIngestHeaders;
+    use nervix_execution::CpuClass;
     use nervix_models::{
-        ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CreateCodec, CreateEndpoint,
+        ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
+        CodecWireFormat, CreateCodec, CreateEndpoint,
         CreateJsonWireSchema, CreateRelay, CreateSchema, CreateVhost, DomainConfig, DomainPace,
         DomainState, DomainStatus, EndpointIngestMode, EndpointName, JsonType, OutputBranch,
         ParseAsType, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
@@ -180,13 +182,33 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
+    use crate::runtime::endpoint::EndpointDispatchOutcome;
 
-    /// A running domain whose one endpoint ingestor reads `/events` on `edge.example.com`.
+    /// A running domain whose one endpoint ingestor reads `/events` on `edge.example.com` through
+    /// its `event_wire` JSON wire schema.
     async fn runtime_with_endpoint_ingestor(
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> Runtime {
-        let runtime = Runtime::default();
+        start_endpoint_ingestor(
+            Runtime::default(),
+            domain,
+            ingestor,
+            CodecWireFormat::Json {
+                wire_schema: named::<WireSchemaName>("event_wire"),
+            },
+        )
+        .await
+    }
+
+    /// Starts, on `runtime`, a running domain whose one endpoint ingestor reads `/events` on
+    /// `edge.example.com` through a codec of `wire_format`.
+    async fn start_endpoint_ingestor(
+        runtime: Runtime,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        wire_format: CodecWireFormat,
+    ) -> Runtime {
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),
             DomainState {
@@ -224,7 +246,7 @@ mod tests {
                             }],
                         })),
                         scheduled_model(Model::WireJsonSchema(CreateJsonWireSchema {
-                            name: wire_schema.clone(),
+                            name: wire_schema,
                             strictness: Default::default(),
                             fields: vec![WireSchemaField {
                                 name: named("user_id"),
@@ -234,7 +256,7 @@ mod tests {
                         })),
                         scheduled_model(Model::Codec(CreateCodec {
                             name: codec.clone(),
-                            wire_format: CodecWireFormat::Json { wire_schema },
+                            wire_format,
                             schema: schema.clone(),
                             encoding_rules: Vec::new(),
                         })),
@@ -345,5 +367,64 @@ mod tests {
             )
             .await;
         assert!(!outcome.is_accepted());
+    }
+
+    #[nervix_primitives::test]
+    async fn endpoint_rejects_a_body_whose_unfolding_the_node_cannot_take_now() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let executor = single_worker_executor();
+        let runtime = start_endpoint_ingestor(
+            Runtime::with_executor(executor.clone()),
+            &domain,
+            &ingestor,
+            CodecWireFormat::JaqNative {
+                format: CodecJaqFormat::Json,
+                transformations: CodecJaqTransformations {
+                    on_ingestion: Some(".".to_string()),
+                    on_emitting: None,
+                    on_emitting_batch: None,
+                },
+            },
+        )
+        .await;
+
+        // Nothing judged the body, so its sender is told to send it again, without a delay the
+        // node could not promise.
+        let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
+        let refused = runtime
+            .dispatch_http_payload(
+                "edge.example.com",
+                "/events",
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+            )
+            .await;
+        assert_eq!(
+            refused,
+            EndpointDispatchOutcome {
+                accepted: 0,
+                rejected: 1,
+                retry_after: None,
+            }
+        );
+
+        filled.release().await;
+        let accepted = runtime
+            .dispatch_http_payload(
+                "edge.example.com",
+                "/events",
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+            )
+            .await;
+        assert_eq!(
+            accepted,
+            EndpointDispatchOutcome {
+                accepted: 1,
+                rejected: 0,
+                retry_after: None,
+            }
+        );
     }
 }

@@ -892,6 +892,14 @@ never returns a silent 202. If several ingestors share a route, the request is a
 one accepts it. It is rejected only when all reject, and `Retry-After` is included only when every
 rejecting ingestor declares `REJECT`.
 
+A body whose codec runs an `ON INGESTION` transformation is unfolded on the node's extension
+workers. When they cannot take it now, the body is rejected the same way: HTTP answers 503 without
+`Retry-After`, and an established WebSocket closes with 1013. The body was not decoded, so its
+sender may send it again; a body its codec rejects is still accepted and reported as a decode
+failure. A body `BUFFER` retained is unfolded when it drains after resume; if the extension workers
+cannot take it then, it is reported as an ingestor error and not delivered, like any other retained
+body that fails after its 202.
+
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 
 TLS is configured on the VHOST itself:
