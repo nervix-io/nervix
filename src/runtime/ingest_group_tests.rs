@@ -305,10 +305,16 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
         .decode_payload(&Executor::default(), &codec, br#"{"user_id":"two"}"#)
         .await
         .expect_err("a user id of the wrong type should be rejected");
-    assert!(matches!(
-        rejected.current_context(),
-        PayloadDecodeError::Codec(_)
-    ));
+    let PayloadDecodeFailure::Codec(rejected) = rejected else {
+        panic!("a payload its codec rejects must fail as a codec failure: {rejected:?}");
+    };
+    assert!(
+        matches!(
+            rejected.current_context(),
+            CodecError::ParseField { field, .. } if field == "user_id"
+        ),
+        "the rejection must name the field that did not decode: {rejected:?}"
+    );
 
     collector
         .decode_payload(&Executor::default(), &codec, br#"{"user_id":3}"#)
@@ -457,7 +463,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first payload should be accepted");
 
-    let error = collector
+    let failure = collector
         .decode_payload(
             &Executor::default(),
             &codec,
@@ -465,6 +471,9 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
         )
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
+    let PayloadDecodeFailure::Codec(error) = failure else {
+        panic!("a payload its codec rejects must fail as a codec failure: {failure:?}");
+    };
     let message = error.to_string();
     assert!(message.contains("(input value 0, output 1)"), "{message}");
     assert!(!message.contains("confidential"), "{message}");
@@ -513,10 +522,13 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
         )
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
-    assert!(matches!(
-        rejected.current_context(),
-        PayloadDecodeError::Codec(_)
-    ));
+    let PayloadDecodeFailure::Codec(rejected) = rejected else {
+        panic!("a payload its codec rejects must fail as a codec failure: {rejected:?}");
+    };
+    assert!(
+        matches!(rejected.current_context(), CodecError::Unfold { .. }),
+        "the rejection must place its cause in the unfolding payload: {rejected:?}"
+    );
 
     assert!(
         collector.pending.records.is_none(),
@@ -1385,10 +1397,10 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
         .await
         .expect_err("a full extension class refuses the unfolding");
 
-    assert!(matches!(
-        refused.current_context(),
-        PayloadDecodeError::NotAdmitted
-    ));
+    assert!(
+        matches!(refused, PayloadDecodeFailure::NotAdmitted(_)),
+        "a payload the node could not unfold must not be judged: {refused:?}"
+    );
     assert_eq!(collector.pending.undispatched_payloads(), 0);
     filled.release().await;
     collector

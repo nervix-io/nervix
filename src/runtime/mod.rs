@@ -409,7 +409,7 @@ pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeError, RawIngestDispatch, decode_ingested_payload,
+    PayloadDecodeFailure, RawIngestDispatch, decode_ingested_payload,
     prepare_branched_entrypoint_input,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
@@ -686,6 +686,7 @@ pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
+pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
 pub use node::{DEFAULT_TEMP_DIR, Runtime};

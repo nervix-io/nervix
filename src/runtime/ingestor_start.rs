@@ -84,7 +84,7 @@ impl Runtime {
     pub(super) async fn start_missing_domain_ingestors(
         &self,
         domain: &DomainName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), IngestorStartError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(Some(domain)) {
@@ -95,7 +95,9 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn start_running_domain_ingestors(
+        &self,
+    ) -> error_stack::Result<(), IngestorStartError> {
         let _application = self.inner.schedule_application.lock().await;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -237,7 +239,7 @@ impl Runtime {
         &self,
         ingestor: &IngestorSpec,
         input: &IngestorInputPlan,
-    ) -> Result<BoundIngestor, RuntimeError> {
+    ) -> error_stack::Result<BoundIngestor, IngestorStartError> {
         let domain = &ingestor.domain;
         /// What the ingestor binds from its domain's execution, read under one lookup.
         struct BindingExecution {
@@ -253,22 +255,21 @@ impl Runtime {
                 generation: execution.start_version,
             },
             None => {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "domain execution is unavailable while starting ingestor '{}'",
-                        ingestor.name.as_str()
-                    ),
-                });
+                return Err(Report::new(
+                    IngestorStartError::DomainExecutionUnavailable {
+                        domain: domain.clone(),
+                        ingestor: ingestor.name.clone(),
+                    },
+                ));
             }
         };
         let input = match input {
             IngestorInputPlan::Transport(transport) => {
                 let Some(codec) = routing.codecs.get(&transport.codec).cloned() else {
-                    return Err(RuntimeError::CodecNotInstantiated {
-                        domain: domain.as_str().to_string(),
-                        codec: transport.codec.as_str().to_string(),
-                    });
+                    return Err(Report::new(IngestorStartError::CodecNotInstantiated {
+                        domain: domain.clone(),
+                        codec: transport.codec.clone(),
+                    }));
                 };
                 BoundIngestorInput::Transport {
                     codec,
@@ -283,7 +284,9 @@ impl Runtime {
         let input_schema = input.schema();
         let programs = ExecutionBuildDeps::from_routing(domain, &routing)
             .bind_ingestor(ingestor, &input_schema)
-            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
+            .change_context_lazy(|| IngestorStartError::Bind {
+                domain: domain.clone(),
+            })?;
         let relays = RelayRuntimeHandles {
             services: &routing.relay_services,
         };
@@ -293,7 +296,9 @@ impl Runtime {
                 &ModelName::from(&ingestor.name),
                 &ingestor.routes,
             )
-            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
+            .change_context_lazy(|| IngestorStartError::Bind {
+                domain: domain.clone(),
+            })?;
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let metrics = self.inner.metrics.resolve_global_node_message_metrics(
@@ -371,18 +376,17 @@ impl Runtime {
             .await;
             let messages = match decoded {
                 Ok(messages) => messages,
-                Err(error) => {
-                    let failure = match error.current_context() {
-                        PayloadDecodeError::Codec(_) => LookupRuntimeError::DecodeLine {
-                            lookup: lookup.name.clone(),
-                            line: line_number,
-                        },
-                        PayloadDecodeError::NotAdmitted => LookupRuntimeError::UnfoldLine {
-                            lookup: lookup.name.clone(),
-                            line: line_number,
-                        },
-                    };
-                    return Err(error.change_context(failure));
+                Err(PayloadDecodeFailure::Codec(report)) => {
+                    return Err(report.change_context(LookupRuntimeError::DecodeLine {
+                        lookup: lookup.name.clone(),
+                        line: line_number,
+                    }));
+                }
+                Err(PayloadDecodeFailure::NotAdmitted(report)) => {
+                    return Err(report.change_context(LookupRuntimeError::UnfoldLine {
+                        lookup: lookup.name.clone(),
+                        line: line_number,
+                    }));
                 }
             };
             row_lines.extend(std::iter::repeat_n(line_number, messages));

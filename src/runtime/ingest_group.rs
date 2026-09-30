@@ -11,7 +11,7 @@ use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
 use nervix_connector::IngestMetadataRow;
-use nervix_execution::{CpuClass, MemoryClass};
+use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
 
 use super::*;
 
@@ -66,16 +66,20 @@ pub(in crate::runtime) enum IngestGroupAdmittedOperation {
 }
 
 /// Why one ingested payload did not decode into its group's builder.
-#[derive(Debug, Error)]
-pub(in crate::runtime) enum PayloadDecodeError {
-    /// The payload is not what the codec accepts.
-    #[error(transparent)]
-    Codec(#[from] CodecError),
+#[derive(Debug)]
+pub(in crate::runtime) enum PayloadDecodeFailure {
+    /// The payload is not what the codec accepts. The codec's report is kept unchanged, so every
+    /// diagnostic built from it reads the codec's own chain.
+    Codec(Report<CodecError>),
     /// The node's bounded execution did not take the payload's unfolding, so nothing judged the
-    /// payload.
-    #[error("the node's bounded execution did not unfold the payload")]
-    NotAdmitted,
+    /// payload and its sender may present it again.
+    NotAdmitted(Report<UnfoldingNotAdmitted>),
 }
+
+/// The node's bounded execution did not take a payload's unfolding now.
+#[derive(Debug, Error)]
+#[error("the node's bounded execution did not unfold the payload")]
+pub(in crate::runtime) struct UnfoldingNotAdmitted;
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum IngestGroupError {
@@ -420,7 +424,7 @@ impl PendingIngestGroup {
         executor: &Executor,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> error_stack::Result<(), PayloadDecodeError> {
+    ) -> Result<(), PayloadDecodeFailure> {
         let row_bound = self.row_bound;
         let records = self
             .records
@@ -720,7 +724,7 @@ impl IngestRouteCollector {
         executor: &Executor,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> error_stack::Result<(), PayloadDecodeError> {
+    ) -> Result<(), PayloadDecodeFailure> {
         self.pending.decode_payload(executor, codec, payload).await
     }
 
@@ -1169,10 +1173,10 @@ pub(super) async fn decode_ingested_payload(
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> error_stack::Result<usize, PayloadDecodeError> {
+) -> Result<usize, PayloadDecodeFailure> {
     if !codec.transforms_on_ingestion() {
         return decode_with_codec(codec, payload, decoder, builder)
-            .map_err(|error| Report::new(PayloadDecodeError::Codec(error)));
+            .map_err(PayloadDecodeFailure::Codec);
     }
 
     // Only the unfolding leaves the task. The Arrow append that consumes its result stays here,
@@ -1185,7 +1189,11 @@ pub(super) async fn decode_ingested_payload(
     };
     let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
         Ok(reservation) => reservation,
-        Err(error) => return Err(error.change_context(PayloadDecodeError::NotAdmitted)),
+        Err(error) => {
+            return Err(PayloadDecodeFailure::NotAdmitted(
+                error.change_context(UnfoldingNotAdmitted),
+            ));
+        }
     };
     let unfolding_codec = codec.clone();
     let payload = Bytes::copy_from_slice(payload);
@@ -1194,22 +1202,33 @@ pub(super) async fn decode_ingested_payload(
             CpuClass::Extension,
             reservation,
             move |_charge, cancellation| {
-                cancellation.check().map_err(|cancelled| {
-                    Report::new(cancelled).change_context(PayloadDecodeError::NotAdmitted)
-                })?;
+                if let Err(cancelled) = cancellation.check() {
+                    return Err(PayloadDecodeFailure::NotAdmitted(
+                        Report::new(cancelled).change_context(UnfoldingNotAdmitted),
+                    ));
+                }
                 unfolding_codec
                     .unfold_on_ingestion(payload)
-                    .map_err(|error| Report::new(PayloadDecodeError::Codec(error)))
+                    .map_err(PayloadDecodeFailure::Codec)
             },
         )
         .await;
     let unfolded = match unfolded {
         Ok(unfolded) => unfolded?,
-        Err(error) => return Err(error.change_context(PayloadDecodeError::NotAdmitted)),
+        Err(error) => {
+            // A panic is the unfolding's own defect, which presenting the payload again would
+            // repeat, so it fails the payload's decode rather than asking for it again.
+            if let ExecutionError::JobPanicked { .. } = error.current_context() {
+                return Err(PayloadDecodeFailure::Codec(codec.unfolding_panicked(error)));
+            }
+            return Err(PayloadDecodeFailure::NotAdmitted(
+                error.change_context(UnfoldingNotAdmitted),
+            ));
+        }
     };
     unfolded
         .append_to(codec, builder)
-        .map_err(|error| Report::new(PayloadDecodeError::Codec(error)))
+        .map_err(PayloadDecodeFailure::Codec)
 }
 
 impl Runtime {
@@ -1230,8 +1249,8 @@ impl Runtime {
     /// branch key) and forwards each batch to its branch entrypoint.
     ///
     /// This is the counterpart to `IngestGroupDispatch::collector`. Building the batch once per
-    /// group replaces N single-row batch constructions, N channel sends, and the
-    /// `spawn_blocking` hop the route task pays per message.
+    /// group replaces N single-row batch constructions, N channel sends, and the hop onto the
+    /// node's data workers the route task would pay per message.
     ///
     /// Every failure below is handled before it is returned: the affected acknowledgements go to
     /// the ingestor's general error policy, which is what decides whether the messages are logged,
@@ -1999,20 +2018,24 @@ impl Runtime {
             nervix_primitives::task::consume_budget().await;
             // A request carries all of its payloads or none of them, so a payload that fails to
             // decode takes the payloads decoded before it back out of the group.
-            if let Err(error) = collector
+            if let Err(failure) = collector
                 .decode_payload(self.executor(), &codec, source_payload)
                 .await
             {
                 collector.discard_undispatched_payloads();
-                let failure = match error.current_context() {
-                    PayloadDecodeError::Codec(_) => IngestGroupError::DecodePayload {
-                        ingestor: ingestor.clone(),
-                    },
-                    PayloadDecodeError::NotAdmitted => IngestGroupError::Execution {
-                        operation: IngestGroupAdmittedOperation::UnfoldPayload,
-                    },
+                let error = match failure {
+                    PayloadDecodeFailure::Codec(report) => {
+                        report.change_context(IngestGroupError::DecodePayload {
+                            ingestor: ingestor.clone(),
+                        })
+                    }
+                    PayloadDecodeFailure::NotAdmitted(report) => {
+                        report.change_context(IngestGroupError::Execution {
+                            operation: IngestGroupAdmittedOperation::UnfoldPayload,
+                        })
+                    }
                 };
-                return Err(error.change_context(failure));
+                return Err(error);
             }
         }
         let metadata = payload.metadata_rows();

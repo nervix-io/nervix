@@ -219,16 +219,9 @@ pub(super) async fn encode_pending_broker_payloads(
         let emitter = context.emitter.clone();
         return context
             .encode_on_extension_workers(arrow_batch.estimated_bytes(), move |cancellation| {
-                let encoder = match codec.batch_encoder(&arrow_batch) {
-                    Ok(encoder) => encoder,
-                    Err(error) => {
-                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
-                            .attach_printable(format!(
-                                "emitter '{}' failed to initialize columnar encoding: {error}",
-                                emitter.as_str()
-                            )));
-                    }
-                };
+                let encoder = codec
+                    .batch_encoder(&arrow_batch)
+                    .map_err(|error| encoding_initialization_failure(&emitter, error))?;
                 let mut payloads = Vec::with_capacity(pending_rows.len());
                 for row_index in pending_rows {
                     cancellation
@@ -243,16 +236,26 @@ pub(super) async fn encode_pending_broker_payloads(
 
     let encoder = codec
         .batch_encoder(&batch.relay_batch().batch)
-        .map_err(|error| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "emitter '{}' failed to initialize columnar encoding: {error}",
-                context.emitter.as_str()
-            ))
-        })?;
+        .map_err(|error| encoding_initialization_failure(&context.emitter, error))?;
     Ok(pending_rows
         .into_iter()
         .map(|row_index| PendingRowPayload::encode(&encoder, row_index))
         .collect())
+}
+
+/// `emitter`'s columnar encoding of a batch failing to start, with the codec's report beneath it
+/// and its whole description attached for the emitter's diagnostics.
+fn encoding_initialization_failure(
+    emitter: &EmitterName,
+    error: Report<CodecError>,
+) -> Report<EmitterRuntimeError> {
+    let description = format!(
+        "emitter '{}' failed to initialize columnar encoding: {error:#}",
+        emitter.as_str()
+    );
+    error
+        .change_context(EmitterRuntimeError::EncodeBatch)
+        .attach_printable(description)
 }
 
 async fn encode_broker_records(
@@ -300,7 +303,7 @@ async fn encode_broker_records(
                     rejected.push(RejectedEmitterRecord {
                         position,
                         reason: format!(
-                            "emitter '{}' failed to encode record: {error}",
+                            "emitter '{}' failed to encode record: {error:#}",
                             context.emitter.as_str()
                         ),
                         structured_error: None,
@@ -464,7 +467,7 @@ async fn pack_batch_records(
                 rejected.push(RejectedEmitterRecord {
                     position,
                     reason: format!(
-                        "emitter '{}' failed to encode record: {error}",
+                        "emitter '{}' failed to encode record: {error:#}",
                         context.emitter.as_str()
                     ),
                     structured_error: None,
@@ -602,14 +605,8 @@ async fn pack_pending_rows(
     carriers: Vec<PackingCarrier>,
 ) -> EmitterRuntimeResult<BufferedBatchPacking> {
     let emitter = context.emitter.clone();
-    let initialization_failed = move |error: Report<CodecError>| {
-        error
-            .change_context(EmitterRuntimeError::EncodeBatch)
-            .attach_printable(format!(
-                "emitter '{}' failed to initialize columnar encoding",
-                emitter.as_str()
-            ))
-    };
+    let initialization_failed =
+        move |error: Report<CodecError>| encoding_initialization_failure(&emitter, error);
     if !codec.transforms_on_emitting() {
         return pack_buffered_batches(&codec, carriers, policy).map_err(initialization_failed);
     }
@@ -641,6 +638,7 @@ async fn pack_pending_rows(
 mod tests {
     use std::collections::VecDeque;
 
+    use error_stack::{AttachmentKind, FrameKind};
     use nervix_connector::{PerRecordOutcome, SinkPublishError, SinkRecordId};
     use nervix_models::{
         BatchMessageLimit, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec,
@@ -654,7 +652,7 @@ mod tests {
             FilledCpuClass, input_batch_with, input_schema, named, single_worker_executor,
             sink_context,
         },
-        runtime_schema::compile_codec,
+        runtime_schema::{RuntimeSchemaError, compile_codec, test_runtime_row},
     };
 
     /// How the scripted sink answers one write.
@@ -721,6 +719,39 @@ mod tests {
         };
         compile_codec(&model, input_schema(), ResolvedCodecWireFormat::Json(&wire))
             .expect("the test codec and Arrow schema both define one required integer field")
+    }
+
+    #[test]
+    fn an_encoding_that_cannot_start_keeps_the_codec_report_beneath_the_emitter() {
+        let context = sink_context();
+        let foreign =
+            test_runtime_row([("other".to_string(), RuntimeValue::U8(1))]).one_row_batch();
+        let error = json_codec()
+            .batch_encoder(&foreign)
+            .err()
+            .expect("a batch of another schema cannot be encoded");
+
+        let report = encoding_initialization_failure(&context.emitter, error);
+
+        assert_eq!(*report.current_context(), EmitterRuntimeError::EncodeBatch);
+        assert!(report.contains::<CodecError>(), "{report:?}");
+        assert!(report.contains::<RuntimeSchemaError>(), "{report:?}");
+        let mut descriptions = Vec::new();
+        for frame in report.frames() {
+            if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+                descriptions.push(attachment.to_string());
+            }
+        }
+        let [description] = descriptions.as_slice() else {
+            panic!("the failure describes itself once: {descriptions:?}");
+        };
+        assert!(
+            description.starts_with(
+                "emitter 'output' failed to initialize columnar encoding: codec 'input_codec' is \
+                 incompatible: Arrow batch schema does not match"
+            ),
+            "{description}"
+        );
     }
 
     fn two_rows(first: i64, second: i64) -> EmitterPublishBatch {

@@ -29,9 +29,12 @@ use nervix_connector::{
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
 use nervix_primitives::sync::CancellationToken;
 
-use super::super::{
-    domain_clock::{DomainCadence, DomainClockWaitResult},
-    *,
+use super::{
+    super::{
+        domain_clock::{DomainCadence, DomainClockWaitResult},
+        *,
+    },
+    IngestorStartError, SourceStartError,
 };
 use crate::runtime::ingestor_quiesce::IngestorQuiesceObservation;
 
@@ -50,13 +53,20 @@ impl IngestorSpec {
         DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone())
     }
 
-    /// The start failure this ingestor reports, naming why it could not start.
-    pub(super) fn start_failure(&self, reason: impl Into<String>) -> RuntimeError {
-        RuntimeError::StartIngestor {
-            domain: self.domain.as_str().to_string(),
-            ingestor: self.name.as_str().to_string(),
-            reason: reason.into(),
+    /// The context every failure to initialize this ingestor's source is reported under.
+    pub(super) fn initialize_failure(&self) -> IngestorStartError {
+        IngestorStartError::Initialize {
+            domain: self.domain.clone(),
+            ingestor: self.name.clone(),
         }
+    }
+
+    /// This ingestor's source failing to start because of `cause`.
+    pub(super) fn source_start_failure(
+        &self,
+        cause: SourceStartError,
+    ) -> Report<IngestorStartError> {
+        Report::new(cause).change_context(self.initialize_failure())
     }
 
     /// The metadata namespace this ingestor's messages expose to its programs, which its source's
@@ -137,7 +147,10 @@ impl<P> BrokerSourceStart<'_, P> {
     ///
     /// Nothing is registered here, so a mode that fails to parse or an instance that fails to open
     /// leaves no running ingestor behind.
-    pub(super) async fn open<C>(self, ingestor: &IngestorSpec) -> Result<SourceStart, RuntimeError>
+    pub(super) async fn open<C>(
+        self,
+        ingestor: &IngestorSpec,
+    ) -> error_stack::Result<SourceStart, IngestorStartError>
     where
         C: BrokerSourceConnector<Plan = P>,
     {
@@ -174,7 +187,7 @@ impl<P> BrokerSourceStart<'_, P> {
             nervix_primitives::task::consume_budget().await;
             let source = C::open(&plan.connector, instance_index)
                 .await
-                .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+                .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
                 acknowledgement: plan.acknowledgement,
@@ -239,7 +252,7 @@ impl<P> PacedSourceStart<P> {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError>
+    ) -> error_stack::Result<SourceStart, IngestorStartError>
     where
         C: PacedSourceConnector<Plan = P>,
     {
@@ -258,10 +271,10 @@ impl<P> PacedSourceStart<P> {
         };
         let source = C::open(&plan.connector, 0)
             .await
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let cadence = runtime
             .bind_domain_cadence(&ingestor.domain, every, cadence_start)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance: Box<dyn SourceInstance> = Box::new(PacedSourceInstance { source, cadence });
         Ok(SourceStart {
             instances: vec![instance],
@@ -731,18 +744,22 @@ impl RuntimeSourceHost {
         let mut metadata = Vec::with_capacity(batch.messages.len());
         for message in batch.messages {
             nervix_primitives::task::consume_budget().await;
-            if let Err(error) = collector
+            if let Err(failure) = collector
                 .decode_payload(self.runtime.executor(), &self.codec, message.payload)
                 .await
             {
                 collector.discard_undispatched_payloads();
                 // A payload the node could not take now was never judged, so it is not a decode
                 // failure: the batch failed to dispatch.
-                let failure = match error.current_context() {
-                    PayloadDecodeError::Codec(_) => SourceIntakeError::Decode,
-                    PayloadDecodeError::NotAdmitted => SourceIntakeError::Dispatch,
+                let error = match failure {
+                    PayloadDecodeFailure::Codec(report) => {
+                        report.change_context(SourceIntakeError::Decode)
+                    }
+                    PayloadDecodeFailure::NotAdmitted(report) => {
+                        report.change_context(SourceIntakeError::Dispatch)
+                    }
                 };
-                return Err(error.change_context(failure));
+                return Err(error);
             }
             metadata.push(message.metadata);
         }
@@ -1088,7 +1105,7 @@ async fn run_paced_source<C, H, D>(
                 continue;
             }
             Ok(false) => {}
-            Err(error) => host.report_error(error.to_string()),
+            Err(error) => host.report_error(format!("{error:#}")),
         }
 
         let due_at = nervix_primitives::select! {
@@ -1137,7 +1154,7 @@ async fn run_paced_source<C, H, D>(
         match host.intake_poll(poll).await {
             Ok(true) => flush_paced_source(&mut host).await,
             Ok(false) => {}
-            Err(error) => host.report_error(error.to_string()),
+            Err(error) => host.report_error(format!("{error:#}")),
         }
     }
 
@@ -1153,7 +1170,7 @@ where
     H: SourceHostServices,
 {
     if let Err(error) = host.flush().await {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
     }
 }
 

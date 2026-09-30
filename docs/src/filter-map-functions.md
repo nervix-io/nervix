@@ -230,6 +230,9 @@ names:
 | Boolean | `BOOL` | `TRUE`, `FALSE`, in any letter case |
 | Null | the type its destination supplies | `NULL`, only as the whole value of an assignment to an optional field or as a result of a conditional whose other results give it a type |
 
+A literal reads the same wherever its expression is written: in a statement, in a web console form,
+and in `nervix-cli subscribe --where`.
+
 There is no `DATETIME`, `BYTES`, NaN, or infinity literal. Convert a string instead:
 `'2024-02-29T12:00:00Z' AS DATETIME`, `hex_decode('00ff')`, `'NaN' AS F64`, or `'inf' AS F64`. A
 `NULL` anywhere else is rejected with `NULL requires a declared optional assignment target`; a typed

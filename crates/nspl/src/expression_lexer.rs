@@ -1,10 +1,13 @@
 //! Layer: language.
 //!
 //! - **Owns.** The private tokens and lexical diagnostics used by semantic expression parsing.
-//! - **Depends on.** Chumsky's parser primitives.
+//! - **Depends on.** Chumsky's parser primitives and the statement lexer's reading of a string
+//!   literal, which both lexers share.
 //! - **Must not know.** VM programs, registry state, or runtime execution.
 
 use chumsky::prelude::*;
+
+use crate::lexer::string_literal;
 
 pub type Span = SimpleSpan<usize>;
 pub type LexError<'src> = Rich<'src, char, Span>;
@@ -123,93 +126,6 @@ fn whitespace<'src>() -> impl Parser<'src, &'src str, (), extra::Err<LexError<'s
         .ignored();
 
     choice((spaces, line_comment)).repeated().ignored()
-}
-
-fn string_literal<'src>() -> impl Parser<'src, &'src str, String, extra::Err<LexError<'src>>> + Clone
-{
-    let dollar = custom(|input| {
-        let start = input.cursor();
-        if input.peek() != Some('$') {
-            return Err(Rich::custom(
-                input.span_since(&start),
-                "expected dollar-quoted string",
-            ));
-        }
-        input.skip();
-
-        let mut tag = String::new();
-        loop {
-            match input.next() {
-                Some('$') => break,
-                Some(ch) if ch.is_ascii_alphanumeric() || ch == '_' => tag.push(ch),
-                Some(_) => {
-                    return Err(Rich::custom(
-                        input.span_since(&start),
-                        "dollar-quote tag must contain only letters, digits, or underscores",
-                    ));
-                }
-                None => {
-                    return Err(Rich::custom(
-                        input.span_since(&start),
-                        "unterminated dollar-quote delimiter",
-                    ));
-                }
-            }
-        }
-
-        let delimiter = format!("${tag}$");
-        let mut value = String::new();
-        loop {
-            match input.next() {
-                Some(ch) => {
-                    value.push(ch);
-                    if value.ends_with(&delimiter) {
-                        value.truncate(value.len() - delimiter.len());
-                        return Ok(value);
-                    }
-                }
-                None => {
-                    return Err(Rich::custom(
-                        input.span_since(&start),
-                        format!("unterminated dollar-quoted string; expected {delimiter}"),
-                    ));
-                }
-            }
-        }
-    });
-
-    let escape = just('\\').ignore_then(choice((
-        just('\\'),
-        just('\''),
-        just('"'),
-        just('n').to('\n'),
-        just('r').to('\r'),
-        just('t').to('\t'),
-    )));
-
-    let single = just('\'')
-        .ignore_then(
-            choice((
-                escape,
-                any().filter(|c: &char| *c != '\'' && *c != '\\' && *c != '\n'),
-            ))
-            .repeated()
-            .collect::<String>(),
-        )
-        .then_ignore(just('\''));
-
-    let double = just('"')
-        .ignore_then(
-            choice((
-                escape,
-                any().filter(|c: &char| *c != '"' && *c != '\\' && *c != '\n'),
-            ))
-            .repeated()
-            .collect::<String>(),
-        )
-        .then_ignore(just('"'));
-
-    choice((dollar, single, double))
 }
 
 fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
@@ -376,5 +292,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Token::String("line one\n\"line two\"".to_string())]
         );
+    }
+
+    #[test]
+    fn lexes_every_backslash_sequence_verbatim_as_the_statement_lexer_does() {
+        let cases = [
+            (r"'a\\b'", r"a\\b"),
+            (r#"'a\"b'"#, r#"a\"b"#),
+            (r#""a\'b""#, r"a\'b"),
+            (r"'a\nb'", r"a\nb"),
+            (r#""a\rb""#, r"a\rb"),
+            (r"'a\tb'", r"a\tb"),
+            (r"'a\0b'", r"a\0b"),
+            (r#""a\x41b""#, r"a\x41b"),
+            (r"'a\u{e9}b'", r"a\u{e9}b"),
+            (r"'a\$b'", r"a\$b"),
+            (r"'a\'", r"a\"),
+            (r#""a\""#, r"a\"),
+            (r"$$a\nb\$$", r"a\nb\"),
+        ];
+        for (source, value) in cases {
+            let tokens =
+                lex(source).unwrap_or_else(|errors| panic!("{source} must lex: {errors:?}"));
+            assert_eq!(
+                tokens
+                    .into_iter()
+                    .map(|token| token.token)
+                    .collect::<Vec<_>>(),
+                vec![Token::String(value.to_string())],
+                "{source}"
+            );
+            let statement_tokens = crate::lexer::lex(source)
+                .unwrap_or_else(|errors| panic!("{source} must lex in a statement: {errors:?}"));
+            assert_eq!(
+                statement_tokens
+                    .into_iter()
+                    .map(|token| token.token)
+                    .collect::<Vec<_>>(),
+                vec![crate::lexer::Token::StringLiteral(value.to_string())],
+                "{source} in a statement"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backslash_before_the_closing_quote_leaves_it_closing() {
+        for source in [r"'a\'b'", r#""a\"b""#] {
+            assert!(lex(source).is_err(), "{source} must be rejected");
+            assert!(
+                crate::lexer::lex(source).is_err(),
+                "{source} must be rejected in a statement"
+            );
+        }
     }
 }

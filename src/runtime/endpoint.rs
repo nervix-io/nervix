@@ -342,27 +342,29 @@ impl Runtime {
                     );
                 }
             }
-            Err(error) => {
-                if let PayloadDecodeError::NotAdmitted = error.current_context() {
-                    debug!(
-                        domain = binding.domain.as_str(),
-                        ingestor = binding.ingestor.as_str(),
-                        error = ?error,
-                        protocol,
-                        "the node could not take an endpoint message now"
-                    );
-                    return EndpointBindingDispatch::NotAdmitted;
-                }
+            Err(PayloadDecodeFailure::NotAdmitted(error)) => {
+                debug!(
+                    domain = binding.domain.as_str(),
+                    ingestor = binding.ingestor.as_str(),
+                    error = ?error,
+                    protocol,
+                    "the node could not take an endpoint message now"
+                );
+                return EndpointBindingDispatch::NotAdmitted;
+            }
+            Err(PayloadDecodeFailure::Codec(error)) => {
+                // The codec's context names the codec and field; the causes beneath it say why.
+                let reason = format!("{error:#}");
                 self.inner.events.report_error(format!(
-                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
+                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': \
+                     {reason}",
                     binding.ingestor.as_str(),
                     binding.domain.as_str(),
-                    error
                 ));
                 warn!(
                     domain = binding.domain.as_str(),
                     ingestor = binding.ingestor.as_str(),
-                    error = %error,
+                    error = %reason,
                     protocol,
                     "failed to decode endpoint message"
                 );

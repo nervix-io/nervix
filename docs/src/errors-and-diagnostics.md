@@ -121,6 +121,24 @@ unexpected fields, nullability, exact wire types, integer ranges, datetime parsi
 nested sequence shapes keep their existing typed codec or runtime-schema failures. Diagnostics name
 the codec and field when one is known and never attach the rejected payload value.
 
+Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
+codec, and the field when one is at fault, and the typed reason stays beneath it: a
+`CodecContractError` for a declaration or use the wire format does not support, such as a missing
+wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
+does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
+builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+An unfolding payload keeps the report of the message that failed and names its zero-based input and
+output position after it. The ingest group returns that report unchanged. A source host keeps it
+beneath its intake's decode or dispatch failure and reports the whole chain, an HTTP or WebSocket
+endpoint renders the whole chain in its decode notice, a lookup line keeps it beneath the line it
+failed on, and an emitter keeps it beneath the record it rejects or the encoding it could not start. The rendered chain reads as the codec
+diagnostic did before: `codec 'events_codec' failed to parse field 'user_id': ...` followed by the
+Arrow builder's own reason. A codec that fails to compile while a domain execution is built keeps its
+report in the runtime build error. A codec failure whose parser or writer error is its `#[source]`,
+such as a simd-json, CBOR, Avro, protobuf, I/O, UTF-8 or timestamp error, leaves that error out of
+its own message: `error-stack` records a context's source as the frame beneath it, so the rendered
+chain names each cause once.
+
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
 is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operation can fail as
@@ -403,6 +421,19 @@ The last carries the runtime planning failure beneath it, such as a relay withou
 an unparseable flush or collection cadence, rather than restating it. Runtime installation adds
 domain context to either report, and an ingestor that fails to start while its domain execution is
 built records that report as its transient error.
+
+Starting an ingestor on a node returns an `IngestorStartError` report. An ingestor already running,
+a domain execution or codec the node has not instantiated, and a binding failure beneath the
+binding context are start failures of their own. Every failure to compose or open the source is
+`IngestorStartError::Initialize`, naming the ingestor and its domain, with the cause beneath it: a
+`SourceStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
+offsets this node does not own, or a delivery-mode duration that does not parse, or else the report
+of the client configuration, connector plan, source instance or domain cadence that failed. A
+runtime caller that still returns `RuntimeError` keeps the whole report in
+`RuntimeError::IngestorStart`, whose message is the report's chain, such as
+`failed to initialize ingestor 'syslog_source' in domain 'edge': invalid Syslog client config key
+'framing': UDP does not use stream framing`. That message is what the failed command and the
+ingestor's transient status show.
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
