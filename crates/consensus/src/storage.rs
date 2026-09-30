@@ -1337,7 +1337,9 @@ impl FjallStore {
     /// no-op therefore proves every earlier blocking job has returned and released its store
     /// handle.
     pub(super) async fn wait_for_idle(&self) -> io::Result<()> {
-        self.inner.run(StorageCharge::Management, |_, _| Ok(())).await
+        self.inner
+            .run(StorageCharge::Management, |_, _| Ok(()))
+            .await
     }
 
     /// Appended entry bytes since the last completed snapshot.
