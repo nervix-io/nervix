@@ -25,6 +25,10 @@ hdrhistogram = { workspace = true }
 
 [[bench]]
 harness = false
+name = "constant_division"
+
+[[bench]]
+harness = false
 name = "checked_lanes"
 
 [[bench]]

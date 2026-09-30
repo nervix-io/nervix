@@ -2,6 +2,11 @@
 //! preparing a branched entrypoint input, and encoding an emitter's rows through a codec
 //! transformation.
 //!
+//! Layer: test harness.
+//! - **Owns.** Opaque benchmark drivers and their initialized runtime contexts.
+//! - **Depends on.** Runtime execution and its typed codec inputs.
+//! - **Must not know.** Live graph placement or control-plane transaction ownership.
+//!
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
 
@@ -18,7 +23,7 @@ use super::{
     BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle, EmitterPublishBatch,
     EmitterSinkContext, Executor, RelayMessage, RelayRecordBatch, Runtime,
     domain_execution::DomainRoutingSnapshot, emitter_encoding::encode_pending_broker_payloads,
-    observability::BranchMetricsMark, prepare_branched_entrypoint_input,
+    prepare_branched_entrypoint_input,
 };
 use crate::{
     runtime_ack::AckSet,
@@ -214,17 +219,17 @@ impl TransformedEncodingBenchmark {
         let clock = lifecycle
             .bind()
             .assured("the benchmark installs its unpaced domain clock above");
-        let node_runtime = Runtime::new();
+        let runtime = Runtime::new();
         let emitter = identifier::<EmitterName>("admitted_work_emitter");
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         Self {
             runtime: benchmark_runtime(),
             context: EmitterSinkContext {
                 routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
-                metrics_dirty: BranchMetricsMark::default(),
-                status: node_runtime.emitter_status(&key),
-                confirmation_waits: node_runtime.emitter_confirmation_counter(&key),
-                runtime: node_runtime,
+                metrics_dirty: runtime.branch_metrics_mark(&domain, ModelKind::Emitter, &emitter),
+                status: runtime.emitter_status(&key),
+                confirmation_waits: runtime.emitter_confirmation_counter(&key),
+                runtime,
                 domain,
                 emitter,
                 error_policies: ErrorPolicies::handled_by_log(),

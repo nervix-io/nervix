@@ -421,6 +421,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/numeric.rs` and `numeric/` | Checked numeric lanes, comparisons, math, bit operations, and decimal rounding |
 | `crates/simd-kernels/src/flags.rs` | Packing the checked lanes' per-lane failure bytes into bitmap words at the selected SIMD level |
 | `crates/simd-kernels/src/checked.rs`, `benches/checked_lanes.rs` | Checked integer addition, subtraction and multiplication in vector registers at the selected SIMD level, returning each lane's value together with the failure words, and their measurement beside the lane loop they replaced |
+| `crates/simd-kernels/src/division.rs`, `division/lanes.rs`, `benches/constant_division.rs` | Constant integer divisors prepared once per call, exact reciprocal quotient and remainder kernels, and comparisons with scalar reciprocal and checked division loops |
 | `crates/nervix-vm/src/datetime.rs` and `datetime/` | Fixed-unit datetime kernels, calendar arithmetic, time zones, and formats |
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
@@ -740,8 +741,8 @@ about vector instructions it supports.
 | Class | Examples | Claim |
 | --- | --- | --- |
 | Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
-| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, and checked `*` over `I8`, `U8`, `I16`, `U16`, `I32`, and `U32` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md) inspects the `x86-64-v3` and AVX-512 code |
-| One pass over value buffers | Checked integer `/` and `%`, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
+| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md) and [08 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-08.md) inspect the generated code |
+| One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
 | Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (sha2 with SHA-NI detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
 | Irregular, per row | Transcendental math, `round(value, digits)`, zoned and calendar datetimes, datetime formatting and parsing, Unicode case mapping and NFC, regular expressions, Aho-Corasick, substring and padding functions, `md5`, IP and URL parsing, JSON path walk and conversion, most list functions, UUIDs | Batch API with optimized substeps; scalar work per row |
 
@@ -799,8 +800,30 @@ List `min` and `max` are the one place that intentionally keeps Arrow's total or
 - **Inlining.** Each operator passes its own lane function or kernel operation, so the call
   inlines.
 
-The datetime kernels share these lanes. Their Euclidean truncation and binning, and their i128
-elapsed-time arithmetic, fail a lane rather than wrap it.
+The datetime kernels share these lanes. Fixed-unit truncation and binning and `to_unix` prepare
+one reciprocal divisor at entry. For a non-power-of-two divisor `d`, the prepared unsigned reciprocal is
+`floor(2^64 / d)`. Discarding its lower `64-w` bits gives `floor(2^w / d)` at a narrower
+operand width `w`; the high half of its product with a dividend gives a
+quotient at most one below the exact quotient. One remainder comparison corrects it. Powers of
+two use a shift and mask. Signs are restored after division of unsigned magnitudes, which keeps
+`MIN` representable and distinguishes truncation toward zero from Euclidean rounding. Binning
+normalizes both its value and origin, then corrects their phase difference by at most one stride.
+It fails a lane if subtracting the distance to the bin start overflows.
+
+Fixed-unit `date_diff` subtracts in `i64` and uses its prepared truncating divisor when the
+difference fits. Otherwise it computes the difference and division in `i128`, then checks the
+result against `i64`. Calendar differences retain their calendar rules. `date_add` and
+`from_unix` use checked `i128` multiplication and addition; `from_unix` performs no division.
+
+Integer column-by-scalar `/` and `%` use the same reciprocal primitive. Division by a column
+retains the checked scalar lane loop. A quotient by zero or `MIN / -1` fails; a remainder fails
+only for zero, so `MIN % -1` remains zero. Operand validity still masks failures, and a null
+scalar produces an all-null column without running division. The constant-lane benchmark
+compares each width's selected kernel, scalar reciprocal and checked lane loop on identical runs;
+`U64` and `I64` remainder retain scalar reciprocal loops because their vector forms measured slower
+on `x86-64-v3`. The
+retained paths and generated instructions are recorded in the
+[SIMD kernels 08 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-08.md).
 
 Floating-point operations fail a lane that produces NaN or infinity. The transcendental functions
 come from the platform math library as opaque calls per lane that no loop vectorizes, so those

@@ -611,15 +611,15 @@ struct SubscriptionSelection {
 
 /// Which rows of one relay batch pass a subscription's filter and sampling.
 ///
-/// The filter reads the domain's execution time once for the batch and runs on the node's
-/// `executor`. A row the filter cannot evaluate is skipped and counted, and the first failure is
-/// reported for the batch. Sampling takes its draws from the node's `sampler`.
+/// The filter reads the domain's execution time once for the batch. A row the filter cannot
+/// evaluate is skipped and counted, and the first failure is reported for the batch. Sampling
+/// takes its draws from the node's `sampler`.
 async fn select_subscription_rows(
+    executor: &nervix_execution::Executor,
     batch: &RelayRecordBatch,
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
     sampler: &SubscriptionSampler,
-    executor: &nervix_execution::Executor,
     clock: &Result<
         crate::runtime::DomainClockLifecycle,
         Report<crate::runtime::DomainClockAccessError>,

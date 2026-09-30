@@ -1685,6 +1685,48 @@ fn numeric_kernel_benches(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("numeric_kernels");
     group.throughput(Throughput::Elements(NUMERIC_KERNEL_ROWS.arch_into()));
+    struct ConstantDivisionCase {
+        name: &'static str,
+        data_type: DataType,
+        source: &'static str,
+        batch: fn(&CompiledProgram, FailureDensity) -> TypedBatch,
+    }
+    let constant_cases = [
+        ConstantDivisionCase {
+            name: "i16_constant_division",
+            data_type: DataType::Int16,
+            source: "SET quotient = input.left / 7 AS I16, remainder = input.left % 7 AS I16",
+            batch: i16_arithmetic_batch,
+        },
+        ConstantDivisionCase {
+            name: "i32_constant_division",
+            data_type: DataType::Int32,
+            source: "SET quotient = input.left / 7 AS I32, remainder = input.left % 7 AS I32",
+            batch: i32_arithmetic_batch,
+        },
+        ConstantDivisionCase {
+            name: "i64_constant_division",
+            data_type: DataType::Int64,
+            source: "SET quotient = input.left / 7, remainder = input.left % 7",
+            batch: i64_arithmetic_batch,
+        },
+    ];
+    for case in constant_cases {
+        let program = compile_numeric_program(
+            case.source,
+            numeric_arithmetic_schema(&case.data_type),
+            &[
+                ("quotient", case.data_type.clone()),
+                ("remainder", case.data_type),
+            ],
+        );
+        let batch = (case.batch)(&program, FailureDensity::None);
+        group.bench_with_input(
+            BenchmarkId::new(case.name, "no_failures"),
+            &batch,
+            |b, batch| b.iter(|| runtime.execute(black_box(&program), black_box(batch))),
+        );
+    }
     for failures in FailureDensity::ALL {
         let batch = i64_arithmetic_batch(&i64_arithmetic_compiled, failures);
         group.bench_with_input(
