@@ -48,15 +48,22 @@ shuttle = [
 turmoil = ["dep:turmoil"]
 
 [dependencies]
-arc-swap = { workspace = true, optional = true }
-concurrent-queue = { workspace = true, optional = true }
-dashmap = { workspace = true, optional = true }
 # The `futures` channels, `select!` and abort handles of the unmodeled surface, and the waker
 # registration the native `sync` family selects.
 futures-channel = { workspace = true }
 futures-util = { workspace = true }
-loom = { workspace = true, optional = true }
 meticulous = { workspace = true }
+# Shared ownership of Nervix-owned state, the same in every mode and on every target.
+triomphe = { workspace = true }
+
+# The libraries of the native capability and of every execution mode exist only for native targets.
+# A wasm build that asks for either compiles none of them, so the boundary's own diagnostic is what
+# fails it, rather than a dependency that cannot build for the browser.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+arc-swap = { workspace = true, optional = true }
+concurrent-queue = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+loom = { workspace = true, optional = true }
 nervix-primitives-macros = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 shuttle = { workspace = true, optional = true }
@@ -81,6 +88,4 @@ tokio = { workspace = true, features = [
 ], optional = true }
 tokio-stream = { workspace = true, features = ["net"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
-# Shared ownership of Nervix-owned state, the same in every mode and on every target.
-triomphe = { workspace = true }
 turmoil = { workspace = true, optional = true }
