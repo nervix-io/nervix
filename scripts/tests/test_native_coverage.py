@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.PRODUCERS],
-            ["bench-smoke", "test-primitives", "nspl-completion-walk"],
+            ["test-typed-ratchet", "bench-smoke", "test-primitives", "nspl-completion-walk"],
         )
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.mode, "ordinary")
@@ -171,7 +171,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(native_coverage.select_producers([], producers), list(producers))
         self.assertEqual(
             native_coverage.select_producers(["nspl-completion-walk", "bench-smoke"], producers),
-            [producers[2], producers[0]],
+            [next(producer for producer in producers if producer.name == "nspl-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
         )
         with self.assertRaisesRegex(RunnerError, "no producer `bench`; the producers are"):
             native_coverage.select_producers(["bench"], producers)
@@ -459,6 +459,14 @@ class BuildIdTests(unittest.TestCase):
             located = native_coverage.locate(build, {BUILD_ID.hex(), bytes(32).hex()})
         self.assertEqual(located, {BUILD_ID.hex(): build / "debug" / "deps" / "child-123"})
         self.assertEqual(native_coverage.locate(Path(directory) / "missing", {"x"}), {})
+
+    def test_compiler_loaded_macros_in_nested_cargo_build_outputs_are_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            output = build / "typed-ratchet/driver/debug/build/macro/hash/out/libmacro.so"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(elf([(note(GNU, 3, BUILD_ID, 4, 0), 4)]))
+            self.assertEqual(native_coverage.locate(build, {BUILD_ID.hex()}), {BUILD_ID.hex(): output})
 
 
 def execution(path: Path, identifier: str, *arguments: str) -> Execution:

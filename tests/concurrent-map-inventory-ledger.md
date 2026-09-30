@@ -14,6 +14,15 @@ The inventory was traced at revision `edc1c8f9`, the parent of the relay presenc
 covers the runtime, the connector contract and connector crates, the interconnect, metrics, the
 authored primitive wrappers, and the application, consensus and client maps next to them.
 
+The compiler synchronization gate consumes these owner/frequency decisions through explicit
+per-acquisition scopes in `tools/nervix-lint/scopes.json`. Its same-source calibration at revision
+`881c9097` inventories 1,117 authored sites across the declared native configuration matrix, with
+132 debt sites. `tools/nervix-lint/calibration.json` records the comparison and owning deliveries;
+[Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review) states the gate's
+current contract. The checkpoint announcer's recurring pending-state/execution reads and terminal
+removes belong to Typed Ratchet 13 alongside its checkpoint progress and notification maps.
+No runtime map or access frequency changes in this compiler-gate delivery.
+
 ## How accesses are classified
 
 A `DashMap` synchronizes on every access. `get`, `contains_key`, `len` and iteration take a shard's

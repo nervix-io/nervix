@@ -151,6 +151,7 @@ class Producer:
     prepare: tuple[str, ...]
     instrumented: str
     finish: tuple[str, ...]
+    toolchain: str | None = None
 
     def rerun(self) -> str:
         return f"just coverage-native-extras {self.name}"
@@ -160,6 +161,14 @@ class Producer:
 
 
 PRODUCERS: tuple[Producer, ...] = (
+    Producer(
+        name="test-typed-ratchet",
+        mode="ordinary",
+        prepare=("typed-ratchet-setup",),
+        instrumented="test-typed-ratchet-ordinary",
+        finish=("test-typed-ratchet-modeled",),
+        toolchain="nightly-2026-09-17",
+    ),
     Producer(
         name="bench-smoke",
         mode="ordinary",
@@ -394,9 +403,9 @@ class Toolchain:
         }
 
 
-def load_toolchain(commands: Commands) -> Toolchain:
-    verbose = commands.capture(["rustc", "-vV"])
-    sysroot = commands.capture(["rustc", "--print", "sysroot"])
+def load_toolchain(commands: Commands, environment: Mapping[str, str] | None = None) -> Toolchain:
+    verbose = commands.capture(["rustc", "-vV"], environment=environment)
+    sysroot = commands.capture(["rustc", "--print", "sysroot"], environment=environment)
     if verbose.status != 0 or sysroot.status != 0:
         raise RunnerError(f"rustc could not describe itself: {verbose.stderr or sysroot.stderr}")
     toolchain = Toolchain.parse(verbose.stdout, sysroot.stdout)
@@ -685,15 +694,16 @@ def executable_candidates(build: Path) -> Iterator[Path]:
 
     if not build.is_dir():
         return
-    for profile in sorted(build.iterdir()):
-        if not profile.is_dir():
-            continue
-        for directory in (profile, profile / "deps", profile / "examples"):
-            if not directory.is_dir():
+    # Tooling uses nested Cargo target directories, and Cargo can place procedural macro shared
+    # objects under build/<package>/<hash>/out. Those are loaded by the compiler being checked.
+    for directory, subdirectories, names in os.walk(build):
+        subdirectories[:] = sorted(name for name in subdirectories if not name.startswith((".", "incremental")))
+        for name in sorted(names):
+            if name.startswith(("build-script-build", "build_script_build")):
                 continue
-            for entry in sorted(directory.iterdir()):
-                if entry.is_file() and not entry.is_symlink() and is_elf(entry):
-                    yield entry
+            entry = Path(directory) / name
+            if entry.is_file() and not entry.is_symlink() and is_elf(entry):
+                yield entry
 
 
 def locate(build: Path, identifiers: set[str]) -> dict[str, Path]:
@@ -982,7 +992,18 @@ def load_packages(commands: Commands) -> Packages:
     metadata = commands.capture(["cargo", "metadata", "--no-deps", "--format-version", "1"])
     if metadata.status != 0:
         raise RunnerError(f"cargo metadata failed: {metadata.stderr.strip()}")
-    return Packages.from_metadata(json.loads(metadata.stdout))
+    combined = json.loads(metadata.stdout)
+    workspace_metadata = combined.get("metadata")
+    if workspace_metadata is None:
+        workspace_metadata = {}
+    for tooling in workspace_metadata.get("tooling", {}).get("workspaces", []):
+        extra = commands.capture(["cargo", "metadata", "--manifest-path", str(commands.root / tooling / "Cargo.toml"), "--no-deps", "--format-version", "1"])
+        if extra.status != 0:
+            raise RunnerError(f"tooling metadata failed: {extra.stderr.strip()}")
+        isolated = json.loads(extra.stdout)
+        combined["packages"].extend(isolated["packages"])
+        combined["workspace_members"].extend(isolated["workspace_members"])
+    return Packages.from_metadata(combined)
 
 
 @dataclass
@@ -1330,7 +1351,15 @@ def run(
         environment=environment,
     )
     for producer in selected:
-        collected = collect(commands, context, producer)
+        selected_context = context
+        if producer.toolchain:
+            selected_environment = dict(environment)
+            selected_environment["RUSTUP_TOOLCHAIN"] = producer.toolchain
+            selected_context = Context(workspace=context.workspace,
+                toolchain=load_toolchain(commands, selected_environment), revision=context.revision,
+                run=context.run, packages=context.packages, clock=context.clock,
+                environment=selected_environment)
+        collected = collect(commands, selected_context, producer)
         lines = summary(workspace, producer, collected)
         print("\n".join(lines), flush=True)
         publish_step_summary(environment, lines)

@@ -35,6 +35,14 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `nspl-archive-model` | `nervix-nspl` archive document/reparse equality | ordered generated Models, including client emitters, v2 | 64 | 128 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
+| `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
+| `typed-catalog-scope` | `nervix-lint-report` complete catalog/scope parsing equality | resolved identities and all reviewed disposition variants, v1 | 256 | 32 bytes |
+| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration and review | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+
+Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
+properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
+from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
+commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent

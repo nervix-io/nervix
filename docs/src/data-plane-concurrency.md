@@ -508,17 +508,58 @@ not discard batches already queued.
 ## Ratchet And Review
 
 `just ratchet` keeps the synchronization debt from growing. The
-`data_plane_lock_acquisitions` count scans the runtime, connector, interconnect, ACK, and metrics
-owners for `.lock()`, `.read()`, `.write()`, and `.entry()` calls outside tests. Its checked-in
+`data_plane_lock_acquisitions` count uses the pinned compiler's resolved definitions and normalized
+receivers for Mutex, RwLock and DashMap acquisitions. Its checked-in
 value in `debt-baseline.json` is a ceiling: the count may fall and may never rise. When it falls,
 `just ratchet --update` records the lower baseline in the same change.
 
-The count is deliberately textual and broad. It includes lifecycle synchronization, cold
-registration, task-local collection `entry()` calls, and I/O methods named `read` or `write`, and it
-cannot see a shared map's borrowed `get`, `contains_key` or iteration, or its `insert`, `remove`
-and `retain`. Passing the ratchet therefore proves only that the total did not increase. Review
-classifies every new site on its own, even when another deletion hides it in the net count, and the
-concurrent map inventory accounts for the accesses the count cannot see.
+The compiler inventories every recognized acquisition, including borrowed reads, mutating and try
+operations, iteration, aliases, re-exports, dereference adjustments and UFCS. Trait calls resolve
+their selected implementation. Ordinary collection entries, held-guard entries and I/O operations
+are not acquisitions. Borrowed DashMap iteration acquires lazily; consuming iteration owns its
+storage. A custom method with the same spelling does not acquire a known lock.
+
+Every authored site has a reviewed scope naming its source fingerprint, all compiler owner variants,
+frequency and rationale. Lifecycle, observer, retained-state and bounded-protocol acquisitions
+remain visible separately from debt. A bounded protocol also names its key and bound. The reviewed
+inventory below is the basis of those decisions; filenames and sharing traits infer no policy.
+Helpers and callbacks are compiled and require their own scopes. Missing, stale, duplicated or
+unobserved scopes fail, even if the aggregate count could otherwise pass. A reviewed new recurring
+acquisition remains a defect even if another deletion keeps the total below its ceiling.
+
+`review-context.json` also binds the frequency review to the wider product source and declarations.
+Changing a caller invalidates that context even when its helper's acquisition body is unchanged.
+Review the affected call chains and scopes before refreshing the context; the gate lists the changed
+inputs and supplies no automatic classification or review-refresh command.
+
+The isolated tooling workspace uses `nightly-2026-09-17`; stable product builds use their existing
+toolchain. The declared matrix analyzes ordinary workspace libraries and binaries, the server's
+testing capability, server/interconnect/primitives under Shuttle, server/consensus/primitives under
+Loom, and interconnect/primitives under Turmoil. Turmoil's runtime cfg comes only from its just
+recipe. These are compilation checks; they do not execute concurrency protocols. Test targets,
+browser configurations and undeclared feature combinations are not claimed. The mandatory source
+primitive validator still checks import provenance, inactive cfg and authored macro bodies.
+
+Reports preserve every compiled configuration and expansion instance while counting an authored
+source site once. Authored tokens passed through external macros remain visible. Resolved sites
+in generated target files or external source files are counted as exclusions, not reviewed sites.
+Calls dynamically dispatched through an unknown API and synchronization internal to external
+libraries are outside this catalog's claim.
+
+Complete Cargo target artifacts, compiler side reports and declared roots must agree before any
+count is accepted, including zero. Completion fingerprints cover the compiler, driver, validator,
+catalog, configuration, sources, dependency locks, Cargo configuration and relevant build flags.
+The reviewed policy is checked and fingerprinted on every invocation. The workspace wrapper nests
+under configured kache; a missing side report triggers a separate supported key-salt namespace
+and recompile of isolated authored artifacts. The gate never clears `RUSTC_WRAPPER`.
+
+The same-revision cutover evidence in `tools/nervix-lint/calibration.json` records 161 textual sites,
+1,117 resolved authored sites and 132 debt sites. Forty-nine textual sites have no resolved
+acquisition; 117 of the debt sites were exposed by the resolved analysis. The explicit scopes retain
+393 lifecycle, 86 observer, 64 bounded-protocol and one retained-state acquisition; 441 acquisitions
+belong to other layers, testing capabilities or modeled primitive implementations. No product repair
+or higher ceiling was needed to activate this gate. Each remaining debt site names its owning epic
+delivery. The calibration is evidence at its recorded source revision, not the live baseline.
 
 Use the site listing while reviewing:
 
@@ -526,7 +567,7 @@ Use the site listing while reviewing:
 just ratchet --show data_plane_lock_acquisitions
 ```
 
-For every new or moved site, and for every shared-map access the count cannot see, the reviewer
+For every new or moved site and every shared-map access, the reviewer
 establishes all of the following:
 
 1. **Frequency.** Trace its callers and decide whether it can run per record, row, batch, remote

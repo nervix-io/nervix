@@ -212,6 +212,49 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+### Compiler synchronization gate
+
+`just ratchet`, `just validate` and `just validate-ci` run the same synchronization gate. The
+compiler-resolved acquisition inventory and reviewed owner/frequency scopes live in the isolated
+`tools/nervix-lint` workspace. `just typed-ratchet-setup` installs the dated nightly with compiler
+libraries and matching LLVM tools. The product toolchain remains stable, and tooling, analysis and
+product artifacts occupy separate target directories. Prepare the ordinary build prerequisites,
+including `just build-web-console`, before analyzing the server.
+
+```bash
+just ratchet
+just ratchet --show data_plane_lock_acquisitions
+just typed-ratchet --show
+just typed-ratchet --configuration shuttle --inventory
+just test-typed-ratchet
+just qualify-typed-ratchet-cache
+```
+
+The JSON report records resolved receivers, operations, spans, owner variants, expansion origins,
+compiled configurations and generated/external exclusions. The human listing includes frequency,
+rationale, debt delivery, and each bounded fence's key and bound. Partial configuration selections
+are inventory only. The policy gate requires the whole declared matrix and complete current
+compiler/Cargo evidence, even for zero sites. See [Data-Plane Concurrency](data-plane-concurrency.md)
+for its matrix, review rules, calibration and exclusions.
+
+The compiler workspace wrapper nests beneath configured kache. Completion hashes the compiler,
+driver, validator, catalog, source/dependency/configuration inputs, Cargo configuration and build
+flags; policy review is checked on every run. Cargo-fresh artifacts can reuse matching side reports.
+Missing reports cause the gate to establish analysis using `KACHE_KEY_SALT` and to rebuild only its
+isolated authored artifacts. `--fresh` reruns Cargo; `--recompile` discards those authored artifacts
+so fixture qualification executes the compiler callback. Neither changes `RUSTC_WRAPPER`.
+
+Frequency review also depends on `review-context.json`, which fingerprints product callers and
+declarations. When it is stale, trace the changed callers, update affected scopes and record the
+reviewed inputs. An unchanged helper body does not establish that its callers remain cold.
+
+The cache qualification checks fresh and Cargo-fresh runs, an actual kache dependency hit, recovery
+from a missing side report, cross-worktree rejection, and the same trybuild diagnostic twice in each
+of two worktrees. Kache 0.28 executes workspace-wrapper chains directly while caching ordinary
+dependencies; the gate also rejects incomplete cached compiler evidence independently of that
+implementation choice. The known trybuild path problem is investigated with the configured wrapper
+and recorded qualification evidence, without a direct-rustc retry.
+
 ### Deterministic concurrency checks
 
 Run the in-process scheduling checks for the execution, interconnect, and server crates with:
@@ -322,15 +365,15 @@ controls, its fault model and limits, the scenario matrix, and how to investigat
 
 ### Source coverage of the native extra checks
 
-The extra checks that execute Nervix code natively in ordinary mode, the benchmark bodies, the
-primitive boundary's ordinary conformance and the NSPL completion walk, also measure which source
+The extra checks that execute Nervix code natively in ordinary mode, the compiler synchronization
+fixtures, benchmark bodies, primitive boundary conformance and NSPL completion walk, also measure which source
 lines they execute. Run them the way CI does:
 
 ```bash
 just coverage-native-extras
 ```
 
-Name producers to run only those, one or more of `bench-smoke`, `test-primitives` and
+Name producers to run only those, one or more of `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
 `nspl-completion-walk`:
 
 ```bash
@@ -363,8 +406,10 @@ another run's directory, so no run can count another's counters. The directory h
 Cargo runs each instrumented executable through the collector as its runner, which records the
 execution and points the counters of the executable, and of every process it starts, at `profiles/`,
 one file per process and module. Build scripts and procedural macros execute only when a crate is
-compiled rather than served from the cache, so their counters are discarded, and a fresh build and a
-cached one select the same executions. The report is exported with the toolchain's own
+compiled rather than served from the cache, so their ordinary build-time counters are discarded.
+The compiler fixture is itself an executed check: its loaded procedural macro objects are retained
+by build ID, including those in nested Cargo output directories. The producer uses its pinned
+compiler's LLVM tools. The report is exported with the toolchain's own
 `llvm-profdata` and `llvm-cov` from exactly the executables that ran and the children they started.
 It keeps the files inside the repository and leaves out dependencies, harness code below a `tests`,
 `examples` or `benches` directory, and code generated below a Cargo target directory.
@@ -388,7 +433,7 @@ them run, such as an inlined dependency function, the copies that never ran can 
 hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
 executables that ran it.
 
-CI's extra-tests job runs the three checks only through this command and uploads the `lcov.info`,
+CI's extra-tests job runs the four checks through this command and uploads the `lcov.info`,
 `completion.json`, `executions.jsonl` and `export.log` of every collection as the
 `coverage-native-extras` artifact, whatever the verdict. The benchmark bodies run instrumented, so
 their Criterion test mode shows that each body executes and measures nothing. The collector itself,

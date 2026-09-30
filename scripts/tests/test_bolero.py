@@ -33,10 +33,11 @@ class InventoryTests(unittest.TestCase):
             "backup-record-manifest",
             "client-processor-choice-request",
             "branch-membership",
+            "typed-report", "typed-catalog-scope", "typed-site-union",
         })
         self.assertEqual({target.package for target in inventory.targets},
                          {"nervix-client-wire", "nervix-nspl", "nervix-backup",
-                          "nervix-branch-instances"})
+                          "nervix-branch-instances", "nervix-lint-report"})
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
@@ -138,7 +139,7 @@ class DiscoveryTests(unittest.TestCase):
         self.inventory = bolero.load_inventory()
         self.manifests = bolero.package_manifests()
 
-    def compiled(self, package: str, test_target: str) -> list[dict[str, str]]:
+    def compiled(self, package: str, test_target: str, manifest: pathlib.Path | None = None) -> list[dict[str, str]]:
         return [
             {
                 "package_name": target.package,
@@ -161,7 +162,7 @@ class DiscoveryTests(unittest.TestCase):
         with (
             mock.patch.object(bolero, "static_targets", side_effect=self.source_functions),
             mock.patch.object(bolero, "listed_tests",
-                              side_effect=lambda package, test_target, ignored:
+                              side_effect=lambda package, test_target, ignored, manifest=None:
                               [] if ignored else
                               [item["test_name"] for item in self.compiled(package, test_target)]),
             mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
@@ -172,7 +173,7 @@ class DiscoveryTests(unittest.TestCase):
         with (
             mock.patch.object(bolero, "static_targets", side_effect=self.source_functions),
             mock.patch.object(bolero, "listed_tests",
-                              side_effect=lambda package, test_target, ignored:
+                              side_effect=lambda package, test_target, ignored, manifest=None:
                               ["tests::bolero_ignored"] if ignored else
                               [item["test_name"] for item in self.compiled(package, test_target)]),
             mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
@@ -217,7 +218,7 @@ class DiscoveryTests(unittest.TestCase):
                     bolero.static_targets(manifest)
 
     def test_compiled_selection_must_match_inventory_and_work_directory(self) -> None:
-        def listed(package: str, test_target: str, ignored: bool) -> list[str]:
+        def listed(package: str, test_target: str, ignored: bool, manifest: pathlib.Path | None = None) -> list[str]:
             return [] if ignored else [
                 item["test_name"] for item in self.compiled(package, test_target)
             ]
@@ -225,13 +226,13 @@ class DiscoveryTests(unittest.TestCase):
         with (
             mock.patch.object(bolero, "static_targets", side_effect=self.source_functions),
             mock.patch.object(bolero, "listed_tests", side_effect=listed),
-            mock.patch.object(bolero, "compiled_targets", side_effect=lambda package, test_target:
+            mock.patch.object(bolero, "compiled_targets", side_effect=lambda package, test_target, manifest=None:
                               self.compiled(package, test_target)[:-1]),
         ):
             with self.assertRaisesRegex(bolero.BoleroError, "listed Bolero tests"):
                 bolero.discover(self.inventory)
 
-        def misplaced(package: str, test_target: str) -> list[dict[str, str]]:
+        def misplaced(package: str, test_target: str, manifest: pathlib.Path | None = None) -> list[dict[str, str]]:
             targets = self.compiled(package, test_target)
             if package == "nervix-backup":
                 targets[0]["work_dir"] = "/tmp/wrong-bolero-work-directory"
@@ -309,6 +310,20 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("property_suite", bolero.cargo_test_args(target))
         self.assertIn("fuzz-support", bolero.cargo_test_args(target))
         self.assertIn("fuzz-support", bolero.bolero_args(self.inventory, target))
+
+    def test_instrumented_library_is_selected_among_package_binaries(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "typed-report")
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            library = temporary / "nervix_lint_report-library"
+            binary = temporary / "nervix_lint_report-binary"
+            library.touch()
+            binary.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable unittests src/lib.rs ({library})\n"
+                f"Executable unittests src/main.rs ({binary})\n", "")
+            with mock.patch.object(bolero, "command", return_value=build):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, temporary), library)
 
     def test_fuzz_build_failure_records_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

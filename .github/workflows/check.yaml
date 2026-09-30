@@ -118,11 +118,6 @@ jobs:
         with:
           fetch-depth: 2
 
-      # Runs before the build: the counts are a text scan, so a change that raises one is named in
-      # seconds rather than after the toolchain has warmed up.
-      - name: Debt ratchet
-        run: just ratchet
-
       - name: Configure kache daemon remote
         env:
           KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
@@ -518,7 +513,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios]
+    needs: [tests, scenarios, extra-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -553,6 +548,12 @@ jobs:
           name: coverage-scenarios
           path: coverage-inputs/scenarios
 
+      - name: Download native extra coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-native-extras
+          path: coverage-inputs/native-extras
+
       - name: Merge coverage and check CRAP
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
@@ -561,6 +562,10 @@ jobs:
           lcov --add-tracefile coverage-inputs/tests/lcov.info \
             --add-tracefile coverage-inputs/scenarios/lcov.info \
             --output-file lcov.info
+          while IFS= read -r report; do
+            lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
+            lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
+          done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
           cargo crap --lcov lcov-workspace.info --min 30 --threshold 30
 
       - name: Upload coverage to Codecov
@@ -860,6 +865,14 @@ jobs:
       - name: Native coverage collector
         run: just test-native-coverage
 
+      - name: Compiler synchronization qualification
+        run: just coverage-native-extras test-typed-ratchet
+
+      - name: Compiler cache and runner qualification
+        run: |
+          just qualify-typed-ratchet-cache
+          just coverage-typed-ratchet-python
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
@@ -900,6 +913,8 @@ jobs:
             target/native-coverage/**/lcov.info
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
+            target/typed-ratchet/python.lcov
+            target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 
       - name: Publish kache report
