@@ -126,8 +126,10 @@ recorded boundary, not a claim:
   identifier that no keyword can match. The name rule admits more, such as `-`, `~`, `.` and a
   leading digit; the name properties cover it on each name type directly.
 - `DROP` has no form for branches, generators, hash maps, signaling protocols, WASM processors or
-  window processors, an HTTP emitter has no `BATCH` clause, and a correlator's filter has no
-  spelling. Only the vocabulary domain generates those states, for the archive properties.
+  window processors, an HTTP emitter has no `BATCH` clause, a correlator's filter has no
+  spelling, and a Postgres `ON CONFLICT DO UPDATE` whose target names every mapped column is
+  rejected, because it leaves no column to update. Only the vocabulary domain generates those
+  states, for the archive properties.
 - The archived form of a `usize` count, such as a relay's `CAPACITY`, is 32 bits wide and
   truncates a larger count without an error. The vocabulary domain draws those counts only from the
   range the archive keeps.
