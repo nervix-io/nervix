@@ -965,6 +965,11 @@ requires a constant scope, but it is shared and computed once per execution. A p
 before the epoch reaches `uuid_v7()` as it is, and each row that evaluates the call fails rather
 than encoding a different instant. No VM or datetime code calls `SystemTime` or `Instant`.
 
+Processor and materialized relay tasks retain the installed domain clock that supplies each unit's
+snapshot. Filtered subscriptions retain its lifecycle owner so a subscription opened before
+`START DOMAIN` follows the subsequently installed generation. Batch evaluation reads these
+publications directly; it does not discover its clock through the runtime registry.
+
 ### Deterministic And Volatile Functions
 
 Only `uuid_v4` and `uuid_v7` are `Volatile`. A volatile builtin:

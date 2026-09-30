@@ -2654,7 +2654,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
         let placement = wasm_guest_placement("acme", 1);
-        let guest = super::super::ReplicatedWasmProcessorState::new(placement.clone(), None);
+        let guest = super::super::ReplicatedWasmProcessorState::new(
+            placement.clone(),
+            None,
+            Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+        );
         let captured = guest.capture(
             vec![1, 2, 3],
             super::super::WasmCheckpointBoundary::LocalStorage,

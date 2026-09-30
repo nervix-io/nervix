@@ -1,5 +1,5 @@
 Feature: Entity-pause model alterations
-  @entity_pause_junction_swap_sibling_uninterrupted
+  @entity_pause_junction_swap_sibling_uninterrupted @retained_task_handles
   Scenario Outline: A junction swap preserves sibling delivery and concrete branch identity
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"

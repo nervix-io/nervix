@@ -1549,13 +1549,6 @@ impl RelayBoundaryBuilder {
 }
 
 impl Runtime {
-    pub(in crate::runtime) fn current_stream_expiration_time(
-        &self,
-        domain: &DomainName,
-    ) -> DomainClockAccessResult<Timestamp> {
-        Ok(self.domain_execution_snapshot(domain)?.now())
-    }
-
     pub(in crate::runtime) fn invalidate_branch_relay_generation(
         &self,
         domain: &DomainName,
@@ -1878,6 +1871,18 @@ impl Runtime {
             let relay_model_name = ModelName::from(&relay);
             let ownership_entity =
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
+            let freeze_watch = OwnershipHandoffFreezeWatch::new(&runtime, ownership_entity);
+            let clock = match runtime.bind_domain_clock(&domain) {
+                Ok(clock) => clock,
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "materialized relay '{}' in domain '{}' could not bind its clock: {error}",
+                        relay.as_str(),
+                        domain.as_str()
+                    ));
+                    return;
+                }
+            };
             let mut restored_branches = state.read().restored_branch_watermarks();
             restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
             for (key, last_ingestion) in restored_branches {
@@ -1886,11 +1891,11 @@ impl Runtime {
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
                 nervix_primitives::task::consume_budget().await;
-                if !runtime.ownership_handoff_entity_is_frozen(&ownership_entity)
+                if !freeze_watch.observe().is_frozen()
                     && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
                 {
-                    let now = match runtime.current_stream_expiration_time(&domain) {
+                    let now = match clock.snapshot().map(|snapshot| snapshot.now()) {
                         Ok(now) => now,
                         Err(error) => {
                             runtime.events().report_error(format!(
@@ -1917,16 +1922,15 @@ impl Runtime {
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
                     continue;
                 }
-                let expiration_sleep =
-                    if runtime.ownership_handoff_entity_is_frozen(&ownership_entity) {
-                        Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
-                    } else {
-                        branch_ttl.map(|_| {
-                            next_expiration_scan
-                                .checked_duration_since(Instant::now())
-                                .unwrap_or(Duration::ZERO)
-                        })
-                    };
+                let expiration_sleep = if freeze_watch.observe().is_frozen() {
+                    Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
+                } else {
+                    branch_ttl.map(|_| {
+                        next_expiration_scan
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO)
+                    })
+                };
                 let mut wake = RuntimeWake::never();
                 if let Some(sleep) = expiration_sleep {
                     match RuntimeWake::after(sleep) {
@@ -1986,7 +1990,7 @@ impl Runtime {
                     }
                 };
                 let branch_key = batch.key.clone();
-                let now = match runtime.current_stream_expiration_time(&domain) {
+                let now = match clock.snapshot().map(|snapshot| snapshot.now()) {
                     Ok(now) => now,
                     Err(error) => {
                         let reason = format!(

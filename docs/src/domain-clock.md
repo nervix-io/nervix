@@ -219,7 +219,18 @@ Each runtime node keeps one shared lifecycle allocation per domain, and graph ta
 handles bound to its domain and lifecycle generation. Control-plane synchronization publishes each
 installation change into that allocation by atomically replacing the complete installation, then
 notifies logical waiters. This makes a lifecycle change visible to every existing handle and gives
-logical waiters one notification source to observe.
+logical waiters one notification source to observe. The same immutable publication contains its
+pause state, lifecycle generation and last start point. Ingest groups read pause/admission and time
+from one publication. Kafka domain-offset polls and filtered subscriptions retain the lifecycle
+allocation; a subscription reads its current installed generation even when it opened before
+START. Generators, processors and materialized relay tasks retain their generation-bound clock. These
+reads do not resolve the runtime's domain or execution registry again. A paused paced domain keeps
+its installed mapping while publishing pause, and a later generation still invalidates a clock
+bound to its predecessor.
+
+A pause-only publication does not notify installation observers when it keeps the installed
+mapping unchanged; intake sees pause through the lifecycle publication while execution keeps its
+existing logical waiters and mapping.
 
 The local installation states have explicit meanings:
 

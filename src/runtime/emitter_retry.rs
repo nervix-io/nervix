@@ -192,20 +192,11 @@ impl EmitterRetrySchedule {
         match self.schedule(wait, acks, waiting_for_stall_clear) {
             Ok(()) => {
                 if let Some(reason) = reason {
-                    context.runtime.record_emitter_transient_error_with_backoff(
-                        &context.domain,
-                        &context.emitter,
-                        reason,
-                        wait,
-                    );
+                    context.record_retry(reason, wait, EmitterRetryKind::Infrastructure);
                 }
             }
             Err(error) => {
-                context.runtime.record_emitter_transient_error(
-                    &context.domain,
-                    &context.emitter,
-                    emitter_error_message(&error),
-                );
+                context.record_failure(emitter_error_message(&error));
             }
         }
     }

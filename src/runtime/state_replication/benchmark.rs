@@ -56,15 +56,18 @@ impl StateReplicationBenchmark {
 
         let deduplicator =
             ModelName::parse("dedup").assured("the benchmark deduplicator name is valid");
-        runtime.inner.state_identities.insert(
+        runtime.publish_state_assignment(
             DomainNodeRef::node_in(
                 domain.clone(),
                 ModelKind::Deduplicator,
                 deduplicator.clone(),
             ),
-            ScheduledStateIdentity {
-                schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
-                wasm_state_generations: None,
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                    wasm_state_generations: None,
+                },
+                checkpoint_owners: None,
             },
         );
         let branch_lru = runtime
@@ -240,11 +243,14 @@ impl ReplicaCatchUpBenchmark {
             deduplicator.clone(),
         );
         for runtime in [&owner, &replica] {
-            runtime.inner.state_identities.insert(
+            runtime.publish_state_assignment(
                 identity.clone(),
-                ScheduledStateIdentity {
-                    schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
-                    wasm_state_generations: None,
+                ScheduledStateAssignment {
+                    identity: ScheduledStateIdentity {
+                        schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                        wasm_state_generations: None,
+                    },
+                    checkpoint_owners: None,
                 },
             );
         }

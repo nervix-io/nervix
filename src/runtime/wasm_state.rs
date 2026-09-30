@@ -22,7 +22,7 @@ use nervix_models::{
 use nervix_primitives::publication::{ArcSwap, ArcSwapOption};
 
 use super::{
-    PersistedRuntimeStateEntry, RuntimeStatePlacement,
+    PersistedRuntimeStateEntry, RuntimeStatePlacement, SharedStateAssignment,
     branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     lsm_sequence::LsmSequence,
 };
@@ -36,6 +36,7 @@ use super::{
 #[derive(Debug)]
 pub(super) struct ReplicatedWasmProcessorState {
     pub(super) placement: RuntimeStatePlacement,
+    pub(super) assignment: SharedStateAssignment,
     /// The last checkpoint that reached its boundary. Replaced as one pointer, so nothing that
     /// reads it waits for the branch task or makes it copy the guest buffer.
     committed: ArcSwap<WasmGuestState>,
@@ -273,6 +274,7 @@ impl ReplicatedWasmProcessorState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         initial: Option<PersistedRuntimeStateEntry>,
+        assignment: SharedStateAssignment,
     ) -> Self {
         let mut committed = WasmGuestState {
             revision: 0,
@@ -287,6 +289,7 @@ impl ReplicatedWasmProcessorState {
         let committed = StdArc::new(committed);
         Self {
             placement,
+            assignment,
             current_lsm: LsmSequence::restored(committed.revision),
             published: ArcSwap::from(committed.clone()),
             committed: ArcSwap::from(committed),
@@ -528,6 +531,7 @@ mod tests {
     use nervix_models::{
         DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
     };
+    use triomphe::Arc;
 
     use super::*;
     use crate::{
@@ -570,7 +574,8 @@ mod tests {
 
     #[test]
     fn a_checkpoint_waits_for_every_replica_it_names() {
-        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        let state =
+            ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
         let replicas = replica_set(&["node-2", "node-3"]);
         let captured = state.capture(
             vec![1, 2, 3],
@@ -606,7 +611,11 @@ mod tests {
             lsm: 7,
             payload: vec![9, 8, 7],
         };
-        let state = ReplicatedWasmProcessorState::new(placement(), Some(initial));
+        let state = ReplicatedWasmProcessorState::new(
+            placement(),
+            Some(initial),
+            Arc::new(ArcSwapOption::empty()),
+        );
 
         let saved = state.restore_guest_state();
         let restorable = saved
@@ -620,7 +629,8 @@ mod tests {
     /// next guest instance must not copy the whole guest buffer each time.
     #[test]
     fn a_capture_keeps_the_saved_buffer_without_copying_it() {
-        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        let state =
+            ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
         let guest_state = vec![7_u8; 4_096];
         let saved_buffer = guest_state.as_ptr();
         let captured = state.capture(guest_state, WasmCheckpointBoundary::LocalStorage);
@@ -644,7 +654,8 @@ mod tests {
     /// revision is never stamped on a later capture.
     #[test]
     fn only_a_completed_checkpoint_becomes_the_committed_checkpoint() {
-        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        let state =
+            ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
         assert_eq!(state.inspection().stage, WasmCheckpointStage::Empty);
         let first = state.capture(vec![1], WasmCheckpointBoundary::LocalStorage);
         assert_eq!(state.progress(), WasmCheckpointProgress::Captured);
@@ -694,7 +705,8 @@ mod tests {
 
     #[test]
     fn failure_before_capture_keeps_the_committed_revision_without_claiming_a_new_one() {
-        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        let state =
+            ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
         state.record_failed();
         let failed = state.inspection();
         assert_eq!(failed.stage, WasmCheckpointStage::Failed);
@@ -721,7 +733,8 @@ mod tests {
 
     #[test]
     fn inspection_counts_only_replica_reports_for_the_current_revision() {
-        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        let state =
+            ReplicatedWasmProcessorState::new(placement(), None, Arc::new(ArcSwapOption::empty()));
         let captured = state.capture(vec![1], replicas(&["node-2", "node-3"]));
         let durable = state.record_locally_durable(captured);
         state.replication().record(&node("node-2"), 1);

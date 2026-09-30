@@ -134,6 +134,11 @@ The four ingestor-quiesce families use `domain`, `ingestor`, and `physical_node_
 families are gauges; dropped and rejected families are monotonic counters. They are process-local:
 quiesce buffers do not migrate during termination or failover.
 
+Quiesce children are registered when the ingestor starts. Client-ingestor outcome children are
+registered when its endpoint starts, and subscription loss counters when delivery starts. These
+bounded series may therefore appear at zero before their first observation. Their labels and
+counting contracts are unchanged.
+
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
 of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
