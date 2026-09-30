@@ -18,7 +18,7 @@ use nervix_connector::{
     SinkPublishError, SinkRecordPosition, physical_time::PhysicalDeadlineCapability,
 };
 
-use super::*;
+use super::{emitter_supervision::EmitterConfirmationWaitGuard, *};
 
 pub(super) struct EmitterPublishControl<'a> {
     pub(super) fault_injection: &'a ConfiguredFaultInjection,
@@ -377,9 +377,7 @@ impl EmitterSinkState {
             match self.flush_buffer(context, control, buffer).await {
                 Ok(report) => {
                     control.backoff.reset();
-                    context
-                        .runtime
-                        .clear_emitter_transient_error(&context.domain, &context.emitter);
+                    context.status.clear();
                     flushed = report;
                     break;
                 }
@@ -391,12 +389,7 @@ impl EmitterSinkState {
                 Err(error) if emitter_publish_error_is_retryable(&error) => {
                     let reason = emitter_error_message(&error);
                     let wait = emitter_retry_delay(control.backoff, &error);
-                    context.runtime.record_emitter_transient_error_with_backoff(
-                        &context.domain,
-                        &context.emitter,
-                        reason.clone(),
-                        wait,
-                    );
+                    context.record_retry(reason.clone(), wait, EmitterRetryKind::Infrastructure);
                     context.report_flush_error(label, &reason);
                     let waited = await_until_emitter_stop_deadline(
                         control.stop_rx,
@@ -489,9 +482,7 @@ impl EmitterSinkState {
             {
                 Ok(report) => {
                     control.backoff.reset();
-                    context
-                        .runtime
-                        .clear_emitter_transient_error(&context.domain, &context.emitter);
+                    context.status.clear();
                     return Ok(report);
                 }
                 Err(error)
@@ -542,9 +533,8 @@ impl EmitterSinkState {
         }
         let acks = self.pending_acks(buffer);
         let committed = {
-            let _confirmation_wait = context
-                .runtime
-                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+            let _confirmation_wait =
+                EmitterConfirmationWaitGuard::begin(&context.confirmation_waits);
             let commit = Box::pin(self.commit_sink());
             await_until_emitter_stop_deadline(
                 control.stop_rx,
@@ -583,9 +573,8 @@ impl EmitterSinkState {
         self.check_fault_injection(context, control)?;
         let pending_acks = buffer.pending_acks();
         {
-            let _confirmation_wait = context
-                .runtime
-                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+            let _confirmation_wait =
+                EmitterConfirmationWaitGuard::begin(&context.confirmation_waits);
             let publish =
                 Box::pin(self.publish_buffered_batches(context, buffer.publication_mut()));
             let published = await_until_emitter_stop_deadline(
@@ -672,12 +661,7 @@ impl EmitterSinkState {
     ) -> EmitterRuntimeResult<bool> {
         let reason = emitter_error_message(error);
         let wait = control.backoff.next_delay();
-        context.runtime.record_commit_failure_with_backoff(
-            &context.domain,
-            &context.emitter,
-            reason.clone(),
-            wait,
-        );
+        context.record_retry(reason.clone(), wait, EmitterRetryKind::Commit);
         context.report_flush_error(sink, &reason);
         await_until_emitter_stop_deadline(
             control.stop_rx,
@@ -873,6 +857,7 @@ pub(super) async fn finish_rejected_records(
                 context
                     .runtime
                     .handle_structured_message_error(MessageErrorHandling {
+                        routing: Some(&context.routing.load()),
                         domain: &context.domain,
                         node_kind: ModelKind::Emitter,
                         node: &ModelName::from(&context.emitter),
