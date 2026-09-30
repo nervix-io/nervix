@@ -282,6 +282,14 @@ schedules and replay. `just validate`, `just book` and `just ratchet` passed. Co
 Python runner reports cover 329 of 339 executable changed lines (97.05%) before integration with
 the latest main branch.
 
+After integrating main's codec error-reporting, representation properties and checked arithmetic,
+all 1,589 instrumented server unit tests passed with the downloaded ONNX runtime configured. The
+merged runner passed 30 unit tests against the complete 26-target inventory, and `just book`
+passed its 282 Python checks and documentation build. Fresh server and Python reports cover
+301 of 331 executable patch lines (90.94%) against the merged main. Public endpoint scenarios and
+Shuttle evidence above were collected before this integration; unchanged endpoint HTTP edge
+paths are exercised by the full PR scenario gate as well.
+
 The full-server sanitizer compilation exceeded the existing 1,800-second local build limit under
 shared-host paging. Its failed and interrupted run evidence remains in `target/bolero/runs`.
 The server's fuzz package profile uses lighter optimization without debug output; assertions,
