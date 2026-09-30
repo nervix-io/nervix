@@ -603,8 +603,7 @@ async fn batch_table_records_writes(
     table: String,
     expected: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let sink = DatabaseSink::parse(&sink);
     let table = expand_placeholders(world, &table);
     let expected = expected

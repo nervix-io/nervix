@@ -212,6 +212,61 @@ Feature: Web console visual relay and subscription creation
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "no subscription tab named 'typed_metrics'"
 
+  @visual_subscription_literal
+  Scenario Outline: A visual subscription filter reads a backslash in a string literal as a typed statement does
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification ( tenant STRING, user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE INGESTOR notifications_source FROM ENDPOINT notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION typed_literal TO notifications WHERE input.tenant = 'a\nb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-name='typed_literal'][data-subscription-state='active']" exists
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='subscription']" is clicked
+    And selector ".create-name" is filled with "visual_literal"
+    And selector ".create-relay-ref .create-choice-search" is filled with "notifications"
+    Then selector ".create-relay-ref [data-value='notifications']" exists
+    When selector ".create-relay-ref [data-value='notifications']" is clicked
+    And selector ".create-filter" is filled with "input.tenant = 'a\nb'"
+    Then selector ".create-preview" contains "CREATE SUBSCRIPTION visual_literal TO notifications WHERE input.tenant = 'a\nb';"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    And selector ".subscription-tab[data-subscription-name='visual_literal'][data-subscription-state='active']" exists
+    When selector ".create-close" is clicked
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"a\nb","user_id":7}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"a\\nb","user_id":42}
+      """
+    And selector ".subscription-tab[data-subscription-name='visual_literal'] .tab-main" is clicked by script
+    Then selector ".terminal" contains '"user_id":42'
+    And selector ".terminal" contains '"user_id":42' exactly 1 times
+    And selector ".terminal" does not contain '"user_id":7'
+    When selector ".subscription-tab[data-subscription-name='typed_literal'] .tab-main" is clicked by script
+    Then selector ".terminal" contains '"user_id":42'
+    And selector ".terminal" contains '"user_id":42' exactly 1 times
+    And selector ".terminal" does not contain '"user_id":7'
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Failed visual subscriptions keep their draft and open no tab
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"

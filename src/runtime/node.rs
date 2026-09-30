@@ -114,12 +114,8 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeRef, Arc<client_emitter::ClientEmitterEndpoint>, RandomState>,
     /// The node's independent native-output byte reservation.
     pub(in crate::runtime) client_emitter_budget: client_emitter::ClientEmitterBudget,
-    pub(in crate::runtime) endpoint_bindings:
-        DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
-    /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so
-    /// request routing never scans domain executions or their configured routes.
-    pub(in crate::runtime) routed_endpoints:
-        DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
+    /// Endpoint definitions and bound source lifetimes share one immutable publication.
+    pub(in crate::runtime) endpoint_intake_routes: EndpointIntakeRoutes<EndpointIngestBinding>,
     pub(in crate::runtime) relay_boundary_fanouts: RelayBoundaryFanoutMap,
     pub(in crate::runtime) events: RuntimeEvents,
     /// The test harness keeps another handle to the same injected state and arms it while this
@@ -137,19 +133,17 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) remote_ack_watcher_shutdown: CancellationToken,
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
-    pub(in crate::runtime) state_checkpoint_notifications:
-        DashMap<RuntimeStatePlacement, Arc<Notify>, RandomState>,
     pub(in crate::runtime) pending_state_replica_syncs:
         DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,
-    pub(in crate::runtime) pending_state_checkpoint_announcements:
-        DashMap<RuntimeStatePlacement, PendingStateCheckpointAnnouncement, RandomState>,
     /// Owns replica synchronization and checkpoint announcement work that outlives the event that
-    /// scheduled it.
+    /// scheduled it. Closing it when the runtime stops ends every announcer.
     pub(in crate::runtime) state_replication_tasks: TaskTracker,
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
-    pub(in crate::runtime) replicated_branch_lru_snapshots:
-        DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    /// The branch lifecycle this node holds for each branch-keyed entity, as its owner or as a
+    /// replica. The replica task that synchronizes an entity's branches keeps its handle.
+    pub(in crate::runtime) replicated_branch_lifecycles:
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchLifecycle>, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_handoffs:
         DashMap<DomainNodeRef, PreparedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) activated_runtime_state_handoffs:

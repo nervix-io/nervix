@@ -133,11 +133,29 @@ test-admission-kernels *args:
 bench-window-admission *args:
     cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
+# Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
+# run each. Extra arguments are forwarded to Criterion.
+bench-checked-lanes *args:
+    cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
+
+# The same measurement built for the x86-64-v3 payload the Docker image ships, in its own target
+# directory: the lane loop compiles for AVX2 as the payload's does, and the kernels still select
+# their level from the CPU at run time.
+bench-checked-lanes-x86-64-v3 *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
+
 test-admission-runtime *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 # Focused ordinary-mode regressions for runtime owners.
 test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
+# Measure the endpoint's actual request routing and per-thread allocations on the same host.
+bench-endpoint-routing: build-web-console download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
+
+test-endpoint-intake *args: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 test-web-console:
@@ -520,6 +538,10 @@ test-connectors *args:
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
 
+# Run native client session unit tests without enabling the modeled Shuttle build.
+test-client-core *args:
+    cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
+
 # Rewrite the client wire conformance corpus from the encoder's current output. Review the
 # regenerated `corpus.report` before committing it: every client implementation is held to it.
 update-client-wire-corpus:
@@ -656,10 +678,16 @@ test-scenarios-coverage: tests-deps
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
+# Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
+# Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
+# the current ones in a report.
+coverage-clean-workspace:
+    cargo llvm-cov clean --workspace
+
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
-coverage-report-workspace:
-    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info
+coverage-report-workspace *args:
+    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info {{ args }}
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
@@ -777,6 +805,10 @@ coverage-scenarios output *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
@@ -784,6 +816,10 @@ coverage-scenarios-append output *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.
@@ -986,6 +1022,7 @@ bench *args: build-web-console
     cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
+    cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
@@ -1000,6 +1037,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
+    cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
@@ -1052,6 +1090,12 @@ client-wire-binding-host-cost output_dir="target/client-wire-binding-host":
 # Compare the same native command workload over plaintext and TLS with one-node test clusters.
 client-wire-tls-cost output_dir="target/client-wire-tls-cost":
     NERVIX_CLIENT_WIRE_TLS_OUTPUT_DIR={{ quote(output_dir) }} just test-scenarios --input tests/features/runtime/client_wire_tls_cost.feature --tags @client_wire_tls_cost --concurrency 1 --retry 0
+
+# Measure runtime-state replication on the owner and on a replica: a Kafka offset commit its one
+# replica acknowledges, and the branch lifecycle check a replica makes before it installs each
+# branch checkpoint, for lifecycles of 16, 128 and 1,024 branches.
+bench-state-replication *args:
+    cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
 
 # Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
 # store lives under the crate target directory, so the synchronization cost is that of its storage.

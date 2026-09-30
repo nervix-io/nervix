@@ -9,6 +9,8 @@
 //! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; NSPL
 //!   parsing, placement policy or consensus storage.
 
+use std::borrow::Cow;
+
 use nervix_connector::{
     IngestMessageHeaders, RetainedIngestHeaders, physical_time::actual_utc_now,
 };
@@ -38,16 +40,10 @@ pub(super) struct RoutedEndpoint {
     pub(super) signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
 }
 
-/// Every domain publishing one exact host and path. A request resolves the host and path by key
-/// and then reads this map, which holds one entry per domain that claims that exact pair.
-pub(super) type RoutedEndpointsByDomain = HashMap<DomainName, RoutedEndpoint>;
-
 /// The intake one ingestor admits an endpoint's requests through, bound to every route the
 /// endpoint publishes while the ingestor's endpoint source runs.
-#[derive(Clone)]
-pub(super) struct EndpointIngestBinding {
+pub(crate) struct EndpointIngestBinding {
     pub(super) handles: IngestTaskHandles,
-    pub(super) runtime_key: DomainNodeRef,
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
@@ -72,34 +68,20 @@ impl EndpointDispatchOutcome {
     }
 }
 
-pub(super) fn normalize_http_host(host: &str) -> String {
-    host.split(':')
-        .next()
-        .unwrap_or(host)
-        .trim()
-        .to_ascii_lowercase()
+pub(crate) type ResolvedEndpointRoute = Arc<EndpointIntakeRoute<EndpointIngestBinding>>;
+
+pub(super) fn normalize_http_host(host: &str) -> Cow<'_, str> {
+    let host = host.split(':').next().unwrap_or(host).trim();
+    if host.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(host.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(host)
+    }
 }
 
 impl Runtime {
-    pub(crate) async fn has_websocket_endpoint(&self, host: &str, path: &str) -> bool {
-        self.has_endpoint(host, path, EndpointType::Websockets)
-            .await
-    }
-
-    pub(crate) async fn websocket_endpoint_signaling_protocol(
-        &self,
-        host: &str,
-        path: &str,
-    ) -> Option<Arc<CompiledSignalingProtocol>> {
-        let key = HttpRouteKey {
-            host: normalize_http_host(host),
-            path: path.to_string(),
-        };
-        let domains = self.inner.routed_endpoints.get(&key)?;
-        domains
-            .values()
-            .find(|endpoint| endpoint.endpoint_type == EndpointType::Websockets)
-            .and_then(|endpoint| endpoint.signaling_protocol.clone())
+    pub(crate) fn resolve_endpoint(&self, host: &str, path: &str) -> Option<ResolvedEndpointRoute> {
+        self.inner.endpoint_intake_routes.resolve(host, path)
     }
 
     pub(in crate::runtime) async fn signaling_protocol(
@@ -114,58 +96,22 @@ impl Runtime {
             .get(signaling_protocol)
             .cloned()
     }
+}
 
-    pub(crate) async fn has_http_endpoint(&self, host: &str, path: &str) -> bool {
-        self.has_endpoint(host, path, EndpointType::Http).await
-    }
-
-    pub(in crate::runtime) async fn has_endpoint(
-        &self,
-        host: &str,
-        path: &str,
-        endpoint_type: EndpointType,
-    ) -> bool {
-        let key = HttpRouteKey {
-            host: normalize_http_host(host),
-            path: path.to_string(),
-        };
-        self.inner
-            .routed_endpoints
-            .get(&key)
-            .is_some_and(|domains| {
-                domains
-                    .values()
-                    .any(|endpoint| endpoint.endpoint_type == endpoint_type)
-            })
-    }
-
-    pub(crate) async fn dispatch_websocket_payload(
-        &self,
-        host: &str,
-        path: &str,
-        payload: &[u8],
-        headers: &dyn IngestMessageHeaders,
-    ) -> EndpointDispatchOutcome {
-        self.dispatch_endpoint_payload(host, path, payload, headers, "websocket")
-            .await
-    }
-
-    pub(crate) async fn websocket_endpoint_admission(
-        &self,
-        host: &str,
-        path: &str,
-    ) -> EndpointDispatchOutcome {
-        let route_key = HttpRouteKey {
-            host: normalize_http_host(host),
-            path: path.to_string(),
-        };
-        let bindings = match self.inner.endpoint_bindings.get(&route_key) {
-            Some(bindings) => bindings.clone(),
-            None => Vec::new(),
-        };
+impl EndpointIntakeRoute<EndpointIngestBinding> {
+    pub(crate) fn admission(&self) -> EndpointDispatchOutcome {
         let mut outcome = EndpointDispatchOutcome::default();
         let mut retry_after = Vec::new();
-        for binding in &bindings {
+        for lifetime in self.bindings() {
+            let lease = lifetime.intake();
+            let Some(binding) = lease.as_deref() else {
+                outcome.rejected = outcome
+                    .rejected
+                    .checked_add(1)
+                    .assured("the bindings counted here are endpoint routes held in memory");
+                retry_after.push(None);
+                continue;
+            };
             match binding.quiesce.endpoint_admission() {
                 Ok(()) => {
                     outcome.accepted = outcome
@@ -191,37 +137,28 @@ impl Runtime {
         outcome
     }
 
-    pub(crate) async fn dispatch_http_payload(
+    pub(crate) async fn dispatch(
         &self,
-        host: &str,
-        path: &str,
+        runtime: &Runtime,
         payload: &[u8],
         headers: &dyn IngestMessageHeaders,
     ) -> EndpointDispatchOutcome {
-        self.dispatch_endpoint_payload(host, path, payload, headers, "http")
-            .await
-    }
-
-    pub(in crate::runtime) async fn dispatch_endpoint_payload(
-        &self,
-        host: &str,
-        path: &str,
-        payload: &[u8],
-        headers: &dyn IngestMessageHeaders,
-        protocol: &str,
-    ) -> EndpointDispatchOutcome {
-        let route_key = HttpRouteKey {
-            host: normalize_http_host(host),
-            path: path.to_string(),
+        let protocol = match self.endpoint_type() {
+            EndpointType::Http => "http",
+            EndpointType::Websockets => "websocket",
         };
-        let bindings = match self.inner.endpoint_bindings.get(&route_key) {
-            Some(bindings) => bindings.clone(),
-            None => Vec::new(),
-        };
-
         let mut outcome = EndpointDispatchOutcome::default();
         let mut retry_after = Vec::new();
-        for binding in &bindings {
+        for lifetime in self.bindings() {
+            let lease = lifetime.intake();
+            let Some(binding) = lease.as_deref() else {
+                outcome.rejected = outcome
+                    .rejected
+                    .checked_add(1)
+                    .assured("the bindings counted here are endpoint routes held in memory");
+                retry_after.push(None);
+                continue;
+            };
             // A binding may buffer this request until it resumes, so its copy of the
             // request headers is taken here and only here.
             let payload = BufferedIngestPayload::new(
@@ -235,7 +172,8 @@ impl Runtime {
                         .accepted
                         .checked_add(1)
                         .assured("the bindings counted here are endpoint routes held in memory");
-                    self.dispatch_endpoint_binding(binding, payload, protocol)
+                    runtime
+                        .dispatch_endpoint_binding(binding, payload, protocol)
                         .await;
                 }
                 IngestorQuiesceIntake::Buffered => {
@@ -270,7 +208,9 @@ impl Runtime {
         }
         outcome
     }
+}
 
+impl Runtime {
     async fn dispatch_endpoint_binding(
         &self,
         binding: &EndpointIngestBinding,
@@ -326,16 +266,18 @@ impl Runtime {
                 }
             }
             Err(error) => {
+                // The codec's context names the codec and field; the causes beneath it say why.
+                let reason = format!("{error:#}");
                 self.inner.events.report_error(format!(
-                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': {}",
+                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': \
+                     {reason}",
                     binding.ingestor.as_str(),
                     binding.domain.as_str(),
-                    error
                 ));
                 warn!(
                     domain = binding.domain.as_str(),
                     ingestor = binding.ingestor.as_str(),
-                    error = %error,
+                    error = %reason,
                     protocol,
                     "failed to decode endpoint message"
                 );
@@ -352,5 +294,9 @@ mod tests {
     fn normalize_http_host_strips_port_and_normalizes_case() {
         assert_eq!(normalize_http_host(" Example.COM:8080 "), "example.com");
         assert_eq!(normalize_http_host("api.example.com"), "api.example.com");
+        assert!(matches!(
+            normalize_http_host(" api.example.com:8080 "),
+            Cow::Borrowed("api.example.com")
+        ));
     }
 }

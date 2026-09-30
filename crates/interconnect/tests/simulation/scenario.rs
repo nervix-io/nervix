@@ -27,6 +27,7 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::parse_duration_text;
 use nervix_primitives::{sync::blocking::OnceLock, thread, unmodeled::time::Instant};
 use nervix_recovery::Discarded as _;
 use serde::{Deserialize, Serialize};
@@ -436,7 +437,7 @@ impl InjectedFailure {
         let invalid = || DriverError::InvalidInjection {
             value: value.to_string(),
         };
-        let at = humantime::parse_duration(value).map_err(|_| invalid())?;
+        let at = parse_duration_text(value).map_err(|_| invalid())?;
         if at.is_zero() {
             return Err(invalid());
         }
@@ -1297,7 +1298,7 @@ mod tests {
                 "{sweep:?}"
             );
         }
-        for injection in ["0s", "soon", ""] {
+        for injection in ["0s", "soon", "", "18446744073709551615s 1000000000ns"] {
             assert!(
                 matches!(
                     mode(&[(INJECT_VARIABLE, injection)]),

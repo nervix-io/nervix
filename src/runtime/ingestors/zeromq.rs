@@ -13,6 +13,7 @@ use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
 
 use super::{
     super::*,
+    IngestorStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -20,7 +21,7 @@ impl ZeroMqIngestorStartPlan {
     pub(super) async fn compose(
         self,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let ZeroMqIngestorStartPlan { client, mode } = self;
         BrokerSourceStart {
             connector: ZeroMqSourcePlan::new(client.config),

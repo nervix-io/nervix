@@ -49,6 +49,16 @@ impl Token {
             Self::LParen | Self::RParen | Self::LBracket | Self::RBracket
         )
     }
+
+    /// Whether an expression may write this token as the name of a call or the scope of a field:
+    /// any word but a keyword an expression follows directly.
+    pub fn may_name_a_term(&self) -> bool {
+        match self {
+            Self::Word(Word::KnownWord { iden, .. }) => !iden.precedes_expression(),
+            Self::Word(Word::UnknownWord(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,6 +415,18 @@ pub enum Identifier {
     Roto0_13,
 }
 
+impl Identifier {
+    /// Whether this keyword can begin a clause that goes straight on with an expression, as
+    /// `WHERE <expression>`, a reorderer's `BY <expressions>` and an HTTP sink's `METHOD` and
+    /// `PATH` do.
+    ///
+    /// Where such a keyword ends an expression region, a `(` after it opens that clause, never the
+    /// arguments of a call named like the keyword.
+    pub fn precedes_expression(self) -> bool {
+        matches!(self, Self::Where | Self::By | Self::Method | Self::Path)
+    }
+}
+
 fn classify_word(raw: &str) -> Word {
     match Identifier::from_str(raw).ok() {
         Some(iden) => Word::KnownWord {
@@ -430,20 +452,15 @@ fn ws<'src>() -> impl Parser<'src, &'src str, (), extra::Err<LexError<'src>>> + 
     choice((spaces, line_comment)).repeated().ignored()
 }
 
-fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
-    let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
-
-    let number = text::int(10)
-        .then(just('.').then(text::digits(10)).or_not())
-        .then(
-            one_of("eE")
-                .then(one_of("+-").or_not())
-                .then(text::digits(10))
-                .or_not(),
-        )
-        .to_slice()
-        .map(|n: &str| Token::NumberLiteral(n.to_string()));
-
+/// A string literal, read verbatim: `'text'`, `"text"`, or dollar-quoted `$$text$$` and
+/// `$tag$text$tag$`, whose tag is letters, digits and underscores. A quoted string holds anything
+/// but its own quote and a line break, and a dollar-quoted string anything but its closing
+/// delimiter. No escape sequence is interpreted, so a backslash is an ordinary character.
+///
+/// This is the one reading of a string literal: a statement lexes its literals with it, and so does
+/// the expression lexer that reads a standalone expression.
+pub(crate) fn string_literal<'src>()
+-> impl Parser<'src, &'src str, String, extra::Err<LexError<'src>>> + Clone {
     let single_string = just('\'')
         .ignore_then(
             any()
@@ -498,8 +515,9 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
             match input.next() {
                 Some(ch) => {
                     value.push(ch);
-                    if value.ends_with(&delimiter) {
-                        value.truncate(value.len() - delimiter.len());
+                    if let Some(body) = value.strip_suffix(delimiter.as_str()) {
+                        let body_length = body.len();
+                        value.truncate(body_length);
                         return Ok(value);
                     }
                 }
@@ -513,11 +531,27 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
         }
     });
 
-    let string = choice((
+    choice((
         dollar_string,
         choice((single_string, double_string)).map(str::to_string),
     ))
-    .map(Token::StringLiteral);
+}
+
+fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
+    let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
+
+    let number = text::int(10)
+        .then(just('.').then(text::digits(10)).or_not())
+        .then(
+            one_of("eE")
+                .then(one_of("+-").or_not())
+                .then(text::digits(10))
+                .or_not(),
+        )
+        .to_slice()
+        .map(|n: &str| Token::NumberLiteral(n.to_string()));
+
+    let string = string_literal().map(Token::StringLiteral);
 
     let punctuation = choice((
         just("!=").to(Token::NotEq),
@@ -574,6 +608,20 @@ pub fn lex(input: &str) -> Result<Vec<SpannedToken>, Vec<LexError<'_>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_word_no_expression_follows_directly_may_name_a_term() {
+        let tokens =
+            lex("max output readings BY path WHERE method ( .").expect("lex should succeed");
+        let may_name = tokens
+            .iter()
+            .map(|spanned| spanned.token.may_name_a_term())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            may_name,
+            vec![true, true, true, false, false, false, false, false, false]
+        );
+    }
 
     #[test]
     fn lexes_known_words_and_unknown_words() {

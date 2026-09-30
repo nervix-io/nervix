@@ -125,8 +125,6 @@ impl TaskHandleBenchmark {
                 placement,
                 None,
                 ClusterNodeName::parse("benchmark").assured("the node is valid"),
-                Vec::new(),
-                0,
             )
             .assured("empty metric state is valid");
         let ingest = runtime

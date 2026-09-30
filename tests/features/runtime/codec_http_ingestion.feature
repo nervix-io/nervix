@@ -144,6 +144,14 @@ Feature: HTTP codec ingestion
       """
       failed to parse json payload for codec 'json_value_codec'
       """
+    When http payload is posted to host "json-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"max_u8":256,"min_i8":0,"max_u16":0,"min_i16":0,"max_u32":0,"min_i32":0,"min_i64":0,"max_u64":0,"float32":0.0,"float64":0.0,"enabled":false,"text":"range","occurred_at":"2024-02-29T12:34:56Z","body":"","nested":[]}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      codec 'json_value_codec' failed to parse field 'max_u8': field 'max_u8' holds a JSON number, which is incompatible with U8
+      """
 
     Examples:
       | cluster_size | nested_type        |

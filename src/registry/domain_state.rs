@@ -12,7 +12,7 @@ use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
     DomainName, EndpointType, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
-    RelayName,
+    RelayName, parse_duration_text,
 };
 use petgraph::graph::DiGraph;
 use triomphe::Arc;
@@ -919,7 +919,7 @@ impl DomainState {
                         deduplicator,
                         &input_schemas,
                     )?;
-                    humantime::parse_duration(&deduplicator.max_time).map_err(|error| {
+                    parse_duration_text(&deduplicator.max_time).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),
@@ -1112,7 +1112,7 @@ impl DomainState {
                         &reorderer.output_routes,
                     )?;
 
-                    humantime::parse_duration(&reorderer.max_time).map_err(|error| {
+                    parse_duration_text(&reorderer.max_time).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),

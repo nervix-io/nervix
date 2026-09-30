@@ -2161,6 +2161,9 @@ table EmitterOpened {
   domain: string (required);
   emitter: string (required);
   fields: [RowField] (required);
+  /// The committed START generation and endpoint contract this consumer is bound to.
+  generation: ulong;
+  contract: Fingerprint (required);
   window: ConsumerWindow (required);
   ack_timeout_nanos: ulong;
   retry_backoff_nanos: ulong;

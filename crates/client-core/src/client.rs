@@ -1,6 +1,8 @@
 //! The client: one session with a server, the statements it executes, and the transaction it
 //! holds.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** Sending requests on the current exchange, the redirects, retries and reconnects a
 //!   reply calls for, the session's selected domain and transaction binding, the statements the
 //!   client serves itself, and installing a new exchange, on which it restores what it holds before
@@ -1539,6 +1541,22 @@ impl Client {
         previous.close().await;
         restoration.attach_interrupted_clocks().await;
         restoration.open_subscriptions().await;
+        restoration.open_producers().await;
+        restoration.open_consumers().await;
+        restoration.follow();
+    }
+
+    /// Reuses the session recovery owner when an endpoint moved while its exchange stayed open.
+    /// The reconnect lock serializes this with installing a replacement exchange; each desired
+    /// handle starts at most one open on the chosen exchange.
+    pub(crate) async fn restore_interrupted_endpoints(&self) {
+        let _reconnect_guard = self.inner.reconnect_lock.lock().await;
+        let mut restoration = {
+            let exchange = self.inner.exchange.lock().await;
+            Restoration::new(&exchange, self.inner.connector.request_timeout())
+        };
+        restoration.open_producers().await;
+        restoration.open_consumers().await;
         restoration.follow();
     }
 

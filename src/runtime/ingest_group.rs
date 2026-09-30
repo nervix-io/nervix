@@ -411,7 +411,7 @@ impl PendingIngestGroup {
         &mut self,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> Result<(), CodecError> {
+    ) -> error_stack::Result<(), CodecError> {
         let row_bound = self.row_bound;
         let records = self
             .records
@@ -711,7 +711,7 @@ impl IngestRouteCollector {
         &mut self,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> Result<(), CodecError> {
+    ) -> error_stack::Result<(), CodecError> {
         self.pending.decode_payload(codec, payload).await
     }
 
@@ -1148,24 +1148,23 @@ pub(super) async fn decode_ingested_payload(
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<usize, CodecError> {
+) -> error_stack::Result<usize, CodecError> {
     if !codec.requires_blocking_decode() {
         return decode_with_codec(codec, payload, decoder, builder);
     }
 
     // Only the unfolding leaves the reactor. The Arrow append that consumes its result stays here,
     // with the batch builder the decoded rows join.
-    let codec_name = codec.name.as_str().to_string();
     let blocking_codec = codec.clone();
     let payload = Bytes::copy_from_slice(payload);
-    let unfolded = nervix_primitives::task::spawn_blocking(move || {
+    let unfolding = nervix_primitives::task::spawn_blocking(move || {
         blocking_codec.unfold_on_ingestion(payload)
     })
-    .await
-    .map_err(|error| CodecError::InvalidCodec {
-        codec: codec_name,
-        reason: format!("blocking decode task failed: {error}"),
-    })??;
+    .await;
+    let unfolded = match unfolding {
+        Ok(unfolded) => unfolded?,
+        Err(join) => return Err(codec.decode_task_failure(join)),
+    };
     unfolded.append_to(codec, builder)
 }
 
@@ -1956,11 +1955,9 @@ impl Runtime {
             // decode takes the payloads decoded before it back out of the group.
             if let Err(error) = collector.decode_payload(&codec, source_payload).await {
                 collector.discard_undispatched_payloads();
-                return Err(
-                    Report::new(error).change_context(IngestGroupError::DecodePayload {
-                        ingestor: ingestor.clone(),
-                    }),
-                );
+                return Err(error.change_context(IngestGroupError::DecodePayload {
+                    ingestor: ingestor.clone(),
+                }));
             }
         }
         let metadata = payload.metadata_rows();

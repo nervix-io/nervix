@@ -15,7 +15,7 @@ impl Runtime {
     /// Wait until every assigned replica has installed the branch lifecycle that authorizes a
     /// branch checkpoint. A reset uses this before offering its first guest checkpoint, so a
     /// replica can never reject that checkpoint merely because the lifecycle announcement raced
-    /// it.
+    /// it. The wait registers for the next replica report before it reads what the replicas hold.
     pub(in crate::runtime) async fn confirm_branch_lru_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
@@ -62,39 +62,27 @@ impl Runtime {
         if replicas.is_empty() {
             return Ok(());
         }
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let awaiting = match self
-                .inner
-                .pending_state_checkpoint_announcements
-                .get(placement)
-            {
-                Some(pending) => replicas
-                    .iter()
-                    .filter(|replica| {
-                        pending
-                            .replica_progress
-                            .get(*replica)
-                            .is_none_or(|progress| *progress < lsm)
-                    })
-                    .cloned()
-                    .collect::<BTreeSet<_>>(),
-                // The announcement owner removes this entry only after every assigned replica
-                // acknowledged its target LSM.
-                None => return Ok(()),
-            };
-            if awaiting.is_empty() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
-                    placement: placement.clone(),
-                    lsm,
-                    awaiting: AwaitedReplicas(awaiting),
-                }));
-            }
-            sleep(Duration::from_millis(10)).await;
+        let lifecycle = self.replicated_branch_lifecycle(placement);
+        let replication = lifecycle.replication();
+        let every_replica_holds =
+            |progress: &ReplicaProgress| progress.holding(&replicas, lsm) == replicas.len();
+        let confirmed = nervix_primitives::time::timeout_at(
+            deadline,
+            replication.wait_until(every_replica_holds),
+        )
+        .await;
+        if confirmed.is_ok() {
+            return Ok(());
         }
+        let awaiting = replication.with_progress(|progress| progress.awaiting(&replicas, lsm));
+        if awaiting.is_empty() {
+            return Ok(());
+        }
+        Err(Report::new(StateReplicationError::ReplicaConfirmation {
+            placement: placement.clone(),
+            lsm,
+            awaiting: AwaitedReplicas(awaiting),
+        }))
     }
 
     pub(super) async fn prepare_ownership_handoff_wasm_guests(
@@ -308,7 +296,7 @@ impl Runtime {
         }
         let durable = state.record_locally_durable(captured);
         if let WasmCheckpointBoundary::Replicas(_) = durable.boundary() {
-            self.notify_runtime_state_replicas(placement, revision);
+            self.announce_checkpoint(placement, state.replication(), revision);
         }
         Ok(durable)
     }
@@ -332,7 +320,7 @@ impl Runtime {
         let mut replicas = captured_replicas;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let progressed = state.replica_progress_signal().notified();
+            let progressed = state.replication().progress_signal().notified();
             tokio::pin!(progressed);
             progressed.as_mut().enable();
             let assigned = self.wasm_checkpoint_boundary(state)?;

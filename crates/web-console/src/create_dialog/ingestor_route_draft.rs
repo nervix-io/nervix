@@ -556,13 +556,13 @@ pub(super) enum IngestRouteDraftError {
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
-        BranchName, FieldName, FlushPolicy, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
-        OutputBranch,
+        BinaryOperator, BranchName, Expression, FieldName, FieldReference, FieldScope, FlushPolicy,
+        Literal, MessageErrorPolicy, ModelKind, ModelName, NodeRef, OutputBranch,
     };
 
     use super::{
-        AssignmentDraft, FlushDraft, IngestRouteDraft, InheritDraft, MessageErrorDraft,
-        RouteBranchDraft,
+        AssignmentDraft, FlushDraft, IngestRouteDraft, InheritDraft, InvocationDraft,
+        MessageErrorDraft, RouteBranchDraft,
     };
 
     fn node(kind: ModelKind, name: &str) -> NodeRef {
@@ -570,6 +570,10 @@ mod tests {
             kind,
             ModelName::parse(name).assured("test model name is valid"),
         )
+    }
+
+    fn string(value: &str) -> Expression {
+        Expression::Literal(Literal::String(value.to_string()))
     }
 
     #[test]
@@ -626,6 +630,38 @@ mod tests {
             matches!(output.message_error_policy, MessageErrorPolicy::Dlq { ref assignments, .. }
             if assignments.len() == 1)
         );
+    }
+
+    #[test]
+    fn route_expressions_read_a_backslash_in_a_string_literal_verbatim() {
+        let mut route = IngestRouteDraft::default();
+        route.select_relay(&node(ModelKind::Relay, "out"));
+        route.inherit = InheritDraft::None;
+        route.add_assignment(FieldName::parse("message").assured("valid field"));
+        route.assignments[0].expression = r"'a\nb'".into();
+        route.where_clause = r#"message.message != "c\td""#.into();
+        route.invocations.push(InvocationDraft {
+            function: "notify".into(),
+            arguments: vec![r"'e\\f'".into()],
+        });
+        route.branch.choose_unbranched();
+        route.flush = FlushDraft::Immediate;
+        route.message_error = MessageErrorDraft::Log;
+
+        let construction = route.build().assured("complete route builds").construction;
+        assert_eq!(construction.assignments[0].value, string(r"a\nb"));
+        assert_eq!(
+            construction.where_clause,
+            Some(Expression::Binary {
+                operator: BinaryOperator::NotEqual,
+                left: Box::new(Expression::Field(FieldReference::scoped(
+                    FieldScope::Message,
+                    FieldName::parse("message").assured("valid field"),
+                ))),
+                right: Box::new(string(r"c\td")),
+            })
+        );
+        assert_eq!(construction.invocations[0].arguments, [string(r"e\\f")]);
     }
 
     #[test]

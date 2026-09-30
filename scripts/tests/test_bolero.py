@@ -29,6 +29,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual({target.id for target in inventory.targets}, {
             "task-status-transitions",
             "entity-freeze-transitions",
+            "endpoint-route-table",
             "client-emitter-wire",
             "nspl-expression",
             "nspl-model",
@@ -46,6 +47,8 @@ class InventoryTests(unittest.TestCase):
             "models-timestamp-text",
             "models-domain-clock",
             "models-domain-clock-validation",
+            "models-durations",
+            "models-duration-text",
             "models-json-paths",
             "models-json-path-validation",
             "models-batch-limits",
@@ -53,6 +56,8 @@ class InventoryTests(unittest.TestCase):
             "models-identities",
             "models-identity-validation",
             "models-archived-models",
+            "simd-checked-lanes",
+            "replica-progress",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -61,7 +66,9 @@ class InventoryTests(unittest.TestCase):
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
+            "nervix-simd-kernels",
             "nervix-server",
+            "nervix-checkpoint-replication",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
@@ -293,6 +300,22 @@ class ExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.inventory = bolero.load_inventory()
         self.target = self.inventory.targets[0]
+
+    def test_server_library_executable_is_selected_among_package_targets(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-server")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_server-1111"
+            binary = run / "nervix_server-2222"
+            for executable in (library, binary):
+                executable.write_bytes(b"")
+            output = (
+                f"  Executable unittests src/lib.rs ({library})\n"
+                f"  Executable unittests src/main.rs ({binary})\n"
+            )
+            build = subprocess.CompletedProcess([], 0, output, "")
+            with mock.patch.object(bolero, "command", return_value=build):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
 
     def test_command_propagates_engine_exit_and_timeout(self) -> None:
         with self.assertRaisesRegex(bolero.BoleroError, "exited 7"):

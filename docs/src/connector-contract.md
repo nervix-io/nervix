@@ -732,6 +732,17 @@ sequenceDiagram
   endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
   when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
   The compiler never chooses a graph route or an endpoint listener.
+- **Server endpoint intake.** The endpoint source binds one prepared intake lifetime to all of its
+  configured routes before reporting readiness. Domain definitions and bound lifetimes share one
+  immutable publication. HTTP resolves it once per request; a WebSocket retains its route and
+  signaling protocol for the connection, including data accepted during signaling. Close or drop
+  ends that exact lifetime before withdrawing it, so a retained route cannot attach to a replacement
+  source. A request already holding an intake may finish. Configured routes without a live intake
+  reject with HTTP 503, and after signaling an established WebSocket closes with 1013 on its next
+  refused payload.
+  Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
+  other domains publishing the same host and path. The host continues to own quiesce, buffering,
+  decoding, routing, flush cadence, and error reporting.
 
 ## Failure and observation
 
@@ -750,10 +761,27 @@ ACK state, leaving external redelivery to each source's contract.
 Connector-owned fallible helpers return contextual reports. Syslog configuration and frame
 decoding create a report at the failed parse, read, or framing check; the source adds its
 connection or lifecycle context before the host receives it. WebSocket signaling keeps its jaq,
-frame encoding, and transport causes beneath the compiled protocol or session failure. The server
+frame encoding, and transport causes beneath the compiled protocol or session failure, and reads its
+connect timeout through the vocabulary's guarded duration parser, keeping its `DurationTextError`
+beneath the invalid-timeout failure. The server
 retains the Syslog plan and signaling compiler reports in its runtime startup errors. A connector
 may turn a report into the existing source or sink outcome only at that boundary, while preserving
 the typed cause and rendering only non-sensitive configuration or transport details.
+
+The host's source start keeps every connector report it composes an ingestor from. A client
+configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
+WebSocket, Pulsar or SQS plan, an instance whose `open` fails, and a domain cadence that does not
+bind all stay beneath the ingestor's initialize failure, which names the ingestor and its domain.
+Host-owned refusals, such as a missing node resolver, signaling protocol or endpoint, Kafka
+`DOMAIN` offsets this node does not own, or a delivery-mode duration that does not parse, are typed
+causes in the same place. Host decoding returns the codec's report through the ingest group
+unchanged and keeps it beneath the intake's decode failure, which a source loop reports with its
+whole chain; the host never renders a codec failure into text before that boundary. A context whose
+parser or driver error is its `#[source]` leaves that error out of its own message, because the
+report carries the source as the frame beneath it: a rendered chain names each cause once. A
+Syslog `max_message_size` or `addr` value that does not parse therefore reads as the key and value
+followed by the parser's error, both at the source's start and in the Syslog sink's configuration
+diagnostic.
 
 For OTEL, each selected row's conversion report becomes that row's existing invalid-record
 outcome, with its signal key as the affected field. Postgres, MySQL, and ClickHouse inspect the

@@ -103,11 +103,14 @@ Several builtins run on libraries that choose SIMD instructions at run time from
 node's CPU offers: JSON extraction finds a document's structure that way, base64 and hexadecimal
 encoding and decoding process their octets that way, `sha256` uses the SHA instructions of x86-64
 CPUs that have them, and substring searches such as `contains_any` and regular expressions scan
-text that way. `xxh3_64` uses the SIMD instructions of the CPU target the binary is built for. The
-checked numeric kernels and the other passes over value buffers are written as loops the compiler
-can turn into vector instructions for that target, and Nervix makes no claim about which of them it
-does. None of these choices changes a result. The one exception is the transcendental functions,
-whose last places come from the platform's C math library; see [Numeric Functions](#numeric-functions).
+text that way. `xxh3_64` uses the SIMD instructions of the CPU target the binary is built for.
+Integer `+` and `-`, and `*` over every integer type but `I64` and `U64`, run on Nervix's own
+kernels, which also choose vector instructions at run time from the ones the node's CPU offers.
+The other checked numeric kernels and passes over value buffers are written as loops the compiler
+can turn into vector instructions for the CPU target the binary is built for, and Nervix makes no
+claim about which of them it does. None of these choices changes a result. The one exception is the
+transcendental functions, whose last places come from the platform's C math library; see
+[Numeric Functions](#numeric-functions).
 
 The compiler applies three optimizations that preserve results in the same way:
 
@@ -227,6 +230,9 @@ names:
 | Boolean | `BOOL` | `TRUE`, `FALSE`, in any letter case |
 | Null | the type its destination supplies | `NULL`, only as the whole value of an assignment to an optional field or as a result of a conditional whose other results give it a type |
 
+A literal reads the same wherever its expression is written: in a statement, in a web console form,
+and in `nervix-cli subscribe --where`.
+
 There is no `DATETIME`, `BYTES`, NaN, or infinity literal. Convert a string instead:
 `'2024-02-29T12:00:00Z' AS DATETIME`, `hex_decode('00ff')`, `'NaN' AS F64`, or `'inf' AS F64`. A
 `NULL` anywhere else is rejected with `NULL requires a declared optional assignment target`; a typed
@@ -274,6 +280,17 @@ These words are reserved in expressions, including after a field scope such as `
 `JSON_VALUE`, `TRY_JSON_VALUE`, `JSON_EXISTS`, `AND`, `OR`, `NOT`, `TRUE`, `FALSE`, `NULL`, `IF`,
 `CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`, `DISTINCT`, `FROM`, and `UDF`. A schema
 may declare one of these field names, but an NSPL expression cannot reference it.
+
+### Expressions Inside Statements
+
+A statement reads an expression it embeds up to the keyword that begins its next clause, such as
+`TO`, `MAX TIME`, or a correlator's `RIGHT FROM`, so an expression needs no parentheses to end. A
+builtin or a field scope whose name is also such a keyword belongs to the expression wherever it is
+written: followed by `(` it is a call, and followed by `.` it is the scope of a field, never the
+start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the first `max` is a call
+and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
+before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
+expression.
 
 ## Logical Operators
 
@@ -1884,8 +1901,10 @@ and `min` and `max` numeric literals with `min` below `max`. A negative number i
 unary minus, which is not a literal, so `min` and `max` are zero or above. `delay` is a duration
 literal such as `'2s'`: a row that stepping removes from the window stays counted until the
 watermark or the domain clock passes its removal time plus `delay`, and `'0s'` removes it at once.
-An invalid delay is rejected with `invalid PERCENTILE_LINEAR_HISTOGRAM delay duration`. Each branch
-holds eight bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
+A delay that names no duration, or whose spans could add up to 18446744073709551615 seconds, is
+rejected when the window processor is created, with
+`invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '<delay>': <reason>`. Each branch holds eight
+bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
 
 ### Approximate Sketches
 

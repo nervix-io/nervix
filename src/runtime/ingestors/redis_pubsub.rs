@@ -9,10 +9,12 @@
 //! - **Must not know.** The Redis driver, subscription lifecycle, NSPL parsing, registry
 //!   validation, or placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_redis::{RedisPubSubSource, RedisPubSubSourcePlan};
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -21,7 +23,7 @@ impl RedisPubSubIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let RedisPubSubIngestorStartPlan {
             client,
             channel,
@@ -29,14 +31,12 @@ impl RedisPubSubIngestorStartPlan {
         } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(
-                ingestor.start_failure("the node DNS resolver is not installed".to_string())
-            );
+            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
         let connector = RedisPubSubSourcePlan::new(resolved.entries, channel, dns.clone())
-            .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
             instances: NonZeroU64::MIN,

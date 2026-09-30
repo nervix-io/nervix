@@ -182,6 +182,14 @@ Retries include explicit application retry, ACK timeout, and consumer loss; a re
 ACK does not increment the ACK counter. `DESCRIBE EMITTER` reports the same values for the
 scheduled owner.
 
+Restoring a client producer or consumer creates a new server attachment. The attachment gauges
+fall when the prior session detaches and rise only after the replacement open succeeds; retained
+batch and incomplete-attempt gauges remain bounded by the existing endpoint budgets. None uses a
+session, producer, consumer, delivery or attempt identity as a metric label. Applications can sample
+the Rust handles' `connection()` states to distinguish an active, interrupted, restoring or
+reopen-required handle. An uncertain producer result and an uncertain consumer settlement remain
+typed call outcomes; these gauges do not imply replay or a confirmed ACK.
+
 ## Delivery Latency
 
 Every processor, reingestor, and emitter input records the delivery latency of each batch it

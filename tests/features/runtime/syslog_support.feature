@@ -207,7 +207,7 @@ Feature: Syslog support
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "invalid Syslog client config key 'framing': UDP does not use stream framing"
+    When these NSPL commands fail with "failed to initialize ingestor 'invalid_syslog_intake' in domain '{{domain}}': invalid Syslog client config key 'framing': UDP does not use stream framing"
       """
       START;
       """

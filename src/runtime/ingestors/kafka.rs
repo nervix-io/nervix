@@ -21,6 +21,7 @@ use nervix_connector_kafka::{
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceInstance, SourceCompanion, SourceInstance, SourceStart},
 };
 
@@ -238,7 +239,7 @@ impl KafkaIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let KafkaIngestorStartPlan {
             client,
             topic,
@@ -251,7 +252,7 @@ impl KafkaIngestorStartPlan {
             Runtime::parse_ingest_acknowledgement(domain, &ingestor.name, mode.acknowledgement())?;
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
 
         let rebalance_tx = match &offsets {
             KafkaOffsetPlan::Domain(_) => Some(watch::channel(0_u64).0),
@@ -267,7 +268,7 @@ impl KafkaIngestorStartPlan {
                     ingestor.name.as_str(),
                 ),
             )
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
             companions.push(Box::new(KafkaPartitionWatch {
                 inspector,
                 domain: domain.clone(),
@@ -286,13 +287,14 @@ impl KafkaIngestorStartPlan {
             },
             KafkaOffsetPlan::Domain(placement) => {
                 let Some(state) = runtime.kafka_offset_originator(ingestor, &placement) else {
-                    return Err(ingestor
-                        .start_failure("Kafka DOMAIN offsets are not authoritative on this node"));
+                    return Err(ingestor.source_start_failure(
+                        SourceStartError::KafkaDomainOffsetsNotAuthoritative,
+                    ));
                 };
                 let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
                     lifecycle: runtime
                         .domain_clock_lifecycle(domain)
-                        .map_err(|error| ingestor.start_failure(error.to_string()))?,
+                        .change_context_lazy(|| ingestor.initialize_failure())?,
                     runtime: runtime.clone(),
                     domain: domain.clone(),
                     ingestor: ingestor.name.clone(),
@@ -333,7 +335,7 @@ impl KafkaIngestorStartPlan {
             nervix_primitives::task::consume_budget().await;
             let source = KafkaSource::open(&source_plan.connector, instance_index)
                 .await
-                .map_err(|error| ingestor.start_failure(error.to_string()))?;
+                .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
                 acknowledgement,

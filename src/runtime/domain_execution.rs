@@ -1090,14 +1090,29 @@ mod tests {
             vec!["events.example.com".to_string()]
         );
         runtime.publish_routed_endpoints(&domain, &execution);
-        assert!(runtime.inner.routed_endpoints.is_empty());
+        assert!(
+            runtime
+                .resolve_endpoint("events.example.com", "/ingest")
+                .is_none()
+        );
 
         execution.routing.passive_only = false;
         runtime.publish_routed_endpoints(&domain, &execution);
-        assert_eq!(runtime.inner.routed_endpoints.len(), 1);
+        assert!(
+            runtime
+                .resolve_endpoint("events.example.com", "/ingest")
+                .is_some()
+        );
         execution.routing.deactivate();
-        runtime.withdraw_routed_endpoints(&domain, &execution);
-        assert!(runtime.inner.routed_endpoints.is_empty());
+        runtime
+            .inner
+            .endpoint_intake_routes
+            .withdraw_domain(&domain);
+        assert!(
+            runtime
+                .resolve_endpoint("events.example.com", "/ingest")
+                .is_none()
+        );
     }
 
     fn tenant_schema(name: &str) -> CreateSchema {

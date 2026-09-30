@@ -13,7 +13,7 @@
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
@@ -23,14 +23,16 @@ use nervix_client_wire::{
     AttachDomainClockRequest, CancelRequest, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition as WireCommandDisposition, CommandRequest, DetachDomainClockRequest,
     DomainClockAttachDisposition, DomainClockAttachmentEndReason, DomainClockDetachDisposition,
-    LeaderRedirect as WireLeaderRedirect, ReplyBody, RequestId, RequestRejection, ServerEvent,
-    ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits, SubscribeDisposition,
-    SubscribeRequest, SubscriptionType, TransferAssembly, VerifiedFrame,
+    EmitterOpenRefusal, LeaderRedirect as WireLeaderRedirect, OpenEmitterDisposition,
+    OpenEmitterRequest, OpenIngestorDisposition, OpenIngestorRequest, ReplyBody, RequestId,
+    RequestRejection, ServerEvent, ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits,
+    SubscribeDisposition, SubscribeRequest, SubscriptionType, TransferAssembly, VerifiedFrame,
 };
 use nervix_models::{
-    DomainClockObservation, DomainClockObservedState, DomainClockState, DomainConfig, DomainName,
-    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, PacedDomainClock,
-    PlacementPolicy, Timestamp, TransactionPosition, UserName,
+    ClientConsumerLimits, ClientProducerLimits, ClientProducerRefusal, DomainClockObservation,
+    DomainClockObservedState, DomainClockState, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, PacedDomainClock, ParseAsType,
+    PlacementPolicy, SchemaField, Timestamp, TransactionPosition, UserName,
 };
 use nervix_primitives::{
     stream::wrappers::UnboundedReceiverStream,
@@ -191,6 +193,82 @@ fn describe_two_operation_transaction(session: &SessionUnderTest) {
         Some(1),
     );
     session.command(4, "DESCRIBE TRANSACTION FORMAT JSON;", Some(2));
+}
+
+#[nervix_primitives::test]
+async fn endpoint_opens_remain_retryable_until_committed_state_is_admitted() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    let fields = vec![SchemaField {
+        name: named("value"),
+        ty: ParseAsType::F64,
+        optional: false,
+        sensitive: false,
+    }];
+    let batches = NonZeroU32::new(1).assured("one is non-zero");
+    let bytes = NonZeroU64::new(1024).assured("1024 is non-zero");
+    let producer = ClientRequest::OpenIngestor(OpenIngestorRequest {
+        domain: named("default"),
+        ingestor: named("input"),
+        expected_fields: fields.clone(),
+        limits: ClientProducerLimits { batches, bytes },
+    });
+    let consumer = ClientRequest::OpenEmitter(OpenEmitterRequest {
+        domain: named("default"),
+        emitter: named("output"),
+        expected_fields: fields,
+        limits: ClientConsumerLimits { batches, bytes },
+    });
+    assert!(!service.inner.runtime_admission.is_admitted());
+    for (id, request) in [(1, producer.clone()), (2, consumer.clone())] {
+        session.send(&ClientMessage {
+            request_id: request_id(id),
+            request,
+        });
+        let (body, _) = session.reply(request_id(id)).await;
+        match body {
+            ReplyBody::OpenIngestor(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenIngestorDisposition::Refused(ClientProducerRefusal::EndpointUnavailable)
+            ),
+            ReplyBody::OpenEmitter(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenEmitterDisposition::Refused(EmitterOpenRefusal::EndpointUnavailable)
+            ),
+            outcome => panic!("expected a typed endpoint refusal, received {outcome:?}"),
+        }
+    }
+    let admitted = service
+        .inner
+        .runtime_admission
+        .runtime_state(&service.inner.consensus, &CancellationToken::new())
+        .await;
+    assert!(admitted.is_some());
+    assert!(service.inner.runtime_admission.is_admitted());
+    for (id, request) in [(3, producer), (4, consumer)] {
+        session.send(&ClientMessage {
+            request_id: request_id(id),
+            request,
+        });
+        let (body, _) = session.reply(request_id(id)).await;
+        match body {
+            ReplyBody::OpenIngestor(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenIngestorDisposition::Refused(ClientProducerRefusal::DomainStopped)
+            ),
+            ReplyBody::OpenEmitter(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenEmitterDisposition::Refused(EmitterOpenRefusal::DomainStopped)
+            ),
+            outcome => panic!("expected a committed domain refusal, received {outcome:?}"),
+        }
+    }
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
 #[nervix_primitives::test]

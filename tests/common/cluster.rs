@@ -25,7 +25,7 @@ use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, ConnectOptions, TlsRequirement};
 use nervix_client_wire::UploadReply;
@@ -93,7 +93,7 @@ use tempfile::{TempDir, tempdir};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::{
-    WebSocketStream, client_async, connect_async,
+    MaybeTlsStream, WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
 use triomphe::Arc;
@@ -2000,6 +2000,29 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         exchange_websocket(&handle.spec, host, path, actions).await
+    }
+
+    pub(crate) async fn open_endpoint_websocket(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+    ) -> io::Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .assured("the scenario names a running node");
+        let mut request = handle
+            .spec
+            .websocket_uri(path)
+            .into_client_request()
+            .map_err(io::Error::other)?;
+        request.headers_mut().insert(
+            "Host",
+            HeaderValue::from_str(host).map_err(io::Error::other)?,
+        );
+        let (websocket, _) = connect_async(request).await.map_err(io::Error::other)?;
+        Ok(websocket)
     }
 
     pub(crate) async fn publish_secure_websocket(

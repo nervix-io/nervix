@@ -10,24 +10,11 @@ use super::*;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("ingestor '{ingestor}' in domain '{domain}' is already running")]
-    IngestorAlreadyRunning { domain: String, ingestor: String },
     #[error("ingestor '{ingestor}' in domain '{domain}' is not running")]
     IngestorNotRunning { domain: String, ingestor: String },
-    #[error("failed to initialize ingestor '{ingestor}' in domain '{domain}': {reason}")]
-    StartIngestor {
-        domain: String,
-        ingestor: String,
-        reason: String,
-    },
-    #[error("failed to initialize ingestor '{ingestor}' in domain '{domain}': {report}")]
-    SyslogSourcePlan {
-        domain: DomainName,
-        ingestor: IngestorName,
-        report: Report<nervix_connector_syslog::SyslogConfigError>,
-    },
-    #[error("codec '{codec}' in domain '{domain}' is not instantiated")]
-    CodecNotInstantiated { domain: String, codec: String },
+    /// An ingestor did not start. The report names the ingestor and keeps every cause beneath it.
+    #[error("{report:#}")]
+    IngestorStart { report: Report<IngestorStartError> },
     #[error("relay '{relay}' in domain '{domain}' is not instantiated")]
     RelayNotInstantiated { domain: String, relay: String },
     #[error(
@@ -44,6 +31,13 @@ pub enum RuntimeError {
     SignalingProtocolCompile {
         domain: DomainName,
         report: Report<nervix_connector_websockets::SignalingProtocolCompileError>,
+    },
+    /// A codec of the domain did not compile. The report keeps the rule or declaration the codec
+    /// breaks beneath the codec's own context.
+    #[error("failed to build domain execution for '{domain}': {report:#}")]
+    CodecCompile {
+        domain: DomainName,
+        report: Report<CodecError>,
     },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     VmCompile {

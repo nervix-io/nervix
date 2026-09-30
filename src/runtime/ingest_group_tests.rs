@@ -299,10 +299,17 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first payload should be accepted");
 
-    collector
+    let rejected = collector
         .decode_payload(&codec, br#"{"user_id":"two"}"#)
         .await
         .expect_err("a user id of the wrong type should be rejected");
+    assert!(
+        matches!(
+            rejected.current_context(),
+            CodecError::ParseField { field, .. } if field == "user_id"
+        ),
+        "the rejection must name the field that did not decode: {rejected:?}"
+    );
 
     collector
         .decode_payload(&codec, br#"{"user_id":3}"#)
@@ -483,10 +490,14 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
         grouped_event_ingestor_metrics(),
     );
 
-    collector
+    let rejected = collector
         .decode_payload(&codec, br#"[{"user_id":1},{"user_id":"two"}]"#)
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
+    assert!(
+        matches!(rejected.current_context(), CodecError::Unfold { .. }),
+        "the rejection must place its cause in the unfolding payload: {rejected:?}"
+    );
 
     assert!(
         collector.pending.records.is_none(),
