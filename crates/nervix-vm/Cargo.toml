@@ -27,7 +27,6 @@ base64-simd = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
 faster-hex = { workspace = true }
-humantime = { workspace = true }
 indexmap = { workspace = true }
 jiff = { workspace = true }
 jiff-tzdb = { workspace = true }

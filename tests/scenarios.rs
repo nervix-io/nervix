@@ -63,6 +63,7 @@ use mysql_async::{
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome, ConnectDns};
 use nervix_dns::{DnsConfiguration, NameServers};
+use nervix_models::parse_duration_text;
 use nervix_primitives::{
     sync::{
         CancellationToken,
@@ -1425,7 +1426,7 @@ async fn then_http_receiver_requests_have_minimum_gap(
     minimum_gap: String,
     earlier: usize,
 ) {
-    let minimum_gap = humantime::parse_duration(&minimum_gap)
+    let minimum_gap = parse_duration_text(&minimum_gap)
         .assured("the Cucumber expression supplies a valid minimum gap duration");
     let later_request = captured_http_request(world, &name, later);
     let earlier_request = captured_http_request(world, &name, earlier);
@@ -1968,8 +1969,7 @@ async fn then_clock_source_recorder_records_requests(
     name: String,
     expected_count: u64,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let name = expand_placeholders(world, &name);
     let deadline = Instant::now() + duration;
     loop {
@@ -2006,7 +2006,7 @@ async fn then_clock_source_recorder_records_at_least_requests(
     name: String,
     expected_count: u64,
 ) {
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the Cucumber expression supplies a valid step duration");
     let name = expand_placeholders(world, &name);
     let deadline = Instant::now()
@@ -2049,7 +2049,7 @@ async fn then_clock_source_requests_have_minimum_physical_gap(
     name: String,
     minimum_gap: String,
 ) {
-    let minimum_gap = humantime::parse_duration(&minimum_gap)
+    let minimum_gap = parse_duration_text(&minimum_gap)
         .assured("the Cucumber expression supplies a valid minimum gap duration");
     let name = expand_placeholders(world, &name);
     let observations = world
@@ -2157,15 +2157,15 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         unix_nanos: i128,
     }
 
-    let duration = match humantime::parse_duration(&duration) {
+    let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
-    let cadence = match humantime::parse_duration(&cadence) {
+    let cadence = match parse_duration_text(&cadence) {
         Ok(cadence) => cadence,
         Err(error) => panic!("cadence duration must be valid: {error}"),
     };
-    let minimum_gap = match humantime::parse_duration(&minimum_gap) {
+    let minimum_gap = match parse_duration_text(&minimum_gap) {
         Ok(minimum_gap) => minimum_gap,
         Err(error) => panic!("minimum gap duration must be valid: {error}"),
     };
@@ -2559,11 +2559,11 @@ async fn given_server_process_cluster_is_started(
     initialize_scenario_identity(world);
     let options = [
         ServerProcessOption::TransactionIdleTimeout(
-            humantime::parse_duration(&idle_timeout)
+            parse_duration_text(&idle_timeout)
                 .assured("the scenario's transaction idle timeout is a valid duration literal"),
         ),
         ServerProcessOption::TransactionTombstoneRetention(
-            humantime::parse_duration(&tombstone_retention)
+            parse_duration_text(&tombstone_retention)
                 .assured("the scenario's tombstone retention is a valid duration literal"),
         ),
     ];
@@ -2799,7 +2799,7 @@ async fn given_nervix_server_process_is_started_with_drain_timeout(
     drain_timeout: String,
 ) {
     let drain_timeout =
-        humantime::parse_duration(&drain_timeout).expect("drain timeout must be a valid duration");
+        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
     start_ready_server_process(world, &[ServerProcessOption::DrainTimeout(drain_timeout)]).await;
 }
 
@@ -2808,8 +2808,8 @@ async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
     world: &mut ScenarioWorld,
     interval: String,
 ) {
-    let interval = humantime::parse_duration(&interval)
-        .expect("state snapshot interval must be a valid duration");
+    let interval =
+        parse_duration_text(&interval).expect("state snapshot interval must be a valid duration");
     start_ready_server_process(
         world,
         &[ServerProcessOption::StateSnapshotInterval(interval)],
@@ -2826,9 +2826,9 @@ async fn given_nervix_server_process_is_started_with_transaction_retention(
     idle_timeout: String,
     tombstone_retention: String,
 ) {
-    let idle_timeout = humantime::parse_duration(&idle_timeout)
+    let idle_timeout = parse_duration_text(&idle_timeout)
         .expect("transaction idle timeout must be a valid duration");
-    let tombstone_retention = humantime::parse_duration(&tombstone_retention)
+    let tombstone_retention = parse_duration_text(&tombstone_retention)
         .expect("transaction tombstone retention must be a valid duration");
     let options = [
         ServerProcessOption::TransactionIdleTimeout(idle_timeout),
@@ -2847,9 +2847,9 @@ async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
     shutdown_timeout: String,
 ) {
     let drain_timeout =
-        humantime::parse_duration(&drain_timeout).expect("drain timeout must be a valid duration");
-    let shutdown_timeout = humantime::parse_duration(&shutdown_timeout)
-        .expect("shutdown timeout must be a valid duration");
+        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
+    let shutdown_timeout =
+        parse_duration_text(&shutdown_timeout).expect("shutdown timeout must be a valid duration");
     let options = [
         ServerProcessOption::DrainTimeout(drain_timeout),
         ServerProcessOption::ShutdownTimeout(shutdown_timeout),
@@ -2886,11 +2886,45 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
     world: &mut ScenarioWorld,
     limit: u32,
 ) {
+    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[]);
+}
+
+#[when(
+    expr = "a nervix-server process is started with command-line option {string} set to {string}"
+)]
+async fn when_nervix_server_process_is_started_with_written_option(
+    world: &mut ScenarioWorld,
+    option: String,
+    value: String,
+) {
+    let option = ServerProcessOption::Written { option, value };
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+}
+
+#[when(
+    expr = "a nervix-server process is started with environment variable {string} set to {string}"
+)]
+async fn when_nervix_server_process_is_started_with_environment_variable(
+    world: &mut ScenarioWorld,
+    variable: String,
+    value: String,
+) {
+    let option = ServerProcessOption::Environment { variable, value };
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+}
+
+/// Starts the scenario's server process without waiting for it to accept commands, for a
+/// scenario about a process that is expected to exit during startup.
+fn start_server_process_without_waiting(
+    world: &mut ScenarioWorld,
+    launch: ServerProcessLaunch,
+    options: &[ServerProcessOption],
+) {
     assert!(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
     );
-    let process = ServerProcess::start(ServerProcessLaunch::OpenFileLimit(limit), &[])
+    let process = ServerProcess::start(launch, options)
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
@@ -3176,8 +3210,8 @@ async fn then_server_process_is_terminated_by_signal_within(
     let expected_signal = expected_signal
         .parse::<nix::sys::signal::Signal>()
         .assured("the scenario names a recognized signal such as SIGKILL");
-    let bound = humantime::parse_duration(&bound)
-        .assured("the scenario termination bound is a valid duration");
+    let bound =
+        parse_duration_text(&bound).assured("the scenario termination bound is a valid duration");
     let signalled_at = world
         .last_server_signal_at
         .verified("the preceding step delivered a signal to the server process");
@@ -3403,8 +3437,7 @@ async fn when_client_probe_attaches_to_the_domain_clock_through_forwarder(
 
 #[then(expr = "within {string} the client probe prints {string}")]
 async fn then_client_probe_prints(world: &mut ScenarioWorld, within: String, line: String) {
-    let within =
-        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
     let line = expand_placeholders(world, &line);
     world
         .client_probe
@@ -3428,8 +3461,7 @@ async fn when_client_probe_decodes_the_corpus(world: &mut ScenarioWorld, runtime
 
 #[then(expr = "within {string} the client probe reports the conformance corpus")]
 async fn then_client_probe_reports_the_corpus(world: &mut ScenarioWorld, within: String) {
-    let within =
-        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
     let probe = world
         .client_probe
         .take()
@@ -3446,8 +3478,7 @@ async fn then_client_probe_reports_the_corpus(world: &mut ScenarioWorld, within:
 
 #[then(expr = "within {string} the client probe reports")]
 async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[step] step: &Step) {
-    let within =
-        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
     let probe = world
         .client_probe
         .take()
@@ -3487,7 +3518,7 @@ async fn then_server_process_exits_with_status_within(
     expected: i32,
     bound: String,
 ) {
-    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let bound = parse_duration_text(&bound).expect("step duration must be a valid duration");
     let elapsed = server_process_exit_after_last_signal(world, expected).await;
     let process = world
         .server_process
@@ -3510,9 +3541,8 @@ async fn then_server_process_exits_with_status_between(
     earliest: String,
     bound: String,
 ) {
-    let earliest =
-        humantime::parse_duration(&earliest).expect("step duration must be a valid duration");
-    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let earliest = parse_duration_text(&earliest).expect("step duration must be a valid duration");
+    let bound = parse_duration_text(&bound).expect("step duration must be a valid duration");
     let elapsed = server_process_exit_after_last_signal(world, expected).await;
     let process = world
         .server_process
@@ -4108,7 +4138,7 @@ async fn then_cli_clock_output_contains(
     duration: String,
     expected: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
     let expected = expand_placeholders(world, &expected);
     wait_for_cli_clock_output(world, duration, &expected, |lines| {
         lines.iter().any(|line| line.contains(&expected))
@@ -4136,7 +4166,7 @@ async fn then_cli_clock_ticks_increase(
     generation: u64,
     domain: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
     let domain = expand_placeholders(world, &domain);
     wait_for_cli_clock_output(world, duration, "increasing clock ticks", |lines| {
         let ids: Vec<_> = lines
@@ -4158,7 +4188,7 @@ async fn then_cli_clock_tick_follows_state(
     generation: u64,
     domain: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
     let domain = expand_placeholders(world, &domain);
     let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
     wait_for_cli_clock_output(world, duration, "a tick after its clock state", |lines| {
@@ -4183,7 +4213,7 @@ async fn then_cli_clock_state_follows_interruption(
     generation: u64,
     domain: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
     let domain = expand_placeholders(world, &domain);
     let interrupted =
         format!("[events] domain clock [{domain}] notice: the session was interrupted;");
@@ -4216,7 +4246,7 @@ async fn then_cli_clock_shows_attached_clock_after_interruption(
     duration: String,
     domain: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
     let domain = expand_placeholders(world, &domain);
     let attached = format!("attached to the clock of domain '{domain}': ");
     let interrupted =
@@ -5746,7 +5776,7 @@ async fn given_raft_retention_bounds(
 #[given(expr = "consensus commits on node {string} take {string}")]
 fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, duration: String) {
     let node_id = expand_placeholders(world, &node_id);
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the Cucumber expression supplies a valid consensus commit duration");
     world
         .fault_injection
@@ -6168,7 +6198,7 @@ async fn await_burst_domains(
     prefix: &str,
 ) {
     let deadline = Instant::now()
-        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+        + parse_duration_text(duration).expect("step duration must be a valid duration");
     for node_id in nodes {
         let applied = loop {
             nervix_primitives::task::consume_budget().await;
@@ -6255,7 +6285,7 @@ async fn then_leader_purged_covered_log_and_reduced_retained_bytes(
 async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld, duration: String) {
     let leader = running_leader_node(world).await;
     let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
     let section_reservation = nervix_execution::OperationLimits::default()
         .snapshot_section_working_bytes()
         .verified("the default snapshot-section working set fits in u64");
@@ -6296,7 +6326,7 @@ async fn await_purge_beyond_retention_peak(
     peak: &nervix_consensus::RaftLogRetention,
 ) {
     let deadline = Instant::now()
-        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+        + parse_duration_text(duration).expect("step duration must be a valid duration");
     loop {
         nervix_primitives::task::consume_budget().await;
         let retention = observer.raft_log_retention();
@@ -6325,7 +6355,7 @@ async fn await_covered_log_purge(
     beyond: Option<u64>,
 ) -> nervix_consensus::RaftLogRetention {
     let deadline = Instant::now()
-        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+        + parse_duration_text(duration).expect("step duration must be a valid duration");
     loop {
         nervix_primitives::task::consume_budget().await;
         let retention = observer.raft_log_retention();
@@ -6393,7 +6423,7 @@ async fn then_node_interrupted_a_snapshot_installation(
     let node_id = expand_placeholders(world, &node_id);
     let node = crate::common::cluster::node_name(&node_id);
     let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
     loop {
         nervix_primitives::task::consume_budget().await;
         if world.fault_injection.consensus_storage_failure_fired(&node) {
@@ -6415,7 +6445,7 @@ async fn then_node_recovers_by_snapshot(
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
     loop {
         nervix_primitives::task::consume_budget().await;
         let observer = world
@@ -6484,7 +6514,7 @@ async fn given_runtime_replication_is_configured(
         "replication must be configured before cluster startup"
     );
     world.cluster_config.replica_count = replica_count;
-    world.cluster_config.state_snapshot_interval = humantime::parse_duration(&snapshot_interval)
+    world.cluster_config.state_snapshot_interval = parse_duration_text(&snapshot_interval)
         .expect("snapshot interval must be a valid duration");
 }
 
@@ -6498,9 +6528,9 @@ fn given_raft_election_timeout_is_configured(
         world.cluster.is_none(),
         "raft election timeout must be configured before cluster startup"
     );
-    let minimum = humantime::parse_duration(&minimum)
+    let minimum = parse_duration_text(&minimum)
         .assured("the Cucumber scenario supplies a valid minimum election timeout");
-    let maximum = humantime::parse_duration(&maximum)
+    let maximum = parse_duration_text(&maximum)
         .assured("the Cucumber scenario supplies a valid maximum election timeout");
     assert!(
         minimum <= maximum,
@@ -6664,8 +6694,7 @@ async fn then_wasm_processor_completes_a_guest_requested_state_reset(
     timeout: String,
     processor: String,
 ) {
-    let timeout =
-        humantime::parse_duration(&timeout).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&timeout).expect("step duration must be a valid duration");
     let deadline = Instant::now() + timeout;
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -7263,7 +7292,7 @@ async fn given_transaction_idle_timeout_is_configured(world: &mut ScenarioWorld,
         "transaction idle timeout must be configured before cluster startup"
     );
     world.cluster_config.transaction_idle_timeout =
-        humantime::parse_duration(&timeout).expect("transaction idle timeout must be valid");
+        parse_duration_text(&timeout).expect("transaction idle timeout must be valid");
 }
 
 #[given(expr = "the transaction tombstone retention is configured as {string}")]
@@ -7275,8 +7304,8 @@ async fn given_transaction_tombstone_retention_is_configured(
         world.cluster.is_none(),
         "transaction tombstone retention must be configured before cluster startup"
     );
-    world.cluster_config.transaction_tombstone_retention = humantime::parse_duration(&retention)
-        .expect("transaction tombstone retention must be valid");
+    world.cluster_config.transaction_tombstone_retention =
+        parse_duration_text(&retention).expect("transaction tombstone retention must be valid");
 }
 
 #[given(expr = "command retry identities are valid for {string}")]
@@ -7285,7 +7314,7 @@ async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld,
         world.cluster.is_none(),
         "command retry validity must be configured before cluster startup"
     );
-    world.cluster_config.command_retry_validity = humantime::parse_duration(&validity)
+    world.cluster_config.command_retry_validity = parse_duration_text(&validity)
         .assured("the configured command retry validity is a duration");
 }
 
@@ -7951,7 +7980,7 @@ async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: S
         "drain timeout must be configured before cluster startup"
     );
     world.cluster_config.drain_timeout =
-        humantime::parse_duration(&timeout).expect("shutdown drain timeout must be valid");
+        parse_duration_text(&timeout).expect("shutdown drain timeout must be valid");
 }
 
 #[given(expr = "shutdown timeout is configured as {string}")]
@@ -7961,7 +7990,7 @@ async fn given_shutdown_timeout_is_configured(world: &mut ScenarioWorld, timeout
         "shutdown timeout must be configured before cluster startup"
     );
     world.cluster_config.shutdown_timeout =
-        humantime::parse_duration(&timeout).expect("shutdown timeout must be valid");
+        parse_duration_text(&timeout).expect("shutdown timeout must be valid");
 }
 
 #[given(expr = "schema change drain timeout is configured as {string}")]
@@ -7974,7 +8003,7 @@ async fn given_schema_change_drain_timeout_is_configured(
         "schema change drain timeout must be configured before cluster startup"
     );
     world.fault_injection.set_domain_drain_timeout(
-        humantime::parse_duration(&timeout).expect("schema drain timeout must be valid"),
+        parse_duration_text(&timeout).expect("schema drain timeout must be valid"),
     );
 }
 
@@ -7985,7 +8014,7 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
         "entity gate deadline must be configured before cluster startup"
     );
     world.fault_injection.set_entity_gate_deadline(
-        humantime::parse_duration(&timeout).expect("entity gate deadline must be valid"),
+        parse_duration_text(&timeout).expect("entity gate deadline must be valid"),
     );
 }
 
@@ -8074,8 +8103,7 @@ async fn given_branched_relay_expiration_scan_interval_is_configured(
     world
         .fault_injection
         .set_branch_instance_expiration_scan_interval(
-            humantime::parse_duration(&scan_interval)
-                .expect("scan interval must be a valid duration"),
+            parse_duration_text(&scan_interval).expect("scan interval must be a valid duration"),
         );
 }
 
@@ -9728,7 +9756,7 @@ async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, nod
 
 #[then(expr = "the leader Raft log index remains unchanged for {string}")]
 async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
-    let duration = humantime::parse_duration(&duration).expect("the observation duration is valid");
+    let duration = parse_duration_text(&duration).expect("the observation duration is valid");
     let leader = current_leader_node(world).await;
     let deadline = Instant::now() + duration;
     let mut initial = None;
@@ -9896,7 +9924,7 @@ async fn when_gossip_exchanges_are_blocked(
     duration: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    let delay = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let delay = parse_duration_text(&duration).assured("the scenario duration is valid");
     world.cluster().block_gossip_for_node(&node_id, delay);
 }
 
@@ -9947,7 +9975,7 @@ async fn then_health_response_pause_is_reached_within(
     probing_node_id: String,
     responding_node_id: String,
 ) {
-    let limit = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let limit = parse_duration_text(&duration).assured("the scenario duration is valid");
     let probing_node_id = expand_placeholders(world, &probing_node_id);
     let responding_node_id = expand_placeholders(world, &responding_node_id);
     nervix_primitives::time::timeout(
@@ -10952,8 +10980,7 @@ async fn then_domain_clock_progress_reaches_pause(
     duration: String,
     domain: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let domain = expand_placeholders(world, &domain);
     nervix_primitives::time::timeout(
         duration,
@@ -10977,8 +11004,7 @@ async fn then_domain_clock_progress_reaches_pause_on_node(
     domain: String,
     node_id: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     world
         .wait_for_domain_clock_progress_pause_on(duration, &domain, &node_id)
         .await;
@@ -11041,8 +11067,7 @@ async fn when_domain_clock_progress_resumes_on_node(
 
 #[when(expr = "physical time passes for {string}")]
 async fn when_physical_time_passes(_world: &mut ScenarioWorld, duration: String) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     nervix_primitives::time::sleep(duration).await;
 }
 
@@ -11202,7 +11227,7 @@ async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
 #[then(expr = "the last cluster operation completes within {string}")]
 async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld, duration: String) {
     let max_duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        parse_duration_text(&duration).expect("step duration must be a valid duration");
     let elapsed = world
         .last_cluster_operation_elapsed
         .expect("a timed cluster operation must run before assertion");
@@ -11217,7 +11242,7 @@ async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld,
 #[then(expr = "the last cluster operation takes at least {string}")]
 async fn then_last_cluster_operation_takes_at_least(world: &mut ScenarioWorld, duration: String) {
     let min_duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        parse_duration_text(&duration).expect("step duration must be a valid duration");
     let elapsed = world
         .last_cluster_operation_elapsed
         .expect("a timed cluster operation must run before assertion");
@@ -11259,7 +11284,7 @@ async fn then_last_authentication_attempts_take_at_least(
     duration: String,
 ) {
     let min_duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        parse_duration_text(&duration).expect("step duration must be a valid duration");
     let elapsed = world
         .last_auth_attempts_elapsed
         .expect("an authentication attempt step must run first");
@@ -11470,8 +11495,7 @@ async fn then_the_external_member_of_kafka_consumer_group_holds_partition(
     topic: String,
     partition: i32,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
     world
@@ -11510,8 +11534,7 @@ async fn then_kafka_consumer_group_next_offset_is(
     partition: i32,
     condition: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
     let condition = expand_placeholders(world, &condition);
@@ -12208,8 +12231,7 @@ async fn when_background_command_caller_deadline_expires(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).assured("the scenario caller deadline is valid");
+    let duration = parse_duration_text(&duration).assured("the scenario caller deadline is valid");
     let mut request = world
         .background_command_result
         .take()
@@ -12245,7 +12267,7 @@ async fn when_command_request_with_reference_created_before_now_is_executed(
     age: String,
     #[step] step: &Step,
 ) {
-    let age = humantime::parse_duration(&age).assured("the scenario reference age is a duration");
+    let age = parse_duration_text(&age).assured("the scenario reference age is a duration");
     let created_at = SystemTime::now()
         .checked_sub(age)
         .assured("the scenario reference age lies after the Unix epoch");
@@ -12262,8 +12284,7 @@ async fn when_command_request_with_reference_created_after_now_is_executed(
     lead: String,
     #[step] step: &Step,
 ) {
-    let lead =
-        humantime::parse_duration(&lead).assured("the scenario reference lead is a duration");
+    let lead = parse_duration_text(&lead).assured("the scenario reference lead is a duration");
     let created_at = SystemTime::now()
         .checked_add(lead)
         .assured("the scenario reference lead stays within the system clock range");
@@ -14491,7 +14512,7 @@ async fn then_node_retains_transaction_report(
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&node_id));
     let deadline =
-        Instant::now() + humantime::parse_duration(&duration).assured("the step duration is valid");
+        Instant::now() + parse_duration_text(&duration).assured("the step duration is valid");
     let mut observed = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -15002,8 +15023,7 @@ async fn then_nspl_commands_complete_within(
     node_id: String,
     #[step] step: &Step,
 ) {
-    let limit =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let limit = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let commands = expand_placeholders(world, docstring(step));
     world.last_command_error = None;
@@ -15092,7 +15112,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
     world.last_command_output = None;
     world.last_server_error = None;
 
-    let timeout = humantime::parse_duration(&within).expect("within must be a valid duration");
+    let timeout = parse_duration_text(&within).expect("within must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
@@ -18752,8 +18772,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
     relay: String,
     expected_total: u64,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let section = expand_placeholders(world, &section);
     let metric = expand_placeholders(world, &metric);
     let direction = expand_placeholders(world, &direction);
@@ -19117,8 +19136,8 @@ async fn then_healthy_nodes_keep_their_work(
     unavailable_node: String,
     minimum_failover_delay: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
-    let minimum_failover_delay = humantime::parse_duration(&minimum_failover_delay)
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
+    let minimum_failover_delay = parse_duration_text(&minimum_failover_delay)
         .assured("the scenario failover delay is valid");
     let health_fault_started_at = world
         .health_fault_started_at
@@ -19143,7 +19162,7 @@ async fn then_stopped_peer_does_not_move_healthy_work(
     node_ids: String,
     stopped_node: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
     observe_healthy_peers(world, duration, node_ids, stopped_node, None).await;
 }
 
@@ -19218,7 +19237,7 @@ async fn then_no_scheduled_work_on_node(
     observing_node: String,
     unavailable_node: String,
 ) {
-    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
     let observing_node = expand_placeholders(world, &observing_node);
     let unavailable_node = expand_placeholders(world, &unavailable_node);
     let observation = PhaseDeadline::after(duration);
@@ -19528,8 +19547,7 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     ingestor: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let ingestor = expand_placeholders(world, &ingestor);
     let expected = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -19562,8 +19580,7 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     processor: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let processor = expand_placeholders(world, &processor);
     let expected = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -19627,8 +19644,7 @@ async fn then_describe_one_of_two_emitters_contains(
     second: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let emitters = [
         expand_placeholders(world, &first),
         expand_placeholders(world, &second),
@@ -19669,8 +19685,7 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     emitter: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let emitter = expand_placeholders(world, &emitter);
     let expected = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -19720,8 +19735,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
     deduplicator: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let deduplicator = expand_placeholders(world, &deduplicator);
     let expected = world
@@ -19770,8 +19784,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
     deduplicator: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let deduplicator = expand_placeholders(world, &deduplicator);
     let unexpected = world
@@ -19823,8 +19836,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
     name: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let kind = expand_placeholders(world, &kind);
     let name = expand_placeholders(world, &name);
@@ -19871,8 +19883,7 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
     name: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let kind = expand_placeholders(world, &kind);
     let name = expand_placeholders(world, &name);
@@ -19923,8 +19934,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     name: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let kind = expand_placeholders(world, &kind);
     let name = expand_placeholders(world, &name);
@@ -20030,8 +20040,7 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_e
     expected_value: i64,
     #[step] step: &Step,
 ) {
-    let wait =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let wait = parse_duration_text(&duration).expect("step duration must be a valid duration");
     world
         .wait_for_observability_metric_value(
             &node_id,
@@ -20071,8 +20080,7 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_r
     minimum_value: i64,
     #[step] step: &Step,
 ) {
-    let wait =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let wait = parse_duration_text(&duration).expect("step duration must be a valid duration");
     world
         .wait_for_observability_metric_at_least(
             &node_id,
@@ -20117,8 +20125,7 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
     expected: String,
     #[step] step: &Step,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 
@@ -20159,8 +20166,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
     ingestor: String,
     expected: String,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let ingestor = expand_placeholders(world, &ingestor);
     let expected = expand_placeholders(world, &expected);
@@ -20201,8 +20207,7 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
     expected: String,
     #[step] step: &Step,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 
@@ -20243,8 +20248,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
     relay: String,
     #[step] step: &Step,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let expected = expand_placeholders(world, docstring(step));
     let command = format!(
@@ -21709,7 +21713,7 @@ async fn when_websocket_frames_are_exchanged(
                 WebsocketExchangeAction::ExpectClose
             } else if let Some(window) = line.strip_prefix("EXPECT SILENCE ") {
                 WebsocketExchangeAction::ExpectSilence(
-                    humantime::parse_duration(window.trim()).unwrap_or_else(|error| {
+                    parse_duration_text(window.trim()).unwrap_or_else(|error| {
                         panic!("invalid silence window '{window}': {error}")
                     }),
                 )
@@ -22385,8 +22389,7 @@ async fn then_within_stream_subscription_receives_payload(
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     append_cucumber_log_line(&format!(
         "awaiting subscription payload within {:?} containing {}",
         duration,
@@ -22402,7 +22405,7 @@ async fn then_named_client_receives_subscription_payload(
     client_name: String,
     #[step] step: &Step,
 ) {
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the scenario subscription deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let expected = expand_placeholders(world, docstring(step));
@@ -22468,7 +22471,7 @@ async fn when_named_client_receives_from_repeated_http_posts(
     path: String,
     #[step] step: &Step,
 ) {
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the scenario delivery deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let node_id = expand_placeholders(world, &node_id);
@@ -22517,8 +22520,8 @@ async fn then_named_client_observes_subscription_interrupted(
     client_name: String,
     subscription_name: String,
 ) {
-    let duration = humantime::parse_duration(&duration)
-        .assured("the interruption deadline is a valid duration");
+    let duration =
+        parse_duration_text(&duration).assured("the interruption deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let subscription_name = expand_placeholders(world, &subscription_name);
     let client = world
@@ -22546,8 +22549,8 @@ async fn then_named_client_observes_failed_restoration(
     subscription_name: String,
     #[step] step: &Step,
 ) {
-    let duration = humantime::parse_duration(&duration)
-        .assured("the restoration deadline is a valid duration");
+    let duration =
+        parse_duration_text(&duration).assured("the restoration deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let subscription_name = expand_placeholders(world, &subscription_name);
     let expected = expand_placeholders(world, docstring(step));
@@ -22617,8 +22620,7 @@ async fn then_named_client_observes_subscription_ended(
     subscription_name: String,
     reason: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).assured("the end deadline is a valid duration");
+    let duration = parse_duration_text(&duration).assured("the end deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let subscription_name = expand_placeholders(world, &subscription_name);
     let expected_reason = match reason.as_str() {
@@ -22694,8 +22696,7 @@ async fn then_named_client_reports_no_subscription_event(
     subscription_name: String,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).assured("the silence window is a valid duration");
+    let duration = parse_duration_text(&duration).assured("the silence window is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let subscription_name = expand_placeholders(world, &subscription_name);
     let client = world
@@ -22850,8 +22851,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_subscriptio
     path: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -22889,8 +22889,7 @@ async fn then_within_duration_repeatedly_posting_https_payload_yields_subscripti
     ca_resource_directory: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -22930,8 +22929,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
     path: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -22979,8 +22977,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_yields_subscri
     topic: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23017,8 +23014,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
     partition: usize,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let partition =
         i32::try_from(partition).assured("Kafka partition ids in cucumber features fit i32");
@@ -23056,8 +23052,7 @@ async fn then_within_duration_repeatedly_publishing_mqtt_message_yields_subscrip
     topic: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23093,8 +23088,7 @@ async fn then_within_duration_repeatedly_publishing_pulsar_tls_message_yields_su
     topic: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23130,8 +23124,7 @@ async fn then_within_duration_repeatedly_publishing_redis_message_yields_subscri
     channel: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let channel = expand_placeholders(world, &channel);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23167,8 +23160,7 @@ async fn then_within_duration_repeatedly_publishing_nats_message_yields_subscrip
     subject: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let subject = expand_placeholders(world, &subject);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23204,8 +23196,7 @@ async fn then_within_duration_repeatedly_publishing_nats_tls_message_yields_subs
     subject: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let subject = expand_placeholders(world, &subject);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23241,8 +23232,7 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
     queue: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let queue = expand_placeholders(world, &queue);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23278,8 +23268,7 @@ async fn then_within_duration_repeatedly_publishing_tls_sqs_message_yields_subsc
     queue: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let queue = expand_placeholders(world, &queue);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
@@ -23404,8 +23393,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_observed_br
     path: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -23445,8 +23433,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -23537,7 +23524,7 @@ async fn then_subscriptions_each_sample_metric_values(
         drawn: bool,
     }
 
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the scenario sampling deadline is a valid duration");
     let session = world
         .active_session
@@ -23640,8 +23627,7 @@ async fn then_relay_subscription_payloads_share_field(
     expected_count: usize,
     field: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -23702,7 +23688,7 @@ async fn then_generator_occurrences_preserve_branches(
     branch_field: String,
     timestamp_field: String,
 ) {
-    let duration = match humantime::parse_duration(&duration) {
+    let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
@@ -23840,8 +23826,7 @@ async fn then_generated_routes_share_field(
     second_value: i64,
     shared_field: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -23908,8 +23893,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_in_order
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -24038,8 +24022,7 @@ async fn receive_subscription_fragment_sets(
     step: &Step,
     unmatched: UnmatchedPayloads,
 ) -> Vec<String> {
-    let duration =
-        humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let expected_fragment_sets = docstring(step)
         .lines()
         .map(str::trim)
@@ -24120,8 +24103,7 @@ async fn then_stream_subscription_does_not_receive_a_payload_within(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     assert_no_subscription_payload_within(world, duration).await;
 }
 
@@ -24137,8 +24119,7 @@ async fn then_stream_subscription_does_not_receive_a_payload_containing_fragment
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -24356,7 +24337,7 @@ async fn then_timestamp_placeholders_differ_by_no_more_than(
         .unwrap_or_else(|| panic!("timestamp placeholder '{second_placeholder}' is out of range"));
     let measured_nanos = first_nanos.abs_diff(second_nanos);
     let measured = Duration::from_nanos(measured_nanos);
-    let maximum = humantime::parse_duration(&maximum_difference)
+    let maximum = parse_duration_text(&maximum_difference)
         .unwrap_or_else(|error| panic!("maximum timestamp difference is invalid: {error}"));
 
     append_cucumber_log_line(&format!(
@@ -24481,8 +24462,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -24508,8 +24488,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected = expand_placeholders(world, docstring(step).trim());
     let session = world
         .active_session
@@ -25601,8 +25580,7 @@ async fn then_within_duration_iceberg_table_contains_row(
     table: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let table = expand_placeholders(world, &table);
     let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
@@ -25693,8 +25671,7 @@ async fn then_iceberg_table_does_not_contain_row_within(
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + duration;
 
@@ -26197,8 +26174,7 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -26313,8 +26289,7 @@ async fn then_observed_broker_receives_json_payloads_preserving_group_order(
     group_field: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected = docstring(step)
         .lines()
         .map(str::trim)
@@ -26384,8 +26359,7 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
     duration: String,
     count: usize,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let deadline = Instant::now() + duration;
     let mut payload_counts = BTreeMap::new();
 
@@ -26637,8 +26611,7 @@ async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectatio
     duration: &str,
     mut remaining: BTreeMap<Expected, usize>,
 ) {
-    let duration =
-        humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     assert!(
         !remaining.is_empty(),
         "the step must list at least one expected message"
@@ -26717,8 +26690,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     field: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_headers = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -26802,8 +26774,7 @@ async fn then_the_observed_broker_does_not_receive_a_payload_within(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let observer = world
         .broker_observer
         .as_mut()
@@ -26892,7 +26863,7 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     #[step] step: &Step,
 ) {
     let expected_delay =
-        humantime::parse_duration(&delay).expect("step duration must be a valid duration");
+        parse_duration_text(&delay).expect("step duration must be a valid duration");
     let published_at = world
         .last_publish_at
         .expect("a delivery-delay assertion must follow a publishing step");

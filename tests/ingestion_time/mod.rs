@@ -6,7 +6,9 @@
 //! - **Must not know.** Runtime clock storage or admission implementation.
 
 use cucumber::{given, then};
-use nervix_models::{DomainAdmissionWindow, DomainClockPeriod, DomainName, Timestamp};
+use nervix_models::{
+    DomainAdmissionWindow, DomainClockPeriod, DomainName, Timestamp, parse_duration_text,
+};
 
 use super::*;
 
@@ -135,14 +137,14 @@ async fn clock_advances(
     placeholder: String,
 ) {
     let probe = IngestionProbe::new(world, &host);
-    let advance = humantime::parse_duration(&advance).assured("scenario duration is valid");
+    let advance = parse_duration_text(&advance).assured("scenario duration is valid");
     let target = probe
         .clock(world)
         .await
         .checked_add(advance)
         .assured("fixture advance fits historical time");
     let deadline = Instant::now()
-        .checked_add(humantime::parse_duration(&timeout).assured("scenario timeout is valid"))
+        .checked_add(parse_duration_text(&timeout).assured("scenario timeout is valid"))
         .assured("scenario timeout fits the monotonic clock");
     loop {
         nervix_primitives::task::consume_budget().await;
