@@ -320,13 +320,13 @@ their `BuiltinLowering` behind shared pointers. Cloning a program therefore shar
 patterns, sets, matchers, and pattern caches. `CompiledPredicate` wraps a program privately, so a
 general construction program cannot be passed where only a read-only filter is allowed.
 
-The VM has no notion of plan activation. The host holds each program as a
-`triomphe::Arc<CompiledProgram>` inside a published typed processor plan. A prepared artifact lives
-exactly as long as that plan. An unchanged scheduled node reuses the exact plan allocation across a
-domain revision. A change to its topology, schema fingerprint, resolved branch contract or
-processor specification binds a fresh plan before publication. Existing branches adopt it by its
-typed revision identity between batches, while a newly appearing branch starts from the same
-published allocation.
+The VM has no notion of plan activation. The host holds each program as a shared
+`Arc<CompiledProgram>`, the primitive boundary's `nervix_primitives::sync::Arc`, inside a published
+typed processor plan. A prepared artifact lives exactly as long as that plan. An unchanged scheduled
+node reuses the exact plan allocation across a domain revision. A change to its topology, schema
+fingerprint, resolved branch contract or processor specification binds a fresh plan before
+publication. Existing branches adopt it by its typed revision identity between batches, while a
+newly appearing branch starts from the same published allocation.
 
 ### Where Programs Are Compiled
 
