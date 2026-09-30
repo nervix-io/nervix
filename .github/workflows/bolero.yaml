@@ -2,7 +2,7 @@ name: Bolero
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
   schedule:
     - cron: "0 3 * * 0"
   workflow_dispatch:
@@ -11,7 +11,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: bolero-${{ github.ref }}
+  # A labeled event runs in a group of its own, so labeling a pull request never cancels the run for
+  # its code, and only the fuzz label starts a job there.
+  group: bolero-${{ github.ref }}-${{ github.event.action == 'labeled' && format('label-{0}', github.event.label.name) || 'code' }}
   cancel-in-progress: true
 
 env:
@@ -24,6 +26,7 @@ env:
 jobs:
   bolero-random:
     name: bolero-random
+    if: github.event.action != 'labeled'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 35
     steps:
@@ -101,6 +104,12 @@ jobs:
 
   bolero-fuzz:
     name: bolero-fuzz
+    # A pull request fuzzes only with the fuzz label, and adding the label starts it; scheduled and
+    # manual campaigns always fuzz.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'fuzz') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'fuzz'))
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
@@ -213,14 +222,22 @@ jobs:
 
   bolero-gate:
     name: bolero-gate
-    if: always()
+    if: always() && (github.event.action != 'labeled' || github.event.label.name == 'fuzz')
     needs: [bolero-random, bolero-fuzz]
     runs-on: ubuntu-latest
     steps:
-      - name: Require both Bolero modes
+      - name: Require every Bolero mode this run owes
         env:
           RANDOM_RESULT: ${{ needs.bolero-random.result }}
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
+          RANDOM_OWED: ${{ github.event.action != 'labeled' }}
+          FUZZ_OWED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'fuzz') }}
         run: |
-          test "$RANDOM_RESULT" = success
-          test "$FUZZ_RESULT" = success
+          if [[ "$RANDOM_OWED" == true ]]; then
+            test "$RANDOM_RESULT" = success
+          fi
+          if [[ "$FUZZ_OWED" == true ]]; then
+            test "$FUZZ_RESULT" = success
+          else
+            test "$FUZZ_RESULT" = skipped
+          fi

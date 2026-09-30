@@ -814,7 +814,9 @@ build and the existing tests, and nothing in it changes behavior.
   `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
   features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
   production path and complete assertion in ordinary randomized/corpus and coverage-guided
-  libFuzzer runs. Registration and both CI modes are mandatory even while other work is concurrent.
+  libFuzzer runs. Registration is mandatory even while other work is concurrent. CI runs the
+  ordinary mode on every pull request, and the libFuzzer mode on a pull request labeled `fuzz`,
+  which adding the label starts, and in scheduled or manual campaigns.
   Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
   features and model-checker dependencies out of ordinary and fuzz builds.
 - For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for

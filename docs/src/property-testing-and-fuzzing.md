@@ -169,8 +169,12 @@ profile enables optimization, debug information, debug assertions and overflow c
 use the pinned nightly and keep the configured kache wrapper. Modeled execution features are
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
-PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
-libFuzzer job. On PRs every target shares ten minutes of engine time, the inventory's
+Every pull request runs the required ordinary randomized/corpus job. The sanitizer libFuzzer job
+runs on a pull request only when it carries the `fuzz` label: adding the label starts the job for
+the pull request's current code, and every later push to it fuzzes again. Scheduled and manual
+campaigns always run it. The `bolero-gate` check requires the ordinary job for every change and the
+libFuzzer job wherever it was due, and a labeled run never cancels the run for the code. On a pull
+request every target shares ten minutes of engine time, the inventory's
 `pr_fuzz_total_seconds`, split evenly, so a new target shortens the others' share instead of
 lengthening the job. `just fuzz` and `just fuzz-all` use the same share when no duration is given;
 a duration they are given is seconds per target. Scheduled or manual campaigns give each target five
@@ -192,6 +196,7 @@ and input length, and assert the complete current-value contract. Register the p
 test name, source, domain version, features, corpus, budgets and invariant in the inventory.
 Check in current-domain seeds, run `just validate-bolero`,
 `just test-bolero <id>` and `just fuzz <id> 30`, then run
-`just validate`. Both CI jobs include the target in the same change. A public product
+`just validate`. The ordinary CI job covers the target in the same change; label the pull request
+`fuzz` to have CI fuzz it as well before it merges. A public product
 bug found this way first gets a failing focused reproducer and affected public Cucumber scenario
 before its fix.

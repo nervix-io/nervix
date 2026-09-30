@@ -66,7 +66,7 @@ coverage-bolero-runner:
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; without one the targets share the PR fuzz budget, as CI runs
-# on PRs, and CI passes 300 for campaigns.
+# on a pull request labeled `fuzz`, and CI passes 300 for campaigns.
 coverage-bolero duration="":
     #!/usr/bin/env bash
     set -euo pipefail
