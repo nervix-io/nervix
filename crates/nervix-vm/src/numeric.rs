@@ -10,7 +10,8 @@
 //!   buffers that yields the result column, the lanes whose operation failed, and why a failed lane
 //!   failed.
 //! - **Depends on.** Arrow arrays and buffers, the value contracts of the semantic catalog, the
-//!   side-error reasons of the VM, and the flag packing of the SIMD kernel crate.
+//!   side-error reasons of the VM, and the flag packing and checked integer arithmetic of the SIMD
+//!   kernel crate.
 //! - **Must not know.** Registers, programs, spans, or how a failed lane is recorded as a row
 //!   error.
 //!
@@ -21,14 +22,18 @@
 //! reruns a batch: the failure bitmap, restricted to lanes whose operands are valid, is the only
 //! record of a failure, and its set bits are the only lanes an error is built for.
 //!
-//! The lane loops are LLVM's auto-vectorization, not explicit SIMD: no lane operation names a SIMD
-//! instruction set or intrinsic. A loop whose lane operation compiles to a few instructions, such
-//! as an integer operation, a comparison, `sqrt`, `trunc` or a multiplication by a constant, is
-//! written so the compiler can widen it to the vector instructions of the CPU the binary targets,
-//! and its results are the same whether or not it does. The failure packing is explicit SIMD,
-//! selected at run time with a scalar fallback, and gives the same word at every level. A function
-//! the platform math library computes, such as `sin` or `log2`, is an opaque call per lane that no
-//! loop vectorizes, so those kernels read validity a word at a time and compute valid lanes only.
+//! Checked integer addition and subtraction of every width, and multiplication of 8-, 16- and
+//! 32-bit integers, are explicit SIMD: the kernel crate computes them in vector registers at the
+//! level the process selected, with a scalar fallback, and hands back each lane's value together
+//! with the failure words, so they need no packing call. Every other lane loop is LLVM's
+//! auto-vectorization: no lane operation of this module names a SIMD instruction set or
+//! intrinsic. A loop whose lane operation compiles to a few instructions, such as a negation, a
+//! comparison, `sqrt`, `trunc` or a multiplication by a constant, is written so the compiler can
+//! widen it to the vector instructions of the CPU the binary targets, and its results are the same
+//! whether or not it does. The failure packing is explicit SIMD, selected at run time with a scalar
+//! fallback, and gives the same word at every level. A function the platform math library
+//! computes, such as `sin` or `log2`, is an opaque call per lane that no loop vectorizes, so those
+//! kernels read validity a word at a time and compute valid lanes only.
 
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
@@ -39,7 +44,9 @@ use arrow_buffer::{
     bit_iterator::BitIndexIterator,
 };
 use nervix_approx_into::ApproxInto as _;
-use nervix_simd_kernels::{FlagPacker, WORD_LANES, lane_mask};
+use nervix_simd_kernels::{
+    CheckedArithmetic, CheckedLanes, FlagPacker, LaneOperands, WORD_LANES, lane_mask,
+};
 
 use crate::{
     batch::TypedArray,
@@ -109,6 +116,24 @@ impl<N: Copy + Default> Lanes<N> {
             packer.pack(block_flags, &mut words);
         }
         Self::new(values, words)
+    }
+
+    /// Computes `lane` for every lane of a binary operation's operands. A shared operand is read
+    /// once and folded into the lane operation, so a run combined with a constant is one pass over
+    /// the run, which the compiler vectorizes as it does a pass over two runs.
+    pub(crate) fn of_operands<V: Copy>(
+        operands: LaneOperands<'_, V>,
+        mut lane: impl FnMut(V, V) -> (N, bool),
+    ) -> Self {
+        match operands {
+            LaneOperands::Runs { left, right } => Self::binary(left, right, lane),
+            LaneOperands::SharedLeft { left, right } => {
+                Self::unary(right, |right| lane(left, right))
+            }
+            LaneOperands::SharedRight { left, right } => {
+                Self::unary(left, |left| lane(left, right))
+            }
+        }
     }
 
     /// Computes `lane` only for the lanes `valid` marks valid, leaving every other lane at its
@@ -253,6 +278,14 @@ impl<N: Copy + Default> Lanes<N> {
     }
 }
 
+/// The lanes an explicit SIMD kernel computed already carry their failures as bitmap words, so
+/// they become a batch's lanes without a packing pass of their own.
+impl<N: Copy + Default> From<CheckedLanes<N>> for Lanes<N> {
+    fn from(lanes: CheckedLanes<N>) -> Self {
+        Self::new(lanes.values, lanes.failed)
+    }
+}
+
 /// Which lanes of one word have valid operands, which decides how the word is computed.
 enum WordValidity {
     /// No lane is valid, so no lane is computed and none fails.
@@ -392,13 +425,13 @@ impl Arithmetic {
         T: ArrowPrimitiveType,
         T::Native: CheckedInteger,
     {
-        // Each arm hands the loop its own lane function, so the lane call is inlined into a loop
-        // the compiler can vectorize. Selecting the function first would coerce the five
-        // functions into one function pointer and call it once per lane.
+        // Each arm hands over its own operation: a SIMD kernel's, or a lane function that is
+        // inlined into a loop the compiler can vectorize. Selecting a function first would coerce
+        // the five into one function pointer and call it once per lane.
         match self {
-            Self::Add => evaluate_binary(left, right, T::Native::lane_sum),
-            Self::Sub => evaluate_binary(left, right, T::Native::lane_difference),
-            Self::Mul => evaluate_binary(left, right, T::Native::lane_product),
+            Self::Add => evaluate_operands(left, right, T::Native::sums),
+            Self::Sub => evaluate_operands(left, right, T::Native::differences),
+            Self::Mul => evaluate_operands(left, right, T::Native::products),
             Self::Div => evaluate_binary(left, right, T::Native::lane_quotient),
             Self::Rem => evaluate_binary(left, right, T::Native::lane_remainder),
         }
@@ -443,15 +476,28 @@ impl Arithmetic {
     }
 }
 
-/// Computes `lane` for every lane of a binary operation whose operands are columns or scalars.
-///
-/// A scalar operand is read once and folded into the lane operation, so a column combined with a
-/// constant is one pass over the column's buffer, which the compiler vectorizes as it does the
-/// two-column pass. A null scalar makes every lane null without running the operation.
+/// Computes `lane` for every lane of a binary operation whose operands are columns or scalars, one
+/// lane at a time through [`Lanes::of_operands`].
 fn evaluate_binary<T>(
     left: Operand<'_, PrimitiveArray<T>>,
     right: Operand<'_, PrimitiveArray<T>>,
-    mut lane: impl FnMut(T::Native, T::Native) -> (T::Native, bool),
+    lane: impl FnMut(T::Native, T::Native) -> (T::Native, bool),
+) -> Checked<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + Default,
+{
+    evaluate_operands(left, right, |operands| Lanes::of_operands(operands, lane))
+}
+
+/// Computes every lane of a binary operation whose operands are columns or scalars: `lanes` is
+/// handed the operands' value buffers, and a scalar operand as the one value every lane shares.
+///
+/// A null scalar makes every lane null without running the operation.
+fn evaluate_operands<T>(
+    left: Operand<'_, PrimitiveArray<T>>,
+    right: Operand<'_, PrimitiveArray<T>>,
+    lanes: impl FnOnce(LaneOperands<'_, T::Native>) -> Lanes<T::Native>,
 ) -> Checked<T>
 where
     T: ArrowPrimitiveType,
@@ -462,22 +508,32 @@ where
             if scalar.is_null(0) {
                 return Checked::all_null(column.len());
             }
-            let value = scalar.value(0);
-            let lanes = Lanes::unary(column.values(), |right| lane(value, right));
-            Checked::from_lanes(lanes, column.nulls().cloned())
+            let operands = LaneOperands::SharedLeft {
+                left: scalar.value(0),
+                right: column.values(),
+            };
+            Checked::from_lanes(lanes(operands), column.nulls().cloned())
         }
         (Operand::Column(column), Operand::Scalar(scalar)) => {
             if scalar.is_null(0) {
                 return Checked::all_null(column.len());
             }
-            let value = scalar.value(0);
-            let lanes = Lanes::unary(column.values(), |left| lane(left, value));
-            Checked::from_lanes(lanes, column.nulls().cloned())
+            let operands = LaneOperands::SharedRight {
+                left: column.values(),
+                right: scalar.value(0),
+            };
+            Checked::from_lanes(lanes(operands), column.nulls().cloned())
         }
         (Operand::Column(left), Operand::Column(right))
         | (Operand::Scalar(left), Operand::Scalar(right)) => {
-            let lanes = Lanes::binary(left.values(), right.values(), lane);
-            Checked::from_lanes(lanes, NullBuffer::union(left.nulls(), right.nulls()))
+            let operands = LaneOperands::Runs {
+                left: left.values(),
+                right: right.values(),
+            };
+            Checked::from_lanes(
+                lanes(operands),
+                NullBuffer::union(left.nulls(), right.nulls()),
+            )
         }
     }
 }
@@ -486,11 +542,12 @@ where
 ///
 /// Every lane operation returns its result and whether it failed. The `overflowing_*` operations
 /// compute a result and its overflow flag without a branch, and the flag fails the lane, so the
-/// wrapped result of an overflowing lane never reaches a column.
+/// wrapped result of an overflowing lane never reaches a column. Sums, differences and products
+/// of whole runs come from the explicit SIMD kernels of `nervix-simd-kernels`, which give every
+/// lane the same value and the same failure as the `overflowing_*` operation, except the product
+/// of 64-bit lanes, which has no wider lane to be exact in and is computed one lane at a time.
 pub(crate) trait CheckedInteger: ArrowNativeType + Default {
     fn lane_sum(self, right: Self) -> (Self, bool);
-
-    fn lane_difference(self, right: Self) -> (Self, bool);
 
     fn lane_product(self, right: Self) -> (Self, bool);
 
@@ -501,6 +558,15 @@ pub(crate) trait CheckedInteger: ArrowNativeType + Default {
     fn lane_remainder(self, right: Self) -> (Self, bool);
 
     fn is_zero_divisor(self) -> bool;
+
+    /// Every lane's sum, failed where the sum does not fit the type.
+    fn sums(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
+
+    /// Every lane's difference, failed where the difference does not fit the type.
+    fn differences(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
+
+    /// Every lane's product, failed where the product does not fit the type.
+    fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
 }
 
 /// A signed integer type, which alone has a negation and an absolute value that can overflow.
@@ -510,50 +576,86 @@ pub(crate) trait SignedInteger: CheckedInteger {
     fn lane_absolute_value(self) -> (Self, bool);
 }
 
-macro_rules! checked_integer {
+/// The operations of [`CheckedInteger`] that every integer type computes alike: the lane
+/// operations, and the sums and differences of the SIMD kernels, which cover every width.
+macro_rules! checked_integer_operations {
+    () => {
+        fn lane_sum(self, right: Self) -> (Self, bool) {
+            self.overflowing_add(right)
+        }
+
+        fn lane_product(self, right: Self) -> (Self, bool) {
+            self.overflowing_mul(right)
+        }
+
+        fn lane_quotient(self, right: Self) -> (Self, bool) {
+            match self.checked_div(right) {
+                Some(quotient) => (quotient, false),
+                None => (0, true),
+            }
+        }
+
+        fn lane_remainder(self, right: Self) -> (Self, bool) {
+            if right == 0 {
+                return (0, true);
+            }
+            match self.checked_rem(right) {
+                Some(remainder) => (remainder, false),
+                // A nonzero divisor fails `checked_rem` only for the minimum signed value over -1.
+                // Its quotient overflows, but its remainder is exactly 0.
+                None => (0, false),
+            }
+        }
+
+        fn is_zero_divisor(self) -> bool {
+            self == 0
+        }
+
+        fn sums(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+            Lanes::from(CheckedArithmetic::new().sums(operands))
+        }
+
+        fn differences(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+            Lanes::from(CheckedArithmetic::new().differences(operands))
+        }
+    };
+}
+
+/// An integer type of 8, 16 or 32 bits, whose products the SIMD kernels compute in lanes of twice
+/// its width.
+macro_rules! widened_checked_integer {
     ($($native:ty),+ $(,)?) => {
         $(
             impl CheckedInteger for $native {
-                fn lane_sum(self, right: Self) -> (Self, bool) {
-                    self.overflowing_add(right)
-                }
+                checked_integer_operations!();
 
-                fn lane_difference(self, right: Self) -> (Self, bool) {
-                    self.overflowing_sub(right)
-                }
-
-                fn lane_product(self, right: Self) -> (Self, bool) {
-                    self.overflowing_mul(right)
-                }
-
-                fn lane_quotient(self, right: Self) -> (Self, bool) {
-                    match self.checked_div(right) {
-                        Some(quotient) => (quotient, false),
-                        None => (0, true),
-                    }
-                }
-
-                fn lane_remainder(self, right: Self) -> (Self, bool) {
-                    if right == 0 {
-                        return (0, true);
-                    }
-                    match self.checked_rem(right) {
-                        Some(remainder) => (remainder, false),
-                        // A nonzero divisor fails `checked_rem` only for the minimum signed value
-                        // over -1. Its quotient overflows, but its remainder is exactly 0.
-                        None => (0, false),
-                    }
-                }
-
-                fn is_zero_divisor(self) -> bool {
-                    self == 0
+                fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+                    Lanes::from(CheckedArithmetic::new().products(operands))
                 }
             }
         )+
     };
 }
 
-checked_integer!(u8, i8, u16, i16, u32, i32, u64, i64);
+widened_checked_integer!(u8, i8, u16, i16, u32, i32);
+
+/// A 64-bit integer type, whose products have no wider lane to be exact in, so they are computed
+/// one lane at a time.
+macro_rules! wide_checked_integer {
+    ($($native:ty),+ $(,)?) => {
+        $(
+            impl CheckedInteger for $native {
+                checked_integer_operations!();
+
+                fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+                    Lanes::of_operands(operands, Self::lane_product)
+                }
+            }
+        )+
+    };
+}
+
+wide_checked_integer!(u64, i64);
 
 macro_rules! signed_integer {
     ($($native:ty),+ $(,)?) => {
