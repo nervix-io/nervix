@@ -116,9 +116,9 @@ use crate::common::{
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
-        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
-        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
-        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
+        POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
+        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -7469,6 +7469,12 @@ async fn given_redis_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name:
     publish_fixture_name(world, REDIS_TLS_ADDR, &name, "redis_tls_dns_addr");
 }
 
+#[given(expr = "the MQTT endpoints are published under fixture DNS name {string}")]
+async fn given_mqtt_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, MQTT_ADDR, &name, "mqtt_dns_addr");
+    publish_fixture_name(world, MQTT_TLS_ADDR, &name, "mqtt_tls_dns_addr");
+}
+
 #[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
 async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
     publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
@@ -7564,6 +7570,15 @@ async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, ad
 async fn given_redis_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
     let endpoint = started_dependency(world, REDIS_ADDR);
     forward_under_fixture_name(world, &endpoint, &name, &addresses, "redis_forwarded_addr").await;
+}
+
+/// Stand TCP forwarders to the plain MQTT listener at `addresses`, and record in placeholder
+/// `mqtt_forwarded_addr` the MQTT address that reaches them through the fixture name `name`. The
+/// scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "MQTT is forwarded as {string} from the fixture addresses {string}")]
+async fn given_mqtt_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, MQTT_ADDR);
+    forward_under_fixture_name(world, &endpoint, &name, &addresses, "mqtt_forwarded_addr").await;
 }
 
 /// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in
@@ -23895,7 +23910,22 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+}
+
+/// Like the step above, except that every payload arriving before the last fragment set matches
+/// must match a set not yet matched, so a record the scenario expects to be dropped fails the step
+/// even when it arrives among the expected ones.
+#[then(
+    expr = "within {string} the relay subscription receives exactly one payload for each fragment \
+            set"
+)]
+async fn then_within_duration_the_stream_subscription_receives_exactly_the_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail).await;
 }
 
 /// Like the step above, and every payload matching a fragment set carries the same value in the
@@ -23910,7 +23940,8 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     field: String,
     #[step] step: &Step,
 ) {
-    let matched = receive_subscription_fragment_sets(world, &duration, step).await;
+    let matched =
+        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
     let values = matched
         .iter()
         .map(|payload| {
@@ -23933,12 +23964,22 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     );
 }
 
+/// What a fragment-set wait does with a payload that matches none of the sets still expected.
+#[derive(Debug, Clone, Copy)]
+enum UnmatchedPayloads {
+    /// Other records share the subscription, so the payload is passed over.
+    Skip,
+    /// The sets name every record the subscription may deliver, so the payload fails the step.
+    Fail,
+}
+
 /// Waits until every docstring line's `|`-separated fragments are all found in one subscription
 /// payload, and returns the payloads that matched, in the order they arrived.
 async fn receive_subscription_fragment_sets(
     world: &mut ScenarioWorld,
     duration: &str,
     step: &Step,
+    unmatched: UnmatchedPayloads,
 ) -> Vec<String> {
     let duration =
         humantime::parse_duration(duration).expect("step duration must be a valid duration");
@@ -23994,12 +24035,19 @@ async fn receive_subscription_fragment_sets(
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
 
-        if let Some(index) = remaining
+        let position = remaining
             .iter()
-            .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)))
-        {
-            remaining.remove(index);
-            matched.push(payload);
+            .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)));
+        match (position, unmatched) {
+            (Some(index), _) => {
+                remaining.remove(index);
+                matched.push(payload);
+            }
+            (None, UnmatchedPayloads::Skip) => {}
+            (None, UnmatchedPayloads::Fail) => panic!(
+                "subscription payload {payload:?} matches no expected fragment set. expected \
+                 remaining {remaining:?}, observed {observed:?}"
+            ),
         }
     }
     matched

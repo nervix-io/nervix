@@ -45,7 +45,7 @@ impl SyslogSourcePlan {
     pub fn new(
         entries: Vec<ClientConfigEntry>,
         bind_addr: impl FnOnce(&str) -> String,
-    ) -> Result<Self, SyslogConfigError> {
+    ) -> error_stack::Result<Self, SyslogConfigError> {
         let config = SyslogClientConfig::parse(&entries, SyslogDirection::Ingest)?;
         let bind_addr = bind_addr(&config.addr);
         Ok(Self { config, bind_addr })
@@ -111,7 +111,7 @@ struct SyslogStreamListener {
     listener: TcpListener,
     frame_tx: mpsc::Sender<ReceivedSyslogFrame>,
     frame_rx: mpsc::Receiver<ReceivedSyslogFrame>,
-    connections: JoinSet<Result<(), SyslogConnectionError>>,
+    connections: JoinSet<error_stack::Result<(), SyslogConnectionError>>,
     paused: watch::Sender<bool>,
 }
 
@@ -159,8 +159,8 @@ enum SyslogConnectionError {
     },
     #[error("connection ended with an incomplete Syslog frame")]
     IncompleteFrame,
-    #[error(transparent)]
-    Frame(#[from] SyslogFrameError),
+    #[error("invalid Syslog stream frame")]
+    Frame,
 }
 
 #[derive(Debug, Error)]
@@ -191,9 +191,10 @@ impl SourceConnector for SyslogSource {
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
         let tls_acceptor = if plan.config.protocol == SyslogProtocol::Tls {
-            let config = plan.config.tls_server_config().map_err(|error| {
-                Report::new(error).change_context(SourceError::Open { connector: SYSLOG })
-            })?;
+            let config = plan
+                .config
+                .tls_server_config()
+                .change_context(SourceError::Open { connector: SYSLOG })?;
             Some(TlsAcceptor::from(config))
         } else {
             None
@@ -277,7 +278,7 @@ impl BrokerSourceConnector for SyslogSource {
 }
 
 impl SyslogSource {
-    async fn bind_listener(&self) -> Result<SyslogListener, Report<SyslogListenerError>> {
+    async fn bind_listener(&self) -> error_stack::Result<SyslogListener, SyslogListenerError> {
         match self.config.protocol {
             SyslogProtocol::Udp => {
                 let socket = UdpSocket::bind(&self.bind_addr).await.map_err(|source| {
@@ -325,7 +326,7 @@ impl SyslogUdpListener {
     async fn receive(
         &mut self,
         max_message_size: NonZeroUsize,
-    ) -> Result<SyslogSourceMessage, Report<SyslogListenerError>> {
+    ) -> error_stack::Result<SyslogSourceMessage, SyslogListenerError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let (size, peer_addr) = self
@@ -355,7 +356,7 @@ impl SyslogStreamListener {
         &mut self,
         max_message_size: NonZeroUsize,
         tls_acceptor: Option<TlsAcceptor>,
-    ) -> Result<SyslogSourceMessage, Report<SyslogListenerError>> {
+    ) -> error_stack::Result<SyslogSourceMessage, SyslogListenerError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
@@ -379,7 +380,7 @@ impl SyslogStreamListener {
                             let stream = acceptor
                                 .accept(stream)
                                 .await
-                                .map_err(|source| SyslogConnectionError::TlsHandshake { source })?;
+                                .map_err(|source| Report::new(SyslogConnectionError::TlsHandshake { source }))?;
                             read_stream_connection(
                                 stream,
                                 peer_addr,
@@ -411,7 +412,7 @@ impl SyslogStreamListener {
                 joined = self.connections.join_next(), if !self.connections.is_empty() => {
                     match joined {
                         Some(Ok(Err(error))) => {
-                            debug!(error = %error, "closed malformed or failed syslog connection");
+                            debug!(error = ?error, "closed malformed or failed syslog connection");
                         }
                         Some(Err(error)) if !error.is_cancelled() => {
                             debug!(error = %error, "syslog connection task failed");
@@ -431,7 +432,7 @@ async fn read_stream_connection(
     allow_non_transparent: bool,
     tx: mpsc::Sender<ReceivedSyslogFrame>,
     mut paused: watch::Receiver<bool>,
-) -> Result<(), SyslogConnectionError> {
+) -> error_stack::Result<(), SyslogConnectionError> {
     let mut decoder = StreamFrameDecoder::new(max_message_size, allow_non_transparent);
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -441,7 +442,10 @@ async fn read_stream_connection(
             }
             continue;
         }
-        if let Some(frame) = decoder.next_frame()? {
+        if let Some(frame) = decoder
+            .next_frame()
+            .change_context(SyslogConnectionError::Frame)?
+        {
             nervix_primitives::select! {
                 sent = tx.send(ReceivedSyslogFrame { payload: frame, peer_addr }) => {
                     if sent.is_err() {
@@ -456,7 +460,9 @@ async fn read_stream_connection(
             }
             continue;
         }
-        let read_capacity = decoder.read_capacity()?;
+        let read_capacity = decoder
+            .read_capacity()
+            .change_context(SyslogConnectionError::Frame)?;
         let mut chunk = [0_u8; 8_192];
         let read_capacity = read_capacity.min(chunk.len());
         let read = nervix_primitives::select! {
@@ -468,12 +474,12 @@ async fn read_stream_connection(
             }
             read = stream.read(&mut chunk[..read_capacity]) => read,
         }
-        .map_err(|source| SyslogConnectionError::StreamRead { source })?;
+        .map_err(|source| Report::new(SyslogConnectionError::StreamRead { source }))?;
         if read == 0 {
             return if decoder.is_empty() {
                 Ok(())
             } else {
-                Err(SyslogConnectionError::IncompleteFrame)
+                Err(Report::new(SyslogConnectionError::IncompleteFrame))
             };
         }
         decoder.extend(&chunk[..read]);
@@ -503,65 +509,69 @@ impl StreamFrameDecoder {
         self.bytes.extend_from_slice(bytes);
     }
 
-    fn read_capacity(&self) -> Result<usize, SyslogFrameError> {
+    fn read_capacity(&self) -> error_stack::Result<usize, SyslogFrameError> {
         let cap = self
             .max_message_size
             .get()
             .checked_add(MAX_OCTET_COUNT_DIGITS + 1)
-            .ok_or(SyslogFrameError::OversizedBufferedFrame {
-                maximum: self.max_message_size,
+            .ok_or_else(|| {
+                Report::new(SyslogFrameError::OversizedBufferedFrame {
+                    maximum: self.max_message_size,
+                })
             })?;
         // The buffer is filled to at most `cap` bytes, so a longer one has no room left.
         let remaining = cap.saturating_sub(self.bytes.len());
         if remaining == 0 {
-            Err(SyslogFrameError::OversizedBufferedFrame {
+            Err(Report::new(SyslogFrameError::OversizedBufferedFrame {
                 maximum: self.max_message_size,
-            })
+            }))
         } else {
             Ok(remaining)
         }
     }
 
-    fn next_frame(&mut self) -> Result<Option<Vec<u8>>, SyslogFrameError> {
+    fn next_frame(&mut self) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
         let Some(first) = self.bytes.first().copied() else {
             return Ok(None);
         };
         if first.is_ascii_digit() {
             self.next_octet_counted_frame()
         } else if !self.allow_non_transparent {
-            Err(SyslogFrameError::NonOctetTlsFrame)
+            Err(Report::new(SyslogFrameError::NonOctetTlsFrame))
         } else {
             self.next_non_transparent_frame()
         }
     }
 
-    fn next_octet_counted_frame(&mut self) -> Result<Option<Vec<u8>>, SyslogFrameError> {
+    fn next_octet_counted_frame(
+        &mut self,
+    ) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
         let delimiter = self.bytes.iter().position(|byte| *byte == b' ');
         let Some(delimiter) = delimiter else {
             if self.bytes.len() > MAX_OCTET_COUNT_DIGITS
                 || self.bytes.iter().any(|byte| !byte.is_ascii_digit())
             {
-                return Err(SyslogFrameError::MalformedOctetCount);
+                return Err(Report::new(SyslogFrameError::MalformedOctetCount));
             }
             return Ok(None);
         };
         if delimiter == 0 || delimiter > MAX_OCTET_COUNT_DIGITS {
-            return Err(SyslogFrameError::MalformedOctetCount);
+            return Err(Report::new(SyslogFrameError::MalformedOctetCount));
         }
         let prefix = &self.bytes[..delimiter];
         if prefix.first() == Some(&b'0') || !prefix.iter().all(|byte| byte.is_ascii_digit()) {
-            return Err(SyslogFrameError::MalformedOctetCount);
+            return Err(Report::new(SyslogFrameError::MalformedOctetCount));
         }
         let prefix = std::str::from_utf8(prefix)
             .verified("the check above rejected every prefix that is not made of ASCII digits");
         let length = prefix
             .parse::<usize>()
-            .map_err(|source| SyslogFrameError::InvalidOctetCount { source })?;
+            .map_err(|source| Report::new(SyslogFrameError::InvalidOctetCount { source }))?;
         if length > self.max_message_size.get() {
-            return Err(SyslogFrameError::OversizedOctetCount {
+            return Err(Report::new(SyslogFrameError::OversizedOctetCount {
                 length,
                 maximum: self.max_message_size,
-            });
+            }));
         }
         let payload_start = delimiter
             .checked_add(1)
@@ -577,7 +587,9 @@ impl StreamFrameDecoder {
         Ok(Some(frame))
     }
 
-    fn next_non_transparent_frame(&mut self) -> Result<Option<Vec<u8>>, SyslogFrameError> {
+    fn next_non_transparent_frame(
+        &mut self,
+    ) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
         let Some(delimiter) = self.bytes.iter().position(|byte| *byte == b'\n') else {
             let pending_payload_size = self
                 .bytes
@@ -585,9 +597,11 @@ impl StreamFrameDecoder {
                 .checked_sub(usize::from(self.bytes.last() == Some(&b'\r')))
                 .verified("a trailing carriage return means the buffer holds at least one byte");
             if pending_payload_size > self.max_message_size.get() {
-                return Err(SyslogFrameError::OversizedNonTransparentFrame {
-                    maximum: self.max_message_size,
-                });
+                return Err(Report::new(
+                    SyslogFrameError::OversizedNonTransparentFrame {
+                        maximum: self.max_message_size,
+                    },
+                ));
             }
             return Ok(None);
         };
@@ -597,9 +611,11 @@ impl StreamFrameDecoder {
             delimiter
         };
         if payload_end > self.max_message_size.get() {
-            return Err(SyslogFrameError::OversizedNonTransparentFrame {
-                maximum: self.max_message_size,
-            });
+            return Err(Report::new(
+                SyslogFrameError::OversizedNonTransparentFrame {
+                    maximum: self.max_message_size,
+                },
+            ));
         }
         let frame = self.bytes[..payload_end].to_vec();
         self.bytes.drain(..=delimiter);
@@ -686,7 +702,7 @@ mod tests {
         decoder.extend(b"<13>line framed\n");
         assert!(matches!(
             decoder.next_frame(),
-            Err(SyslogFrameError::NonOctetTlsFrame)
+            Err(error) if matches!(error.current_context(), SyslogFrameError::NonOctetTlsFrame)
         ));
     }
 }

@@ -390,6 +390,8 @@ RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` br
 against that host; see [RabbitMQ](#rabbitmq).
 Redis Pub/Sub also resolves its `addr` hostname through the node resolver for each dedicated
 subscription connection; see [Redis Pub/Sub](#redis-pubsub).
+MQTT resolves the host of its `addr` through the node resolver for every connection and verifies
+an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 
 Example Kafka TLS client:
 
@@ -767,6 +769,14 @@ remain connected under any valid session declaration. In ACK modes, Nervix ackno
 when it is buffered or deliberately dropped, trading broker redelivery for the declared connected
 behavior.
 
+Each instance resolves the host of its client's `addr` through the node's asynchronous DNS
+resolver whenever it connects: on its first subscription and on every resume after a lost
+connection. It dials the answers in order within the client's five-second connect timeout, which
+also covers TLS and the MQTT handshake. For `mqtts`, TLS verifies the configured host name. A name
+that does not resolve is a connection failure, never a message rejection: the instance resumes
+again on its declared `RETRY POLICY`, or on the host's reconnect cadence in a `NO_ACK` mode. See
+[DNS for MQTT](connector-contract.md#dns-for-mqtt).
+
 ### NATS
 
 ```nspl,ignore
@@ -816,6 +826,9 @@ Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` c
 application acknowledgment. Every live cluster node runs the listener; it is independent of the
 leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
+An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
+file and its underlying cause. A frame or connection failure keeps its cause in the source
+diagnostic. These failures do not acknowledge a message; Syslog has no application ACK.
 
 ### SQS
 
@@ -979,6 +992,9 @@ connection ids, timestamps, or echoed parameters still match.
 A matcher that errors on a frame of a different shape counts as a non-match
 rather than a connection failure. On timeout, the error names the matchers the
 current step was still waiting on.
+Invalid signaling programs fail validation with the protocol, clause, step, and compiler cause.
+Handshake send, capture, encoding, and transport failures retain their causes in the source
+diagnostic. A failed handshake delivers no frame to the relay.
 
 ### Data Arriving During The Handshake
 
