@@ -56,6 +56,7 @@ class InventoryTests(unittest.TestCase):
             "models-identities",
             "models-identity-validation",
             "models-archived-models",
+            "simd-constant-division",
             "simd-checked-lanes",
             "replica-progress",
             "replica-catch-up",
