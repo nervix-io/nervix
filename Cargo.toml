@@ -369,6 +369,9 @@ as-conversions = "deny"
 disallowed-methods = "deny"
 disallowed-types = "deny"
 
+[workspace.metadata.tooling]
+workspaces = ["tools/nervix-lint"]
+
 [workspace.dependencies]
 ahash = "0.8"
 ahash-compile-time = { package = "ahash", version = "0.8", default-features = false, features = [
