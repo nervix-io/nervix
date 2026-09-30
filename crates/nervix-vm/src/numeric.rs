@@ -25,7 +25,9 @@
 //! Checked integer addition and subtraction of every width, and multiplication of 8-, 16- and
 //! 32-bit integers, are explicit SIMD: the kernel crate computes them in vector registers at the
 //! level the process selected, with a scalar fallback, and hands back each lane's value together
-//! with the failure words, so they need no packing call. Every other lane loop is LLVM's
+//! with the failure words, so they need no packing call. Integer division and remainder by a
+//! shared scalar use the same kernel crate's prepared reciprocal lanes, with a measured scalar
+//! multiply-high path for U64 and I64 remainder. Every other lane loop is LLVM's
 //! auto-vectorization: no lane operation of this module names a SIMD instruction set or
 //! intrinsic. A loop whose lane operation compiles to a few instructions, such as a negation, a
 //! comparison, `sqrt`, `trunc` or a multiplication by a constant, is written so the compiler can
@@ -45,7 +47,8 @@ use arrow_buffer::{
 };
 use nervix_approx_into::ApproxInto as _;
 use nervix_simd_kernels::{
-    CheckedArithmetic, CheckedLanes, FlagPacker, LaneOperands, WORD_LANES, lane_mask,
+    CheckedArithmetic, CheckedLanes, ConstantDivision, DivisionLane, FlagPacker, LaneOperands,
+    WORD_LANES, lane_mask,
 };
 
 use crate::{
@@ -432,8 +435,8 @@ impl Arithmetic {
             Self::Add => evaluate_operands(left, right, T::Native::sums),
             Self::Sub => evaluate_operands(left, right, T::Native::differences),
             Self::Mul => evaluate_operands(left, right, T::Native::products),
-            Self::Div => evaluate_binary(left, right, T::Native::lane_quotient),
-            Self::Rem => evaluate_binary(left, right, T::Native::lane_remainder),
+            Self::Div => evaluate_operands(left, right, T::Native::quotients),
+            Self::Rem => evaluate_operands(left, right, T::Native::remainders),
         }
     }
 
@@ -546,7 +549,7 @@ where
 /// of whole runs come from the explicit SIMD kernels of `nervix-simd-kernels`, which give every
 /// lane the same value and the same failure as the `overflowing_*` operation, except the product
 /// of 64-bit lanes, which has no wider lane to be exact in and is computed one lane at a time.
-pub(crate) trait CheckedInteger: ArrowNativeType + Default {
+pub(crate) trait CheckedInteger: ArrowNativeType + Default + DivisionLane {
     fn lane_sum(self, right: Self) -> (Self, bool);
 
     fn lane_product(self, right: Self) -> (Self, bool);
@@ -567,6 +570,25 @@ pub(crate) trait CheckedInteger: ArrowNativeType + Default {
 
     /// Every lane's product, failed where the product does not fit the type.
     fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
+
+    /// A shared right operand prepares one reciprocal; a divisor column stays scalar.
+    fn quotients(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+        match operands {
+            LaneOperands::SharedRight { left, right } => {
+                Lanes::from(ConstantDivision::new().quotients(left, right))
+            }
+            operands => Lanes::of_operands(operands, Self::lane_quotient),
+        }
+    }
+
+    fn remainders(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+        match operands {
+            LaneOperands::SharedRight { left, right } => {
+                Lanes::from(ConstantDivision::new().remainders(left, right))
+            }
+            operands => Lanes::of_operands(operands, Self::lane_remainder),
+        }
+    }
 }
 
 /// A signed integer type, which alone has a negation and an absolute value that can overflow.

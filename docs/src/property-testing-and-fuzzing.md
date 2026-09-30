@@ -58,6 +58,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
+| `simd-constant-division` | `nervix-simd-kernels` constant quotients and remainders equal checked operations at every SIMD level | all integer widths, divisors, scalar fallback and tails, with full-range signed overflow, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 | `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
 | `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
@@ -185,8 +186,8 @@ PR CI runs a required ordinary randomized/corpus job and a separate required san
 libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
 manual campaigns. The sanitizer job is bounded by 120 minutes on PRs and 300 minutes in scheduled
 or manual campaigns, including ordinary property checks, compiled discovery, cold instrumented
-builds, failure qualification, artifacts and cleanup. The current 34-target inventory alone needs
-17 minutes of PR engine time or 170 minutes of campaign engine time, before those prerequisites.
+builds, failure qualification, artifacts and cleanup. The current 35-target inventory alone needs
+17.5 minutes of PR engine time or 175 minutes of campaign engine time, before those prerequisites.
 The per-build deadline remains 1,800 seconds. A cache may seed a campaign but cannot skip a target
 or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
