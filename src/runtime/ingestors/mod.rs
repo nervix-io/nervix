@@ -79,7 +79,7 @@ pub(crate) enum SourceStartError {
         setting: DeliverySetting,
         value: String,
         #[source]
-        source: humantime::DurationError,
+        source: nervix_models::DurationTextError,
     },
 }
 

@@ -13,7 +13,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState, DomainClockPeriod,
-    DomainClockSkew, DomainName, DomainTimeRate, Timestamp,
+    DomainClockSkew, DomainName, DomainTimeRate, Timestamp, parse_duration_text,
 };
 
 use super::*;
@@ -251,7 +251,7 @@ async fn next_clock_frame(
     duration: &str,
     domain: &DomainName,
 ) -> TestClockFrame {
-    let duration = humantime::parse_duration(duration).expect("step durations are valid durations");
+    let duration = parse_duration_text(duration).expect("step durations are valid durations");
     let frame = clock_session(world)
         .try_next_clock_frame(duration)
         .await
@@ -485,8 +485,7 @@ async fn then_clock_session_receives_no_frame(
     duration: String,
 ) {
     let domain = scenario_domain(world, &domain);
-    let duration =
-        humantime::parse_duration(&duration).expect("step durations are valid durations");
+    let duration = parse_duration_text(&duration).expect("step durations are valid durations");
     let session = clock_session(world);
     let reply = session
         .clock_log()
@@ -774,7 +773,7 @@ fn client_admission_window(world: &ScenarioWorld, name: &str) -> DomainAdmission
 
 #[then(expr = "within {string} client {string} receives a tick for its attached domain clock")]
 async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, name: String) {
-    let duration = humantime::parse_duration(&duration).expect("step durations are valid");
+    let duration = parse_duration_text(&duration).expect("step durations are valid");
     let client = world
         .transaction_clients
         .get(&name)
@@ -879,8 +878,7 @@ async fn then_client_observes_server_error(
     #[step] step: &Step,
 ) {
     let expected = expand_placeholders(world, docstring(step));
-    let duration =
-        humantime::parse_duration(&duration).expect("step durations are valid durations");
+    let duration = parse_duration_text(&duration).expect("step durations are valid durations");
     let client = world
         .transaction_clients
         .get(&name)

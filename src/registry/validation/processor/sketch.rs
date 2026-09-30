@@ -10,6 +10,7 @@
 use error_stack::Report;
 use nervix_models::{
     CreateWindowProcessor, DomainName, ModelIndex, ModelName, RelayName, WindowStateLimit,
+    parse_duration_text,
 };
 use nervix_vm::window::{WindowPaneLayout, WindowSketchConfig};
 
@@ -38,8 +39,8 @@ pub(super) fn validate(
         processor.step.duration.as_deref(),
     ) {
         (Some(width), Some(step)) => {
-            let width = humantime::parse_duration(width).ok();
-            let step = humantime::parse_duration(step).ok();
+            let width = parse_duration_text(width).ok();
+            let step = parse_duration_text(step).ok();
             match (width, step) {
                 (Some(width), Some(step)) => WindowPaneLayout::for_width_and_step(width, step),
                 _ => None,
@@ -112,12 +113,63 @@ mod tests {
     use std::fs;
 
     use meticulous::ResultExt as _;
+    use nervix_models::{Model, WindowBound};
     use nervix_recovery::Reported as _;
+    use nonzero_ext::nonzero;
 
+    use super::*;
     use crate::registry::{
         storage::Registry,
-        test_fixtures::{example_graph_models, temp_db_path},
+        test_fixtures::{
+            TOO_LONG_DURATION_TEXT, example_graph_models, named, temp_db_path, window_processor,
+        },
     };
+
+    #[test]
+    fn window_durations_that_name_no_duration_leave_a_sketch_no_time_panes() {
+        let domain = named::<DomainName>("default");
+        let identifier = named::<ModelName>("sketch_window");
+        let route = named::<RelayName>("sketch_out");
+        let Model::WindowProcessor(mut processor) = window_processor(
+            "sketch_window",
+            "sketch_in",
+            "sketch_out",
+            "SET distinct_values = 1",
+        ) else {
+            panic!("the fixture builds a window processor");
+        };
+        processor.state_limit = WindowStateLimit::MaxBytes(nonzero!(1_048_576_u64));
+        for (width, step) in [
+            ("oops", "1s"),
+            (TOO_LONG_DURATION_TEXT, "1s"),
+            ("2s", TOO_LONG_DURATION_TEXT),
+        ] {
+            processor.width = WindowBound {
+                messages: None,
+                duration: Some(width.to_string()),
+            };
+            processor.step = WindowBound {
+                messages: None,
+                duration: Some(step.to_string()),
+            };
+            let error = validate(
+                &domain,
+                &identifier,
+                &ModelIndex::new(),
+                &processor,
+                &route,
+                &[],
+            )
+            .expect_err("a sketch needs duration panes");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    RegistryError::WindowSketchRequiresTimePanes { .. }
+                ),
+                "{error:?}"
+            );
+        }
+    }
 
     #[test]
     fn sketch_window_requires_time_panes_and_an_explicit_sufficient_state_budget() {
