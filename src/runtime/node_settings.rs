@@ -1,19 +1,18 @@
 use nervix_connector::{ParsedRetryPolicy, SourceAckPolicy};
 use nervix_models::IngestAcknowledgement;
 
-use super::*;
+use super::{
+    ingestors::{DeliverySetting, IngestorStartError, SourceStartError},
+    *,
+};
 
 impl Runtime {
     pub(in crate::runtime) fn parse_ack_timeout(
         domain: &DomainName,
         ingestor: &IngestorName,
         timeout: &str,
-    ) -> Result<Duration, RuntimeError> {
-        humantime::parse_duration(timeout).map_err(|source| RuntimeError::StartIngestor {
-            domain: domain.as_str().to_string(),
-            ingestor: ingestor.as_str().to_string(),
-            reason: format!("invalid ack timeout '{timeout}': {source}"),
-        })
+    ) -> error_stack::Result<Duration, IngestorStartError> {
+        Self::parse_duration_setting(domain, ingestor, DeliverySetting::AckTimeout, timeout)
     }
 
     /// Parses the acknowledgement a delivery mode declares into the policy its source loop runs.
@@ -24,7 +23,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         acknowledgement: IngestAcknowledgement<'_>,
-    ) -> Result<SourceAckPolicy, RuntimeError> {
+    ) -> error_stack::Result<SourceAckPolicy, IngestorStartError> {
         match acknowledgement {
             IngestAcknowledgement::Unacknowledged => Ok(SourceAckPolicy::None),
             IngestAcknowledgement::Sequential { timeout, retry } => {
@@ -38,8 +37,12 @@ impl Runtime {
                 timeout,
                 retry,
             } => {
-                let batch_timeout =
-                    Self::parse_duration_setting(domain, ingestor, "batch timeout", batch_timeout)?;
+                let batch_timeout = Self::parse_duration_setting(
+                    domain,
+                    ingestor,
+                    DeliverySetting::BatchTimeout,
+                    batch_timeout,
+                )?;
                 let timeout = Self::parse_ack_timeout(domain, ingestor, timeout)?;
                 let retry = Self::parse_retry_policy(domain, ingestor, retry)?;
                 Ok(SourceAckPolicy::Parallel {
@@ -52,16 +55,24 @@ impl Runtime {
         }
     }
 
+    /// Parses one duration `setting` of an ingestor's delivery mode. A value that does not parse
+    /// fails the ingestor's initialization, naming the setting beneath it.
     pub(in crate::runtime) fn parse_duration_setting(
         domain: &DomainName,
         ingestor: &IngestorName,
-        field: &str,
+        setting: DeliverySetting,
         value: &str,
-    ) -> Result<Duration, RuntimeError> {
-        humantime::parse_duration(value).map_err(|source| RuntimeError::StartIngestor {
-            domain: domain.as_str().to_string(),
-            ingestor: ingestor.as_str().to_string(),
-            reason: format!("invalid {field} '{value}': {source}"),
+    ) -> error_stack::Result<Duration, IngestorStartError> {
+        humantime::parse_duration(value).map_err(|source| {
+            Report::new(SourceStartError::InvalidDuration {
+                setting,
+                value: value.to_string(),
+                source,
+            })
+            .change_context(IngestorStartError::Initialize {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            })
         })
     }
 
@@ -169,18 +180,18 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         policy: &RetryPolicy,
-    ) -> Result<ParsedRetryPolicy, RuntimeError> {
+    ) -> error_stack::Result<ParsedRetryPolicy, IngestorStartError> {
         Ok(ParsedRetryPolicy {
             backoff: Self::parse_duration_setting(
                 domain,
                 ingestor,
-                "retry backoff",
+                DeliverySetting::RetryBackoff,
                 &policy.backoff,
             )?,
             max_backoff: Self::parse_duration_setting(
                 domain,
                 ingestor,
-                "retry max backoff",
+                DeliverySetting::RetryMaxBackoff,
                 &policy.max_backoff,
             )?,
         })
@@ -195,6 +206,24 @@ mod tests {
 
     use super::*;
 
+    /// Whether `report` is `ingestor`'s failure to initialize, with the delivery `setting` whose
+    /// value did not parse as its typed cause.
+    fn names_invalid_setting(
+        report: &Report<IngestorStartError>,
+        ingestor: &IngestorName,
+        setting: DeliverySetting,
+    ) -> bool {
+        let initialize = matches!(
+            report.current_context(),
+            IngestorStartError::Initialize { ingestor: failed, .. } if failed == ingestor
+        );
+        let cause = matches!(
+            report.downcast_ref::<SourceStartError>(),
+            Some(SourceStartError::InvalidDuration { setting: invalid, .. }) if *invalid == setting
+        );
+        initialize && cause
+    }
+
     #[test]
     fn runtime_duration_parsers_validate_and_report_context() {
         let domain = domain("default");
@@ -205,21 +234,44 @@ mod tests {
             Duration::from_secs(2)
         );
         assert_eq!(
-            Runtime::parse_duration_setting(&domain, &ingestor, "batch timeout", "250ms")
-                .expect("valid duration"),
+            Runtime::parse_duration_setting(
+                &domain,
+                &ingestor,
+                DeliverySetting::BatchTimeout,
+                "250ms"
+            )
+            .expect("valid duration"),
             Duration::from_millis(250)
         );
 
         let err = Runtime::parse_ack_timeout(&domain, &ingestor, "oops")
             .expect_err("invalid ack timeout");
         assert!(
-            matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("invalid ack timeout 'oops'"))
+            names_invalid_setting(&err, &ingestor, DeliverySetting::AckTimeout),
+            "{err:?}"
+        );
+        assert!(
+            format!("{err:#}").starts_with(
+                "failed to initialize ingestor 'orders_ingestor' in domain 'default': invalid ack \
+                 timeout 'oops': "
+            ),
+            "{err:#}"
         );
 
-        let err = Runtime::parse_duration_setting(&domain, &ingestor, "batch timeout", "oops")
-            .expect_err("invalid duration");
+        let err = Runtime::parse_duration_setting(
+            &domain,
+            &ingestor,
+            DeliverySetting::BatchTimeout,
+            "oops",
+        )
+        .expect_err("invalid duration");
         assert!(
-            matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("invalid batch timeout 'oops'"))
+            names_invalid_setting(&err, &ingestor, DeliverySetting::BatchTimeout),
+            "{err:?}"
+        );
+        assert!(
+            format!("{err:#}").contains("invalid batch timeout 'oops'"),
+            "{err:#}"
         );
 
         let retry = RetryPolicy {
@@ -238,7 +290,12 @@ mod tests {
         let err = Runtime::parse_retry_policy(&domain, &ingestor, &bad_retry)
             .expect_err("invalid retry backoff");
         assert!(
-            matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("invalid retry backoff 'oops'"))
+            names_invalid_setting(&err, &ingestor, DeliverySetting::RetryBackoff),
+            "{err:?}"
+        );
+        assert!(
+            format!("{err:#}").contains("invalid retry backoff 'oops'"),
+            "{err:#}"
         );
 
         let bad_max_retry = RetryPolicy {
@@ -248,7 +305,12 @@ mod tests {
         let err = Runtime::parse_retry_policy(&domain, &ingestor, &bad_max_retry)
             .expect_err("invalid retry max_backoff");
         assert!(
-            matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("retry max backoff") && reason.contains("oops"))
+            names_invalid_setting(&err, &ingestor, DeliverySetting::RetryMaxBackoff),
+            "{err:?}"
+        );
+        assert!(
+            format!("{err:#}").contains("invalid retry max backoff 'oops'"),
+            "{err:#}"
         );
     }
 
@@ -325,7 +387,8 @@ mod tests {
         )
         .expect_err("invalid retry backoff");
         assert!(
-            matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("invalid retry backoff 'oops'"))
+            names_invalid_setting(&err, &ingestor, DeliverySetting::RetryBackoff),
+            "{err:?}"
         );
     }
 }
