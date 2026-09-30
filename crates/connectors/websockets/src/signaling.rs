@@ -3,7 +3,9 @@ use std::{future::Future, time::Duration};
 use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
 use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
-use nervix_models::{SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat};
+use nervix_models::{
+    SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat, parse_duration_text,
+};
 use nervix_primitives::time;
 use prost::Message as ProstMessage;
 use prost_reflect::{
@@ -356,9 +358,9 @@ impl CompiledSignalingProtocol {
             .map(|(index, matcher)| compile("FAIL JAQ", index + 1, matcher))
             .collect::<error_stack::Result<Vec<_>, _>>()?;
 
-        let timeout = humantime::parse_duration(&on_connect.timeout).map_err(|error| {
+        let timeout = parse_duration_text(&on_connect.timeout).map_err(|error| {
             let reason = error.to_string();
-            Report::new(error).change_context(SignalingProtocolCompileError::InvalidTimeout {
+            error.change_context(SignalingProtocolCompileError::InvalidTimeout {
                 protocol: name.to_string(),
                 timeout: on_connect.timeout.clone(),
                 reason,
@@ -724,9 +726,9 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        CreateSignalingProtocol, ModelName, ResourceName, SignalingProtobufConfig,
-        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat,
+        CreateSignalingProtocol, DurationTextError, ModelName, ResourceName,
+        SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat,
     };
     use nervix_primitives::sync::blocking::Mutex;
     use serde_json::json;
@@ -912,17 +914,34 @@ mod tests {
 
     #[test]
     fn invalid_timeout_keeps_the_parser_cause() {
-        let mut configured = protocol(
-            SignalingWireFormat::Json,
-            on_connect(&["{id: 1}"], &[".id == 1"], &[]),
-        );
-        configured.on_connect.timeout = "not-a-duration".to_string();
-        let error = compile_fixture!(&configured, None).expect_err("the timeout must parse");
-        assert!(matches!(
-            error.current_context(),
-            SignalingProtocolCompileError::InvalidTimeout { .. }
-        ));
-        assert!(error.frames().count() > 1);
+        for (timeout, reason) in [
+            ("not-a-duration", "expected number at 0"),
+            (
+                "18446744073709551615s 1000000000ns",
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let mut configured = protocol(
+                SignalingWireFormat::Json,
+                on_connect(&["{id: 1}"], &[".id == 1"], &[]),
+            );
+            configured.on_connect.timeout = timeout.to_string();
+            let error = compile_fixture!(&configured, None).expect_err("the timeout must parse");
+            assert!(matches!(
+                error.current_context(),
+                SignalingProtocolCompileError::InvalidTimeout {
+                    timeout: invalid,
+                    reason: given,
+                    ..
+                } if invalid == timeout && given == reason
+            ));
+            assert_eq!(
+                error
+                    .downcast_ref::<DurationTextError>()
+                    .map(ToString::to_string),
+                Some(reason.to_string())
+            );
+        }
     }
 
     #[test]

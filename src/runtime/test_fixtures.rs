@@ -47,6 +47,10 @@ use crate::{
     },
 };
 
+/// Duration text `humantime` panicked on instead of refusing: spans that add up to the last second
+/// a duration holds, and fractions of exactly one more second.
+pub(super) const TOO_LONG_DURATION_TEXT: &str = "18446744073709551615s 1000000000ns";
+
 pub(super) fn named<N>(raw: &str) -> N
 where
     N: for<'a> TryFrom<&'a str>,

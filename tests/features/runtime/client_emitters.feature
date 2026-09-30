@@ -110,7 +110,61 @@ Feature: Client emitters
       | 1            | client "app"                |
       | 3            | WebSocket session "browser" |
 
-  @client_emitter
+  @client_emitter @client_io_03_emitter @client_io_03_consumer_restore
+  Scenario Outline: A producer and consumer resume their unchanged endpoint after a session restart
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
+      CREATE SCHEMA incoming (id STRING, amount I64);
+      CREATE SCHEMA outgoing (id STRING, cents I64);
+      CREATE RELAY orders SCHEMA incoming UNBRANCHED;
+      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND TIMESTAMP NOW
+        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE EMITTER app_output FROM orders
+        TO CLIENT SCHEMA outgoing
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        INHERIT id SET cents = input.amount * 100
+        BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    And client "app" is connected to the leader node
+    When client "app" opens consumer "output" on emitter "app_output" expecting fields "id STRING, cents I64"
+    And client "app" opens producer "input" on ingestor "orders_in" expecting fields "id STRING, amount I64" with 1 batch and "32MiB" of credit
+    Then client "app" cannot open a producer on ingestor "orders_in" expecting fields "id STRING, amount I64" because "session capacity exhausted"
+    When client "app" executes these NSPL commands
+      """
+      ATTACH DOMAIN CLOCK;
+      """
+    And producer "input" submits batch "before restart" with rows
+      | id  | amount |
+      | o-1 | 1      |
+    And consumer "output" reads output batch "first"
+    And output batch "first" is acknowledged
+    Then batch "before restart" completes
+    When the cluster is restarted
+    And producer "input" submits batch "after restart" with rows
+      | id  | amount |
+      | o-2 | 2      |
+    Then consumer "output" reports an attachment interruption
+    When consumer "output" reads output batch "second"
+    Then output batch "second" contains id "o-2" and cents 200
+    And within "10s" client "app" reports an interruption of its attached domain clock
+    And within "10s" client "app" receives a tick for its attached domain clock
+    When output batch "second" is acknowledged
+    Then batch "after restart" completes
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_emitter @client_io_03_emitter @client_io_03_generation
   Scenario Outline: Stopping and restarting a domain closes the consumer and creates a new endpoint
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -145,7 +199,8 @@ Feature: Client emitters
       """
       START;
       """
-    And <session> opens consumer "after start" on emitter "app_output" expecting fields "id STRING, cents I64"
+    Then consumer "before stop" requires an explicit new open
+    When <session> opens consumer "after start" on emitter "app_output" expecting fields "id STRING, cents I64"
     And <session> opens producer "input" on ingestor "orders_in" expecting fields "id STRING, amount I64"
     And producer "input" submits batch "after start input" with rows
       | id  | amount |
@@ -223,8 +278,8 @@ Feature: Client emitters
       | 1            |
       | 3            |
 
-  @client_emitter
-  Scenario: A consumer is forwarded to the emitter owner and ends when that emitter relocates
+  @client_emitter @client_io_03_emitter @client_io_03_emitter_relocation
+  Scenario: A consumer follows emitter relocation through a fresh attachment
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -287,7 +342,14 @@ Feature: Client emitters
       """
       RELOCATE EMITTER app_output ONTO NODE {{entry}} IGNORE PREFERENCES;
       """
-    Then consumer "remote" eventually ends
+    Then consumer "remote" reports an attachment interruption
+    When producer "input" submits batch "after relocation" with rows
+      | id  | amount |
+      | o-4 | 10     |
+    And consumer "remote" reads output batch "relocated output"
+    Then output batch "relocated output" contains id "o-4" and cents 1000
+    When output batch "relocated output" is acknowledged
+    Then batch "after relocation" completes
 
   @client_emitter
   Scenario: Client output requires explicit leakage of sensitive input

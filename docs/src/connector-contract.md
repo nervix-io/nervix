@@ -768,7 +768,9 @@ ACK state, leaving external redelivery to each source's contract.
 Connector-owned fallible helpers return contextual reports. Syslog configuration and frame
 decoding create a report at the failed parse, read, or framing check; the source adds its
 connection or lifecycle context before the host receives it. WebSocket signaling keeps its jaq,
-frame encoding, and transport causes beneath the compiled protocol or session failure. The server
+frame encoding, and transport causes beneath the compiled protocol or session failure, and reads its
+connect timeout through the vocabulary's guarded duration parser, keeping its `DurationTextError`
+beneath the invalid-timeout failure. The server
 retains the Syslog plan and signaling compiler reports in its runtime startup errors. A connector
 may turn a report into the existing source or sink outcome only at that boundary, while preserving
 the typed cause and rendering only non-sensitive configuration or transport details.

@@ -66,6 +66,15 @@ attempt becomes live. Confirmed ACK, retry and rejection results have bounded re
 idempotence and expire independently of the delivery identity. An absent consumer is not encoded
 as an empty consumer id, and an unbranched batch has no synthetic branch fingerprint.
 
+The Rust client's desired producer and consumer handles have distinct active, interrupted,
+restoring, reopen-required and closed states. An attachment belongs to one session exchange; a
+replacement receives a fresh request-derived identity. The producer's unresolved sent batch has
+an unknown outcome, rather than a missing outcome defaulted to not admitted. A consumer reports
+the interruption before delivery from a replacement attachment. Its prior delivery reference is
+expired, while a settlement sent before losing its answer is separately uncertain. The domain
+`START` generation and endpoint contract fingerprint are required values on every successful
+consumer open, so absence cannot be mistaken for a matching contract.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that
@@ -253,9 +262,12 @@ past its step limit, a minimum above its maximum, or a size that is not a whole 
 such data fails to decode with a typed error and is never normalized into a valid value. A timestamp
 is its signed Unix nanoseconds, and every conversion into one goes through them, so two spellings of
 one instant, such as an offset and its UTC equivalent, or a leap second and the second after it, are
-one timestamp. NSPL duration literals and domain-clock periods and skews are read by a guarded
-parser in the vocabulary, which refuses text whose spans could add up to the most seconds a duration
-holds with a typed error; the grammar library it wraps would panic on such text instead of failing.
+one timestamp. Every duration Nervix reads from text, whether an NSPL literal, a domain-clock period
+or skew, a Model's timeout, interval, retention or TTL, a window aggregate's delay, or a node's
+command-line option, is read by one guarded parser in the vocabulary. It refuses text whose spans
+could add up to the most seconds a duration holds with a typed error; the grammar library it wraps
+would panic on such text instead of failing, and Clippy rejects every other way of reaching that
+library's parser.
 
 One in-memory domain activation plan resolves each relay's compiled schema, branch retention and
 materialized-state presence; each codec's schema and wire definition; and each endpoint's VHOST and

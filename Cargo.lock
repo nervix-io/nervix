@@ -6504,7 +6504,6 @@ dependencies = [
  "arch-into",
  "clap",
  "error-stack",
- "humantime",
  "meticulous",
  "nervix-approx-into",
  "nervix-client-core",
@@ -6547,6 +6546,17 @@ dependencies = [
  "criterion 0.5.1",
  "imbl",
  "indexmap 2.14.2",
+ "meticulous",
+ "nervix-models",
+ "nervix-primitives",
+ "triomphe",
+]
+
+[[package]]
+name = "nervix-checkpoint-replication"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
  "meticulous",
  "nervix-models",
  "nervix-primitives",
@@ -6633,6 +6643,7 @@ dependencies = [
  "strum 0.26.3",
  "tonic 0.13.1",
  "triomphe",
+ "uuid",
 ]
 
 [[package]]
@@ -7109,7 +7120,6 @@ dependencies = [
  "async-trait",
  "error-stack",
  "futures-util",
- "humantime",
  "meticulous",
  "nervix-connector",
  "nervix-dns",
@@ -7255,7 +7265,6 @@ dependencies = [
  "futures-util",
  "h2",
  "http",
- "humantime",
  "meticulous",
  "nervix-dns",
  "nervix-execution",
@@ -7357,7 +7366,6 @@ dependencies = [
  "chumsky",
  "clap",
  "error-stack",
- "humantime",
  "meticulous",
  "nervix-approx-into",
  "nervix-arbitrary",
@@ -7522,6 +7530,7 @@ dependencies = [
  "nervix-backup",
  "nervix-bounded-write",
  "nervix-branch-instances",
+ "nervix-checkpoint-replication",
  "nervix-client-core",
  "nervix-client-ffi",
  "nervix-client-wire",
@@ -7678,7 +7687,6 @@ dependencies = [
  "error-stack",
  "faster-hex",
  "fastrand",
- "humantime",
  "indexmap 2.14.2",
  "jiff",
  "jiff-tzdb",

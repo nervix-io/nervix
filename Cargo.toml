@@ -102,6 +102,7 @@ nervix-approx-into = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-branch-instances = { workspace = true }
+nervix-checkpoint-replication = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-columnar-json = { workspace = true }
@@ -281,6 +282,11 @@ harness = false
 name = "wasm_checkpoint"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "state_replication"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",
@@ -290,6 +296,7 @@ members = [
   "crates/benchmark",
   "crates/bounded-write",
   "crates/branch-instances",
+  "crates/checkpoint-replication",
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-wire",
@@ -351,6 +358,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 as-conversions = "deny"
+disallowed-methods = "deny"
 disallowed-types = "deny"
 
 [workspace.dependencies]
@@ -504,6 +512,7 @@ nervix-arbitrary = { package = "nervix-arbitrary", path = "crates/arbitrary" }
 nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-branch-instances = { package = "nervix-branch-instances", path = "crates/branch-instances" }
+nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", path = "crates/checkpoint-replication" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }

@@ -43,6 +43,13 @@ impl RuntimeAdmission {
         }
     }
 
+    /// A session may classify an absent or stopped endpoint as final only after this node has
+    /// caught up through a quorum-confirmed log boundary. Before that, its local domain snapshot
+    /// may still describe the state from before a committed START.
+    pub(in crate::application) fn is_admitted(&self) -> bool {
+        self.committed_log_index.get().is_some()
+    }
+
     pub(in crate::application) async fn apply_planned_cluster_state(
         &self,
         runtime: &Runtime,

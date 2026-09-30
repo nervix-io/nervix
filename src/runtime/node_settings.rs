@@ -1,5 +1,5 @@
 use nervix_connector::{ParsedRetryPolicy, SourceAckPolicy};
-use nervix_models::IngestAcknowledgement;
+use nervix_models::{IngestAcknowledgement, parse_duration_text};
 
 use super::{
     ingestors::{DeliverySetting, IngestorStartError, SourceStartError},
@@ -63,11 +63,11 @@ impl Runtime {
         setting: DeliverySetting,
         value: &str,
     ) -> error_stack::Result<Duration, IngestorStartError> {
-        humantime::parse_duration(value).map_err(|source| {
+        parse_duration_text(value).map_err(|report| {
             Report::new(SourceStartError::InvalidDuration {
                 setting,
                 value: value.to_string(),
-                source,
+                source: report.current_context().clone(),
             })
             .change_context(IngestorStartError::Initialize {
                 domain: domain.clone(),
@@ -84,7 +84,7 @@ impl Runtime {
         value: &str,
     ) -> Result<Duration, RuntimeError> {
         let identifier = identifier.into();
-        humantime::parse_duration(value).map_err(|source| RuntimeError::BuildDomainExecution {
+        parse_duration_text(value).map_err(|source| RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(
                 "invalid {field} '{value}' for {kind} '{}': {source}",
@@ -312,6 +312,75 @@ mod tests {
             format!("{err:#}").contains("invalid retry max backoff 'oops'"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn runtime_duration_parsers_say_why_text_names_no_duration() {
+        let domain = domain("default");
+        let ingestor = named("orders_ingestor");
+        for (value, why) in [
+            ("oops", "expected number at 0"),
+            (
+                TOO_LONG_DURATION_TEXT,
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let error = Runtime::parse_ack_timeout(&domain, &ingestor, value)
+                .expect_err("the ack timeout names no duration");
+            assert!(
+                names_invalid_setting(&error, &ingestor, DeliverySetting::AckTimeout),
+                "{error:?}"
+            );
+            assert!(
+                matches!(
+                    error.downcast_ref::<SourceStartError>(),
+                    Some(SourceStartError::InvalidDuration { source, .. })
+                        if source.to_string() == why
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                format!("{error:#}"),
+                format!(
+                    "failed to initialize ingestor 'orders_ingestor' in domain 'default': invalid \
+                     ack timeout '{value}': {why}"
+                )
+            );
+
+            let error = Runtime::parse_duration_setting(
+                &domain,
+                &ingestor,
+                DeliverySetting::BatchTimeout,
+                value,
+            )
+            .expect_err("the batch timeout names no duration");
+            assert!(
+                names_invalid_setting(&error, &ingestor, DeliverySetting::BatchTimeout),
+                "{error:?}"
+            );
+            assert!(
+                format!("{error:#}").ends_with(&format!("invalid batch timeout '{value}': {why}")),
+                "{error:#}"
+            );
+
+            let error = Runtime::parse_runtime_node_duration_setting(
+                &domain,
+                "emitter",
+                named::<ModelName>("orders_emitter"),
+                "flush_each",
+                value,
+            )
+            .expect_err("the flush interval names no duration");
+            let expected =
+                format!("invalid flush_each '{value}' for emitter 'orders_emitter': {why}");
+            assert!(
+                matches!(
+                    &error,
+                    RuntimeError::BuildDomainExecution { reason, .. } if reason == &expected
+                ),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]

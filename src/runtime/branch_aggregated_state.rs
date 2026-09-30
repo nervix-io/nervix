@@ -1,12 +1,6 @@
-use ahash::RandomState;
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::{
-    collections::DashMap,
-    sync::{
-        Notify,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-};
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
@@ -28,8 +22,9 @@ pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
-    pub(super) replica_progress: DashMap<String, u64, RandomState>,
-    pub(super) replication_notify: Notify,
+    /// What each replica reported holding and the offer of the newest snapshot to them while this
+    /// node aggregates the metrics, and the owner's announcements while it replicates them.
+    replication: CheckpointReplication,
 }
 
 impl ReplicatedBranchAggregatedState {
@@ -37,8 +32,6 @@ impl ReplicatedBranchAggregatedState {
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
         physical_node_id: ClusterNodeName,
-        _replica_nodes: Vec<ClusterNodeName>,
-        _required_replica_acks: usize,
         metrics: &RuntimeMetrics,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -65,8 +58,7 @@ impl ReplicatedBranchAggregatedState {
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
+            replication: CheckpointReplication::new(),
         })
     }
 
@@ -76,6 +68,10 @@ impl ReplicatedBranchAggregatedState {
 
     pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
         *self.roles.write() = roles;
+    }
+
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     pub(super) fn mark_metrics_updated(&self) -> u64 {
@@ -118,7 +114,6 @@ impl ReplicatedBranchAggregatedState {
         );
         self.current_lsm.adopt(lsm);
         self.dirty.store(true, Ordering::SeqCst);
-        self.replication_notify.notify_waiters();
         Ok(())
     }
 
@@ -149,13 +144,7 @@ impl ReplicatedBranchAggregatedState {
         self.last_persisted_lsm
             .store(snapshot.lsm, Ordering::SeqCst);
         self.dirty.store(false, Ordering::SeqCst);
-        self.replication_notify.notify_waiters();
         Ok(())
-    }
-
-    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
-        self.replica_progress.insert(node_id.to_string(), lsm);
-        self.replication_notify.notify_waiters();
     }
 }
 

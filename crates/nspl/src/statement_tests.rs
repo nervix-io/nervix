@@ -402,6 +402,58 @@ fn from_relay_context_suggests_where_without_schema_keyword_leakage() {
     assert!(!suggestions.contains(&"AVRO".to_string()));
 }
 
+/// A call or a field scope named like the keyword that begins the next clause leaves completion
+/// after its region as it is: the clauses that may follow are offered exactly as after any other
+/// expression.
+#[test]
+fn calls_and_scopes_named_like_clause_keywords_keep_the_following_clauses_offered() {
+    for (plain, spelled, following) in [
+        (
+            "CREATE JUNCTION peaks FROM sensors FILTER WHERE input.total > 10 ",
+            "CREATE JUNCTION peaks FROM sensors FILTER WHERE max(input.readings) > output.total ",
+            "UNBRANCHED",
+        ),
+        (
+            "CREATE JUNCTION peaks FROM sensors WHERE input.total > 10 ",
+            "CREATE JUNCTION peaks FROM sensors WHERE max(input.readings) > output.total ",
+            "FILTER",
+        ),
+        (
+            "CREATE DEDUPLICATOR distinct_peaks FROM sensors DEDUPLICATE ON input.id ",
+            "CREATE DEDUPLICATOR distinct_peaks FROM sensors DEDUPLICATE ON max(input.readings) ",
+            "MAX",
+        ),
+        (
+            "CREATE REORDERER peaks_in_order FROM sensors BY input.id ",
+            "CREATE REORDERER peaks_in_order FROM sensors BY max(input.readings) ",
+            "MAX",
+        ),
+        (
+            "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE left.id > 0 ",
+            "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE right(left.name, 2) = \
+             right.suffix ",
+            "RIGHT",
+        ),
+        (
+            "ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, input.kind) != '', SET ",
+            "ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, replace(input.kind, 'a', \
+             'b')) != '', SET ",
+            "FILTER",
+        ),
+    ] {
+        let offered = suggest_statement(plain, plain.len());
+        assert!(
+            offered.contains(&following.to_string()),
+            "{plain} must offer {following}, got {offered:?}"
+        );
+        assert_eq!(
+            suggest_statement(spelled, spelled.len()),
+            offered,
+            "completion changed after {spelled}"
+        );
+    }
+}
+
 #[test]
 fn junction_context_suggestions_do_not_leak_schema_keywords() {
     let input = "CREATE JUNCTION merge FROM orders_a, orders_b ";

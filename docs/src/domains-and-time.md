@@ -24,7 +24,9 @@ Paced domains maintain a domain clock.
 `PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
 fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
 is stored. Duration text anywhere in NSPL whose spans could add up to 18446744073709551615 seconds,
-however they are written, is rejected when the statement is parsed.
+however they are written, is rejected: a duration literal when the statement is parsed, and a
+duration string argument, such as the delay of `PERCENTILE_LINEAR_HISTOGRAM`, when the statement is
+validated.
 
 While the domain is running:
 

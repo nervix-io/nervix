@@ -22,7 +22,7 @@ use nervix_client_wire::{
     EmitterOpenRefusal, EmitterSettlement, OpenEmitterDisposition, OpenEmitterRequest,
     ReadEmitterBatchRequest, ReadEmitterDisposition, ReplyBody, SettleEmitterBatchRequest,
 };
-use nervix_models::{ClientConsumerLimits, EmitterName};
+use nervix_models::{ClientConsumerLimits, EmitterName, parse_duration_text};
 
 use super::{
     client_producers::{expected_fields, scenario_domain},
@@ -83,7 +83,7 @@ async fn then_leader_describes_emitter_with(
     emitter: String,
     #[step] step: &Step,
 ) {
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let within = parse_duration_text(&within).expect("the step names a valid duration");
     let expected = expand_placeholders(world, docstring(step));
     let emitter = expand_placeholders(world, &emitter);
     let deadline = Instant::now() + within;
@@ -363,6 +363,29 @@ async fn when_consumer_reads(world: &mut ScenarioWorld, consumer: String, batch:
             .insert(batch, Received { consumer, attempt })
             .is_none()
     );
+}
+
+#[then(expr = "consumer {string} reports an attachment interruption")]
+async fn then_consumer_reports_interruption(world: &mut ScenarioWorld, consumer: String) {
+    let ScenarioConsumer::Native(client) = world
+        .consumers
+        .open
+        .get(&consumer)
+        .unwrap_or_else(|| panic!("consumer '{consumer}' is not open"))
+    else {
+        panic!("session interruption requires a native consumer");
+    };
+    let report = match nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
+        .await
+        .expect("consumer interruption deadline")
+    {
+        Err(report) => report,
+        Ok(_) => panic!("the first read after an attachment gap must report the interruption"),
+    };
+    assert!(matches!(
+        report.current_context(),
+        ClientError::ConsumerInterrupted
+    ));
 }
 
 #[when(expr = "consumer {string} starts waiting for output batch {string}")]
@@ -672,13 +695,24 @@ async fn then_consumer_ends(world: &mut ScenarioWorld, consumer: String) {
         .unwrap_or_else(|| panic!("consumer '{consumer}' is not open"));
     match attached {
         ScenarioConsumer::Native(client) => {
-            assert!(
-                nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
-                    .await
-                    .expect("consumer end deadline")
-                    .expect("consumer end reply")
-                    .is_none()
-            );
+            let interrupted = nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
+                .await
+                .expect("consumer end deadline")
+                .err()
+                .expect("an ended attachment reports interruption");
+            assert!(matches!(
+                interrupted.current_context(),
+                ClientError::ConsumerInterrupted
+            ));
+            let terminal = nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
+                .await
+                .expect("consumer restoration deadline")
+                .err()
+                .expect("the changed or removed endpoint requires a new open");
+            assert!(matches!(
+                terminal.current_context(),
+                ClientError::ConsumerReopenRequired(_)
+            ));
         }
         ScenarioConsumer::WebSocket { session, id } => {
             let raw = world
@@ -701,5 +735,24 @@ async fn then_consumer_ends(world: &mut ScenarioWorld, consumer: String) {
             };
             assert!(matches!(outcome.disposition, ReadEmitterDisposition::Ended));
         }
+    }
+}
+
+#[then(expr = "consumer {string} requires an explicit new open")]
+async fn then_consumer_requires_new_open(world: &mut ScenarioWorld, consumer: String) {
+    let attached = world
+        .consumers
+        .open
+        .get(&consumer)
+        .unwrap_or_else(|| panic!("consumer '{consumer}' is not open"));
+    if let ScenarioConsumer::Native(client) = attached {
+        let report = match client.next_batch().await {
+            Err(report) => report,
+            Ok(_) => panic!("the stopped consumer must not follow the next START"),
+        };
+        assert!(matches!(
+            report.current_context(),
+            ClientError::ConsumerReopenRequired(_)
+        ));
     }
 }

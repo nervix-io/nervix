@@ -226,6 +226,22 @@ failures and do not become command dispositions. OTEL gRPC reports a failed look
 connection through its existing infrastructure export failure; the emitter host keeps the batch
 and its acknowledgement under the declared retry policy. No record rejection is inferred from DNS.
 
+Native endpoint recovery keeps failure states distinct. A lost producer submission resolves to
+`ProducerOutcome::OutcomeUnknown(SessionLost)` when its frame was sent but no outcome arrived; the
+client never calls that batch not admitted or replays it automatically. A consumer read crossing a
+session gap returns `ClientError::ConsumerInterrupted` before any batch from the replacement
+attachment. `ClientError::ConsumerReopenRequired` names a changed, stopped or removed endpoint that
+needs a fresh application open; `ConsumerSessionUnavailable` means the bounded reconnect attempt
+did not establish a session. A delivery from a revoked attachment returns
+`DeliveryReferenceExpired` before settlement, while `SettlementUnknown` means a settlement request
+may have reached the server but its answer was lost. The application must resolve such an ACK with
+its own idempotency policy. None of these errors claims that a downstream effect did or did not
+occur.
+
+Before a restarted serving node has proved linearizable catch-up, both native endpoint opens use
+the ordinary retryable `EndpointUnavailable` refusal. They do not report a missing or stopped
+domain from that node's stale local snapshot as a terminal application error.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with
@@ -729,10 +745,21 @@ Broken internal guarantees take the explicit panic classes `assured` for a const
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
 in the type. A dependency that panics on input a caller can supply is such a failure too: its owner
-refuses that input with a typed error before the dependency reads it, as the vocabulary's duration
-parser does with `DurationTextError::TooLong` for text whose spans would overflow `humantime`'s
-duration arithmetic. A dropped result with no stated recovery class does not establish that it was
-handled.
+refuses that input with a typed error before the dependency reads it, and that guarded read is the
+only way the rest of Nervix reaches the dependency. The vocabulary's duration parser,
+`parse_duration_text`, refuses text whose spans would overflow `humantime`'s duration arithmetic
+with `DurationTextError::TooLong`, and every reader of duration text uses it: NSPL literals, Model
+settings, window aggregate arguments, node command-line options and their environment variables,
+benchmark settings and test harnesses. Clippy rejects a direct call to `humantime::parse_duration`
+and any use of `humantime::Duration`, whose text conversion reads through the same parser.
+`DurationTextError` describes only the reason, `humantime`'s own for malformed text or
+`it is longer than a duration can be`, so each owner keeps its diagnostic around it: the setting,
+the text it could not read, then that reason. An owner with a typed error of its own, such as the
+command line, an ingestor's start, the activation, entrypoint, runtime and emitter plans, and the
+WebSockets signaling compiler, also keeps the `DurationTextError` beneath it. A node given such a
+value on its command line or in an environment variable names the option and the reason and exits
+with status 2 before it starts. A dropped result with no stated recovery class does not establish
+that it was handled.
 
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
