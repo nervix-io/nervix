@@ -216,13 +216,24 @@ test-execution *args:
 # not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
 # is its own build, because Cargo would unify the features of one.
 # The portable surface is also built for the browser target.
-test-primitives:
+test-primitives: test-primitives-ordinary test-primitives-modeled test-primitives-compile
+
+# The conformance checks in ordinary native execution: the portable surface alone, then with the
+# native families. `coverage-native-extras test-primitives` runs these under instrumentation.
+test-primitives-ordinary:
     cargo test --package nervix-primitives --lib
     cargo test --package nervix-primitives --features native --lib
-    cargo test --package nervix-primitives --features native --doc
+
+# The conformance checks under each model checker's backend, each mode its own build.
+test-primitives-modeled:
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
     cargo test --package nervix-primitives --features 'turmoil native' --lib
+
+# The conformance checks that compile rather than run: the documentation tests that a runtime
+# attribute refuses a crate path, and the portable surface's browser build.
+test-primitives-compile:
+    cargo test --package nervix-primitives --features native --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
@@ -912,6 +923,26 @@ coverage-turmoil output:
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
+# Run the extra checks that execute Nervix code natively in ordinary mode, `bench-smoke`,
+# `test-primitives` and `nspl-completion-walk`, exactly as their recipes do but with LLVM source
+# coverage, and fail as they do. Prerequisites build outside the instrumentation, and the parts of a
+# check that compile, target the browser or run a model checker stay uninstrumented. Each producer
+# writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
+# target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
+# Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
+coverage-native-extras *producers: llvm-tools
+    python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
+
+# Exercise the native coverage collector: its producer inventory, source policy, selection and
+# failure handling, then instrumented runs of a fixture crate through the real toolchain.
+test-native-coverage: llvm-tools
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
+
+# Add the LLVM tools that read coverage profiles to the toolchain rust-toolchain.toml pins, which
+# must be the compiler's own: a toolchain installed under another name does not provide them.
+llvm-tools:
+    rustup component add llvm-tools
+
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
@@ -923,7 +954,11 @@ bench *args: build-web-console
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console
+bench-smoke: build-web-console bench-smoke-bodies
+
+# The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
+# `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
+bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
