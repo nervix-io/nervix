@@ -7,7 +7,8 @@ script prints each count next to its baseline and exits non-zero when any count 
 naming the offending counts. A count that has fallen is reported too, with the reminder that
 `--update` rewrites the baseline in the same change.
 
-Counting is textual. Comments and literal contents are blanked before matching, so a pattern
+Synchronization debt is compiler-resolved through the pinned tooling workspace. Disjoint counts
+remain textual. Comments and literal contents are blanked before matching, so a pattern
 written in a doc comment or an NSPL fixture string is never counted, and `#[cfg(test)]` items are
 blanked so unit tests never hold a production count up. Blanking preserves byte offsets, so spans
 found in one view of a file address the same bytes in another.
@@ -68,13 +69,6 @@ DATA_PLANE_PLANNERS = frozenset(
     }
 )
 
-# Lock acquisitions in these files are the contention debt on the data-plane hot path. The method
-# spellings are deliberately counted textually: the selected files make the ownership boundary,
-# while later hot-path work removes the sites and lowers the baseline.
-DATA_PLANE_LOCK_PREFIXES = (*DATA_PLANE, "crates/interconnect/src/")
-DATA_PLANE_LOCK_FILES = frozenset({"src/runtime_ack.rs", "src/metrics.rs"})
-
-
 @dataclass(frozen=True)
 class Site:
     """One counted occurrence, addressed for a developer who has to go remove it."""
@@ -119,6 +113,29 @@ class RustFile:
         start = self.source.rfind("\n", 0, offset) + 1
         end = self.source.find("\n", offset)
         return self.source[start : end if end >= 0 else len(self.source)].strip()
+
+    def macro_origins(self, offset: int) -> list[dict[str, str | None]]:
+        """Source provenance for captured tokens whose compiler hygiene remains at the caller.
+
+        This labels authored macro arguments; it does not recognize acquisitions or infer policy.
+        Comments and literal contents use the same source view as the mandatory boundary scanner.
+        """
+        origins = []
+        calls = re.compile(r"(?<![\w:])(?P<name>[A-Za-z_][\w]*(?:::[A-Za-z_][\w]*)*)\s*!\s*(?P<open>[({\[])")
+        closing = {"(": ")", "{": "}", "[": "]"}
+        for call in calls.finditer(self.code, 0, offset):
+            stack = [closing[call.group("open")]]
+            index = call.end()
+            while index < len(self.code) and stack:
+                token = self.code[index]
+                if token in closing:
+                    stack.append(closing[token])
+                elif token == stack[-1]:
+                    stack.pop()
+                index += 1
+            if not stack and call.end() <= offset < index:
+                origins.append({"macro_name": call.group("name"), "call_site": f"{self.path}:{self.line_of(call.start())}", "definition": None})
+        return origins
 
 
 def blank(text: str, spans: Iterable[tuple[int, int]]) -> str:
@@ -647,10 +664,6 @@ def count_model_matches_in_data_plane(files: Sequence[RustFile]) -> list[Site]:
     return sites
 
 
-_DATA_PLANE_LOCK_ACQUISITION = re.compile(
-    r"\.\s*(?:lock|read|write|entry)\s*\("
-)
-
 _DATA_PLANE_CLUSTER_AWAIT = re.compile(
     r"\.\s*cluster\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*?\)\s*\.\s*await\b",
     re.DOTALL,
@@ -665,19 +678,6 @@ def count_data_plane_cluster_awaits(files: Sequence[RustFile]) -> list[Site]:
         if not file.path.startswith(DATA_PLANE):
             continue
         for match in _DATA_PLANE_CLUSTER_AWAIT.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-def count_data_plane_lock_acquisitions(files: Sequence[RustFile]) -> list[Site]:
-    """Count lock-taking method calls in the files that execute the data plane."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        in_prefix = file.path.startswith(DATA_PLANE_LOCK_PREFIXES)
-        if not in_prefix and file.path not in DATA_PLANE_LOCK_FILES:
-            continue
-        for match in _DATA_PLANE_LOCK_ACQUISITION.finditer(file.product):
             sites.append(file.site(match.start(), file.source_line(match.start())))
     return sites
 
@@ -792,7 +792,7 @@ def product_files(files: Sequence[RustFile]) -> Iterator[RustFile]:
 class Count:
     name: str
     description: str
-    collect: Callable[[Sequence[RustFile]], list[Site]]
+    collect: Callable[[Sequence[RustFile]], list[Site]] | None
 
 
 COUNTS: tuple[Count, ...] = (
@@ -854,8 +854,8 @@ COUNTS: tuple[Count, ...] = (
     ),
     Count(
         "data_plane_lock_acquisitions",
-        "lock acquisitions and `DashMap::entry` calls in data-plane files",
-        count_data_plane_lock_acquisitions,
+        "compiler-resolved recurring synchronization debt under reviewed owner scopes",
+        None,
     ),
     Count(
         "write_once_rwlock_fields",
@@ -892,9 +892,33 @@ def load_files(root: Path) -> list[RustFile]:
     return files
 
 
-def measure(root: Path) -> dict[str, list[Site]]:
+def measure_sources(root: Path) -> dict[str, list[Site]]:
     files = load_files(root)
-    return {count.name: count.collect(files) for count in COUNTS}
+    return {count.name: count.collect(files) for count in COUNTS if count.collect is not None}
+
+
+def typed_sites(root: Path) -> list[Site]:
+    from scripts import typed_ratchet
+
+    target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+    destination = target / "typed-ratchet/gate.json"
+    if typed_ratchet.main(["--root", str(root), "--target-dir", str(target), "--output", str(destination)]):
+        raise SystemExit("error: compiler synchronization analysis did not pass; no debt count was accepted")
+    analysis = json.loads(destination.read_text())
+    sites = []
+    for classified in analysis["findings"]:
+        if classified["scope"]["disposition"]["class"] != "debt":
+            continue
+        acquisition = classified["acquisition"]
+        finding = next(iter(acquisition["configurations"].values()))[0]
+        sites.append(Site(acquisition["site"]["path"], finding["span"]["line"], typed_ratchet.render_finding(classified)))
+    return sites
+
+
+def measure(root: Path) -> dict[str, list[Site]]:
+    sites = measure_sources(root)
+    sites["data_plane_lock_acquisitions"] = typed_sites(root)
+    return sites
 
 
 def read_baseline(path: Path) -> dict[str, int]:
@@ -981,11 +1005,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     counts = {name: len(found) for name, found in sites.items()}
 
-    if arguments.update:
-        write_baseline(baseline_path, counts)
-        print(f"Wrote {baseline_path.name} from the current counts.")
-        return 0
-
     baseline = read_baseline(baseline_path)
     report(counts, baseline)
 
@@ -1010,6 +1029,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f" `just ratchet --show {name}` lists the sites"
             )
         return 1
+
+    if arguments.update:
+        write_baseline(baseline_path, counts)
+        print(f"Wrote {baseline_path.name} from the current counts.")
 
     return 0
 

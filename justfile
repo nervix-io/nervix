@@ -1236,7 +1236,7 @@ taplo-format:
     taplo format
 
 [parallel]
-fmt: cargo-fmt taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
+fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
 
 cargo-fmt-check:
     cargo +nightly fmt --check
@@ -1245,7 +1245,7 @@ taplo-format-check:
     taplo format --check
 
 [parallel]
-fmt-check: cargo-fmt-check taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
+fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
 
 gherkin-fmt:
     ghokin fmt replace tests/features
@@ -1380,7 +1380,7 @@ cargo-clippy-shuttle:
 cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-shuttle cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
-lint-inner: cargo-clippy
+lint-inner: cargo-clippy lint-typed-ratchet
 
 lint: build-web-console lint-inner
 
@@ -1388,10 +1388,72 @@ audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args:
-    python3 scripts/ratchet.py {{ args }}
+ratchet *args: typed-ratchet-setup typed-ratchet-build
+    python3 -m scripts.ratchet {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
+# Focused regression checks for the debt gate and its shared Rust source scanner.
+test-ratchet-units:
+    python3 -m unittest scripts.tests.test_ratchet
+
+# The compiler driver and analyzed crates use this dated nightly; product builds remain stable.
+typed-ratchet-setup:
+    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
+
+typed-ratchet-build:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+
+typed-ratchet *args: typed-ratchet-build
+    python3 -m scripts.typed_ratchet {{ args }}
+
+typed-ratchet-turmoil *args:
+    RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}" python3 -m scripts.typed_ratchet {{ args }}
+
+test-typed-ratchet-compiler:
+    just typed-ratchet --fixture-mode ordinary --recompile --inventory --output target/typed-ratchet/fixture-ordinary.json
+    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
+
+test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-modeled
+
+test-typed-ratchet-ordinary:
+    just test-typed-ratchet-reports
+    just test-typed-ratchet-compiler
+
+test-typed-ratchet-modeled:
+    just typed-ratchet --fixture-mode shuttle --inventory --output target/typed-ratchet/fixture-shuttle.json
+    just typed-ratchet --fixture-mode loom --inventory --output target/typed-ratchet/fixture-loom.json
+    just typed-ratchet --fixture-mode turmoil --inventory --output target/typed-ratchet/fixture-turmoil.json
+    python3 -m unittest scripts.tests.compiler_fixture_checks.ModeledFixtureTests
+
+test-typed-ratchet-ui:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/ui cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --test diagnostics
+
+qualify-typed-ratchet-cache: typed-ratchet-build
+    python3 -m scripts.tests.qualify_typed_ratchet_cache
+
+test-typed-ratchet-reports:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
+
+fmt-typed-ratchet: typed-ratchet-setup
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
+
+fmt-check-typed-ratchet: typed-ratchet-setup
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
+
+lint-typed-ratchet: typed-ratchet-setup
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 clippy --manifest-path tools/nervix-lint/Cargo.toml --workspace --all-targets -- -D warnings
+
+coverage-typed-ratchet-python:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero
+    "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
+    "${coverage[@]}" report
+
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero ratchet
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1488,7 +1550,7 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero ratchet
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
 # direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a

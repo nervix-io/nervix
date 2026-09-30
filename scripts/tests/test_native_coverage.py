@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.PRODUCERS],
-            ["bench-smoke", "test-primitives", "nspl-completion-walk"],
+            ["test-typed-ratchet", "bench-smoke", "test-primitives", "nspl-completion-walk"],
         )
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.mode, "ordinary")
@@ -171,7 +171,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(native_coverage.select_producers([], producers), list(producers))
         self.assertEqual(
             native_coverage.select_producers(["nspl-completion-walk", "bench-smoke"], producers),
-            [producers[2], producers[0]],
+            [next(producer for producer in producers if producer.name == "nspl-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
         )
         with self.assertRaisesRegex(RunnerError, "no producer `bench`; the producers are"):
             native_coverage.select_producers(["bench"], producers)
@@ -459,6 +459,14 @@ class BuildIdTests(unittest.TestCase):
             located = native_coverage.locate(build, {BUILD_ID.hex(), bytes(32).hex()})
         self.assertEqual(located, {BUILD_ID.hex(): build / "debug" / "deps" / "child-123"})
         self.assertEqual(native_coverage.locate(Path(directory) / "missing", {"x"}), {})
+
+    def test_compiler_loaded_macros_in_nested_cargo_build_outputs_are_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            output = build / "typed-ratchet/driver/debug/build/macro/hash/out/libmacro.so"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(elf([(note(GNU, 3, BUILD_ID, 4, 0), 4)]))
+            self.assertEqual(native_coverage.locate(build, {BUILD_ID.hex()}), {BUILD_ID.hex(): output})
 
 
 def execution(path: Path, identifier: str, *arguments: str) -> Execution:
@@ -939,14 +947,17 @@ class CollectTests(unittest.TestCase):
         )
 
     def collect(
-        self, commands: FakeCommands, exported: Exported | BaseException | None = None
+        self,
+        commands: FakeCommands,
+        exported: Exported | BaseException | None = None,
+        producer: Producer = PRODUCER,
     ) -> native_coverage.Collected:
         with mock.patch.object(
             native_coverage,
             "export",
             side_effect=[exported if exported is not None else self.exported()],
         ):
-            return native_coverage.collect(commands, self.context, PRODUCER)
+            return native_coverage.collect(commands, self.context, producer)
 
     def record(self, collected: native_coverage.Collected) -> dict[str, object]:
         return json.loads(collected.record.path.read_text())
@@ -1024,6 +1035,77 @@ class CollectTests(unittest.TestCase):
                 self.assertEqual(record["failure"], {"stage": stage, "detail": detail})
                 self.assertIn("finished_at", record)
         self.assertIn("sources", record)
+
+    def test_preparation_installs_the_selected_compiler_and_llvm_tools_before_resolution(self) -> None:
+        producer = Producer(
+            "check", "ordinary", ("prepare",), "instrumented", ("finish",), "nightly-2026-09-17"
+        )
+        sysroot = self.root / "installed-toolchain"
+        tools = sysroot / "lib" / "rustlib" / HOST / "bin"
+
+        def install() -> int:
+            record = json.loads(next(self.root.rglob("completion.json")).read_text())
+            self.assertEqual(record["verdict"], "running")
+            self.assertEqual(record["toolchain"], {"requested": producer.toolchain})
+            tools.mkdir(parents=True)
+            for name in ("llvm-profdata", "llvm-cov"):
+                (tools / name).write_text("")
+            return 0
+
+        commands = FakeCommands(self.root, {"prepare": install})
+        capture = commands.capture
+        versions = VersionCommands(sysroot, "LLVM version 22.1.8")
+
+        def installed_capture(arguments, *, environment=None):
+            if arguments[0] == "rustc" or str(arguments[0]).startswith(str(tools)):
+                self.assertTrue(tools.is_dir(), "the selected compiler is installed by preparation")
+                if arguments[0] == "rustc":
+                    self.assertEqual(environment["RUSTUP_TOOLCHAIN"], producer.toolchain)
+                return versions.capture(arguments, environment=environment)
+            return capture(arguments, environment=environment)
+
+        with mock.patch.object(commands, "capture", side_effect=installed_capture):
+            collected = self.collect(commands, producer=producer)
+        self.assertEqual(collected.status, 0, self.record(collected).get("failure"))
+        self.assertEqual(self.record(collected)["toolchain"], toolchain(tools).describe())
+        self.assertEqual(collected.attempt.parent.name, "rust-nightly-2026-09-17")
+        prepare, instrumented, finish = (streamed.environment for streamed in commands.streamed)
+        self.assertEqual(prepare, {"RUSTC_WRAPPER": "kache"})
+        self.assertEqual(instrumented["RUSTUP_TOOLCHAIN"], producer.toolchain)
+        self.assertEqual(finish, {"RUSTC_WRAPPER": "kache", "RUSTUP_TOOLCHAIN": producer.toolchain})
+
+    def test_failed_or_interrupted_toolchain_preparation_keeps_its_completion_record(self) -> None:
+        producer = Producer(
+            "check", "ordinary", ("prepare",), "instrumented", (), "nightly-2026-09-17"
+        )
+        cases = ((2, 2, "failed"), (Interrupted(signal.SIGTERM), 143, "interrupted"))
+        for outcome, status, verdict in cases:
+            with self.subTest(verdict=verdict):
+                self.setUp()
+                with mock.patch.object(native_coverage, "load_toolchain") as load:
+                    collected = self.collect(
+                        FakeCommands(self.root, {"prepare": outcome}), producer=producer
+                    )
+                load.assert_not_called()
+                record = self.record(collected)
+                self.assertEqual(collected.status, status)
+                self.assertEqual(record["verdict"], verdict)
+                self.assertEqual(record["failure"]["stage"], "prepare")
+                self.assertEqual(record["toolchain"], {"requested": producer.toolchain})
+
+    def test_unavailable_selected_compiler_fails_preparation_without_instrumentation(self) -> None:
+        producer = Producer(
+            "check", "ordinary", (), "instrumented", (), "nightly-2026-09-17"
+        )
+        commands = FakeCommands(self.root)
+        with mock.patch.object(
+            native_coverage, "load_toolchain", side_effect=RunnerError("compiler unavailable")
+        ):
+            collected = self.collect(commands, producer=producer)
+        record = self.record(collected)
+        self.assertEqual(collected.status, 1)
+        self.assertEqual(record["failure"], {"stage": "prepare", "detail": "compiler unavailable"})
+        self.assertEqual(commands.streamed, [])
 
     def test_a_failed_export_fails_the_collection(self) -> None:
         collected = self.collect(

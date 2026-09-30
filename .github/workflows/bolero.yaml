@@ -111,8 +111,8 @@ jobs:
       (contains(github.event.pull_request.labels.*.name, 'fuzz') &&
         (github.event.action != 'labeled' || github.event.label.name == 'fuzz'))
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Cold sanitizer builds precede the full per-target campaign and qualification.
-    timeout-minutes: 90
+    # Include cold ordinary and sanitizer builds before all bounded target campaigns.
+    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write
