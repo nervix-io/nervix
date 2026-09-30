@@ -16,6 +16,7 @@ use nervix_models::{
     BranchName, BranchSelection, CorrelationTimeoutAction, CreateBranch, CreateSchema, DomainName,
     FieldName, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
     ProcessorOutputs, RelayBranching, RelayName, ResolvedBranching, SchemaName,
+    parse_duration_text,
 };
 use nervix_vm::{
     CompileOptions, OutputMode, compile_program_with_options_for_bindings_with_sensitivity,
@@ -55,7 +56,7 @@ fn parse_branch_ttl(
     identifier: &ModelName,
     ttl: &str,
 ) -> Result<Duration, Report<RegistryError>> {
-    humantime::parse_duration(ttl).map_err(|error| {
+    parse_duration_text(ttl).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -1115,7 +1116,7 @@ mod tests {
     use crate::registry::{
         storage::Registry,
         test_fixtures::{
-            branch, branch_for_relay, branch_name_for_relay, branch_schema,
+            TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_name_for_relay, branch_schema,
             branch_schema_with_types, branched_by, client_model, codec, deduplicator,
             ingestor_with_params, junction, named, processor, reingestor, relay, relay_branched_by,
             relay_branched_by_relay_branch, relay_branched_like, scheduled_node, schema,
@@ -1123,6 +1124,30 @@ mod tests {
             with_processor_branching,
         },
     };
+
+    #[test]
+    fn branch_ttl_says_why_its_text_names_no_duration() {
+        let domain = named::<DomainName>("default");
+        let identifier = named::<ModelName>("by_tenant");
+        for (ttl, why) in [
+            ("oops", "expected number at 0"),
+            (
+                TOO_LONG_DURATION_TEXT,
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let error = parse_branch_ttl(&domain, &identifier, ttl)
+                .expect_err("the branch TTL names no duration");
+            let expected = format!("invalid branch ttl '{ttl}': {why}");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    RegistryError::InvalidModel { reason, .. } if reason == &expected
+                ),
+                "{error:?}"
+            );
+        }
+    }
 
     #[test]
     fn branch_schema_rejects_nested_bytes_with_field_identity() {

@@ -125,7 +125,7 @@ impl ServerProcessLaunch {
     }
 }
 
-/// A command-line option a scenario sets on the server process in addition to the fixture's own.
+/// A setting a scenario gives the server process in addition to the fixture's own.
 #[derive(Clone, Debug)]
 pub(crate) enum ServerProcessOption {
     /// The files and authority the node's resolver loads.
@@ -142,6 +142,12 @@ pub(crate) enum ServerProcessOption {
     TransactionIdleTimeout(Duration),
     /// `--transaction-tombstone-retention`.
     TransactionTombstoneRetention(Duration),
+    /// A command-line option with its value written exactly as the scenario gives it, whether or
+    /// not the server can read it.
+    Written { option: String, value: String },
+    /// An environment variable set exactly as the scenario gives it, whether or not the server
+    /// can read it.
+    Environment { variable: String, value: String },
 }
 
 impl ServerProcessOption {
@@ -191,6 +197,12 @@ impl ServerProcessOption {
                 command
                     .arg("--transaction-tombstone-retention")
                     .arg(humantime::format_duration(*retention).to_string());
+            }
+            Self::Written { option, value } => {
+                command.arg(option).arg(value);
+            }
+            Self::Environment { variable, value } => {
+                command.env(variable, value);
             }
         }
     }
@@ -316,9 +328,6 @@ impl ServerProcessConfiguration {
         } else {
             command.arg("--allow-bootstrap");
         }
-        for option in &self.options {
-            option.apply_to(&mut command, &self.node_id);
-        }
         // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the
         // server, and `RUST_LOG` would replace the log filter the server ships with.
         for (name, _) in std::env::vars_os() {
@@ -327,6 +336,10 @@ impl ServerProcessConfiguration {
             }
         }
         command.env_remove("RUST_LOG");
+        // Options go last, so a variable a scenario sets survives the removal above.
+        for option in &self.options {
+            option.apply_to(&mut command, &self.node_id);
+        }
         command.spawn()
     }
 }

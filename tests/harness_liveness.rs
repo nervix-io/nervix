@@ -2995,7 +2995,7 @@ mod tests {
         // environment is bounded by that value, and only a run that does not receives the policy
         // default. This process may be either kind of run.
         let expected_default = match std::env::var(SUITE_BUDGET_ENV) {
-            Ok(given) => humantime::parse_duration(&given)
+            Ok(given) => nervix_models::parse_duration_text(&given)
                 .assured("the option parsed the same environment value as a duration above"),
             Err(_) => SUITE_BUDGET,
         };

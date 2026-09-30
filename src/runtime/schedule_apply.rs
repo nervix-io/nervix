@@ -1858,19 +1858,9 @@ impl Runtime {
         let aggregate_primary_node = execution_node
             .clone()
             .or_else(|| executes_locally.then(|| local_node_id.clone()));
-        let aggregate_replica_nodes = if execution_node.is_some() && node.kind() != ModelKind::Relay
-        {
-            node.replica_nodes()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
         if node.kind() != ModelKind::Relay
             && (executes_locally || (assigned_locally && aggregate_primary_node.is_some()))
         {
-            let required_replica_acks = aggregate_replica_nodes.len();
             let state = self
                 .replicated_branch_aggregated_state(
                     RuntimeStatePlacement {
@@ -1882,8 +1872,6 @@ impl Runtime {
                     },
                     aggregate_primary_node.clone(),
                     aggregate_primary_node.unwrap_or_else(|| local_node_id.clone()),
-                    aggregate_replica_nodes,
-                    required_replica_acks,
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),

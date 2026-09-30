@@ -14,7 +14,7 @@ use nervix_models::{
 };
 
 use crate::{
-    Arbitrary, Domain, RegionEnds,
+    Arbitrary, Domain,
     route::{RouteBranch, RouteFlush, RouteShape},
 };
 
@@ -41,7 +41,7 @@ impl Arbitrary<'_> {
             ),
             branched_by: self.branch_selection(),
             mode: self.ack_mode(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
             materialized_state: self.materialized_state(),
         }
     }
@@ -60,7 +60,7 @@ impl Arbitrary<'_> {
             deduplicate_on: self.key_expressions(),
             max_time: self.duration(),
             mode: self.ack_mode(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
             materialized_state: self.materialized_state(),
         }
     }
@@ -77,7 +77,7 @@ impl Arbitrary<'_> {
             ),
             mode: self.ack_mode(),
             materialized_state: self.materialized_state(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
         }
     }
 
@@ -85,9 +85,7 @@ impl Arbitrary<'_> {
     pub fn create_correlator(&mut self) -> CreateCorrelator {
         CreateCorrelator {
             name: self.name(),
-            left: self.within_region(RegionEnds::LEFT_INPUTS, |arbitrary| {
-                arbitrary.processor_inputs(true)
-            }),
+            left: self.processor_inputs(true),
             right: self.processor_inputs(true),
             output_routes: self.processor_outputs(
                 RouteShape::SetOnly,
@@ -116,7 +114,7 @@ impl Arbitrary<'_> {
     fn correlator_filter(&mut self) -> Option<Expression> {
         match self.domain {
             Domain::Nspl => None,
-            Domain::Vocabulary => self.filter_expression(),
+            Domain::Vocabulary => self.optional_expression(),
         }
     }
 
@@ -142,7 +140,7 @@ impl Arbitrary<'_> {
             order_by: self.key_expressions(),
             max_time: self.duration(),
             mode: self.ack_mode(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
             materialized_state: self.materialized_state(),
         }
     }
@@ -178,7 +176,7 @@ impl Arbitrary<'_> {
                 WindowStateLimit::Unbounded
             },
             mode: self.ack_mode(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
             materialized_state: self.materialized_state(),
         }
     }
@@ -259,7 +257,7 @@ impl Arbitrary<'_> {
             inputs,
             output_schema,
             mode: self.ack_mode(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
             materialized_state: self.materialized_state(),
         }
     }
@@ -316,7 +314,7 @@ impl Arbitrary<'_> {
                 WasmRejectedStatePolicy::Reset,
             ]),
             mode: self.ack_mode(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
             materialized_state: self.materialized_state(),
         }
     }

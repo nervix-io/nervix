@@ -628,12 +628,16 @@ none ends the draw in about a second.
 
 ## Server Processes
 
-Scenarios about signals, exit statuses, process startup, and open-file limits run `nervix-server` as
-a real child process, because an in-process node cannot show whether the process boundary delivers a
-signal to its shutdown coordinator. The fixture gives each process its own ports, database
-directory, and interconnect credentials, forms a single-node cluster, and captures its standard
-output and error in one log. It removes every `NERVIX_*` variable and `RUST_LOG` from the child's
-environment, so the runner's configuration cannot silently reconfigure the server. A claim about a
+Scenarios about signals, exit statuses, process startup, command-line values, and open-file limits
+run `nervix-server` as a real child process, because an in-process node cannot show whether the
+process boundary delivers a signal to its shutdown coordinator. The fixture gives each process its
+own ports, database directory, and interconnect credentials, forms a single-node cluster, and
+captures its standard output and error in one log. It removes every `NERVIX_*` variable and
+`RUST_LOG` from the child's environment, so the runner's configuration cannot silently reconfigure
+the server. The options and environment variables a scenario gives the process are applied after
+that removal, written exactly as the scenario states them, so a scenario can hand the node a value
+it must refuse; such a scenario starts the process without waiting for readiness and asserts how it
+exits. A claim about a
 node process dying while its peers keep running, such as what a client producer is told when the
 node that executes its ingestor or serves its session is killed or frozen, runs the three-process
 cluster and faults one member, because only a real process death closes, or stops answering on,
@@ -868,7 +872,8 @@ minutes of the limit and keeps the same 5-minute reserve.
 ## The Suite Watchdog
 
 The scenario run has one budget, 41 minutes from the moment it starts, which `--suite-budget` or
-`NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`. The budget is a clock rather than
+`NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`, read by the same guarded duration
+parser as a node's options. The budget is a clock rather than
 a count of failures. Cucumber's fail-fast stops scheduling scenarios and leaves those already
 running where they are, so it cannot end a run whose step, diagnostic, or node stop never returns;
 the clock ends such a run at the same instant as one whose work returned at once. Until the budget
