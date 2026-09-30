@@ -761,6 +761,10 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 				if err := union(outcome.Disposition, opened); err != nil {
 					return nil, err
 				}
+				contract := opened.Contract(nil)
+				if contract == nil || contract.BytesLength() != 32 {
+					return nil, errors.New("an opened consumer's contract is not a 32-byte fingerprint")
+				}
 				window := "sequential"
 				if opened.WindowType() == session.ConsumerWindowParallelConsumerWindow {
 					parallel := new(session.ParallelConsumerWindow)
@@ -769,8 +773,8 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 					}
 					window = fmt.Sprintf("parallel:%d", parallel.Max())
 				}
-				lines := []string{fmt.Sprintf("REPLY %d EMITTER_OPENED domain=%s emitter=%s window=%s ack_timeout=%d retry=%d/%d granted=%d/%d max_batch=%d/%d message=%s",
-					id, opened.Domain(), opened.Emitter(), window, opened.AckTimeoutNanos(), opened.RetryBackoffNanos(),
+				lines := []string{fmt.Sprintf("REPLY %d EMITTER_OPENED domain=%s emitter=%s generation=%d contract=%s window=%s ack_timeout=%d retry=%d/%d granted=%d/%d max_batch=%d/%d message=%s",
+					id, opened.Domain(), opened.Emitter(), opened.Generation(), hex.EncodeToString(contract.BytesBytes()), window, opened.AckTimeoutNanos(), opened.RetryBackoffNanos(),
 					opened.RetryMaxBackoffNanos(), opened.GrantedBatches(), opened.GrantedBytes(), opened.MaxBatchBytes(),
 					opened.MaxBatchRows(), text(outcome.Message()))}
 				for index := 0; index < opened.FieldsLength(); index++ {

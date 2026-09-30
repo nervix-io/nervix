@@ -1299,10 +1299,22 @@ it, as [When The Session Ends](#when-the-session-ends) describes.
 When the session ends, including because the node that serves it crashed, its producers detach:
 the executing node stops accepting their batches, drops the ones it held queued or awaiting their
 clearance without admitting them, answers nobody, and lets admitted batches finish in the graph.
-Nothing about a producer survives the session. The Rust client reports every batch that was sent
-without an outcome as of unknown outcome with `SessionLost` and ends the producer as `SessionLost`;
-it does not reopen producers on its next session, so the application opens another one. The shared
-binding and the web console do not open producers.
+No server attachment survives the session. The Rust client retains the application's desired
+producer and its submission ledger. It reports every batch sent without an outcome as
+`OutcomeUnknown(SessionLost)` and never resends it. On a new exchange it sends a fresh
+`OpenIngestorRequest`, compares the returned `START` generation, endpoint contract, schema, policy
+and grant with the first open, then publishes the new attachment to the same producer handle. A
+different generation or contract, a removed or stopped endpoint, or an incompatible schema makes
+the handle require an explicit new open. Temporary owner and capacity refusals are retried with
+bounded physical backoff while the new exchange lives. Closing or dropping the handle fences a
+late open and releases any attachment it created. The shared binding and the web console do not
+open producers.
+
+A serving node whose runtime has not yet passed its process-start linearizable catch-up barrier
+refuses producer and consumer opens as `EndpointUnavailable`. Its local domain snapshot may still
+show the state before a committed `START`, so it does not classify a missing or stopped endpoint as
+terminal until that barrier passes. The client retries this temporary refusal with its bounded
+restoration backoff.
 
 ## Emitter Consumers
 
@@ -1312,14 +1324,21 @@ reserves the requested bytes against the session's 32 MiB and node's separate 12
 budgets, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
 refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 consumer handles
 belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
-FlatBuffers shape are identical over native gRPC and the console WebSocket.
+FlatBuffers shape are identical over native gRPC and the console WebSocket. An opened reply also
+carries the domain `START` generation and the emitter endpoint contract fingerprint. The fingerprint
+is BLAKE3 of canonical emitter NSPL with flush cadence normalized to immediate, a `0xff` separator,
+and the ordered output fields serialized as JSON. A flush-only change therefore keeps the live
+endpoint contract while changes to construction, publishing or ACK behavior do not.
 
 `ReadEmitterBatchRequest` is a concurrent, potentially long read. It occupies one of the 64
 ordinary in-flight request places but does not hold the ordered lane or receive loop. Its reply
 is a `ReadEmitterBatchOutcome`: `Batch` carries one canonical Arrow IPC stream, a stable delivery
 identity, a fresh attempt reference, source relay, opaque branch fingerprint, member count and
-execution-time snapshot; `Ended` says the attachment is gone. A large reply uses the normal
-bounded transfer parts. Reading the reply never acknowledges it.
+execution-time snapshot; `Ended` says the attachment is gone. It does not distinguish relocation
+from removal or a changed contract. A client retaining the desired consumer reports the
+interruption, then checks a fresh open on the current exchange against its pinned generation and
+contract. A large reply uses the normal bounded transfer parts. Reading the reply never
+acknowledges it.
 
 `SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or
 `Reject` with a bounded non-sensitive reason. It runs beside the ordered lane and answers with
@@ -1330,11 +1349,17 @@ backoff controls retry. `CloseEmitterRequest` detaches and answers `Closed` or `
 
 Consumer and producer operations can share one session. A read awaiting output runs beside
 commands, producer submissions and their outcomes, clock observations, and consumer settlement.
-Each consumer is bound to its session exchange; the Rust client does not restore it after a
-reconnect. The serving node forwards remote consumers on an authenticated relay-class duplex
-stream and reserves their granted bytes on both the serving and executing nodes. Loss of the
-stream or either endpoint revokes outstanding attempts. There is no durable cursor or consumer
-result history across an owner loss; upstream replay may be needed. [Emitters](./emitters.md#client-emitters)
+Each server attachment is bound to its session exchange. The Rust client keeps a desired consumer
+across reconnects and emitter relocation, reports an interruption before the next delivery, and
+opens a new attachment only while the generation, contract, schema and granted behavior still
+match its original open. Removed or changed endpoints require an explicit new consumer. A delivery
+reference remains bound to the exchange that delivered it; the client never sends its ACK on the
+replacement exchange, and
+a settlement whose answer was lost is uncertain. The serving node forwards remote consumers on an
+authenticated relay-class duplex stream and reserves their granted bytes on both the serving and
+executing nodes. Loss of the stream or either endpoint revokes outstanding attempts. There is no
+durable cursor or consumer result history across an owner loss; upstream replay may be needed.
+[Emitters](./emitters.md#client-emitters)
 owns the source acknowledgement guarantee and [Cluster
 Interconnect](./interconnect.md#client-consumer-streams) owns the forwarding form.
 
@@ -1560,8 +1585,8 @@ Nothing a session held survives.
 | Selected domain and its observations | The session | Gone; the client selects the domain again |
 | Subscriptions, generations, interest leases, queued rows | The session and its node | Gone; rows in transit are lost, and a restored subscription is a new generation |
 | Domain clock attachments | The session | Gone; the client attaches again and receives the clock as it is then |
-| Producers, their credit, and the replies they owe | The session and the executing node | Gone; unresolved batches are of unknown outcome, admitted ones finish in the graph, and the client opens a new producer |
-| Waiters, transfer reassembly, previews, desired subscriptions, followed clocks | The client | Kept by the Rust client across reconnects; lost if the client process ends |
+| Producer and consumer attachments, their credit, and the replies they owe | The session and the executing node | Gone; unresolved producer batches are of unknown outcome, admitted ones finish in the graph, and matching client handles acquire fresh attachments |
+| Waiters, transfer reassembly, previews, desired subscriptions, followed clocks, desired producers and consumers | The client | Kept by the Rust client across reconnects; lost if the client process ends |
 
 A subscription therefore always has a gap across the loss of its session. The server cannot report
 that gap, because the session that would carry the report is the one that was lost. The Rust client
@@ -1743,9 +1768,11 @@ It does not provide:
   a cancelled waiter keeps its admitted effect. Undoing either is a new command.
 - **Durable subscription replay.** Subscriptions keep no offsets and are not persisted. A restored
   subscription starts with the rows that arrive after it opens again.
-- **Guaranteed restoration.** The Rust client opens a subscription again, or attaches a clock
-  again, only when a new session accepts it. A subscription whose relay no longer exists stays
-  interrupted, and is reported at every attempt, until its caller deletes it.
+- **Guaranteed restoration.** The Rust client opens a subscription or endpoint again, or attaches a
+  clock again, only when the serving exchange accepts it. A subscription whose relay no longer
+  exists stays interrupted until its caller deletes it. A producer or consumer whose endpoint
+  contract or domain generation changed requires a fresh application open. There is no durable
+  consumer cursor.
 - **A required Arrow client library.** Rows arrive as typed FlatBuffers cells; a client needs only
   code generated from the schema.
 - **Columnar subscriptions.** `SubscriptionType` has one value, `Row`. A server refuses a type it

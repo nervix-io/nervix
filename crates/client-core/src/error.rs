@@ -1,5 +1,7 @@
 //! Why a client call failed.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The failures a caller of the client can act on, and which request each concerns.
 //! - **Depends on.** The wire contract's rejection, cancellation and codec errors, and tonic's
 //!   transport errors.
@@ -16,6 +18,9 @@ use nervix_models::{
 };
 use thiserror::Error;
 use tonic::metadata::errors::InvalidMetadataValue;
+use uuid::Uuid;
+
+use crate::consumer::ConsumerReopenReason;
 
 /// The requests of the session protocol, as errors about their replies name them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
@@ -221,6 +226,16 @@ pub enum ClientError {
         refusal: EmitterOpenRefusal,
         message: String,
     },
+    #[error("the emitter consumer was interrupted by a session gap")]
+    ConsumerInterrupted,
+    #[error("the emitter consumer needs a new open: {0:?}")]
+    ConsumerReopenRequired(ConsumerReopenReason),
+    #[error("the emitter consumer's session could not be restored before the retry deadline")]
+    ConsumerSessionUnavailable,
+    #[error("the delivery reference {reference} belongs to an expired attachment")]
+    DeliveryReferenceExpired { reference: Uuid },
+    #[error("the settlement outcome for delivery reference {reference} is unknown")]
+    SettlementUnknown { reference: Uuid },
     /// The archive a restore names could not be read on this machine.
     #[error("failed to read the restore archive '{}' ({kind})", .path.display())]
     ReadRestoreArchive {

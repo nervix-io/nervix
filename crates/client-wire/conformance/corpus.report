@@ -150,7 +150,7 @@ REPLY 23 EMITTER_BATCH identity=a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3 reference=b4b4b
 FRAME server_emitter_closed.nxsm
 REPLY 25 EMITTER_CLOSE disposition=Closed message=str:
 FRAME server_emitter_opened.nxsm
-REPLY 22 EMITTER_OPENED domain=tenant emitter=app_output window=parallel:8 ack_timeout=30000000000 retry=100000000/1000000000 granted=8/4194304 max_batch=1048576/16 message=str:636f6e73756d6572206174746163686564
+REPLY 22 EMITTER_OPENED domain=tenant emitter=app_output generation=4 contract=0707070707070707070707070707070707070707070707070707070707070707 window=parallel:8 ack_timeout=30000000000 retry=100000000/1000000000 granted=8/4194304 max_batch=1048576/16 message=str:636f6e73756d6572206174746163686564
 FIELD order_id U64 required public
 FIELD card STRING nullable sensitive
 FRAME server_emitter_settled.nxsm
