@@ -434,9 +434,25 @@ mod tests {
 
     use super::*;
 
+    /// A runtime with the host's resolver installed, as every node's runtime has one.
+    async fn runtime_with_dns() -> Runtime {
+        let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
+            .await
+            .expect("the host's resolver configuration should load");
+        Runtime::with_persistence_and_temp_dir(
+            nervix_execution::Executor::default(),
+            Some(dns),
+            None,
+            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+            ConfiguredFaultInjection::default(),
+            PathBuf::from(DEFAULT_TEMP_DIR),
+        )
+        .expect("a runtime without persistence builds")
+    }
+
     #[nervix_primitives::test]
     async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
-        let runtime = Runtime::default();
+        let runtime = runtime_with_dns().await;
         let domain = domain("default");
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),

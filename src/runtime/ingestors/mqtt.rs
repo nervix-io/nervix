@@ -3,8 +3,9 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the MQTT connector plan, with one rendered client configuration per
-//!   instance, the declared acknowledgement policy, and host-owned intake whose quiesce either
-//!   disconnects the session or buffers and drops what stays subscribed.
+//!   instance, the node resolver its connections resolve the broker through, the declared
+//!   acknowledgement policy, and host-owned intake whose quiesce either disconnects the session or
+//!   buffers and drops what stays subscribed.
 //! - **Depends on.** The connector source contract, the MQTT connector, and pre-resolved runtime
 //!   execution handles.
 //! - **Must not know.** The MQTT driver, session lifecycle, NSPL parsing, registry validation, or
@@ -45,6 +46,11 @@ impl MqttIngestorStartPlan {
                 client_mounts.push(mounts);
             }
         }
+        let Some(dns) = runtime.dns() else {
+            return Err(
+                ingestor.start_failure("the node DNS resolver is not installed".to_string())
+            );
+        };
         let connector = MqttSourcePlan::new(MqttSourceSettings {
             instances: instance_configs,
             client_id_conflict: MqttSourcePlan::client_id_conflict(&client.config, instances),
@@ -54,6 +60,7 @@ impl MqttIngestorStartPlan {
             session: mode.session(),
             qos: mode.qos(),
             manual_acks: mode.is_ack(),
+            dns: dns.clone(),
         });
         BrokerSourceStart {
             connector,
