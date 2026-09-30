@@ -7599,6 +7599,8 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tonic 0.13.1",
+ "tonic 0.14.6",
+ "tower-service",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
