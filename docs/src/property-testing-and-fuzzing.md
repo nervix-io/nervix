@@ -149,6 +149,7 @@ prepares the server binary and builds with one Cargo job to bound compiler memor
 deadline includes that preparation before the sanitizer evidence is collected. Preparation has
 a 7,200-second deadline. The CI job allows 180 minutes on a PR and 360 minutes for longer campaigns,
 including compilation, all selected target campaigns, failure qualification and artifact upload.
+The native validation job allows 90 minutes for its full checks, including compiled discovery.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
