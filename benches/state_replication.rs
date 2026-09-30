@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use nervix_primitives::time::Instant;
-use nervix_server::runtime::StateReplicationBenchmark;
+use nervix_server::runtime::{ReplicaCatchUpBenchmark, StateReplicationBenchmark};
 
 /// Branches the replica's branch lifecycle names. Installing each of them checks the lifecycle
 /// once.
@@ -22,6 +22,32 @@ fn acknowledged_commits(iterations: u64) -> Duration {
         }
         started.elapsed()
     })
+}
+
+/// The time `iterations` catch-up rounds of a replica take while none of the `benchmark`'s branches
+/// changes.
+fn catch_up_rounds(benchmark: &ReplicaCatchUpBenchmark, iterations: u64) -> Duration {
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("benchmark runtime must build");
+    runtime.block_on(async move {
+        let started = Instant::now();
+        for _ in 0..iterations {
+            nervix_primitives::task::consume_budget().await;
+            benchmark.catch_up_once().await;
+        }
+        started.elapsed()
+    })
+}
+
+/// How many requests one catch-up round of the `benchmark`'s replica sends to its owner.
+fn catch_up_requests(benchmark: &ReplicaCatchUpBenchmark) -> usize {
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("benchmark runtime must build");
+    runtime.block_on(benchmark.catch_up_once())
 }
 
 fn state_replication_benches(criterion: &mut Criterion) {
@@ -44,6 +70,19 @@ fn state_replication_benches(criterion: &mut Criterion) {
         });
     }
     installations.finish();
+
+    let mut catch_up = criterion.benchmark_group("state_replication/replica_catch_up_round");
+    for branches in LIFECYCLE_BRANCHES {
+        let benchmark = ReplicaCatchUpBenchmark::new(branches);
+        eprintln!(
+            "replica catch-up round over {branches} unchanged branches: {} requests",
+            catch_up_requests(&benchmark)
+        );
+        catch_up.bench_function(format!("{branches}_branches"), |bencher| {
+            bencher.iter_custom(|iterations| catch_up_rounds(&benchmark, iterations));
+        });
+    }
+    catch_up.finish();
 }
 
 criterion_group!(benches, state_replication_benches);

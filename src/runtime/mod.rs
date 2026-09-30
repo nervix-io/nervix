@@ -636,7 +636,7 @@ mod wasm_checkpoint;
 pub mod wasm_checkpoint_benchmark;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
-pub use state_replication::benchmark::StateReplicationBenchmark;
+pub use state_replication::benchmark::{ReplicaCatchUpBenchmark, StateReplicationBenchmark};
 mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;

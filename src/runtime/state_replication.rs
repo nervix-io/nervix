@@ -34,6 +34,7 @@ pub(in crate::runtime) use preparation::{
     PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateSnapshot,
 };
 pub(in crate::runtime) use published_branch_state::PublishedBranchState;
+use replica_catch_up::{RemoteStateOwner, StateOwner};
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingStateReplicaSync {
@@ -2732,6 +2733,7 @@ impl Runtime {
 pub mod benchmark;
 mod checkpoint_announcement;
 mod lifecycle;
+mod replica_catch_up;
 mod tasks;
 mod wasm_processor_state;
 
