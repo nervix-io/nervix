@@ -10,7 +10,8 @@
 //! | Family | Path | Capability |
 //! | --- | --- | --- |
 //! | Atomics, orderings and fences | [`sync::atomic`] | Portable |
-//! | Async synchronization: locks, notification, semaphores, channels, cancellation | [`sync`] | `native` |
+//! | Shared ownership: Nervix-owned references, and the standard strong and weak references an external API or a weak reference requires | [`sync::Arc`], [`sync::StdArc`], [`sync::StdWeak`] | Portable |
+//! | Async synchronization: locks, notification, waker registration, semaphores, channels, cancellation | [`sync`] | `native` |
 //! | Thread-blocking synchronization: locks, condition variables, barriers, one-time initialization, channels | `sync::blocking` | `native` |
 //! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting, and the mechanism that runs an admitted CPU job | `task` | `native` |
 //! | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | `native` |
@@ -39,9 +40,13 @@
 //! failure that the backend reports; there is no fallback to a real primitive. A real primitive
 //! that must stay outside every model is reached through [`unmodeled`] and nowhere else.
 //!
-//! The portable surface, [`sync::atomic`] and the unmodeled atomics, builds for every target,
-//! including the browser. Everything else is the `native` capability, and requesting a capability or
-//! a mode the target cannot provide is a compile error rather than a different implementation.
+//! Shared ownership is real in every mode: no model checker counts references, so a reference count
+//! establishes no ordering a check claims.
+//!
+//! The portable surface, [`sync::atomic`], shared ownership, and the unmodeled atomics, one-time
+//! initialization and `futures` families, builds for every target, including the browser.
+//! Everything else is the `native` capability, and requesting a capability or a mode the target
+//! cannot provide is a compile error rather than a different implementation.
 //!
 //! Layer: primitives.
 //!

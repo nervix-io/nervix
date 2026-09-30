@@ -7382,6 +7382,8 @@ dependencies = [
  "arc-swap",
  "concurrent-queue",
  "dashmap 6.2.1",
+ "futures-channel",
+ "futures-util",
  "loom",
  "meticulous",
  "nervix-primitives-macros",
@@ -7395,6 +7397,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "triomphe",
  "turmoil",
 ]
 
