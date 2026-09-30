@@ -46,6 +46,9 @@ with other statements and not while a transaction is open. The web console refus
 browser session has no file to write.
 
 Each domain records the applied configuration revision and Raft log entry of its own capture.
+Before reading state, each owner waits up to five seconds to apply the selected log revision,
+brings its runtime plan current, and checks the sending leader again. An owner that cannot reach
+the revision refuses capture. This also applies to stopped and live captures.
 For a quiesced running domain, the leader holds a replicated domain mutation lease, pauses and
 drains the domain across live nodes, asks state owners to publish and stage their checkpoints,
 and reads the configuration while the cut is held. The leader resumes the domain and releases its

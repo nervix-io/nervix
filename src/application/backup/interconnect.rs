@@ -20,7 +20,10 @@ use nervix_interconnect::{
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
 use nervix_models::{DomainName, RestoreStateAuthority};
-use nervix_primitives::{sync::Mutex as AsyncMutex, time::Instant};
+use nervix_primitives::{
+    sync::{Mutex as AsyncMutex, watch},
+    time::Instant,
+};
 
 use super::{
     CaptureSectionKey, CapturedSectionStage, PlannedContent, state_sections::plan_state_sections,
@@ -250,15 +253,24 @@ impl SessionServiceImpl {
                 "capture coordinator is not the current leader",
             ));
         }
+        wait_for_capture_revision(
+            &request.domain,
+            request.revision,
+            self.inner.consensus.subscribe_applied(),
+        )
+        .await?;
+        self.apply_current_cluster_state()
+            .await
+            .map_err(|error| failed(&request.domain, &error.to_string()))?;
+        if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
+            return Err(failed(
+                &request.domain,
+                "capture coordinator is not the current leader",
+            ));
+        }
         let Some(capture) = self.inner.consensus.configuration_capture().await else {
             return Err(failed(&request.domain, "configuration is unavailable"));
         };
-        if capture.applied.index < request.revision {
-            return Err(failed(
-                &request.domain,
-                "owner has not applied the cut revision",
-            ));
-        }
         let state = self
             .capture_local_state(&request.domain, request.quiesced)
             .await?;
@@ -746,6 +758,32 @@ fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
     RemoteOperationFailure::failed(RemoteOperationSubject::domain(domain), reason.to_string())
 }
 
+async fn wait_for_capture_revision(
+    domain: &DomainName,
+    revision: u64,
+    mut applied: watch::Receiver<u64>,
+) -> Result<(), RemoteOperationFailure> {
+    nervix_primitives::time::timeout(Duration::from_secs(5), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if *applied.borrow_and_update() >= revision {
+                return Ok(());
+            }
+            applied
+                .changed()
+                .await
+                .map_err(|_| failed(domain, "capture revision authority is unavailable"))?;
+        }
+    })
+    .await
+    .map_err(|_| {
+        failed(
+            domain,
+            "owner has not applied the cut revision within its deadline",
+        )
+    })?
+}
+
 fn restore_checkpoint_working_bytes(
     domain: &DomainName,
     length: u64,
@@ -756,4 +794,54 @@ fn restore_checkpoint_working_bytes(
     payload_bytes
         .checked_add(64 * 1024)
         .ok_or_else(|| failed(domain, "restore checkpoint exceeds address space"))
+}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod tests {
+    use std::task::Poll;
+
+    use meticulous::ResultExt as _;
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn capture_waits_until_the_selected_revision_is_applied() {
+        let domain = DomainName::parse("capture_wait").assured("domain is valid");
+        let (sender, applied) = watch::channel(7);
+        let mut capture = Box::pin(wait_for_capture_revision(&domain, 9, applied));
+        assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
+        sender.send(8).assured("capture retains its receiver");
+        assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
+        sender.send(9).assured("capture retains its receiver");
+        capture
+            .await
+            .assured("the selected revision permits capture");
+    }
+
+    #[nervix_primitives::test]
+    async fn capture_refuses_when_the_applied_revision_owner_ends() {
+        let domain = DomainName::parse("capture_closed").assured("domain is valid");
+        let (sender, applied) = watch::channel(7);
+        drop(sender);
+        let failure = wait_for_capture_revision(&domain, 9, applied)
+            .await
+            .err()
+            .assured("a closed authority cannot reach the selected revision");
+        assert!(
+            failure
+                .to_string()
+                .contains("capture revision authority is unavailable")
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn capture_refuses_when_the_selected_revision_never_applies() {
+        let domain = DomainName::parse("capture_deadline").assured("domain is valid");
+        let (_sender, applied) = watch::channel(7);
+        let failure = wait_for_capture_revision(&domain, 9, applied)
+            .await
+            .err()
+            .assured("an owner that does not catch up reaches its deadline");
+        assert!(failure.to_string().contains("within its deadline"));
+    }
 }

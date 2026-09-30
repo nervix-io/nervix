@@ -826,7 +826,11 @@ Backup state capture uses typed drain, capture, inventory, and fetch operations.
 each node's admitted work through a management-class drain request and requests a separate
 confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
 request with its coordination identity and applied cut revision to each live node, then reads each
-node's management-class inventory of staged sections. A captured section is fetched over a
+node's management-class inventory of staged sections. A receiver waits up to five seconds for its
+state machine to apply that revision, installs its current runtime plan, and rechecks the sending
+leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
+capture; a follower that is still applying the cut does not produce an archive from earlier state.
+A captured section is fetched over a
 snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
 and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
 staged section only for the coordinator process that requested it and releases expired stages.

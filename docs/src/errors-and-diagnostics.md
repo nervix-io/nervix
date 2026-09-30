@@ -278,7 +278,10 @@ leader or differs from its catalog entry, a record that does not encode, and an 
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
 under which it acquired the cut. Owner capture failures are classified at the
-interconnect boundary without guest bytes in the failure. The failed command's message is
+interconnect boundary without guest bytes in the failure. An owner still applying the selected
+revision waits within a five-second bound; a closed applied-state authority or an expired catch-up
+wait is a domain capture failure. A leadership change during that wait refuses the capture before
+state is read. The failed command's message is
 `backup failed:` followed by that
 error's text. A download the server does not serve is answered with a typed refusal,
 `InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the

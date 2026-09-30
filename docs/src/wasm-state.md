@@ -47,7 +47,8 @@ committed schedule names and never decides one.
 ## Backup And Restore
 
 A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
-drain, each owner requests a fresh branch lifecycle checkpoint from its active supervisors before
+drain, each owner applies the selected cut revision and its runtime plan, then requests a fresh
+branch lifecycle checkpoint from its active supervisors before
 reading durable WASM saves together with its other state from one database snapshot.
 The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
 branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
