@@ -491,7 +491,12 @@ failure carries the answering node's opaque operator description. That text is a
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
 replication and materialized-snapshot description use this envelope, and local errors retain the
 remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
-defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries.
+defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
+acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
+forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
+reason that names the silent receiver, and the source retries the record as it retries any failed
+acknowledgement; see
+[Record Acknowledgements The Receiver Stops Reporting](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
 Local interconnect transport, typed request, and streaming-handler failures carry reports through
 their callers. A layer that changes the failure's meaning adds context to the existing report, so
 the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends

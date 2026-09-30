@@ -298,11 +298,31 @@ affected sender recorded 1,200 additional TCP retransmissions over the run.
 
 An earlier full run on the same image, `degraded-all-final1`, correctly failed its 90-second
 burst-loss recovery deadline: after Pumba was stopped, qdiscs returned to default and ICMP
-answered 40/40 probes, but source offsets advanced from 414 to 601 while output stayed at 414.
-Running burst loss by itself passed 158/158, so the stall is intermittent or depends on the
-preceding fault sequence. [Cluster Chaos 32: Resume cross-node delivery after healed burst
-loss](https://app.clickup.com/t/86bc95vz6) owns the product investigation. The verifier retains
-the failed attempt and does not convert it into a pass because another attempt succeeded.
+answered 40/40 probes, but source offsets advanced from 414 to 601 while output stayed at 414. The
+verifier retains the failed attempt and does not convert it into a pass because another attempt
+succeeded. A repeat on the same image, `cc32-repro-all-1`, failed the same way with output held at
+397 while the source reached 608.
+
+[Cluster Chaos 32: Resume cross-node delivery after healed burst
+loss](https://app.clickup.com/t/86bc95vz6) traced both failures to one record acknowledgement that
+`nervix-3` gave up returning to the relay owner `nervix-2` during a loss burst, after the
+record's delivery had been admitted. `nervix-2` kept reporting the record alive to the ingestor's
+node, so the `ACK SEQUENTIAL` source never reached its `ACK TIMEOUT` and delivered nothing more.
+That one lost acknowledgement is all the stall needs; the earlier profiles are not part of it,
+although on this image it appeared in two of three full sequences and in none of six
+burst-loss-only runs, five of them with 60-second faults. A node now fails a forwarded
+acknowledgement its receiver reports nothing about for 15 seconds, and the source redelivers the
+record; see [Record Acknowledgements The Receiver Stops
+Reporting](../../docs/src/interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
+With a server binary built from the fixed source tree layered onto the same image, five
+burst-loss-only runs with 60-second faults passed their exact ledgers. In three of them `nervix-3` gave up an acknowledgement and
+`nervix-2` failed it 15 seconds later, and each run reported the resulting one or two replay
+duplicates separately.
+
+On a worker loaded by unrelated builds, the six profiles can outlast the 1,000-record fixture. In
+`cc32-local-fix1-all-1`, every profile through the rate limit recovered and all 1,000 records
+reached the output, but the load had stopped before the combined profile's recovery window closed,
+and the run failed as a setup limit rather than a product verdict.
 
 In `degraded-limit-negative`, the same worker and image ran one delay profile with a deliberately
 impossible 1 MiB per-node memory limit. The exact ledger still matched 179/179 records, while the

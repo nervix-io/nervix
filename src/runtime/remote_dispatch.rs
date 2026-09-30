@@ -16,6 +16,43 @@ pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_mill
 
 pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a node that forwarded a record acknowledgement with an admitted relay delivery waits
+/// without a report about it from the receiver before it fails the acknowledgement.
+///
+/// The receiver reports an acknowledgement it holds `REMOTE_ACK_ALIVE_INTERVAL` after its previous
+/// report was delivered or given up, and gives a report up after
+/// `RemoteDispatcher::DISPATCH_TIMEOUT`. Two consecutive reports that each exhaust that deadline
+/// stay inside this bound, so only a receiver that stopped reporting the acknowledgement altogether
+/// is silent this long: its terminal outcome was lost on the way back, or its run ended.
+pub(super) const REMOTE_ACK_SILENCE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often a node looks for forwarded record acknowledgements whose receiver fell silent.
+pub(super) const REMOTE_ACK_SILENCE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The sweeps that may find a forwarded acknowledgement unreported before the next one fails it. A
+/// report can land just after a sweep, so the acknowledgement fails between
+/// `REMOTE_ACK_SILENCE_TIMEOUT` and one sweep interval later.
+pub(super) const REMOTE_ACK_SILENT_SWEEPS: u64 =
+    REMOTE_ACK_SILENCE_TIMEOUT.as_secs() / REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs();
+
+const _: () = {
+    assert!(REMOTE_ACK_SILENCE_TIMEOUT.subsec_nanos() == 0);
+    assert!(REMOTE_ACK_SILENCE_SWEEP_INTERVAL.subsec_nanos() == 0);
+    assert!(REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs() > 0);
+    assert!(
+        REMOTE_ACK_SILENCE_TIMEOUT
+            .as_secs()
+            .is_multiple_of(REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs())
+    );
+    assert!(REMOTE_ACK_SILENT_SWEEPS > 0);
+    // Two consecutive reports that each exhaust their dispatch deadline stay inside the bound.
+    assert!(
+        2 * (RemoteDispatcher::DISPATCH_TIMEOUT.as_millis()
+            + REMOTE_ACK_ALIVE_INTERVAL.as_millis())
+            < REMOTE_ACK_SILENCE_TIMEOUT.as_millis()
+    );
+};
+
 pub(super) const REMOTE_RELAY_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 enum FailedRelayAdmissionResolution {
@@ -92,27 +129,58 @@ struct RemoteRelayAdmissionContext<'a> {
 /// Both maps hold only registrations this run of the node handed out, keyed by their number. A
 /// resolution resolves an entry only once the dispatcher confirms that it names this run.
 pub(super) struct RemoteDispatchRegistry {
-    pub(super) next_ack_id: AtomicU64,
-    pub(super) pending_acks: DashMap<u64, PendingRemoteAck, RandomState>,
+    next_ack_id: AtomicU64,
+    /// Record acknowledgements this node forwarded with relay deliveries, waiting for the nodes
+    /// the deliveries went to.
+    pending_acks: DashMap<u64, PendingRemoteAck, RandomState>,
     pub(super) pending_relay_admissions:
         DashMap<u64, watch::Sender<RelayAdmissionUpdate>, RandomState>,
 }
 
-/// One forwarded ACK share, including the latest nonterminal status from its remote owner.
-/// A parked share stays unresolved, but it no longer holds an ownership handoff or backup cut.
-pub(super) struct PendingRemoteAck {
+/// A record acknowledgement this node forwarded with a relay delivery, waiting for the node the
+/// delivery went to.
+///
+/// Its atomics change only while it is in the registry, through a borrowed lookup under the
+/// shard's shared lock. Parked progress changes under the shard's exclusive lock. The sweep fails
+/// it only through an exclusive removal that rechecks the count, so the shard lock, not the
+/// atomics' ordering, orders that recheck after every report that reached the acknowledgement
+/// first.
+struct PendingRemoteAck {
+    /// The node the delivery went to, which reports and resolves the acknowledgement.
+    receiver: ClusterNodeName,
     acks: AckSet,
+    /// Whether the receiver admitted the delivery. Until it has, the delivery's own admission wait
+    /// decides its failure, and sweeps pass the acknowledgement by.
+    admitted: AtomicBool,
+    /// Sweeps that found no report since the receiver last reported the acknowledgement, or since
+    /// its delivery was admitted.
+    silent_sweeps: AtomicU64,
+    /// A parked share remains unresolved while it releases the upstream ownership handoff.
     required_wait: Option<AckRequiredWaitGuard>,
+    /// Delayed progress cannot reverse a newer park or resume.
     progress_sequence: Option<u64>,
 }
 
 impl PendingRemoteAck {
-    fn new(acks: AckSet) -> Self {
+    fn new(receiver: ClusterNodeName, acks: AckSet) -> Self {
         Self {
+            receiver,
             acks,
+            admitted: AtomicBool::new(false),
+            silent_sweeps: AtomicU64::new(0),
             required_wait: None,
             progress_sequence: None,
         }
+    }
+
+    fn admit(&self) {
+        self.admitted.store(true, Ordering::Relaxed);
+    }
+
+    /// The receiver reported that it still holds the acknowledgement.
+    fn report(&self) {
+        self.silent_sweeps.store(0, Ordering::Relaxed);
+        self.acks.ack_alive();
     }
 
     fn progress(&mut self, sequence: u64, parked: bool) {
@@ -126,6 +194,172 @@ impl PendingRemoteAck {
             }
         } else {
             self.required_wait = None;
+        }
+    }
+
+    /// Counts one sweep that found no report, and answers whether the receiver has now been silent
+    /// past the bound. An acknowledgement whose delivery was not admitted is never counted.
+    fn swept(&self) -> bool {
+        if !self.admitted.load(Ordering::Relaxed) {
+            return false;
+        }
+        let previous = self
+            .silent_sweeps
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {
+                sweeps.checked_add(1)
+            })
+            .assured(
+                "each sweep counts once, and the first sweep past REMOTE_ACK_SILENT_SWEEPS \
+                 removes the acknowledgement unless a report reset its count to zero",
+            );
+        previous >= REMOTE_ACK_SILENT_SWEEPS
+    }
+
+    /// Whether the receiver has been silent past the bound, as the sweep's exclusive removal
+    /// rechecks it.
+    fn is_silent(&self) -> bool {
+        self.admitted.load(Ordering::Relaxed)
+            && self.silent_sweeps.load(Ordering::Relaxed) > REMOTE_ACK_SILENT_SWEEPS
+    }
+}
+
+impl RemoteDispatchRegistry {
+    pub(super) fn new() -> Self {
+        Self {
+            next_ack_id: AtomicU64::new(1),
+            pending_acks: DashMap::default(),
+            pending_relay_admissions: DashMap::default(),
+        }
+    }
+
+    /// The number of a new registration. Every run of the node numbers its registrations from one.
+    pub(super) fn next_ack_id(&self) -> u64 {
+        self.next_ack_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Holds `acks`, forwarded to `receiver` under `ack_id`, until the receiver resolves them.
+    pub(super) fn register_ack(&self, ack_id: u64, receiver: ClusterNodeName, acks: AckSet) {
+        self.pending_acks
+            .insert(ack_id, PendingRemoteAck::new(receiver, acks));
+    }
+
+    /// Starts waiting on the receiver's reports about the acknowledgement registered under
+    /// `ack_id`, now that the receiver admitted the delivery that carried it.
+    pub(super) fn admit_ack(&self, ack_id: u64) {
+        if let Some(pending) = self.pending_acks.get(&ack_id) {
+            pending.admit();
+        }
+    }
+
+    /// Starts waiting on the receiver's reports about every acknowledgement `registrations` names,
+    /// now that the receiver admitted the delivery that carried them.
+    pub(super) fn admit_acks(&self, registrations: &[Option<RemoteAckRegistration>]) {
+        for registration in registrations.iter().flatten() {
+            self.admit_ack(registration.ack_id);
+        }
+    }
+
+    /// Records the receiver's report that it still holds the acknowledgement registered under
+    /// `ack_id`, and answers whether this node was still waiting for it.
+    pub(super) fn report_ack(&self, ack_id: u64) -> bool {
+        let Some(pending) = self.pending_acks.get(&ack_id) else {
+            return false;
+        };
+        pending.report();
+        true
+    }
+
+    /// Applies a receiver's parked or resumed status in sequence order, while still counting even
+    /// a stale status as a liveness report for the silence timeout.
+    pub(super) fn progress_ack(&self, ack_id: u64, sequence: u64, parked: bool) -> bool {
+        let Some(mut pending) = self.pending_acks.get_mut(&ack_id) else {
+            return false;
+        };
+        pending.progress(sequence, parked);
+        pending.report();
+        true
+    }
+
+    /// Resolves the acknowledgement registered under `ack_id` with the receiver's terminal
+    /// `outcome`, and answers whether this node was still waiting for it.
+    pub(super) fn resolve_ack(&self, ack_id: u64, outcome: AckOutcome) -> bool {
+        let Some((_, pending)) = self.pending_acks.remove(&ack_id) else {
+            return false;
+        };
+        match outcome {
+            AckOutcome::Ack => pending.acks.ack_success(),
+            AckOutcome::NoAck(error) => pending.acks.no_ack(error),
+        }
+        true
+    }
+
+    /// Stops waiting for the acknowledgement registered under `ack_id` because its delivery
+    /// failed. The caller resolves the acknowledgement itself.
+    pub(super) fn clear_ack(&self, ack_id: u64) {
+        self.pending_acks.remove(&ack_id);
+    }
+
+    /// Whether this node still waits for the acknowledgement registered under `ack_id`.
+    #[cfg(test)]
+    pub(super) fn holds_ack(&self, ack_id: u64) -> bool {
+        self.pending_acks.contains_key(&ack_id)
+    }
+
+    /// Counts one sweep against every forwarded acknowledgement of an admitted delivery, fails each
+    /// one whose receiver reported nothing about it for `REMOTE_ACK_SILENCE_TIMEOUT`, and returns
+    /// how many it failed for each receiver.
+    pub(super) fn fail_silent_acks(&self) -> BTreeMap<ClusterNodeName, usize> {
+        let mut silent = Vec::new();
+        for pending in self.pending_acks.iter() {
+            if pending.swept() {
+                silent.push(*pending.key());
+            }
+        }
+        let mut failed = BTreeMap::new();
+        for ack_id in silent {
+            let removed = self
+                .pending_acks
+                .remove_if(&ack_id, |_, pending| pending.is_silent());
+            let Some((_, pending)) = removed else {
+                continue;
+            };
+            pending.acks.no_ack(format!(
+                "node '{}' reported nothing about the forwarded record for {}",
+                pending.receiver.as_str(),
+                humantime::format_duration(REMOTE_ACK_SILENCE_TIMEOUT)
+            ));
+            match failed.get_mut(&pending.receiver) {
+                Some(count) => {
+                    *count = usize::checked_add(*count, 1)
+                        .assured("one sweep fails at most the acknowledgements held in memory");
+                }
+                None => {
+                    failed.insert(pending.receiver, 1);
+                }
+            }
+        }
+        failed
+    }
+
+    /// Sweeps the forwarded acknowledgements once every `REMOTE_ACK_SILENCE_SWEEP_INTERVAL` for as
+    /// long as it runs, failing each one its receiver stopped reporting. A sweep that runs late
+    /// counts once, so a node whose own execution stalled does not fail acknowledgements whose
+    /// reports it could not receive meanwhile.
+    pub(super) async fn sweep_silent_acks(&self) {
+        let mut sweeps = tokio::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
+        sweeps.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            sweeps.tick().await;
+            let failed = self.fail_silent_acks();
+            for (receiver, acknowledgements) in failed {
+                warn!(
+                    target_node = %receiver,
+                    acknowledgements,
+                    silence = %humantime::format_duration(REMOTE_ACK_SILENCE_TIMEOUT),
+                    "failed forwarded record acknowledgements the receiving node stopped reporting"
+                );
+            }
         }
     }
 }
@@ -183,7 +417,7 @@ impl RemoteDispatcher {
     /// can only ever resolve the entry registered under it here.
     fn next_registration(&self) -> RemoteAckRegistration {
         RemoteAckRegistration {
-            ack_id: self.registry.next_ack_id.fetch_add(1, Ordering::Relaxed),
+            ack_id: self.registry.next_ack_id(),
             registrar: ClusterNodeIdentity::new(
                 self.local_node_id().clone(),
                 self.local_node_incarnation(),
@@ -199,13 +433,24 @@ impl RemoteDispatcher {
             && registration.registrar.incarnation() == self.local_node_incarnation()
     }
 
-    /// Registers `acks` to be resolved by the node the returned registration is sent to.
-    pub(super) fn register_pending_ack(&self, acks: AckSet) -> RemoteAckRegistration {
+    /// Registers `acks` to be resolved by `receiver`, the node the returned registration is sent
+    /// to.
+    pub(super) fn register_pending_ack(
+        &self,
+        receiver: &ClusterNodeName,
+        acks: AckSet,
+    ) -> RemoteAckRegistration {
         let registration = self.next_registration();
         self.registry
-            .pending_acks
-            .insert(registration.ack_id, PendingRemoteAck::new(acks));
+            .register_ack(registration.ack_id, receiver.clone(), acks);
         registration
+    }
+
+    /// Starts waiting on the receiver's reports about the acknowledgements a delivery carried, now
+    /// that the receiver admitted the delivery. From here on, an acknowledgement its receiver
+    /// reports nothing about for `REMOTE_ACK_SILENCE_TIMEOUT` fails.
+    pub(super) fn admit_pending_acks(&self, registrations: &[Option<RemoteAckRegistration>]) {
+        self.registry.admit_acks(registrations);
     }
 
     pub(super) fn forwarded_ack(acks: &AckSet) -> AckSet {
@@ -213,7 +458,7 @@ impl RemoteDispatcher {
     }
 
     pub(super) fn clear_pending_ack(&self, registration: &RemoteAckRegistration) {
-        self.registry.pending_acks.remove(&registration.ack_id);
+        self.registry.clear_ack(registration.ack_id);
     }
 
     /// Registers a relay admission to be resolved by the node the returned registration is sent
@@ -679,6 +924,10 @@ impl Runtime {
         self.inner
             .remote_dispatcher
             .store(Some(StdArc::new(dispatcher)));
+        let registry = self.inner.remote_dispatch.clone();
+        self.spawn_remote_ack_watcher_task(async move {
+            registry.sweep_silent_acks().await;
+        });
     }
 
     /// Whether `node_id` names this node. A node that has not joined a cluster has no name, so no
@@ -1173,15 +1422,21 @@ impl Runtime {
                 }
                 return;
             }
-            let Some(mut pending) = self.inner.remote_dispatch.pending_acks.get_mut(&ack_id) else {
-                warn!(ack_id, "received remote ack progress for unknown ack id");
-                return;
+            // A report can follow the acknowledgement's failure: the receiver keeps reporting a
+            // record whose reports this node stopped hearing for the whole silence bound.
+            let reported = match outcome {
+                RemoteAckOutcome::Alive => self.inner.remote_dispatch.report_ack(ack_id),
+                RemoteAckOutcome::Progress { sequence, parked } => self
+                    .inner
+                    .remote_dispatch
+                    .progress_ack(ack_id, sequence, parked),
+                RemoteAckOutcome::Ack | RemoteAckOutcome::NoAck(_) => unreachable!(),
             };
-            trace!(ack_id, outcome = ?outcome, "received remote ack progress");
-            if let RemoteAckOutcome::Progress { sequence, parked } = outcome {
-                pending.progress(sequence, parked);
+            if !reported {
+                debug!(ack_id, "received remote ack progress for unknown ack id");
+                return;
             }
-            pending.acks.ack_alive();
+            trace!(ack_id, "received remote ack progress");
             return;
         }
 
@@ -1206,17 +1461,16 @@ impl Runtime {
             return;
         }
 
-        let Some((_, pending)) = self.inner.remote_dispatch.pending_acks.remove(&ack_id) else {
-            warn!(ack_id, "received remote ack resolution for unknown ack id");
-            return;
+        let outcome = match outcome {
+            RemoteAckOutcome::Ack => AckOutcome::Ack,
+            RemoteAckOutcome::NoAck(error) => AckOutcome::NoAck(error),
+            RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => return,
         };
         trace!(ack_id, outcome = ?outcome, "resolving remote ack");
-        match outcome {
-            RemoteAckOutcome::Ack => pending.acks.ack_success(),
-            RemoteAckOutcome::NoAck(error) => pending.acks.no_ack(error),
-            RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => {
-                unreachable!("progress is handled before terminal removal")
-            }
+        // An outcome can follow the acknowledgement's failure, when the sweep failed it after the
+        // receiver fell silent, or when its delivery failed after the receiver admitted it.
+        if !self.inner.remote_dispatch.resolve_ack(ack_id, outcome) {
+            debug!(ack_id, "received remote ack resolution for unknown ack id");
         }
     }
 
@@ -1232,6 +1486,7 @@ impl Runtime {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return;
         };
+        let fault_injection = self.inner.fault_injection.clone();
         self.spawn_remote_ack_watcher_task(async move {
             let mut completion = completion;
             loop {
@@ -1296,6 +1551,12 @@ impl Runtime {
                                     AckOutcome::Ack => RemoteAckOutcome::Ack,
                                     AckOutcome::NoAck(error) => RemoteAckOutcome::NoAck(error),
                                 };
+                                if fault_injection.loses_remote_acknowledgement(
+                                    dispatcher.local_node_id(),
+                                    ack.registrar.node_id(),
+                                ) {
+                                    break;
+                                }
                                 if let Err(error) = dispatcher
                                     .dispatch(
                                         ack.registrar.node_id(),
@@ -1430,7 +1691,7 @@ mod tests {
     use tokio::time::{Duration, Instant, sleep, timeout};
 
     use super::*;
-    use crate::runtime_ack::{AckOutcome, AckSet};
+    use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet};
 
     /// Scheduler-independent hang guard for event-driven unit-test observations.
     const ASYNC_EVENT_FAILSAFE: Duration = Duration::from_secs(30);
@@ -1568,6 +1829,11 @@ mod tests {
         (runtime, dispatcher)
     }
 
+    /// The node the tests' deliveries go to, which resolves the acknowledgements they forward.
+    fn receiving_node() -> ClusterNodeName {
+        ClusterNodeName::parse("node-2").expect("the fixture node name is valid")
+    }
+
     /// The registration an earlier run of the same node handed out under the same number.
     fn from_an_earlier_run(registration: &RemoteAckRegistration) -> RemoteAckRegistration {
         let incarnation = registration
@@ -1590,7 +1856,7 @@ mod tests {
         let (runtime, dispatcher) = joined_runtime().await;
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
-        let registration = dispatcher.register_pending_ack(acks);
+        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
         let runtime_task = runtime.clone();
         let resolved = registration.clone();
 
@@ -1611,12 +1877,7 @@ mod tests {
             Some(AckOutcome::Ack)
         );
         assert!(
-            runtime
-                .inner
-                .remote_dispatch
-                .pending_acks
-                .get(&registration.ack_id)
-                .is_none(),
+            !runtime.inner.remote_dispatch.holds_ack(registration.ack_id),
             "terminal ack must clear the pending remote ack"
         );
         drop(shutdown_tx);
@@ -1627,7 +1888,8 @@ mod tests {
         let (runtime, dispatcher) = joined_runtime().await;
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
-        let registration = dispatcher.register_pending_ack(acks);
+        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
+        dispatcher.registry.admit_ack(registration.ack_id);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
 
         runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Progress {
@@ -1653,6 +1915,7 @@ mod tests {
         runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Ack));
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        assert!(!runtime.inner.remote_dispatch.holds_ack(registration.ack_id));
     }
 
     #[nervix_primitives::test]
@@ -1691,7 +1954,7 @@ mod tests {
     async fn a_resolution_addressed_to_an_earlier_run_leaves_the_pending_ack_unresolved() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
-        let registration = dispatcher.register_pending_ack(acks);
+        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
         let completion = completion.wait();
         tokio::pin!(completion);
 
@@ -1704,11 +1967,7 @@ mod tests {
             "an acknowledgement addressed to an earlier run must not complete this run's record"
         );
         assert!(
-            runtime
-                .inner
-                .remote_dispatch
-                .pending_acks
-                .contains_key(&registration.ack_id),
+            runtime.inner.remote_dispatch.holds_ack(registration.ack_id),
             "this run's registration stays pending for its own resolution"
         );
 
@@ -1754,7 +2013,7 @@ mod tests {
     async fn a_cleared_registration_ignores_a_late_resolution() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
-        let acknowledgement = dispatcher.register_pending_ack(acks.clone());
+        let acknowledgement = dispatcher.register_pending_ack(&receiving_node(), acks.clone());
         let (admission, admission_rx) = dispatcher.register_pending_relay_admission();
 
         dispatcher.clear_pending_ack(&acknowledgement);
@@ -1801,8 +2060,7 @@ mod tests {
         runtime
             .inner
             .remote_dispatch
-            .pending_acks
-            .insert(1, PendingRemoteAck::new(acks));
+            .register_ack(1, receiving_node(), acks);
         let completion = completion.wait();
         tokio::pin!(completion);
         let registration = RemoteAckRegistration {
@@ -2007,4 +2265,230 @@ mod tests {
             .expect("the failed owner fan-out must resolve its root ACK");
         assert!(matches!(outcome, AckOutcome::NoAck(_)));
     }
+
+    /// One acknowledgement forwarded to `receiving_node()`, held by a registry of its own.
+    struct ForwardedAck {
+        registry: RemoteDispatchRegistry,
+        ack_id: u64,
+        completion: AckCompletion,
+    }
+
+    impl ForwardedAck {
+        fn registered() -> Self {
+            let registry = RemoteDispatchRegistry::new();
+            let (acks, completion) = AckSet::root();
+            let ack_id = registry.next_ack_id();
+            registry.register_ack(ack_id, receiving_node(), acks);
+            Self {
+                registry,
+                ack_id,
+                completion,
+            }
+        }
+
+        /// Runs `sweeps` sweeps and requires that none of them fails anything.
+        fn sweep_without_failing(&self, sweeps: u64) {
+            for _ in 0..sweeps {
+                assert!(
+                    self.registry.fail_silent_acks().is_empty(),
+                    "no sweep before the silence bound passes may fail the acknowledgement"
+                );
+            }
+        }
+
+        /// Requires the next sweep to fail the acknowledgement.
+        fn sweep_failing_it(&self) {
+            assert_eq!(
+                self.registry.fail_silent_acks().get(&receiving_node()),
+                Some(&1),
+                "the first sweep past the silence bound fails the acknowledgement"
+            );
+            assert!(!self.registry.holds_ack(self.ack_id));
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_admitted_acknowledgement_its_receiver_stops_reporting_fails_at_the_silence_bound() {
+        let forwarded = ForwardedAck::registered();
+        forwarded.registry.admit_ack(forwarded.ack_id);
+
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+        forwarded.sweep_failing_it();
+
+        let outcome = timeout(ASYNC_EVENT_FAILSAFE, forwarded.completion.wait())
+            .await
+            .expect("the failed acknowledgement resolves its root");
+        assert_eq!(
+            outcome,
+            AckOutcome::NoAck(
+                "node 'node-2' reported nothing about the forwarded record for 15s".to_string()
+            )
+        );
+        assert!(
+            !forwarded.registry.report_ack(forwarded.ack_id),
+            "a report after the failure finds nothing to keep alive"
+        );
+        assert!(
+            !forwarded
+                .registry
+                .resolve_ack(forwarded.ack_id, AckOutcome::Ack),
+            "an outcome after the failure finds nothing to resolve"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn one_sweep_counts_every_acknowledgement_it_fails_against_its_receiver() {
+        let registry = RemoteDispatchRegistry::new();
+        let mut completions = Vec::new();
+        for _ in 0..2 {
+            let (acks, completion) = AckSet::root();
+            let ack_id = registry.next_ack_id();
+            registry.register_ack(ack_id, receiving_node(), acks);
+            registry.admit_ack(ack_id);
+            completions.push(completion);
+        }
+        for _ in 0..REMOTE_ACK_SILENT_SWEEPS {
+            assert!(registry.fail_silent_acks().is_empty());
+        }
+
+        let failed = registry.fail_silent_acks();
+
+        assert_eq!(failed.get(&receiving_node()), Some(&2));
+        for completion in completions {
+            let outcome = timeout(ASYNC_EVENT_FAILSAFE, completion.wait())
+                .await
+                .expect("every failed acknowledgement resolves its root");
+            assert!(matches!(outcome, AckOutcome::NoAck(_)));
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_report_restarts_the_silence_of_an_admitted_acknowledgement() {
+        let forwarded = ForwardedAck::registered();
+        forwarded.registry.admit_ack(forwarded.ack_id);
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+
+        assert!(forwarded.registry.report_ack(forwarded.ack_id));
+
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+        forwarded.sweep_failing_it();
+    }
+
+    #[nervix_primitives::test]
+    async fn an_acknowledgement_is_not_swept_before_its_delivery_is_admitted() {
+        let forwarded = ForwardedAck::registered();
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+
+        let registration = RemoteAckRegistration {
+            ack_id: forwarded.ack_id,
+            registrar: ClusterNodeIdentity::new(
+                ClusterNodeName::parse("node-1").expect("the fixture node name is valid"),
+                ClusterNodeIncarnation::new(1),
+            ),
+        };
+        forwarded.registry.admit_acks(&[None, Some(registration)]);
+
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+        forwarded.sweep_failing_it();
+    }
+
+    #[nervix_primitives::test]
+    async fn a_terminal_outcome_leaves_the_sweep_nothing_to_fail() {
+        let forwarded = ForwardedAck::registered();
+        forwarded.registry.admit_ack(forwarded.ack_id);
+        forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+
+        assert!(
+            forwarded
+                .registry
+                .resolve_ack(forwarded.ack_id, AckOutcome::Ack)
+        );
+        forwarded.sweep_without_failing(1);
+
+        assert_eq!(
+            timeout(ASYNC_EVENT_FAILSAFE, forwarded.completion.wait())
+                .await
+                .expect("the receiver's outcome resolves the root"),
+            AckOutcome::Ack
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn the_running_sweep_fails_an_acknowledgement_at_the_silence_bound() {
+        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let (acks, completion) = AckSet::root();
+        let ack_id = registry.next_ack_id();
+        registry.register_ack(ack_id, receiving_node(), acks);
+        registry.admit_ack(ack_id);
+        let admitted_at = Instant::now();
+        let sweeping = registry.clone();
+        let sweeps =
+            nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+
+        let outcome = completion.wait().await;
+        let silent_for = admitted_at.elapsed();
+
+        assert!(matches!(outcome, AckOutcome::NoAck(_)));
+        assert!(
+            silent_for >= REMOTE_ACK_SILENCE_TIMEOUT,
+            "the acknowledgement failed after {silent_for:?} of silence"
+        );
+        assert!(
+            silent_for <= REMOTE_ACK_SILENCE_TIMEOUT + REMOTE_ACK_SILENCE_SWEEP_INTERVAL,
+            "the acknowledgement failed after {silent_for:?} of silence"
+        );
+        sweeps.abort();
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn the_running_sweep_keeps_an_acknowledgement_its_receiver_keeps_reporting() {
+        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let (acks, completion) = AckSet::root();
+        let ack_id = registry.next_ack_id();
+        registry.register_ack(ack_id, receiving_node(), acks);
+        registry.admit_ack(ack_id);
+        let sweeping = registry.clone();
+        let sweeps =
+            nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+
+        for _ in 0..10 {
+            sleep(Duration::from_secs(7)).await;
+            assert!(
+                registry.report_ack(ack_id),
+                "an acknowledgement reported within the bound stays pending"
+            );
+        }
+        assert!(registry.resolve_ack(ack_id, AckOutcome::Ack));
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        sweeps.abort();
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stalled_sweep_counts_once_for_the_time_it_missed() {
+        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let (acks, _completion) = AckSet::root();
+        let ack_id = registry.next_ack_id();
+        registry.register_ack(ack_id, receiving_node(), acks);
+        registry.admit_ack(ack_id);
+        let sweeping = registry.clone();
+        let sweeps =
+            nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+        nervix_primitives::task::yield_now().await;
+
+        // The node's execution stalls for four silence bounds, as a paused container's does, so no
+        // report could have reached it.
+        tokio::time::advance(REMOTE_ACK_SILENCE_TIMEOUT * 4).await;
+        nervix_primitives::task::yield_now().await;
+
+        assert!(
+            registry.holds_ack(ack_id),
+            "a sweep that ran late counts once rather than for every interval it missed"
+        );
+        sweeps.abort();
+    }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "remote_dispatch_shuttle_tests.rs"]
+mod shuttle_tests;

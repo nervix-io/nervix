@@ -593,8 +593,11 @@ These steps expose three intentionally different outcomes:
 
 While admission or an attached acknowledgement is unresolved, the receiver sends coalesced progress
 events through the reserved management quota. The sender treats five seconds without progress as a
-stalled exchange and bounds the total admission wait at five minutes. Progress keeps a live attempt
-from being mistaken for a disconnected one; it does not change the delivery outcome.
+stalled exchange and bounds the total admission wait at five minutes. Once the delivery is admitted,
+the sender waits for an attached record acknowledgement only while the receiver keeps reporting it,
+and fails one the receiver reports nothing about for fifteen seconds, as
+[Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
+attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
 For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
 remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
@@ -624,6 +627,41 @@ A receiver issues a grant only when the admission registration names the authent
 node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
 terminal outcome addressed to an earlier run neither completes nor retires the admission a later
 run registered under the same number.
+
+### Record Acknowledgements The Receiver Stops Reporting
+
+A receiver reports every record acknowledgement it holds to the node that registered it. While the
+downstream work the acknowledgement stands for continues, it sends a report 100 milliseconds after
+its previous one was delivered or given up, and when the work completes it sends the terminal
+outcome once. Each report and the outcome is one bounded event that the receiver retries for up to
+five seconds and then gives up. Once the outcome is given up, or the receiver's run ends, nothing
+reports that acknowledgement again.
+
+The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
+it. From the moment the delivery that carries the acknowledgement is admitted, a sweep once a second
+counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
+once fifteen seconds of such passes have gone by. The bound outlasts two consecutive reports that
+each exhaust their five-second deadline, so a receiver that is still working on the record is not
+mistaken for one that stopped. Before admission, the delivery's own admission wait decides its
+failure, and the sweep leaves its acknowledgements alone. The sweep counts its own passes rather
+than elapsed time, so a registering node whose own execution stalled, such as a paused container,
+does not fail acknowledgements whose reports it could not receive meanwhile.
+
+A failed acknowledgement resolves negatively exactly once. The sweep's removal rechecks the count
+under the entry's exclusive map lock, so a report that arrives first keeps the acknowledgement
+pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
+sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
+routes, so a sink that already completed the record can receive it again. A report or outcome that
+arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
+
+Every node on a record's path applies the same bound. A relay owner that routed a record to the
+node of an attached consumer reports the record alive to the source's node for as long as the
+record's acknowledgement tree is unresolved. Without the bound, a terminal outcome lost between the
+consumer's node and the relay owner would keep the source's acknowledgement alive, and its
+`ACK TIMEOUT` from ever passing, for the rest of the relay owner's run. With it, the relay owner
+fails the acknowledgement fifteen seconds after the consumer's node fell silent, stops reporting
+the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
+`warn`, one line per receiver with the number it failed.
 
 ### Ordering, Retry, And Reconciliation
 
