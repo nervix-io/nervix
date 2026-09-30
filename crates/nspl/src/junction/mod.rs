@@ -236,6 +236,42 @@ mod tests {
     }
 
     #[test]
+    fn a_replace_call_after_a_comma_stays_in_the_operation_expression() {
+        let parsed = parse_alter_junction(
+            "ALTER JUNCTION project_events SET FILTER WHERE concat(input.kind, replace(input.raw, \
+             'a', 'b')) != '', REPLACE ROUTE TO projected INHERIT ALL FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG;",
+        )
+        .expect("a call to replace after a comma must stay in the filter");
+
+        assert_eq!(parsed.operations.len(), 2);
+        assert_eq!(
+            parsed.operations[0],
+            AlterProcessorOperation::SetFilterWhere {
+                where_clause: crate::parse_expression(
+                    "concat(input.kind, replace(input.raw, 'a', 'b')) != ''"
+                )
+                .expect("valid expression"),
+            }
+        );
+        assert!(matches!(
+            parsed.operations[1],
+            AlterProcessorOperation::ReplaceRoute { .. }
+        ));
+    }
+
+    #[test]
+    fn a_bare_operation_keyword_after_a_comma_still_begins_the_next_operation() {
+        assert!(
+            parse_alter_junction(
+                "ALTER JUNCTION project_events SET FILTER WHERE concat(input.kind, replace);"
+            )
+            .is_err(),
+            "a bare replace after a comma heads a REPLACE operation, not a field"
+        );
+    }
+
+    #[test]
     fn alter_expression_documents_operation_head_field_corner() {
         assert!(
             parse_alter_junction(

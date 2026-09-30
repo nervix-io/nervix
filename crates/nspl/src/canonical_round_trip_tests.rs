@@ -222,6 +222,41 @@ fn every_statement_form_round_trips_canonically() {
     }
 }
 
+/// Every region that ends at a keyword a builtin or a field scope also spells reads the call or the
+/// field back as itself, whether it was written in parentheses or not: canonical NSPL writes it
+/// without them. A clause that goes straight on with an expression still begins at its keyword
+/// when that expression opens with a parenthesis.
+#[test]
+fn calls_and_scopes_named_like_clause_keywords_round_trip_in_every_region() {
+    for source in [
+        "CREATE REORDERER peaks_in_order FROM sensors WHERE max(input.readings) > 0 BY \
+         (input.first + input.second) * 2 MAX TIME 10s UNBRANCHED TO ordered_readings INHERIT ALL \
+         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE EMITTER send FROM source WHERE output.total > 0 TO HTTP api METHOD input.method \
+         PATH (input.prefix + input.tenant) * 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+         WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE JUNCTION peaks FROM sensors WHERE (max(input.readings) > 10) FILTER WHERE \
+         (output.total > 0) UNBRANCHED TO alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE DEDUPLICATOR distinct_peaks FROM sensors FILTER WHERE max(input.readings) > 0 \
+         DEDUPLICATE ON max(input.readings), input.id MAX TIME 10m UNBRANCHED TO \
+         distinct_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE REORDERER peaks_in_order FROM sensors BY (max(input.readings)) MAX TIME 10s \
+         UNBRANCHED TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE (right(left.name, 2) = \
+         right.suffix) RIGHT FROM labels WHERE max(right.readings) > output.id CORRELATE WHERE \
+         left.id = right.id MATCH EARLIEST MAX TIME 5s ON CORRELATION TIMEOUT DROP, DROP \
+         UNBRANCHED TO matched SET id = left.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        "ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) \
+         != '', ADD FROM labels WHERE max(input.readings) > output.total, SET DETACHED;",
+        "ALTER DEDUPLICATOR distinct_peaks SET DEDUPLICATE ON input.id, replace(input.name, 'a', \
+         'b'), SET MAX TIME 20m;",
+    ] {
+        let statement = parse_client_statement(source)
+            .unwrap_or_else(|error| panic!("{source}\nmust parse: {error:?}"));
+        assert_statement_round_trips(&statement);
+    }
+}
+
 /// Characters an edit inserts or substitutes: the delimiters, quotes and operators the grammar
 /// reads, digits, and characters outside ASCII.
 const EDIT_CHARACTERS: [char; 20] = [

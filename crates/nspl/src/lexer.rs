@@ -49,6 +49,16 @@ impl Token {
             Self::LParen | Self::RParen | Self::LBracket | Self::RBracket
         )
     }
+
+    /// Whether an expression may write this token as the name of a call or the scope of a field:
+    /// any word but a keyword an expression follows directly.
+    pub fn may_name_a_term(&self) -> bool {
+        match self {
+            Self::Word(Word::KnownWord { iden, .. }) => !iden.precedes_expression(),
+            Self::Word(Word::UnknownWord(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,6 +415,18 @@ pub enum Identifier {
     Roto0_13,
 }
 
+impl Identifier {
+    /// Whether this keyword can begin a clause that goes straight on with an expression, as
+    /// `WHERE <expression>`, a reorderer's `BY <expressions>` and an HTTP sink's `METHOD` and
+    /// `PATH` do.
+    ///
+    /// Where such a keyword ends an expression region, a `(` after it opens that clause, never the
+    /// arguments of a call named like the keyword.
+    pub fn precedes_expression(self) -> bool {
+        matches!(self, Self::Where | Self::By | Self::Method | Self::Path)
+    }
+}
+
 fn classify_word(raw: &str) -> Word {
     match Identifier::from_str(raw).ok() {
         Some(iden) => Word::KnownWord {
@@ -574,6 +596,20 @@ pub fn lex(input: &str) -> Result<Vec<SpannedToken>, Vec<LexError<'_>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_word_no_expression_follows_directly_may_name_a_term() {
+        let tokens =
+            lex("max output readings BY path WHERE method ( .").expect("lex should succeed");
+        let may_name = tokens
+            .iter()
+            .map(|spanned| spanned.token.may_name_a_term())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            may_name,
+            vec![true, true, true, false, false, false, false, false, false]
+        );
+    }
 
     #[test]
     fn lexes_known_words_and_unknown_words() {

@@ -22,12 +22,12 @@ const TYPE_DEPTH: u8 = 3;
 const LIST_ITEMS: usize = 4;
 
 /// Built-in functions a call names beside generated names. Several share their spelling with a
-/// statement keyword. `max` is not among them: every region that ends at `MAX` stops at a call to
-/// it, so NSPL cannot spell such a call there, and generating it only where it can be read would
-/// make every expression depend on where it is written.
-const FUNCTIONS: [&str; 15] = [
+/// statement keyword, and `max`, `right` and `replace` with one that begins the clause after an
+/// expression: `MAX TIME`, a correlator's `RIGHT FROM` and an `ALTER` list's `, REPLACE ROUTE`.
+/// A statement reads each of them as a call wherever an expression is written.
+const FUNCTIONS: [&str; 20] = [
     "lower", "upper", "now", "coalesce", "abs", "concat", "length", "greatest", "least", "clamp",
-    "min", "sum", "count", "first", "last",
+    "min", "max", "sum", "count", "first", "last", "left", "right", "replace", "log",
 ];
 
 /// Every scalar type a conversion names.
@@ -348,11 +348,9 @@ impl Arbitrary<'_> {
             0 => FieldScope::Bare,
             1 => FieldScope::Message,
             2 => FieldScope::Input,
-            3 if self.region.output_scope => FieldScope::Input,
             3 => FieldScope::Output,
             4 => FieldScope::Branch,
             5 => FieldScope::Left,
-            6 if self.region.right_scope => FieldScope::Left,
             6 => FieldScope::Right,
             7 => FieldScope::RelayState { relay: self.name() },
             8 => FieldScope::Metadata,
