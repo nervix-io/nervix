@@ -640,6 +640,7 @@ impl Runtime {
             };
             let route = &input.routes[output_index].route;
             self.handle_structured_message_error(MessageErrorHandling {
+                routing: Some(routing),
                 domain,
                 node_kind: ModelKind::Reingestor,
                 node: &ModelName::from(reingestor),
@@ -926,6 +927,7 @@ impl Runtime {
             reingestor,
             error_policies,
             execution_now,
+            routing,
             ..
         } = context;
         let plan = match plan_filter_map_messages(
@@ -956,6 +958,7 @@ impl Runtime {
             }
         };
         self.handle_planned_message_errors(
+            Some(routing),
             domain,
             ModelKind::Reingestor,
             reingestor,
@@ -977,6 +980,8 @@ impl Runtime {
         input: BoundReingestorInput,
         receiver: RelayRuntimeFanIn,
     ) -> JoinHandle<()> {
+        let metrics_dirty =
+            self.branch_metrics_mark(domain, ModelKind::Reingestor, &input.reingestor);
         let task_domain = domain.clone();
         let task_reingestor = input.reingestor.clone();
         let task_from_relay = input.relay.clone();
@@ -1029,7 +1034,6 @@ impl Runtime {
             };
             let mut task_output_buffers =
                 ReingestorOutputBuffers::new(input.routes.len(), quiesce_counters.clone());
-            let task_reingestor_node = ModelName::from(&task_reingestor);
             let output_flush_context = ReingestorOutputFlushContext {
                 domain: &task_domain,
                 reingestor: &task_reingestor,
@@ -1166,11 +1170,7 @@ impl Runtime {
                             }
                         };
                         input_metrics.observe_delivery(&batch.delivery_observation(accepted_at));
-                        runtime.mark_branch_aggregated_metrics_updated(
-                            &task_domain,
-                            ModelKind::Reingestor,
-                            &task_reingestor_node,
-                        );
+                        metrics_dirty.mark();
                         let dependency_error_acks = batch.acks.clone();
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime
@@ -1579,7 +1579,7 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                message_error_plans: Arc::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
@@ -1828,7 +1828,7 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                message_error_plans: Arc::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),

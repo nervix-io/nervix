@@ -77,7 +77,7 @@ writer.
 | Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, signaling protocols, and the complete map of bound processor plans together. Each plan carries a typed identity and prepared VM and WASM artifacts for one installed node revision. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. Existing processor branches compare typed plan identities between batches; new branches resolve their template from the same published map. |
 | Ingestor and reingestor programs | Schedule application installs the domain's decision-layer entrypoint plans inside its complete typed execution revision. An ingestor start binds its node filter and routes against the staged routing revision into one immutable route set before its source opens. A reingestor start prepares the branched entrypoints of its routes and binds each input's source filter, its node filter and its routes before any entrypoint or input task starts. A running relay registers the consumer of a swapped-in input only after that. | Every source instance, endpoint request and ingest group of one ingestor shares the same bound route allocation, and a reingestor input task owns its bound programs. Neither compiles a program on the hot path nor returns to the domain execution registry per batch. A reingestor start that fails leaves no entrypoint, task or registered consumer behind, so a relay never refuses attached delivery for a consumer that has no receiver. |
 | Emitter execution plans | The decision layer prepares the domain's typed sink and ordered source edges with lowered expressions from one schedule revision; schedule application installs them in that revision. Startup, swaps and relocation bind a selected plan to local mounts, schemas and UDFs; relay inputs are registered during those transitions. Remote consumer edges come from the same plans. | An emitter task owns its bound programs and sink configuration for its lifetime. Per-batch work does not read the schedule or client Models; sink retries reuse the typed configuration. A dynamic flush change sends only its new flush policy to the running task. |
-| Message-error route plans | The registry selects each DLQ route from the committed schedule. Domain installation binds its schemas, branch declaration, flush contract, relay target and SET program before tasks start. Schedule application replaces the complete bound route map under the domain execution's write guard with the planned nodes, placement, entrypoints and emitters of one typed revision. | A failed record looks up one prepared route under the domain execution read guard and releases the guard before running its VM program or delivery. A buffered route compares the bound plan allocation with its running delivery task; a replacement drains the preceding task and starts a task with the new target and cadence. |
+| Message-error route plans | The registry selects each DLQ route from the committed schedule. Domain installation binds its schemas, branch declaration, flush contract, relay target and SET program before tasks start. Schedule application publishes the complete bound route map with the routing state of one typed revision. | A failed record looks up its prepared route in the task’s retained immutable routing snapshot, which publishes the bound plans together with the routing revision, before running its VM program or delivery. A buffered route compares the bound plan allocation with its running delivery task; a replacement drains the preceding task and starts a task with the new target and cadence. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
 | Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
 | Relay branch presence | The relay's owner task publishes the complete membership of the concrete branches it holds, and whether it admitted unbranched work, when that membership changes: a branch appears, is evicted or expires, or the owner starts or stops. The relay's state placement keeps the same presence across execution rebuilds. See [Relay branch presence](#relay-branch-presence). | `DESCRIBE RELAY ... WHERE`, materialized reads, and the console's dataflow graph load one membership without a lock. A batch for a branch the owner already holds publishes nothing. |
@@ -109,6 +109,56 @@ failure leaves the preceding routing revision observable. Publication swaps the 
 routing snapshot with its installed execution revision. Unchanged processor specifications, schema
 fingerprints and resolved branch contracts keep their exact plan allocation, including prepared
 programs and compiled WASM modules.
+
+## Retained Task Dependencies
+
+A source or sink retains one failure publication containing both its safe error and optional retry.
+Success reads that slot and clears it only when it holds a failure. Identical failure reports keep
+the same immutable observation. Reporting an error without a new retry keeps the active retry,
+which remains visible as publishing work to drains even when the emitter buffer is empty. DESCRIBE
+loads error, backoff and remaining wait from one observation. Emitter confirmation guards retain
+one counter resolved at startup, and task teardown removes its registry interest.
+
+Every pooled Redis or SQL sink registers a wait slot once. The connector serializes its connection
+borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
+that clears it on success, error or cancellation. Sink destruction removes only its own registry
+slot, so a replacement sink's slot survives an earlier sink's teardown.
+
+Generators retain the domain acknowledgement tracker. Ingest executions, groups and endpoint
+bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
+exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
+subscription drop counters retain their Prometheus children, including every declared outcome
+label combination, so recording resolves no label set.
+
+Each handoff entity has one immutable coordination-owner set and notification owner. Tasks retain
+that entity slot across repeated freezes. A watch registers before reading the publication;
+engagement and release replace it before notifying. Concurrent owners derive their replacement
+with the primitive publication boundary's reference update. Domain removal drops registry interest.
+
+Domain-clock publication contains lifecycle pause, generation and start-point observations alongside
+its installation. Ingestion reads admission and time from that one publication; Kafka offset polls
+read its generation; generators, processors, materialized relay tasks and subscriptions use the
+clock or lifecycle handle bound at startup. Each WASM state retains its entity assignment slot,
+which publishes state identity and checkpoint execution/replica owners together. A generation
+replacement or removal therefore fences a callback without a runtime registry lookup.
+
+Force-flush participants retain a private idle, available or closed scalar. Idle and already-claimed
+polls acquire no coordinator mutex. An available indication enters the mutex, which remains the
+sole authority for generations and claims. The coordinator visits participants in participant-ID
+order when publishing readiness, so deterministic replay sees the same sequence of scheduling
+points. Publication of a request precedes the watch wakeup;
+claim release makes the obligation available again. The relaxed hint publishes no data from another
+location. Watch synchronization and ArcSwap ordering belong to opaque primitive dependencies;
+this change introduces no Nervix cross-location memory-ordering claim. Production Shuttle checks
+explore generation publication, claims, release and close, and the idle regression counts actual
+coordinator acquisitions.
+
+The status and freeze transition contracts have registered Bolero sequence properties. Status
+observers and freeze registration/release have production-owner Shuttle checks. `just
+bench-task-handles` records raw same-host timing and allocated-byte samples for the repaired paths.
+The [retained task handle measurements](https://github.com/nervix-io/nervix/blob/main/benches/reports/task-handles.md) record the measured
+operations, host, samples and limits.
+The concurrent map inventory records their lifecycle registration, observation and teardown sites.
 
 ### Server endpoint intake
 

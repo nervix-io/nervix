@@ -66,7 +66,11 @@ impl WasmCheckpointBenchmark {
                     identifier: processor.clone(),
                     branch_key: Some(key),
                 };
-                ReplicatedWasmProcessorState::new(placement, None)
+                ReplicatedWasmProcessorState::new(
+                    placement,
+                    None,
+                    Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+                )
             })
             .collect();
         Self {

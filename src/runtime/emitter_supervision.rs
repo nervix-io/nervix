@@ -32,7 +32,7 @@ pub(super) enum EmitterRetryKind {
     Commit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EmitterRetryStatus {
     pub(super) kind: EmitterRetryKind,
     pub(super) reconnect: RuntimeReconnectStatus,
@@ -40,6 +40,15 @@ pub(super) struct EmitterRetryStatus {
 
 pub(super) struct EmitterConfirmationWaitGuard {
     pub(super) active_waits: Arc<AtomicUsize>,
+}
+
+impl EmitterConfirmationWaitGuard {
+    pub(super) fn begin(active_waits: &Arc<AtomicUsize>) -> Self {
+        active_waits.fetch_add(1, Ordering::AcqRel);
+        Self {
+            active_waits: active_waits.clone(),
+        }
+    }
 }
 
 impl Drop for EmitterConfirmationWaitGuard {
@@ -241,18 +250,22 @@ impl Runtime {
         })
     }
 
-    pub(in crate::runtime) fn record_emitter_transient_error(
+    pub(super) fn emitter_status(
         &self,
-        domain: &DomainName,
-        emitter: &EmitterName,
-        error: impl Into<String>,
-    ) {
-        self.inner.emitter_transient_errors.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
-            error.into(),
-        );
+        key: &DomainNodeRef,
+    ) -> Arc<task_status::TaskStatus<EmitterRetryStatus>> {
+        if let Some(status) = self.inner.emitter_statuses.get(key) {
+            return status.clone();
+        }
+        // Execution preparation serializes this entity's first registration before instances start.
+        let status = Arc::new(task_status::TaskStatus::<EmitterRetryStatus>::default());
+        self.inner
+            .emitter_statuses
+            .insert(key.clone(), status.clone());
+        status
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) fn record_emitter_transient_error_with_backoff(
         &self,
         domain: &DomainName,
@@ -269,6 +282,7 @@ impl Runtime {
         );
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) fn record_commit_failure_with_backoff(
         &self,
         domain: &DomainName,
@@ -285,6 +299,7 @@ impl Runtime {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn record_emitter_retry_with_backoff(
         &self,
         domain: &DomainName,
@@ -294,114 +309,34 @@ impl Runtime {
         kind: EmitterRetryKind,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-        self.inner
-            .emitter_transient_errors
-            .insert(key.clone(), error.into());
-        self.inner.emitter_retry_statuses.insert(
-            key,
-            EmitterRetryStatus {
+        self.emitter_status(&key).fail(
+            error.into(),
+            Some(EmitterRetryStatus {
                 kind,
                 reconnect: RuntimeReconnectStatus {
                     backoff,
                     retry_at: Instant::now() + backoff,
                 },
-            },
+            }),
         );
     }
 
+    pub(super) fn emitter_confirmation_counter(&self, key: &DomainNodeRef) -> Arc<AtomicUsize> {
+        self.inner
+            .emitter_confirmation_waits
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone()
+    }
+
+    #[cfg(test)]
     pub(in crate::runtime) fn begin_emitter_confirmation_wait(
         &self,
         domain: &DomainName,
         emitter: &EmitterName,
     ) -> EmitterConfirmationWaitGuard {
-        let active_waits = self
-            .inner
-            .emitter_confirmation_waits
-            .entry(DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.clone(),
-            ))
-            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
-            .clone();
-        active_waits.fetch_add(1, Ordering::AcqRel);
-        EmitterConfirmationWaitGuard { active_waits }
-    }
-
-    pub(in crate::runtime) fn clear_emitter_transient_error(
-        &self,
-        domain: &DomainName,
-        emitter: &EmitterName,
-    ) {
-        self.inner
-            .emitter_transient_errors
-            .remove(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.clone(),
-            ));
-        self.inner
-            .emitter_retry_statuses
-            .remove(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.clone(),
-            ));
-    }
-
-    pub(super) fn emitter_transient_error(
-        &self,
-        domain: &DomainName,
-        emitter: &EmitterName,
-    ) -> Option<String> {
-        self.inner
-            .emitter_transient_errors
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.clone(),
-            ))
-            .map(|error| error.value().clone())
-    }
-
-    pub(in crate::runtime) fn emitter_reconnect_backoff(
-        &self,
-        domain: &DomainName,
-        emitter: &EmitterName,
-    ) -> Option<String> {
-        self.inner
-            .emitter_retry_statuses
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.clone(),
-            ))
-            .map(|status| humantime::format_duration(status.value().reconnect.backoff).to_string())
-    }
-
-    pub(super) fn emitter_reconnect_wait_millis(
-        &self,
-        domain: &DomainName,
-        emitter: &EmitterName,
-    ) -> Option<u64> {
-        self.inner
-            .emitter_retry_statuses
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Emitter,
-                emitter.clone(),
-            ))
-            .map(|status| {
-                u64::try_from(
-                    status
-                        .value()
-                        .reconnect
-                        .retry_at
-                        .saturating_duration_since(Instant::now())
-                        .as_millis(),
-                )
-                .unwrap_or(u64::MAX)
-            })
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
+        EmitterConfirmationWaitGuard::begin(&self.emitter_confirmation_counter(&key))
     }
 
     /// Resolves the mounts in an already decided emitter plan, then starts its task.
@@ -424,6 +359,44 @@ impl Runtime {
                 })
         })?;
         emitter_task::EmitterTask::spawn(self, build, emitter, plan, inputs)
+    }
+}
+
+/// Registration ends with its emitter task. A replacement task owns different retained handles.
+pub(super) struct EmitterTaskRegistration {
+    runtime: Runtime,
+    key: DomainNodeRef,
+    status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
+    confirmations: Arc<AtomicUsize>,
+}
+
+impl EmitterTaskRegistration {
+    pub(super) fn new(context: &EmitterSinkContext) -> Self {
+        Self {
+            runtime: context.runtime.clone(),
+            key: DomainNodeRef::node_in(
+                context.domain.clone(),
+                ModelKind::Emitter,
+                context.emitter.clone(),
+            ),
+            status: context.status.clone(),
+            confirmations: context.confirmation_waits.clone(),
+        }
+    }
+}
+
+impl Drop for EmitterTaskRegistration {
+    fn drop(&mut self) {
+        self.runtime
+            .inner
+            .emitter_statuses
+            .remove_if(&self.key, |_, current| Arc::ptr_eq(current, &self.status));
+        self.runtime
+            .inner
+            .emitter_confirmation_waits
+            .remove_if(&self.key, |_, current| {
+                Arc::ptr_eq(current, &self.confirmations)
+            });
     }
 }
 

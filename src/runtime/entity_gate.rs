@@ -615,10 +615,68 @@ impl Drop for EntityGateHold {
 /// that lands between a read and a registration wakes nothing: the waiter did not exist yet. A task
 /// that missed one keeps a stale freeze, and a stale freeze disables exactly the arms that would
 /// wake it again, so its force-flush obligation can outlive the handoff that raised it.
+/// Coordination owners mutate only on handoff engagement and release. Tasks retain this slot.
+#[derive(Debug)]
+pub(in crate::runtime) struct OwnershipHandoffFreezeState {
+    published: ArcSwap<BTreeSet<CoordinationIdentity>>,
+    changed: Notify,
+}
+
+impl Default for OwnershipHandoffFreezeState {
+    fn default() -> Self {
+        Self {
+            published: ArcSwap::from_pointee(BTreeSet::new()),
+            changed: Notify::new(),
+        }
+    }
+}
+
+impl OwnershipHandoffFreezeState {
+    pub(in crate::runtime) fn insert(&self, coordination: CoordinationIdentity) {
+        if self.published.load().contains(&coordination) {
+            return;
+        }
+        let preceding = self.published.rcu(|current| {
+            if current.contains(&coordination) {
+                return current.clone();
+            }
+            let mut owners = (**current).clone();
+            owners.insert(coordination.clone());
+            StdArc::new(owners)
+        });
+        if !preceding.contains(&coordination) {
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn remove(&self, coordination: &CoordinationIdentity) {
+        if !self.published.load().contains(coordination) {
+            return;
+        }
+        let preceding = self.published.rcu(|current| {
+            if !current.contains(coordination) {
+                return current.clone();
+            }
+            let mut owners = (**current).clone();
+            owners.remove(coordination);
+            StdArc::new(owners)
+        });
+        if preceding.contains(coordination) {
+            self.changed.notify_waiters();
+        }
+    }
+
+    pub(in crate::runtime) fn is_frozen(&self) -> bool {
+        !self.published.load().is_empty()
+    }
+
+    pub(in crate::runtime) fn contains(&self, coordination: &CoordinationIdentity) -> bool {
+        self.published.load().contains(coordination)
+    }
+}
+
 pub(in crate::runtime) struct OwnershipHandoffFreezeWatch {
-    frozen_entities: Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
-    changed: Arc<Notify>,
-    entity: DomainNodeRef,
+    state: Arc<OwnershipHandoffFreezeState>,
 }
 
 /// One observation of an entity's ownership-handoff freeze, with the wait that outlives it.
@@ -629,29 +687,23 @@ pub(in crate::runtime) struct OwnershipHandoffFreeze<'watch> {
 
 impl OwnershipHandoffFreezeWatch {
     pub(in crate::runtime) fn new(runtime: &Runtime, entity: DomainNodeRef) -> Self {
-        Self::over(
-            runtime.inner.frozen_ownership_handoff_entities.clone(),
-            runtime.inner.ownership_handoff_freeze_changed.clone(),
-            entity,
-        )
+        let state = runtime
+            .inner
+            .frozen_ownership_handoff_entities
+            .entry(entity)
+            .or_default()
+            .clone();
+        Self::over(state)
     }
 
-    fn over(
-        frozen_entities: Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
-        changed: Arc<Notify>,
-        entity: DomainNodeRef,
-    ) -> Self {
-        Self {
-            frozen_entities,
-            changed,
-            entity,
-        }
+    fn over(state: Arc<OwnershipHandoffFreezeState>) -> Self {
+        Self { state }
     }
 
     /// One observation of the entity's freeze, with its wait registered before the read.
     pub(in crate::runtime) fn observe(&self) -> OwnershipHandoffFreeze<'_> {
-        let changed = self.changed.notified();
-        let frozen = self.frozen_entities.contains_key(&self.entity);
+        let changed = self.state.changed.notified();
+        let frozen = self.state.is_frozen();
         OwnershipHandoffFreeze { frozen, changed }
     }
 }
@@ -921,7 +973,6 @@ impl Runtime {
                     .or_default()
                     .insert(coordination.clone());
             }
-            self.inner.ownership_handoff_freeze_changed.notify_waiters();
         }
         let hold = EntityAlterHold {
             coordination: coordination.clone(),
@@ -938,7 +989,6 @@ impl Runtime {
                 &self.inner.ingestors,
                 &self.inner.ingestor_quiescence,
                 &self.inner.frozen_ownership_handoff_entities,
-                &self.inner.ownership_handoff_freeze_changed,
                 domain,
                 hold,
             )
@@ -958,7 +1008,6 @@ impl Runtime {
         let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
-        let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
         let expiring_operation = operation.clone();
         drop(nervix_primitives::task::spawn(async move {
             nervix_primitives::time::sleep_until(deadline).await;
@@ -972,7 +1021,6 @@ impl Runtime {
                 &ingestors,
                 &ingestor_quiescence,
                 &frozen_ownership_handoff_entities,
-                &ownership_handoff_freeze_changed,
                 &coordination,
                 &expiring_operation,
             )
@@ -1057,7 +1105,6 @@ impl Runtime {
         let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
-        let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
         let coordination = coordination.clone();
         let release = nervix_primitives::task::spawn(async move {
             Self::release_entity_gate_operation_from_state(
@@ -1065,7 +1112,6 @@ impl Runtime {
                 &ingestors,
                 &ingestor_quiescence,
                 &frozen_ownership_handoff_entities,
-                &ownership_handoff_freeze_changed,
                 &coordination,
                 &operation,
             )
@@ -1083,10 +1129,9 @@ impl Runtime {
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeRef,
-            BTreeSet<CoordinationIdentity>,
+            Arc<OwnershipHandoffFreezeState>,
             RandomState,
         >,
-        ownership_handoff_freeze_changed: &Notify,
         coordination: &CoordinationIdentity,
         expected_operation: &Arc<EntityGateOperation>,
     ) {
@@ -1105,7 +1150,6 @@ impl Runtime {
             ingestors,
             ingestor_quiescence,
             frozen_ownership_handoff_entities,
-            ownership_handoff_freeze_changed,
             &operation.scope().domain,
             hold,
         )
@@ -1117,10 +1161,9 @@ impl Runtime {
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeRef,
-            BTreeSet<CoordinationIdentity>,
+            Arc<OwnershipHandoffFreezeState>,
             RandomState,
         >,
-        ownership_handoff_freeze_changed: &Notify,
         domain: &DomainName,
         hold: EntityAlterHold,
     ) {
@@ -1130,16 +1173,11 @@ impl Runtime {
             for entity in &hold.affected_entities {
                 let key =
                     DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
-                if let nervix_primitives::collections::dash_map::Entry::Occupied(mut entry) =
-                    frozen_ownership_handoff_entities.entry(key)
-                {
-                    entry.get_mut().remove(&hold.coordination);
-                    if entry.get().is_empty() {
-                        entry.remove();
-                    }
+                if let Some(state) = frozen_ownership_handoff_entities.get(&key) {
+                    state.remove(&hold.coordination);
                 }
             }
-            ownership_handoff_freeze_changed.notify_waiters();
+            // Each retained entity slot publishes and wakes its own observers.
         }
         for quiesced in &hold.quiesced_ingestors {
             nervix_primitives::task::consume_budget().await;
@@ -1290,7 +1328,8 @@ impl Runtime {
                 retry_wait: None,
             });
         }
-        let retry = self.inner.emitter_retry_statuses.get(key)?;
+        let failure = self.inner.emitter_statuses.get(key)?.snapshot()?;
+        let retry = failure.retry.as_ref()?;
         let state = match retry.kind {
             EmitterRetryKind::Infrastructure => EmitterPublishingDrainState::RetryingInfrastructure,
             EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
@@ -1392,13 +1431,14 @@ impl Runtime {
             })
             .map(|entry| entry.key().clone())
             .collect::<HashSet<_>>();
-        publishing_keys.extend(
-            self.inner
-                .emitter_retry_statuses
-                .iter()
-                .filter(|entry| &entry.key().domain == domain)
-                .map(|entry| entry.key().clone()),
-        );
+        for entry in self.inner.emitter_statuses.iter() {
+            if &entry.key().domain == domain
+                && let Some(failure) = entry.value().snapshot()
+                && failure.retry.is_some()
+            {
+                publishing_keys.insert(entry.key().clone());
+            }
+        }
         let mut emitter_publishing = Vec::new();
         for key in publishing_keys {
             let pending_messages = match self.inner.emitter_buffers.get(&key) {
@@ -1420,7 +1460,13 @@ impl Runtime {
                 });
                 continue;
             }
-            let Some(retry) = self.inner.emitter_retry_statuses.get(&key) else {
+            let Some(status) = self.inner.emitter_statuses.get(&key) else {
+                continue;
+            };
+            let Some(failure) = status.snapshot() else {
+                continue;
+            };
+            let Some(retry) = failure.retry.as_ref() else {
                 continue;
             };
             let state = match retry.kind {
@@ -1480,6 +1526,31 @@ mod tests {
 
     fn coordination(coordinator: &str, process_epoch: u64, sequence: u64) -> CoordinationIdentity {
         CoordinationIdentity::new(named(coordinator), process_epoch, sequence)
+    }
+
+    #[test]
+    fn bolero_freeze_sequences_publish_exact_coordination_owners() {
+        bolero::check!().with_type::<[u8; 64]>().for_each(|steps| {
+            let state = Arc::new(OwnershipHandoffFreezeState::default());
+            let watch = OwnershipHandoffFreezeWatch::over(state.clone());
+            let mut expected = BTreeSet::new();
+            for step in steps {
+                let owner = coordination("coordinator", 1, u64::from((step / 2) % 8) + 1);
+                if step % 2 == 0 {
+                    state.insert(owner.clone());
+                    expected.insert(owner);
+                } else {
+                    state.remove(&owner);
+                    expected.remove(&owner);
+                }
+                assert_eq!(&**state.published.load(), &expected);
+                assert_eq!(watch.observe().is_frozen(), !expected.is_empty());
+                for sequence in 1..=8 {
+                    let owner = coordination("coordinator", 1, sequence);
+                    assert_eq!(state.contains(&owner), expected.contains(&owner));
+                }
+            }
+        });
     }
 
     #[test]

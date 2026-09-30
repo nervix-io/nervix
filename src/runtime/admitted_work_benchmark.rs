@@ -8,15 +8,17 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    DomainClockAuthority, DomainConfig, DomainName, DomainPace, DomainStartPoint, DomainState,
-    DomainStatus, EmitterName, ErrorPolicies, FieldName, ParseAsType, PlacementPolicy,
-    ResolvedCodecWireFormat, SchemaName, Timestamp,
+    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainPace, DomainStartPoint,
+    DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
+    PlacementPolicy, ResolvedCodecWireFormat, SchemaName, Timestamp,
 };
+use nervix_primitives::{publication::ArcSwap, sync::StdArc};
 
 use super::{
     BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle, EmitterPublishBatch,
     EmitterSinkContext, Executor, RelayMessage, RelayRecordBatch, Runtime,
-    emitter_encoding::encode_pending_broker_payloads, prepare_branched_entrypoint_input,
+    domain_execution::DomainRoutingSnapshot, emitter_encoding::encode_pending_broker_payloads,
+    observability::BranchMetricsMark, prepare_branched_entrypoint_input,
 };
 use crate::{
     runtime_ack::AckSet,
@@ -212,12 +214,19 @@ impl TransformedEncodingBenchmark {
         let clock = lifecycle
             .bind()
             .assured("the benchmark installs its unpaced domain clock above");
+        let node_runtime = Runtime::new();
+        let emitter = identifier::<EmitterName>("admitted_work_emitter");
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         Self {
             runtime: benchmark_runtime(),
             context: EmitterSinkContext {
-                runtime: Runtime::new(),
+                routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+                metrics_dirty: BranchMetricsMark::default(),
+                status: node_runtime.emitter_status(&key),
+                confirmation_waits: node_runtime.emitter_confirmation_counter(&key),
+                runtime: node_runtime,
                 domain,
-                emitter: identifier::<EmitterName>("admitted_work_emitter"),
+                emitter,
                 error_policies: ErrorPolicies::handled_by_log(),
                 udfs: None,
                 clock,

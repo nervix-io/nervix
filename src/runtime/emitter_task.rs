@@ -27,6 +27,14 @@ pub(in crate::runtime) struct EmitterTask;
 /// one handle to node state instead of a second view of the same values.
 #[derive(Clone)]
 pub(in crate::runtime) struct EmitterSinkContext {
+    /// Schedule application also owns and replaces this routing publication.
+    pub(super) routing: SharedDomainRouting,
+    /// Metric replication independently retains the marked state.
+    pub(super) metrics_dirty: BranchMetricsMark,
+    /// The status registry retains this owner for DESCRIBE and drain observations.
+    pub(super) status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
+    /// Drain observers retain the registered counter independently of this context.
+    pub(super) confirmation_waits: Arc<AtomicUsize>,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) emitter: EmitterName,
@@ -39,6 +47,8 @@ pub(in crate::runtime) struct EmitterSinkContext {
 }
 
 struct EmitterBatchContext<'a> {
+    error_routing: &'a SharedDomainRouting,
+    metrics_dirty: &'a BranchMetricsMark,
     runtime: &'a Runtime,
     routing: &'a mut DomainRoutingCache,
     /// Bound once with the task, so resolving a batch's materialized dependencies never re-binds
@@ -210,6 +220,28 @@ pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<Emitte
 }
 
 impl EmitterSinkContext {
+    pub(super) fn record_failure(&self, error: impl Into<String>) {
+        self.status.record_error(error.into());
+    }
+
+    pub(super) fn record_retry(
+        &self,
+        error: impl Into<String>,
+        backoff: Duration,
+        kind: EmitterRetryKind,
+    ) {
+        self.status.fail(
+            error.into(),
+            Some(EmitterRetryStatus {
+                kind,
+                reconnect: RuntimeReconnectStatus {
+                    backoff,
+                    retry_at: Instant::now() + backoff,
+                },
+            }),
+        );
+    }
+
     pub(super) fn dns(&self) -> Result<DnsResolver, Report<EmitterRuntimeError>> {
         let Some(dns) = self.runtime.dns() else {
             return Err(Report::new(EmitterRuntimeError::InitializeSink)
@@ -312,17 +344,20 @@ impl SinkAcknowledgementServices for AckSet {
 
 impl SinkTransientErrorStatus for EmitterSinkContext {
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
-        self.runtime.record_emitter_transient_error_with_backoff(
-            &self.domain,
-            &self.emitter,
+        self.status.fail(
             reason,
-            retry_after,
+            Some(EmitterRetryStatus {
+                kind: EmitterRetryKind::Infrastructure,
+                reconnect: RuntimeReconnectStatus {
+                    backoff: retry_after,
+                    retry_at: Instant::now() + retry_after,
+                },
+            }),
         );
     }
 
     fn clear_transient_error(&self) {
-        self.runtime
-            .clear_emitter_transient_error(&self.domain, &self.emitter);
+        self.status.clear();
     }
 }
 
@@ -455,9 +490,7 @@ impl EmitterTaskState {
                 },
             );
         } else {
-            context
-                .runtime
-                .clear_emitter_transient_error(&context.domain, &context.emitter);
+            context.status.clear();
         }
         Self {
             sink,
@@ -489,9 +522,7 @@ impl EmitterTaskState {
             Ok(report) => {
                 self.backoff.reset();
                 self.retry.clear();
-                context
-                    .runtime
-                    .clear_emitter_transient_error(&context.domain, &context.emitter);
+                context.status.clear();
                 if let Some(report) = report.as_ref() {
                     batch_context.observe_sent(report);
                 }
@@ -538,11 +569,7 @@ impl EmitterTaskState {
                 let (error, failed_batches) =
                     failure.drain_failed_batches(pending_batch, &mut self.buffer);
                 let reason = emitter_error_message(&error);
-                context.runtime.record_emitter_transient_error(
-                    &context.domain,
-                    &context.emitter,
-                    reason.clone(),
-                );
+                context.record_failure(reason.clone());
                 outcome_context.report_error(context, &reason);
                 let operation =
                     emitter_message_error_operation(&error, outcome_context.codec_route);
@@ -828,7 +855,7 @@ impl EmitterTask {
                     return;
                 }
             };
-            let mut routing = DomainRoutingCache::new(shared_routing);
+            let mut routing = DomainRoutingCache::new(shared_routing.clone());
             // The emitter's explicit FLUSH EACH and COMMIT EACH cadences are domain logical
             // durations, so every emitter binds the domain clock whether or not it collects input.
             let domain_clock = match runtime.bind_domain_clock(&task_domain) {
@@ -875,7 +902,22 @@ impl EmitterTask {
                 "the registry validated this emitter's inputs, and a non-empty input list builds \
                  an interaction",
             );
+            let emitter_key = DomainNodeRef::node_in(
+                task_domain.clone(),
+                ModelKind::Emitter,
+                task_emitter.clone(),
+            );
+            let status = runtime.emitter_status(&emitter_key);
+            let confirmation_waits = runtime.emitter_confirmation_counter(&emitter_key);
             let context = EmitterSinkContext {
+                routing: shared_routing,
+                metrics_dirty: runtime.branch_metrics_mark(
+                    &task_domain,
+                    ModelKind::Emitter,
+                    &task_emitter,
+                ),
+                status,
+                confirmation_waits,
                 runtime: runtime.clone(),
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
@@ -883,6 +925,7 @@ impl EmitterTask {
                 udfs,
                 clock: domain_clock.clone(),
             };
+            let _registration = super::emitter_supervision::EmitterTaskRegistration::new(&context);
             let backoff = RuntimeReconnectBackoff::from_policy(plan.retry_policy);
             let buffer =
                 EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
@@ -898,6 +941,8 @@ impl EmitterTask {
             let state = EmitterTaskState::new(sink, buffer, backoff, &context);
             let task_emitter_node = ModelName::from(&task_emitter);
             let batch_context = EmitterBatchContext {
+                error_routing: &context.routing,
+                metrics_dirty: &context.metrics_dirty,
                 runtime: &runtime,
                 routing: &mut routing,
                 domain_clock: &domain_clock,
@@ -963,11 +1008,7 @@ impl EmitterTaskLoop<'_> {
                 // for a logical cadence, so the work stays buffered and unpublished while the
                 // acknowledgements it owns are kept alive on the physical beat.
                 Err(RelayInteractionError::WakeTiming { reason, .. }) => {
-                    self.context.runtime.record_emitter_transient_error(
-                        &self.context.domain,
-                        &self.context.emitter,
-                        reason,
-                    );
+                    self.context.record_failure(reason);
                     let acks = self.state.sink.pending_acks(&self.state.buffer);
                     RuntimeReconnectBackoff::wait_duration_with_ack_alive(
                         RETRY_ACK_ALIVE_EACH,
@@ -1005,11 +1046,7 @@ impl EmitterTaskLoop<'_> {
                     // without a deadline and is recorded as the emitter's transient error.
                     if let Err(error) = self.state.buffer.reconfigure(self.context, &flush_policy) {
                         let reason = emitter_error_message(&error);
-                        self.context.runtime.record_emitter_transient_error(
-                            &self.context.domain,
-                            &self.context.emitter,
-                            reason.clone(),
-                        );
+                        self.context.record_failure(reason.clone());
                         self.context
                             .report_flush_error(self.plan.sink.label(), &reason);
                     }
@@ -1029,11 +1066,7 @@ impl EmitterTaskLoop<'_> {
                             &self.context.emitter,
                         )
                     {
-                        self.context.runtime.record_emitter_transient_error(
-                            &self.context.domain,
-                            &self.context.emitter,
-                            reason.clone(),
-                        );
+                        self.context.record_failure(reason.clone());
                         self.context
                             .report_flush_error(self.plan.sink.label(), &reason);
                         clear_emitter_stop_signal(self.stop_signal, deadline);
@@ -1069,10 +1102,7 @@ impl EmitterTaskLoop<'_> {
                         Ok(Ok(report)) => {
                             self.state.backoff.reset();
                             self.state.retry.clear();
-                            self.context.runtime.clear_emitter_transient_error(
-                                &self.context.domain,
-                                &self.context.emitter,
-                            );
+                            self.context.status.clear();
                             if let Some(report) = report.as_ref() {
                                 self.batch_context.observe_sent(report);
                             }
@@ -1080,11 +1110,7 @@ impl EmitterTaskLoop<'_> {
                         }
                         Ok(Err(error)) => {
                             let reason = emitter_error_message(&error);
-                            self.context.runtime.record_emitter_transient_error(
-                                &self.context.domain,
-                                &self.context.emitter,
-                                reason.clone(),
-                            );
+                            self.context.record_failure(reason.clone());
                             self.context
                                 .report_flush_error(self.plan.sink.label(), &reason);
                             Err(Report::new(EmitterRuntimeError::FinalFlush)
@@ -1124,14 +1150,11 @@ impl EmitterTaskLoop<'_> {
                             .retry
                             .include_acks(self.state.sink.pending_acks(&self.state.buffer));
                         if self.state.retry.is_active() {
-                            self.context
-                                .runtime
-                                .record_emitter_transient_error_with_backoff(
-                                    &self.context.domain,
-                                    &self.context.emitter,
-                                    reason.clone(),
-                                    self.state.backoff.next_delay(),
-                                );
+                            self.context.record_retry(
+                                reason.clone(),
+                                self.state.backoff.next_delay(),
+                                EmitterRetryKind::Infrastructure,
+                            );
                         } else {
                             self.state.retry.defer(
                                 self.context,
@@ -1197,11 +1220,7 @@ impl EmitterTaskLoop<'_> {
                             &self.context.emitter,
                         )
                     {
-                        self.context.runtime.record_emitter_transient_error(
-                            &self.context.domain,
-                            &self.context.emitter,
-                            reason.clone(),
-                        );
+                        self.context.record_failure(reason.clone());
                         self.context
                             .report_flush_error(self.plan.sink.label(), &reason);
                         let pending = self.state.buffer.drain_pending();
@@ -1235,11 +1254,7 @@ impl EmitterTaskLoop<'_> {
                         Ok(None) => {}
                         Err(error) => {
                             let reason = emitter_error_message(&error);
-                            self.context.runtime.record_emitter_transient_error(
-                                &self.context.domain,
-                                &self.context.emitter,
-                                reason.clone(),
-                            );
+                            self.context.record_failure(reason.clone());
                             self.context
                                 .report_flush_error(self.plan.sink.label(), &reason);
                             let pending = self.state.buffer.drain_pending();
@@ -1292,10 +1307,7 @@ impl EmitterTaskLoop<'_> {
                             continue;
                         }
                         self.state.reconnect_on_wake = false;
-                        self.context.runtime.clear_emitter_transient_error(
-                            &self.context.domain,
-                            &self.context.emitter,
-                        );
+                        self.context.status.clear();
                     }
                     let publish_result = {
                         let EmitterTaskState {
@@ -1344,11 +1356,7 @@ impl EmitterTaskLoop<'_> {
                         .get(&input_relay)
                         .verified("the task resolves metrics for every declared emitter input");
                     input_metrics.observe_delivery(&batch.delivery_observation(actual_utc_now()));
-                    self.context.runtime.mark_branch_aggregated_metrics_updated(
-                        &self.context.domain,
-                        ModelKind::Emitter,
-                        &self.context.emitter,
-                    );
+                    self.context.metrics_dirty.mark();
                     let wait_for_required_state = !self.interaction.is_terminal_drain();
                     let publish_batch = match self
                         .batch_context
@@ -1477,11 +1485,7 @@ impl EmitterTaskLoop<'_> {
 impl EmitterBatchContext<'_> {
     fn observe_sent(&self, report: &PublishReport) {
         self.output_metrics.observe(report);
-        self.runtime.mark_branch_aggregated_metrics_updated(
-            self.domain,
-            ModelKind::Emitter,
-            self.node,
-        );
+        self.metrics_dirty.mark();
     }
 
     async fn handle_publish_error_batches(
@@ -1526,6 +1530,7 @@ impl EmitterBatchContext<'_> {
             }
             self.runtime
                 .handle_structured_message_error(MessageErrorHandling {
+                    routing: Some(&self.error_routing.load()),
                     domain: self.domain,
                     node_kind: ModelKind::Emitter,
                     node: self.node,
@@ -1566,6 +1571,7 @@ impl EmitterBatchContext<'_> {
     async fn deliver_planned_message_errors(&self, errors: Vec<PlannedMessageError>) {
         self.runtime
             .handle_planned_message_errors(
+                Some(&self.error_routing.load()),
                 self.domain,
                 ModelKind::Emitter,
                 self.emitter,
@@ -1945,6 +1951,8 @@ mod tests {
         materialized_state: &'a [nervix_models::MaterializedStateDependency],
     ) -> EmitterBatchContext<'a> {
         EmitterBatchContext {
+            error_routing: &context.routing,
+            metrics_dirty: &context.metrics_dirty,
             runtime: &context.runtime,
             routing,
             domain_clock: &context.clock,
@@ -2082,7 +2090,8 @@ mod tests {
         assert_eq!(
             context
                 .runtime
-                .emitter_transient_error(&context.domain, &context.emitter),
+                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+                .error,
             None
         );
         let mut fresh_backoff = RuntimeReconnectBackoff::default();
@@ -2142,7 +2151,8 @@ mod tests {
         assert_eq!(
             context
                 .runtime
-                .emitter_transient_error(&context.domain, &context.emitter),
+                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+                .error,
             Some("test sink rejected the attempt".to_string())
         );
     }
@@ -2196,7 +2206,8 @@ mod tests {
         assert_eq!(
             context
                 .runtime
-                .emitter_transient_error(&context.domain, &context.emitter),
+                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+                .error,
             Some("test encoding failed".to_string())
         );
     }
@@ -2321,20 +2332,23 @@ mod tests {
         assert_eq!(
             context
                 .runtime
-                .emitter_transient_error(&context.domain, &context.emitter),
+                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+                .error,
             Some("broker temporarily unavailable".to_string())
         );
         assert!(
             context
                 .runtime
-                .emitter_reconnect_backoff(&context.domain, &context.emitter)
+                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+                .reconnect_backoff
                 .is_some()
         );
         host.clear_transient_error();
         assert_eq!(
             context
                 .runtime
-                .emitter_transient_error(&context.domain, &context.emitter),
+                .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+                .error,
             None
         );
 

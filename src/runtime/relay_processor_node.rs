@@ -356,6 +356,7 @@ impl RelayProcessorNode {
         branch
             .runtime
             .handle_planned_message_errors(
+                branch.routing_snapshot.as_deref(),
                 &branch.domain,
                 self.kind,
                 &self.processor,
@@ -388,8 +389,7 @@ impl RelayProcessorNode {
                 }
             };
             self.refresh(routing);
-            let execution_snapshot = match branch.runtime.domain_execution_snapshot(&branch.domain)
-            {
+            let execution_snapshot = match branch.domain_clock.snapshot() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
@@ -667,6 +667,7 @@ impl RelayProcessorNode {
                                     .runtime
                                     .handle_message_error(
                                         MessageErrorSourceContext {
+                                            routing: branch.routing_snapshot.as_deref(),
                                             domain: &branch.domain,
                                             node_kind: self.kind,
                                             node: &self.processor,
@@ -699,6 +700,7 @@ impl RelayProcessorNode {
                             .runtime
                             .handle_message_error(
                                 MessageErrorSourceContext {
+                                    routing: branch.routing_snapshot.as_deref(),
                                     domain: &branch.domain,
                                     node_kind: self.kind,
                                     node: &self.processor,
@@ -745,6 +747,7 @@ impl RelayProcessorNode {
                                     .runtime
                                     .handle_message_error(
                                         MessageErrorSourceContext {
+                                            routing: branch.routing_snapshot.as_deref(),
                                             domain: &branch.domain,
                                             node_kind: self.kind,
                                             node: &self.processor,
@@ -1220,6 +1223,7 @@ impl RelayProcessorNode {
                                     branch
                                         .runtime
                                         .handle_structured_message_error(MessageErrorHandling {
+                                            routing: branch.routing_snapshot.as_deref(),
                                             domain: &branch.domain,
                                             node_kind: self.kind,
                                             node: &self.processor,

@@ -1578,7 +1578,7 @@ impl Cluster {
             let dependencies = self.dependencies.clone();
             let query_group = group.to_string();
             let query_topic = topic.to_string();
-            let actual = nervix_primitives::task::spawn_blocking(move || {
+            let observation = nervix_primitives::task::spawn_blocking(move || {
                 kafka_consumer_group_next_offset(
                     &dependencies,
                     &query_group,
@@ -1587,7 +1587,15 @@ impl Cluster {
                 )
             })
             .await
-            .map_err(io::Error::other)??;
+            .map_err(io::Error::other)?;
+            let actual = match observation {
+                Ok(actual) => actual,
+                Err(error) if Instant::now() >= deadline => return Err(error),
+                Err(_) => {
+                    sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
             let reached = actual.is_some_and(|offset| offset >= threshold);
             if should_reach && reached {
                 return Ok(());

@@ -123,6 +123,7 @@ fn accept_decoded_payloads(
         .collect::<Vec<_>>();
     collector
         .collect(IngestGroupContribution {
+            handles: &IngestTaskHandles::detached(&domain("default")),
             domain: &domain("default"),
             ingestor: &named("grouped_event_source"),
             timestamp_source: None,
@@ -773,6 +774,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     }];
     let identity_error = expect_failure(
         collector.collect(IngestGroupContribution {
+            handles: &IngestTaskHandles::detached(&domain("default")),
             domain: &other_domain,
             ingestor: &ingestor,
             timestamp_source: None,
@@ -1073,6 +1075,8 @@ async fn branched_root_without_children_acks_success() {
         relay_state_epoch: None,
         processors: HashMap::default(),
         metrics: BranchRuntimeMetrics {
+            source_dirty: BranchMetricsMark::default(),
+            processor_dirty: HashMap::default(),
             source: root_metrics,
             source_input: None,
             processor_inputs: HashMap::default(),

@@ -10,7 +10,7 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records. The counters under test are Shuttle's atomics, so a
 // check reads them while another task is between two of its own adjustments.
-use std::{collections::BTreeSet, time::Duration};
+use std::time::Duration;
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -22,7 +22,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     collections::DashMap,
-    sync::{Arc, Notify, StdArc, oneshot},
+    sync::{Arc, StdArc, oneshot},
     time::Instant,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
@@ -30,8 +30,8 @@ use nervix_primitives::{
 use super::{
     BranchQuiesceDepths, BranchQuiesceGauges, EntityAlterHold, EntityGateHold, EntityGateOperation,
     EntityGateOperationError, EntityGateScope, NodeQuiesceCounters, NodeQuiesceWorkGuard,
-    OutputBufferQuiesceGauge, OwnershipHandoffFreezeWatch, RelayDispatchGate,
-    RelayDispatchGateLease, Runtime,
+    OutputBufferQuiesceGauge, OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch,
+    RelayDispatchGate, RelayDispatchGateLease, Runtime,
 };
 
 const RANDOM_ITERATIONS: usize = 1_000;
@@ -751,9 +751,8 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
         };
         let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
         let frozen_entities: Arc<
-            DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>,
+            DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>,
         > = Arc::new(DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0)));
-        let changed = Arc::new(Notify::new());
         frozen_entities
             .entry(key.clone())
             .or_default()
@@ -761,16 +760,13 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
         let gate = Arc::new(RelayDispatchGate::new());
 
         let watch = Arc::new(OwnershipHandoffFreezeWatch::over(
-            frozen_entities.clone(),
-            changed.clone(),
-            key.clone(),
+            frozen_entities.entry(key.clone()).or_default().clone(),
         ));
         let waiters = (0..FREEZE_WAITERS)
             .map(|_| nervix_primitives::task::spawn(wait_until_thawed(watch.clone())))
             .collect::<Vec<_>>();
 
         let releasing_entities = frozen_entities.clone();
-        let releasing_changed = changed.clone();
         let releasing_domain = domain.clone();
         let released_gate = gate.clone();
         let release = nervix_primitives::task::spawn(async move {
@@ -780,7 +776,6 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
                 &ingestors,
                 &ingestor_quiescence,
                 &releasing_entities,
-                &releasing_changed,
                 &releasing_domain,
                 EntityAlterHold {
                     coordination: coordination(),
@@ -804,7 +799,9 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
         }
 
         assert!(
-            frozen_entities.is_empty(),
+            frozen_entities
+                .iter()
+                .all(|entry| !entry.value().is_frozen()),
             "releasing the only hold lifts the freeze it raised"
         );
         assert!(
@@ -832,17 +829,14 @@ fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
         };
         let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
         let frozen_entities: Arc<
-            DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>,
+            DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>,
         > = Arc::new(DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0)));
-        let changed = Arc::new(Notify::new());
         frozen_entities
             .entry(key.clone())
             .or_default()
             .insert(coordination());
         let watch = Arc::new(OwnershipHandoffFreezeWatch::over(
-            frozen_entities.clone(),
-            changed.clone(),
-            key,
+            frozen_entities.entry(key.clone()).or_default().clone(),
         ));
 
         let waiter = nervix_primitives::task::spawn(wait_until_thawed(watch));
@@ -854,7 +848,6 @@ fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
                 &ingestors,
                 &ingestor_quiescence,
                 &releasing_entities,
-                &changed,
                 &domain,
                 EntityAlterHold {
                     coordination: coordination(),
@@ -873,7 +866,9 @@ fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
         release.await.assured(CHECK_TASK_JOINS);
         waiter.await.assured(CHECK_TASK_JOINS);
         assert!(
-            frozen_entities.is_empty(),
+            frozen_entities
+                .iter()
+                .all(|entry| !entry.value().is_frozen()),
             "the thawed entity and its waiter both observe the release"
         );
     });

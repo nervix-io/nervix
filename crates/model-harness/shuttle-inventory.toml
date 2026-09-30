@@ -124,6 +124,7 @@ checks = [
   "runtime::state_store::shuttle_tests::shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes",
   "runtime::state_store::shuttle_tests::shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind",
   "runtime::state_store::shuttle_tests::shuttle_snapshot_installation_never_overlaps_origination_or_a_capture",
+  "runtime::task_status::tests::shuttle_status_observers_read_coherent_error_and_retry",
   "runtime::wasm_checkpoint::shuttle_tests::shuttle_a_checkpoint_waiting_for_its_replicas_misses_no_confirmation",
   "runtime::wasm_checkpoint::shuttle_tests::shuttle_a_held_input_resolves_once_after_its_completed_checkpoint",
   "runtime::wasm_checkpoint::shuttle_tests::shuttle_a_held_input_whose_checkpoint_and_delivery_failed_resolves_once",

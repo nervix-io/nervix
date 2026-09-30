@@ -34,6 +34,10 @@ use thiserror::Error;
 use super::VmExecutionContext;
 use super::{ObservedDomainTick, Runtime};
 
+#[path = "domain_lifecycle.rs"]
+mod lifecycle;
+pub(super) use lifecycle::{DomainIngestionRead, DomainTaskState};
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(crate) enum DomainClockAccessError {
     #[error("domain '{domain}' is missing from this runtime")]
@@ -247,6 +251,7 @@ impl DomainClockReadWatermark {
 /// in-flight read already holds.
 #[derive(Debug)]
 struct DomainClockPublication {
+    task_state: Option<DomainTaskState>,
     installation: DomainClockInstallation,
     /// Shared with a replacement only when that replacement keeps the same generation installed,
     /// so reads of that generation cannot decrease even when they race the replacement. Every
@@ -258,6 +263,7 @@ struct DomainClockPublication {
 impl DomainClockPublication {
     fn new(installation: DomainClockInstallation) -> Self {
         Self {
+            task_state: None,
             installation,
             watermark: Arc::new(DomainClockReadWatermark::new()),
         }
@@ -265,19 +271,26 @@ impl DomainClockPublication {
 
     /// The publication that installs `installation` in place of this one, or `None` when this
     /// publication already installs it.
-    fn successor(&self, installation: &DomainClockInstallation) -> Option<Self> {
-        if self.installation == *installation {
+    fn successor(
+        &self,
+        installation: &DomainClockInstallation,
+        task_state: &Option<DomainTaskState>,
+    ) -> Option<Self> {
+        if self.installation == *installation && self.task_state == *task_state {
             return None;
         }
         if let Some(generation) = self.installation.installed_generation()
             && installation.installed_generation() == Some(generation)
         {
             return Some(Self {
+                task_state: task_state.clone(),
                 installation: installation.clone(),
                 watermark: self.watermark.clone(),
             });
         }
-        Some(Self::new(installation.clone()))
+        let mut successor = Self::new(installation.clone());
+        successor.task_state = task_state.clone();
+        Some(successor)
     }
 }
 
@@ -295,7 +308,7 @@ struct DomainClockInner {
 /// installation therefore reaches every bound handle and wakes every waiter without copying a
 /// mapping into task-local state.
 #[derive(Debug, Clone)]
-pub(in crate::runtime) struct DomainClockLifecycle {
+pub(crate) struct DomainClockLifecycle {
     inner: Arc<DomainClockInner>,
 }
 
@@ -332,6 +345,9 @@ impl DomainClockLifecycle {
                     source: DomainClockSource::Paced { .. },
                 } if *generation == state.start_version
             ) {
+                let installation = published.installation.clone();
+                drop(published);
+                self.replace_with_task_state(installation, Some(DomainTaskState::from(state)));
                 return;
             }
         }
@@ -362,7 +378,7 @@ impl DomainClockLifecycle {
                 }
             }
         };
-        self.replace(installation);
+        self.replace_with_task_state(installation, Some(DomainTaskState::from(state)));
     }
 
     #[cfg(test)]
@@ -383,7 +399,7 @@ impl DomainClockLifecycle {
     }
 
     pub(in crate::runtime) fn mark_missing(&self) {
-        self.replace(DomainClockInstallation::Missing);
+        self.replace_with_task_state(DomainClockInstallation::Missing, None);
     }
 
     pub(in crate::runtime) fn bind(&self) -> DomainClockAccessResult<DomainClock> {
@@ -451,10 +467,20 @@ impl DomainClockLifecycle {
     /// The successor is derived from the publication it replaces and stored only while that
     /// publication is still current, so an unchanged installation wakes no waiter and a watermark
     /// is shared only across the replacement it was derived for.
+    #[cfg(test)]
     fn replace(&self, installation: DomainClockInstallation) {
-        loop {
+        let task_state = self.inner.published.load().task_state.clone();
+        self.replace_with_task_state(installation, task_state);
+    }
+
+    fn replace_with_task_state(
+        &self,
+        installation: DomainClockInstallation,
+        task_state: Option<DomainTaskState>,
+    ) {
+        let installation_changed = loop {
             let current = self.inner.published.load();
-            let Some(successor) = current.successor(&installation) else {
+            let Some(successor) = current.successor(&installation, &task_state) else {
                 return;
             };
             let previous = self
@@ -462,10 +488,12 @@ impl DomainClockLifecycle {
                 .published
                 .compare_and_swap(&*current, StdArc::new(successor));
             if StdArc::ptr_eq(&*previous, &*current) {
-                break;
+                break current.installation != installation;
             }
+        };
+        if installation_changed {
+            self.inner.changes.send_replace(());
         }
-        self.inner.changes.send_replace(());
     }
 }
 
@@ -572,8 +600,10 @@ impl DomainClock {
         })
     }
 
-    pub(super) fn ingestion_snapshot(&self) -> DomainClockAccessResult<DomainIngestionSnapshot> {
-        let published = self.inner.published.load();
+    fn ingestion_snapshot_from(
+        &self,
+        published: &DomainClockPublication,
+    ) -> DomainClockAccessResult<DomainIngestionSnapshot> {
         let source = self.source(&published.installation)?;
         let snapshot = self.observe(source, &published.watermark)?;
         let window = match source {
@@ -970,13 +1000,6 @@ impl Runtime {
         start: DomainCadenceStart,
     ) -> DomainClockAccessResult<DomainCadence> {
         DomainCadence::new(self.bind_domain_clock(domain)?, interval, start)
-    }
-
-    pub(crate) fn domain_execution_snapshot(
-        &self,
-        domain: &DomainName,
-    ) -> DomainClockAccessResult<DomainExecutionSnapshot> {
-        self.bind_domain_clock(domain)?.snapshot()
     }
 
     #[cfg(feature = "testing")]

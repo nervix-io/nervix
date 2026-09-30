@@ -289,8 +289,17 @@ impl RedisSink {
         pool: &'pool RedisCommandPool,
         handle: &RedisPoolHandle,
     ) -> Result<RedisPooledConnection<'pool>, Report<SinkPublishError>> {
-        let waiting = handle.begin_pool_wait();
-        let connection = pool.get().await.map_err(Self::publish_pool_error);
+        let mut borrow = std::pin::pin!(pool.get());
+        let mut waiting = None;
+        let connection = std::future::poll_fn(|context| {
+            let result = borrow.as_mut().poll(context);
+            if result.is_pending() && waiting.is_none() {
+                waiting = Some(handle.begin_pool_wait());
+            }
+            result
+        })
+        .await
+        .map_err(Self::publish_pool_error);
         drop(waiting);
         connection
     }

@@ -34,6 +34,8 @@ pub(super) struct BranchRuntime {
 }
 
 pub(super) struct BranchRuntimeMetrics {
+    pub(super) source_dirty: BranchMetricsMark,
+    pub(super) processor_dirty: HashMap<ModelName, BranchMetricsMark>,
     pub(super) source: BatchMetricsHandle,
     pub(super) source_input: Option<MessageMetricsHandle>,
     pub(super) processor_inputs: HashMap<ModelName, HashMap<RelayName, NodeInputMetricsHandle>>,
@@ -499,11 +501,7 @@ impl BranchRuntime {
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        self.runtime.mark_branch_aggregated_metrics_updated(
-            &self.domain,
-            self.source_kind,
-            &self.source,
-        );
+        self.metrics.source_dirty.mark();
         if self.dispatch_stream(&root_relay, &batch).await.is_err() {
             let reason = "branched root relay dispatch failed".to_string();
             if self.source_kind == ModelKind::Ingestor {
@@ -597,11 +595,11 @@ impl BranchRuntime {
             "the branch template resolves every declared processor input before spawning",
         );
         input_metrics.observe_delivery(&batch.delivery_observation(snapshot.now()));
-        self.runtime.mark_branch_aggregated_metrics_updated(
-            &self.domain,
-            processor.kind,
-            &processor.processor,
-        );
+        self.metrics
+            .processor_dirty
+            .get(processor_id)
+            .verified("the branch binds a mark for each processor")
+            .mark();
         processor
             .accept_input(self, incoming_relay, batch, &snapshot)
             .await;
@@ -619,7 +617,7 @@ impl BranchRuntime {
     pub(super) async fn dispatch_output(
         &mut self,
         output: &RelayProcessorOutputNode,
-        source_kind: ModelKind,
+        _source_kind: ModelKind,
         source: &ModelName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
@@ -634,8 +632,11 @@ impl BranchRuntime {
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        self.runtime
-            .mark_branch_aggregated_metrics_updated(&self.domain, source_kind, source);
+        self.metrics
+            .processor_dirty
+            .get(source)
+            .verified("the branch binds a mark for each processor")
+            .mark();
         self.dispatch_stream(&output.relay, batch).await
     }
 

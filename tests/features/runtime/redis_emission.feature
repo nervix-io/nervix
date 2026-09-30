@@ -1,4 +1,5 @@
 Feature: Redis emission
+  @retained_task_handles
   Scenario Outline: Redis emitter publishes JSON payloads from a relay
     Given Redis is running
     And MQTT is running

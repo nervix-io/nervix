@@ -833,6 +833,13 @@ impl BranchInstanceTemplate {
         let domain_clock = runtime
             .bind_domain_clock(domain)
             .change_context(ProcessorTemplateError::BindDomainClock)?;
+        let mut processor_dirty = HashMap::default();
+        for (identifier, processor) in &processors {
+            processor_dirty.insert(
+                identifier.clone(),
+                runtime.branch_metrics_mark(domain, processor.kind, &processor.processor),
+            );
+        }
         Ok(Mutex::new(BranchRuntime {
             key,
             runtime: runtime.clone(),
@@ -849,6 +856,8 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
+                source_dirty: runtime.branch_metrics_mark(domain, self.source_kind, &self.source),
+                processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,
                 processor_inputs,
