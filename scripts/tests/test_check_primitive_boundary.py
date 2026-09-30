@@ -513,7 +513,7 @@ class FamilyTests(CheckTestCase):
         status, report = self.check(
             {
                 "crates/engine/src/lib.rs": (
-                    "use std::sync::Arc;\n"
+                    "use nervix_primitives::sync::{Arc, StdArc, StdWeak};\n"
                     "use nervix_primitives::{sync::{Notify, blocking::Mutex, watch}, task};\n"
                     "nervix_primitives::thread_local! { static SEEN: u8 = const { 0 }; }\n"
                     "#[nervix_primitives::test]\n"
@@ -577,12 +577,14 @@ class FamilyTests(CheckTestCase):
             "`std::sync::Mutex::new` bypasses the boundary",
         )
 
-    def test_an_imported_sync_module_fails_where_it_reaches_blocking_synchronization(self) -> None:
-        report = self.assert_rejected(
+    def test_an_imported_sync_module_fails_where_it_reaches_a_governed_item(self) -> None:
+        self.assert_rejected(
             "use std::sync;\nfn f() -> sync::Mutex<u8> { todo() }\nfn g() -> sync::Arc<u8> { todo() }\n",
-            "`sync::Mutex` reaches thread-blocking synchronization through an imported `sync` module",
+            "`sync::Mutex` reaches `std::sync::Mutex` through an imported `std::sync` module; use "
+            "`nervix_primitives::sync::blocking::Mutex`",
+            "`sync::Arc` reaches `std::sync::Arc` through an imported `std::sync` module; use "
+            "`nervix_primitives::sync::StdArc`",
         )
-        self.assertNotIn("sync::Arc", report)
 
     def test_threads_and_thread_locals_fail_outside_the_boundary(self) -> None:
         self.assert_rejected(
@@ -1026,8 +1028,400 @@ class TokioUnstableTests(CheckTestCase):
             },
         )
         self.assertEqual(status, 1)
+        self.assertIn(".cargo/config.toml:2", report)
         self.assertIn(".github/workflows/check.yaml:4", report)
         self.assertIn("crates/engine/build.rs", report)
+
+
+class SharedOwnershipTests(CheckTestCase):
+    """Shared ownership is the same library type in every mode, reached through the boundary."""
+
+    def test_approved_shared_ownership_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "use nervix_primitives::sync::{Arc, StdArc, StdWeak};\n"
+                    "fn f() -> StdWeak<u8> {\n"
+                    "    let owned = Arc::new(1_u8);\n"
+                    "    let external = nervix_primitives::sync::StdArc::new(2_u8);\n"
+                    "    StdArc::downgrade(&external)\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_the_libraries_own_paths_fail_and_name_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use triomphe::Arc;\n"
+            "use std::sync::{Arc as StdArc, Weak};\n"
+            "fn f() { let _shared = triomphe::Arc::new(0); let _std = std::sync::Arc::new(1); }\n",
+            "`triomphe::Arc` bypasses the boundary; use `nervix_primitives::sync::Arc`",
+            "`std::sync::Arc` bypasses the boundary; use `nervix_primitives::sync::StdArc`",
+            "`std::sync::Weak` bypasses the boundary; use `nervix_primitives::sync::StdWeak`",
+            "`triomphe::Arc::new` bypasses the boundary; use `nervix_primitives::sync::Arc::new`",
+            "`std::sync::Arc::new` bypasses the boundary; use `nervix_primitives::sync::StdArc::new`",
+        )
+
+    def test_the_allocation_crates_and_modeled_references_fail(self) -> None:
+        self.assert_rejected(
+            "extern crate alloc;\n"
+            "use alloc::sync::Arc;\n"
+            "fn f() -> loom::sync::Arc<u8> { todo() }\n",
+            "`alloc::sync::Arc` bypasses the boundary; use `nervix_primitives::sync::StdArc`",
+            "`loom::sync::Arc` bypasses the boundary; use `nervix_primitives::sync::StdArc`",
+        )
+
+    def test_a_glob_or_a_renamed_crate_fails(self) -> None:
+        self.assert_rejected(
+            "use triomphe::*;\nuse triomphe as shared;\n",
+            "`triomphe::*` bypasses the boundary",
+            "`triomphe` bypasses the boundary; use `nervix_primitives::sync`",
+        )
+
+    def test_a_triomphe_dependency_outside_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={"crates/vocabulary/Cargo.toml": VOCABULARY + 'triomphe = "0.1"\n'},
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("only nervix-primitives depends on `triomphe`", report)
+
+
+class FuturesTests(CheckTestCase):
+    """The `futures` crates' synchronization, executors, waker registration, `select!` and abort
+    handles are governed; their pure combinators are not."""
+
+    def test_the_futures_families_fail_and_name_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use futures_channel::mpsc::unbounded;\n"
+            "use futures::channel::oneshot;\n"
+            "use futures_util::{lock::Mutex, task::AtomicWaker};\n"
+            "use atomic_waker::AtomicWaker as Registration;\n"
+            "use futures::future::{AbortHandle, Abortable, abortable};\n"
+            "fn f() {\n"
+            "    futures_executor::block_on(async {});\n"
+            "    futures_util::select! { () = ready => {} }\n"
+            "    futures::select_biased! { () = ready => {} }\n"
+            "}\n",
+            "`futures_channel::mpsc::unbounded` bypasses the boundary; use "
+            "`nervix_primitives::sync::mpsc::unbounded`",
+            "`futures::channel::oneshot` bypasses the boundary; use `nervix_primitives::sync::oneshot`",
+            "`futures_util::lock::Mutex` bypasses the boundary; use `nervix_primitives::sync::Mutex`",
+            "`futures_util::task::AtomicWaker` bypasses the boundary; use "
+            "`nervix_primitives::sync::AtomicWaker`",
+            "`atomic_waker::AtomicWaker` bypasses the boundary; use "
+            "`nervix_primitives::sync::AtomicWaker`",
+            "`futures::future::AbortHandle` bypasses the boundary; use "
+            "`nervix_primitives::task::AbortHandle`",
+            "`futures::future::Abortable` bypasses the boundary; use "
+            "`nervix_primitives::sync::CancellationToken`",
+            "`futures::future::abortable` bypasses the boundary",
+            "`futures_executor::block_on` bypasses the boundary; use "
+            "`nervix_primitives::runtime::block_on`",
+            "`futures_util::select` bypasses the boundary; use `nervix_primitives::select`",
+            "`futures::select_biased` bypasses the boundary; use `nervix_primitives::select`",
+        )
+
+    def test_pure_combinators_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "use futures_util::{FutureExt as _, StreamExt, stream::FuturesUnordered};\n"
+                    "fn f() { let _all = futures_util::future::join_all(Vec::<Ready>::new()); }\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_program_outside_every_mode_reaches_the_futures_families_under_a_permission(
+        self,
+    ) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/console.rs": (
+                    "use nervix_primitives::unmodeled::futures::{AbortHandle, mpsc};\n"
+                    "async fn f() {\n"
+                    "    let (sender, receiver) = mpsc::unbounded::<u8>();\n"
+                    "    nervix_primitives::unmodeled::futures::select! { () = ready => {} }\n"
+                    "}\n"
+                )
+            },
+            permissions=PERMISSION
+            + """
+[[permission]]
+path = "crates/engine/src/console.rs"
+items = ["futures::AbortHandle", "futures::mpsc", "futures::select"]
+owner = "The engine's browser console."
+reason = "Its event loop runs in no execution mode."
+limit = "Nothing it does is modeled."
+""",
+        )
+        self.assertEqual(status, 0, report)
+
+
+GUEST_SDK = """
+[package]
+name = "nervix-wasm-sdk"
+"""
+
+GUEST = """
+[package]
+name = "example-guest"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nervix-wasm-sdk = { path = "../../crates/sdk" }
+
+[workspace]
+"""
+
+
+class GuestCodeTests(CheckTestCase):
+    """Guest code is compiled into a user's WASM guest, where no execution mode exists."""
+
+    def test_the_guest_sdk_and_its_guests_are_outside_the_source_rules(self) -> None:
+        status, report = self.check(
+            {
+                "crates/sdk/src/lib.rs": "use std::sync::Arc;\n",
+                "examples/guest/src/lib.rs": "use std::{ops::Range, sync::Arc};\n",
+            },
+            manifests={
+                "crates/sdk/Cargo.toml": GUEST_SDK,
+                "examples/guest/Cargo.toml": GUEST,
+            },
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_host_crate_that_uses_the_sdk_is_governed(self) -> None:
+        status, report = self.check(
+            {
+                "crates/sdk/src/lib.rs": "use std::sync::Arc;\n",
+                "crates/engine/tests/guest.rs": "use std::sync::Arc;\n",
+            },
+            manifests={
+                "crates/sdk/Cargo.toml": GUEST_SDK,
+                "crates/engine/Cargo.toml": ENGINE + 'nervix-wasm-sdk = { path = "../sdk" }\n',
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("crates/engine/tests/guest.rs:1", report)
+        self.assertNotIn("crates/sdk/src/lib.rs", report)
+
+    def test_a_guest_manifest_is_still_checked(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/sdk/Cargo.toml": GUEST_SDK + '\n[dependencies]\nparking_lot = "0.12"\n',
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("crates/sdk/Cargo.toml", report)
+        self.assertIn("only nervix-primitives depends on `parking_lot`", report)
+
+
+class ManifestRenameTests(CheckTestCase):
+    """A manifest that renames a governed crate hides its paths from the source rules."""
+
+    def test_a_renamed_governed_crate_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY
+                + 'runtime = { package = "tokio", version = "1" }\n'
+                + 'prims = { package = "nervix-primitives", path = "../primitives" }\n'
+                + '\n[dev-dependencies]\nhelpers = { package = "futures-util", version = "0.3" }\n'
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "the dependencies entry `runtime` renames `tokio`, which hides its governed paths",
+            report,
+        )
+        self.assertIn("the dependencies entry `prims` renames `nervix-primitives`", report)
+        self.assertIn("the dev-dependencies entry `helpers` renames `futures-util`", report)
+
+    def test_a_workspace_rename_used_by_a_member_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "Cargo.toml": WORKSPACE + 'tk = { package = "tokio", version = "1" }\n',
+                "crates/vocabulary/Cargo.toml": VOCABULARY + "tk = { workspace = true }\n",
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("the dependencies entry `tk` renames `tokio`", report)
+
+    def test_a_hyphenated_name_and_an_ungoverned_rename_pass(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY
+                + 'tokio_util = { package = "tokio-util", version = "0.7" }\n'
+                + 'hashing = { package = "ahash", version = "0.8" }\n'
+            },
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_new_package_outside_the_member_list_is_checked(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/fresh/Cargo.toml": '[package]\nname = "nervix-fresh"\n\n[dependencies]\n'
+                'dashmap = "6"\n',
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("crates/fresh/Cargo.toml", report)
+        self.assertIn("only nervix-primitives depends on `dashmap`", report)
+
+
+class LoomModuleFileTests(CheckTestCase):
+    """A module declared out of line and compiled only for Loom is model code, file and all."""
+
+    def test_a_loom_only_module_file_is_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": '#[cfg(all(test, feature = "loom"))]\nmod loom_models;\n',
+                "crates/engine/src/loom_models.rs": (
+                    "use nervix_primitives::sync::Notify;\n"
+                    "fn model() { let _gate = nervix_primitives::sync::blocking::Mutex::new(0); }\n"
+                ),
+            }
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/engine/src/loom_models.rs:1: primitive boundary: Loom model code names "
+            "`nervix_primitives::sync::Notify`",
+            report,
+        )
+        self.assertIn("Loom model code names `nervix_primitives::sync::blocking::Mutex::new`", report)
+
+    def test_a_path_attribute_and_a_nested_declaration_are_followed(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/cancellation.rs": (
+                    '#[cfg(feature = "loom")]\n#[path = "models/cancel.rs"]\nmod models;\n'
+                ),
+                "crates/engine/src/models/cancel.rs": "mod helpers;\n",
+                "crates/engine/src/models/cancel/helpers.rs": (
+                    "fn wait() { nervix_primitives::time::sleep(DELAY); }\n"
+                ),
+            }
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/engine/src/models/cancel/helpers.rs:1: primitive boundary: Loom model code "
+            "names `nervix_primitives::time::sleep`",
+            report,
+        )
+
+    def test_shared_ownership_and_permitted_unmodeled_primitives_pass_in_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": '#[cfg(feature = "loom")]\nmod runner;\n',
+                "crates/engine/src/runner.rs": RUNNER
+                + "use nervix_primitives::sync::{Arc, atomic::AtomicBool};\n"
+                + "fn model() { let _flag = Arc::new(AtomicBool::new(false)); }\n",
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_module_declared_without_loom_is_not_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": '#[cfg(not(feature = "loom"))]\nmod ordinary;\n',
+                "crates/engine/src/ordinary.rs": "use nervix_primitives::sync::Notify;\n",
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+
+class ModeCfgTests(CheckTestCase):
+    """An execution mode is a feature of the boundary, never a global cfg."""
+
+    def test_a_bare_mode_cfg_in_source_fails(self) -> None:
+        report = self.assert_rejected(
+            "#[cfg(loom)]\nmod models {}\n"
+            "fn f() -> bool { cfg!(any(test, shuttle)) }\n"
+            '#[cfg_attr(not(turmoil), path = "real.rs")]\nmod network;\n',
+            "crates/engine/src/lib.rs:1",
+            "`cfg(loom)` selects an execution mode through a global cfg",
+            '`feature = "loom"`',
+            "`cfg(shuttle)` selects an execution mode",
+            "`cfg(turmoil)` selects an execution mode",
+        )
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+
+    def test_a_mode_feature_and_tokios_unstable_cfg_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(feature = "loom")]\nmod models {}\n'
+                    "fn unstable() -> bool { cfg!(tokio_unstable) }\n"
+                    "fn shuttle() {}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_global_mode_cfg_fails_even_in_a_turmoil_recipe(self) -> None:
+        status, report = self.check(
+            {"crates/engine/build.rs": 'fn main() { println!("cargo::rustc-cfg=loom"); }\n'},
+            manifests={
+                "justfile": (
+                    'test-turmoil budget="480":\n'
+                    '    RUSTFLAGS="--cfg turmoil --cfg tokio_unstable" cargo test\n'
+                ),
+                ".cargo/config.toml": '[build]\nrustflags = ["--cfg", "shuttle"]\n',
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("justfile:2: primitive boundary: `--cfg turmoil` selects an execution mode", report)
+        self.assertNotIn("`--cfg tokio_unstable` changes", report)
+        self.assertIn(".cargo/config.toml:2: primitive boundary: `--cfg shuttle`", report)
+        self.assertIn("crates/engine/build.rs: primitive boundary: `--cfg loom`", report)
+
+
+class PermissionScopeTests(CheckTestCase):
+    """A permission covers one governed Rust file and names real items of the unmodeled path."""
+
+    def test_a_directory_or_glob_permission_fails(self) -> None:
+        for path in ("crates/engine/src/", "crates/engine/src/*.rs", "../outside.rs"):
+            with self.subTest(path=path):
+                status, report = self.check(
+                    {},
+                    permissions=PERMISSION.replace("crates/engine/src/runner.rs", path),
+                )
+                self.assertEqual(status, 1)
+                self.assertIn("a permission covers one Rust file", report)
+
+    def test_an_unknown_item_fails(self) -> None:
+        status, report = self.check(
+            {},
+            permissions=PERMISSION.replace(
+                '"sync::atomic::Ordering"', '"sync::atomic::Ordering", "sync::Everything"'
+            ),
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "lists `sync::Everything`, which is not an item of `nervix_primitives::unmodeled`",
+            report,
+        )
+
+    def test_a_permission_for_a_file_the_boundary_does_not_govern_is_stale(self) -> None:
+        status, report = self.check(
+            {},
+            permissions=PERMISSION
+            + PERMISSION.replace("crates/engine/src/runner.rs", "crates/primitives/src/sync.rs"),
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "stale permission: crates/primitives/src/sync.rs is not a Rust file the boundary governs",
+            report,
+        )
 
 
 if __name__ == "__main__":

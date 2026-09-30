@@ -1391,12 +1391,15 @@ validate-dns-dependencies:
 
 validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
 
-# Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
-# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a
-# selected atomic held by a static or constructed in a const context, an unmodeled atomic without
-# its permission, a stale permission, a `loom` dependency outside its owner and harness, and a mode
-# feature that is not forwarded. The check's own tests run first, so a rule that stopped rejecting
-# its bypass fails here too.
+# Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
+# rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
+# primitives, shared ownership and the `futures` crates' synchronization included; a manifest that
+# renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; a selected atomic
+# held by a static or constructed in a const context; a family Loom does not model in Loom model
+# code; an unmodeled primitive without its permission; a stale or misplaced permission; a `loom`
+# dependency outside its owner and harness; and a mode feature that is not forwarded. Guest code
+# compiled into user WASM guests is outside the source rules. The check's own tests run first, so a
+# rule that stopped rejecting its bypass fails here too.
 validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
