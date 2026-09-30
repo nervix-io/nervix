@@ -1994,7 +1994,7 @@ not guarantees; the ratios between rows are what carries over.
 | Checked integer arithmetic, dense failures | 51.07 µs | 20 million |
 | Arithmetic, 1 message | 3.44 µs | 0.29 million |
 | Arithmetic, 8 messages | 3.38 µs | 2.4 million |
-| Arithmetic, 1,025 messages, on the blocking pool | 25.17 µs | 41 million |
+| Arithmetic, 1,025 messages, on the data workers | 14.40 µs | 71 million |
 | Arithmetic over a sliced batch | 10.39 µs | 99 million |
 | List function over ragged `VEC` values | 384.74 µs | 2.7 million |
 | `contains_any` with a per-message set, 32-byte ASCII text | 117.76 µs | 8.7 million |
