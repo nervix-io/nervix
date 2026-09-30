@@ -4,7 +4,9 @@
 campaign_fuzz_seconds = 300
 cargo_bolero = "0.13.4"
 nightly = "nightly-2026-09-17"
-pr_fuzz_seconds = 30
+# Engine time a PR fuzz pass shares evenly among every target, so adding a target shortens the
+# others' share instead of lengthening the pass.
+pr_fuzz_total_seconds = 600
 sanitizer = "address"
 
 [[target]]

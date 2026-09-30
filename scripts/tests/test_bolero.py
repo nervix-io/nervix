@@ -7,6 +7,7 @@ import contextlib
 import io
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,27 @@ class InventoryTests(unittest.TestCase):
         self.assert_invalid_inventory(
             text.replace(source, 'source = "crates/nspl/src/missing.rs"', 1),
             "missing source",
+        )
+
+    def test_pr_fuzz_budget_is_ten_minutes_shared_by_every_target(self) -> None:
+        inventory = bolero.load_inventory()
+        self.assertLessEqual(inventory.pr_fuzz_total_seconds, 600)
+        share = inventory.pr_fuzz_seconds_per_target()
+        self.assertGreaterEqual(share, 1)
+        self.assertLessEqual(share * len(inventory.targets), inventory.pr_fuzz_total_seconds)
+        more = dataclasses.replace(inventory, targets=inventory.targets * 2)
+        self.assertLess(more.pr_fuzz_seconds_per_target(), share)
+
+    def test_pr_fuzz_budget_must_give_every_target_a_second(self) -> None:
+        text = bolero.INVENTORY.read_text()
+        count = len(bolero.load_inventory().targets)
+        self.assert_invalid_inventory(
+            re.sub(r"pr_fuzz_total_seconds = \d+", f"pr_fuzz_total_seconds = {count - 1}", text),
+            f"gives each of the {count} targets less than one second",
+        )
+        self.assert_invalid_inventory(
+            re.sub(r"pr_fuzz_total_seconds = \d+", "pr_fuzz_total_seconds = 0", text),
+            "pr_fuzz_total_seconds must be a positive integer",
         )
 
     def test_inventory_sections_and_fields_are_closed(self) -> None:
@@ -579,15 +601,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.invoke("list"), 0)
 
     def test_fuzz_routes_select_targets_and_reject_zero_duration(self) -> None:
+        share = self.inventory.pr_fuzz_total_seconds // len(self.inventory.targets)
         with mock.patch.object(bolero, "fuzz_targets") as fuzz:
             self.assertEqual(self.invoke("fuzz", "nspl-expression", "3"), 0)
             selected = next(target for target in self.inventory.targets
                             if target.id == "nspl-expression")
             self.assertEqual(fuzz.call_args.args[1], (selected,))
             self.assertEqual(fuzz.call_args.args[2], 3)
+            self.assertEqual(self.invoke("fuzz", "nspl-expression"), 0)
+            self.assertEqual(fuzz.call_args.args[2], share)
+            self.assertEqual(self.invoke("fuzz-all", "7"), 0)
+            self.assertEqual(fuzz.call_args.args[2], 7)
             self.assertEqual(self.invoke("fuzz-all"), 0)
             self.assertEqual(fuzz.call_args.args[1], self.inventory.targets)
-            self.assertEqual(fuzz.call_args.args[2], 30)
+            self.assertEqual(fuzz.call_args.args[2], share)
+            self.assertLessEqual(
+                fuzz.call_args.args[2] * len(self.inventory.targets),
+                self.inventory.pr_fuzz_total_seconds,
+            )
             with self.assertRaisesRegex(bolero.BoleroError, "duration"):
                 self.invoke("fuzz", "nspl-expression", "0")
             with self.assertRaisesRegex(bolero.BoleroError, "unknown Bolero target"):

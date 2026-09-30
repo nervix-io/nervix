@@ -148,7 +148,7 @@ just fuzz-list
 just test-bolero
 just test-bolero nspl-model
 just fuzz nspl-model 30
-just fuzz-all 30
+just fuzz-all
 just fuzz-replay nspl-model <saved-input>
 just fuzz-reduce nspl-model <saved-input>
 ```
@@ -170,8 +170,11 @@ use the pinned nightly and keep the configured kache wrapper. Modeled execution 
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
 PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
-libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
-manual campaigns. Job limits reserve additional time for compilation, artifacts and cleanup. A
+libFuzzer job. On PRs every target shares ten minutes of engine time, the inventory's
+`pr_fuzz_total_seconds`, split evenly, so a new target shortens the others' share instead of
+lengthening the job. `just fuzz` and `just fuzz-all` use the same share when no duration is given;
+a duration they are given is seconds per target. Scheduled or manual campaigns give each target five
+minutes. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 

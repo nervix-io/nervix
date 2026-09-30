@@ -21,13 +21,15 @@ test-bolero filter="":
 fuzz-list:
     python3 scripts/bolero.py list
 
-# Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
-fuzz target duration="30":
-    python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
+# Run one target through sanitizer-backed libFuzzer. Duration is in seconds; without one the target
+# gets its share of the PR fuzz budget in tests/bolero-targets.toml.
+fuzz target duration="":
+    python3 scripts/bolero.py fuzz {{ quote(target) }} {{ if duration == "" { "" } else { quote(duration) } }}
 
-# Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
-fuzz-all duration="30":
-    python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
+# Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds; without one
+# the targets share the PR fuzz budget in tests/bolero-targets.toml evenly.
+fuzz-all duration="":
+    python3 scripts/bolero.py fuzz-all {{ if duration == "" { "" } else { quote(duration) } }}
 
 # Replay the exact saved input through its ordinary property assertion.
 fuzz-replay target failure:
@@ -63,15 +65,16 @@ coverage-bolero-runner:
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
-# The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
-coverage-bolero duration="2":
+# The duration is per product target; without one the targets share the PR fuzz budget, as CI runs
+# on PRs, and CI passes 300 for campaigns.
+coverage-bolero duration="":
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
     "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
     "${coverage[@]}" run --branch -a scripts/bolero.py test
-    "${coverage[@]}" run --branch -a scripts/bolero.py fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a scripts/bolero.py fuzz-all {{ if duration == "" { "" } else { quote(duration) } }}
     "${coverage[@]}" run --branch -a scripts/bolero.py qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov

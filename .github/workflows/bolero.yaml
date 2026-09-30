@@ -188,11 +188,11 @@ jobs:
         run: |
           just build-web-console
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            budget=30
+            # Every target shares the inventory's PR fuzz budget.
+            just coverage-bolero
           else
-            budget=300
+            just coverage-bolero 300
           fi
-          just coverage-bolero "$budget"
 
       - name: Upload runner coverage to Codecov
         uses: codecov/codecov-action@v5
