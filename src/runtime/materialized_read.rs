@@ -845,6 +845,7 @@ impl Runtime {
                             continue;
                         }
                         let value = evaluate_constant_expression_vm(
+                            self.executor(),
                             &assignment.value,
                             Some(&routing.udfs),
                             execution_now,

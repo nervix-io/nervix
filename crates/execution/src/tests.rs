@@ -19,7 +19,9 @@ fn small_executor() -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             control_cpu: one(),
+            credentials_cpu: one(),
             data_cpu: one(),
+            extension_cpu: one(),
             bulk_cpu: one(),
             consensus_storage: one(),
             filesystem_storage: one(),
@@ -41,7 +43,9 @@ fn queued_executor(pending_jobs: usize) -> Executor {
             pending_jobs: NonZeroUsize::new(pending_jobs).expect("a test queue holds at least one"),
             ..WorkerCounts {
                 control_cpu: one(),
+                credentials_cpu: one(),
                 data_cpu: one(),
+                extension_cpu: one(),
                 bulk_cpu: one(),
                 consensus_storage: one(),
                 filesystem_storage: one(),
@@ -105,6 +109,27 @@ async fn a_management_budget_below_one_event_fails_to_start() {
             operation: "management event",
             budget: ByteUnit::Kibibyte(32).as_u64(),
             required: ByteUnit::Kibibyte(64).as_u64(),
+        }
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_credentials_budget_below_one_password_hash_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            credentials: ByteUnit::Mebibyte(16),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a credentials budget below one password hash is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::BudgetBelowOperation {
+            class: "credentials",
+            operation: "password hash",
+            budget: ByteUnit::Mebibyte(16).as_u64(),
+            required: ByteUnit::Mebibyte(19).as_u64(),
         }
     );
 }
@@ -295,6 +320,7 @@ mod shuttle_checks {
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
             ("bulk", snapshot.bulk_memory),
+            ("credentials", snapshot.credentials_memory),
         ] {
             assert!(
                 budget.reserved_bytes <= budget.capacity_bytes,
@@ -309,7 +335,9 @@ mod shuttle_checks {
         let snapshot = executor.snapshot();
         for (class, workers) in [
             ("control_cpu", snapshot.control_cpu),
+            ("credentials_cpu", snapshot.credentials_cpu),
             ("data_cpu", snapshot.data_cpu),
+            ("extension_cpu", snapshot.extension_cpu),
             ("bulk_cpu", snapshot.bulk_cpu),
             ("consensus_storage", snapshot.consensus_storage),
             ("filesystem_storage", snapshot.filesystem_storage),
@@ -325,6 +353,7 @@ mod shuttle_checks {
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
             ("bulk", snapshot.bulk_memory),
+            ("credentials", snapshot.credentials_memory),
         ] {
             assert_eq!(
                 budget.reserved_bytes, 0,

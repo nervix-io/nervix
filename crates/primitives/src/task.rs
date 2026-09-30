@@ -7,7 +7,9 @@
 //!
 //! [`spawn_blocking`] is the runtime's mechanism, not a policy: variable-size and blocking work
 //! belongs to the bounded executor, which admits, charges and cancels it and runs its storage jobs
-//! here.
+//! here. `just validate-primitive-boundary` rejects it outside the executor's worker pools unless
+//! `crates/primitives/blocking-permissions.toml` declares the file's owner, why it stays outside the
+//! executor, and what bounds its work instead.
 //!
 //! [`spawn_cpu`] is the mechanism that runs a CPU job the bounded executor admitted. It is
 //! [`spawn_blocking`] in every mode but Turmoil's, where the job runs as one task of the simulated

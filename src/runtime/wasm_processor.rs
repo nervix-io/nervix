@@ -673,7 +673,7 @@ impl Runtime {
         let compiled = self
             .inner
             .wasm_runtime
-            .compile_processor(&wasm)
+            .compile_processor(self.executor(), &wasm)
             .await
             .change_context_lazy(|| WasmInstanceError::CompileModule {
                 processor: processor.clone(),

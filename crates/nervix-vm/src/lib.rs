@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** The instruction IR and its register layout, compilation into it, the semantics of
 //!   every operator, cast and builtin, and execution over a typed batch with per-row error masks.
-//! - **Depends on.** The vocabulary.
+//! - **Depends on.** The vocabulary, and the bounded executor that admits the executions it runs
+//!   off the caller's task.
 //! - **Must not know.** Relays, branches, connectors, schedules or the registry. It runs one
 //!   program against the bindings it was handed.
 //!
@@ -103,9 +104,8 @@ pub use regexp::{
 };
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
-    FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
-    SPAWN_BLOCKING_ROW_THRESHOLD, execute_predicate_in_context,
-    execute_program_with_selection_in_context,
+    FunctionInvocation, INLINE_ROW_LIMIT, InjectedResult, PredicateExecutionResult, RowSelection,
+    execute_predicate_in_context, execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,

@@ -78,6 +78,7 @@ impl CompiledOrderingGroup {
     /// cannot be evaluated keeps its reason, and the emitter rejects that row when it publishes.
     pub(super) async fn evaluate(
         &self,
+        executor: &Executor,
         emitter: &EmitterName,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
@@ -88,6 +89,10 @@ impl CompiledOrderingGroup {
             Self::Expression(program) => program,
         };
         let executed = execute_filter_map_program_on_batch(
+            ProgramRun {
+                executor,
+                now: execution_now,
+            },
             "emitter",
             emitter,
             program,
@@ -98,7 +103,6 @@ impl CompiledOrderingGroup {
                 side_inputs,
                 ingest_metadata: None,
             },
-            execution_now,
             batch.acks.clone(),
             None,
         )
@@ -450,6 +454,7 @@ mod tests {
     async fn evaluate(group: &CompiledOrderingGroup, batch: &RelayRecordBatch) -> OrderingGroups {
         group
             .evaluate(
+                &Executor::default(),
                 &named("ordered_notifications"),
                 batch,
                 Timestamp::from_unix_nanos(1),

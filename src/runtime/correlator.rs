@@ -419,13 +419,13 @@ pub(super) fn store_correlator_unmatched_incoming(
 }
 
 pub(super) async fn correlate_incoming_message(
+    run: ProgramRun<'_>,
     processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
     state: &mut CorrelatorBranchState,
     incoming: CorrelatorPendingMessage,
-    execution_now: Timestamp,
 ) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
     let opposite_pending = take_correlator_opposite_pending(state, incoming_side);
     if opposite_pending.is_empty() {
@@ -433,12 +433,13 @@ pub(super) async fn correlate_incoming_message(
         return Ok(None);
     }
     let evaluated = evaluate_correlator_where_matches(
+        run.executor,
         processor,
         program,
         incoming_side,
         &incoming,
         &opposite_pending,
-        execution_now,
+        run.now,
     )
     .await?;
 
@@ -474,6 +475,7 @@ pub(super) async fn correlate_incoming_message(
 }
 
 pub(super) async fn evaluate_correlator_where_matches(
+    executor: &Executor,
     processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
@@ -566,6 +568,7 @@ pub(super) async fn evaluate_correlator_where_matches(
     #[cfg(test)]
     CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
+        executor,
         &program.program,
         &input,
         &VmExecutionContext {
@@ -708,6 +711,7 @@ pub(super) fn correlator_output_batch_errors(
 }
 
 pub(super) async fn evaluate_correlator_output_batch(
+    executor: &Executor,
     processor: &ModelName,
     program: &CompiledCorrelatorOutputProgram,
     matched: &CorrelatorMatchedBatch,
@@ -734,6 +738,7 @@ pub(super) async fn evaluate_correlator_output_batch(
     }
     let side_inputs = HashMap::default();
     let lookup_columns = match compute_lookup_hash_map_columns(
+        executor,
         &program.program,
         &FilterMapBatchInputs {
             carrier: &matched.carrier,
@@ -801,6 +806,7 @@ pub(super) async fn evaluate_correlator_output_batch(
     #[cfg(test)]
     CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = match execute_program_with_selection_in_context(
+        executor,
         &program.program.compiled,
         &input,
         &VmExecutionContext {
@@ -1383,13 +1389,16 @@ mod tests {
         CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let (matched_left, _matched_right) = correlate_incoming_message(
+            ProgramRun {
+                executor: &Executor::default(),
+                now,
+            },
             &processor,
             &program,
             CorrelatorSide::Right,
             nervix_models::CorrelatorMatchPolicy::Latest,
             &mut state,
             incoming,
-            now,
         )
         .await
         .expect("batched WHERE evaluation should succeed")
@@ -1424,6 +1433,7 @@ mod tests {
         CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let matching = evaluate_correlator_where_matches(
+            &Executor::default(),
             &processor,
             &program,
             CorrelatorSide::Left,
@@ -1543,6 +1553,7 @@ mod tests {
         CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let outcomes = evaluate_correlator_output_batch(
+            &Executor::default(),
             &named("join_profiles"),
             &program,
             &matched,

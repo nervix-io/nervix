@@ -591,8 +591,9 @@ Member values and containers are working values that exist only while the releas
 encoded; the records themselves stay in Arrow batches. The packer holds at most `MAX MESSAGES`
 prepared members in one candidate, even when the members come from successive carriers. For a
 codec with jaq transformations, member preparation, batch transformations and every re-encoding
-run in the same job on Nervix's blocking worker pool that already runs `ON EMITTING`, so a slow
-program never stalls the emitter task. Candidate work is bounded by `MAX MESSAGES` and the
+run in the same job on the node's extension workers that already runs `ON EMITTING`, so a slow
+program never stalls the emitter task. A node whose extension workers cannot take the job now
+refuses it, and the emitter keeps its rows and retries them as it retries a failed publish. Candidate work is bounded by `MAX MESSAGES` and the
 encodings above; `MAX SIZE` bounds what is written.
 
 ### Broker and message emitters

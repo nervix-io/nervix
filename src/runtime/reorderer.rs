@@ -504,6 +504,7 @@ mod tests {
         let input = vm_input_from_test_rows(&records, &program.program.input_schema)
             .expect("VM input batch should build");
         let output = execute_program_with_selection_in_context(
+            &Executor::default(),
             &program.program,
             &input,
             &VmExecutionContext {

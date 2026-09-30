@@ -5,8 +5,9 @@
 //! - **Owns.** Engine configuration, instance lifetime, linear-memory limits, epoch deadlines, the
 //!   host half of the C ABI, the guest snapshot calls, and the classification of every failed
 //!   guest operation, including a guest's verdict on the saved state it was asked to restore.
-//! - **Depends on.** The vocabulary for processor limits and timestamps, and `nervix-wasm-protocol`
-//!   for the envelopes it exchanges with a guest.
+//! - **Depends on.** The vocabulary for processor limits and timestamps, `nervix-wasm-protocol`
+//!   for the envelopes it exchanges with a guest, and the node's bounded executor, whose bulk
+//!   workers compile a module.
 //! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
 //!   routed. It calls a guest and returns what the guest produced.
 
@@ -23,6 +24,7 @@ use bytes::Bytes;
 use error_stack::{Report, Result as StackResult, ResultExt as _};
 use flatbuffers::{Allocator, FlatBufferBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 use nervix_primitives::sync::mpsc;
 // The epoch driver is an operating-system thread that no model runs, so the flag that stops it is a
@@ -52,6 +54,11 @@ nervix_primitives::unmodeled::task_local! {
     static INVOCATION_NOW: Timestamp;
 }
 
+/// What compiling one module is charged. Wasmtime allocates the code it generates itself and keeps
+/// it for as long as the processor holds the module, which no transient budget can stand for, so
+/// the charge only admits the compilation onto the bulk workers.
+const COMPILE_RESERVATION_BYTES: u64 = 1;
+
 /// Why the Wasmtime engine could not start, or why a module could not be compiled and linked.
 ///
 /// Like every error this crate reports, a variant names only its own failure and leaves the cause
@@ -64,8 +71,8 @@ pub enum WasmProcessorError {
     SpawnEpochDriver(#[source] std::io::Error),
     #[error("failed to compile wasm module")]
     Compile(#[source] wasmtime::Error),
-    #[error("failed to join wasm compilation task")]
-    CompileTask(#[source] nervix_primitives::task::JoinError),
+    #[error("the node's bounded execution did not compile the wasm module")]
+    CompileExecution,
     #[error("failed to link wasm module")]
     Link(#[source] wasmtime::Error),
 }
@@ -530,7 +537,7 @@ impl WasmRuntime {
         let mut wasmtime_config = Config::new();
         wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);
-        // Runtime instances already compile independently on blocking workers. Letting each
+        // Modules already compile independently on the node's bulk workers. Letting each
         // Cranelift invocation fan out across the global CPU pool can starve Raft and Tokio
         // executor threads when several nodes or branch instances initialize together.
         wasmtime_config.parallel_compilation(false);
@@ -556,23 +563,35 @@ impl WasmRuntime {
         })
     }
 
+    /// Compile and link `wasm` on the node's bulk workers: Cranelift compiles the whole module in
+    /// one bounded unit that must not hold a data or control worker.
     pub async fn compile_processor(
         &self,
+        executor: &Executor,
         wasm: impl AsRef<[u8]>,
     ) -> StackResult<CompiledWasmProcessor, WasmProcessorError> {
         let engine = self.engine.clone();
         let wasm = wasm.as_ref().to_vec();
-        let instance_pre = nervix_primitives::task::spawn_blocking(move || {
-            let module = Module::new(&engine, wasm)
-                .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
-            let mut linker = Linker::<BranchStore>::new(&engine);
-            define_host_functions(&mut linker)?;
-            linker
-                .instantiate_pre(&module)
-                .map_err(|source| Report::new(WasmProcessorError::Link(source)))
-        })
-        .await
-        .map_err(|source| Report::new(WasmProcessorError::CompileTask(source)))??;
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
+            .await
+            .change_context(WasmProcessorError::CompileExecution)?;
+        let compiled = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(WasmProcessorError::CompileExecution)?;
+                let module = Module::new(&engine, wasm)
+                    .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
+                let mut linker = Linker::<BranchStore>::new(&engine);
+                define_host_functions(&mut linker)?;
+                linker
+                    .instantiate_pre(&module)
+                    .map_err(|source| Report::new(WasmProcessorError::Link(source)))
+            })
+            .await
+            .change_context(WasmProcessorError::CompileExecution)?;
+        let instance_pre = compiled?;
         Ok(CompiledWasmProcessor {
             engine: self.engine.clone(),
             instance_pre,
@@ -2762,7 +2781,7 @@ mod tests {
     async fn underestimated_guest_capacity_grows_and_copies_finished_spill() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let mut branch = compiled
@@ -2992,7 +3011,7 @@ mod tests {
     ) -> Report<WasmGuestError> {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(wasm)
+            .compile_processor(&Executor::default(), wasm)
             .await
             .expect("module should compile");
         compiled
@@ -3128,7 +3147,7 @@ mod tests {
         );
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(&wasm)
+            .compile_processor(&Executor::default(), &wasm)
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3233,7 +3252,7 @@ mod tests {
     async fn state_reset_branch(wasm: String) -> WasmBranchInstance {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(wasm.as_bytes())
+            .compile_processor(&Executor::default(), wasm.as_bytes())
             .await
             .expect("module should compile");
         compiled
@@ -3352,7 +3371,7 @@ mod tests {
         })
         .expect("runtime must initialize");
         let compiled = runtime
-            .compile_processor(return_code_wasm(0, 0).as_bytes())
+            .compile_processor(&Executor::default(), return_code_wasm(0, 0).as_bytes())
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3383,7 +3402,7 @@ mod tests {
     async fn process_batch_negative_guest_code_is_reported() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(return_code_wasm(-4, 0).as_bytes())
+            .compile_processor(&Executor::default(), return_code_wasm(-4, 0).as_bytes())
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3414,7 +3433,7 @@ mod tests {
     async fn timeout_negative_guest_code_is_reported() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(return_code_wasm(0, -5).as_bytes())
+            .compile_processor(&Executor::default(), return_code_wasm(0, -5).as_bytes())
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3445,7 +3464,10 @@ mod tests {
     async fn flush_negative_guest_code_is_reported() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(return_code_wasm_with_flush(0, 0, -6).as_bytes())
+            .compile_processor(
+                &Executor::default(),
+                return_code_wasm_with_flush(0, 0, -6).as_bytes(),
+            )
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3476,7 +3498,7 @@ mod tests {
     async fn a_guest_that_never_buffers_stays_usable_across_a_quiesce_flush() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(return_code_wasm(0, 0).as_bytes())
+            .compile_processor(&Executor::default(), return_code_wasm(0, 0).as_bytes())
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3522,7 +3544,7 @@ mod tests {
         "#;
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(wasm.as_bytes())
+            .compile_processor(&Executor::default(), wasm.as_bytes())
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3580,7 +3602,7 @@ mod tests {
         "#;
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(wasm.as_bytes())
+            .compile_processor(&Executor::default(), wasm.as_bytes())
             .await
             .expect("module should compile");
         let mut branch = compiled
@@ -3607,7 +3629,7 @@ mod tests {
     async fn flushing_a_guest_that_holds_nothing_yields_no_output() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -3649,7 +3671,7 @@ mod tests {
         "#;
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(wasm.as_bytes())
+            .compile_processor(&Executor::default(), wasm.as_bytes())
             .await
             .expect("module should compile");
         let error = compiled
@@ -3687,7 +3709,7 @@ mod tests {
         "#;
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(wasm.as_bytes())
+            .compile_processor(&Executor::default(), wasm.as_bytes())
             .await
             .expect("module should compile");
         let error = compiled
@@ -3740,7 +3762,7 @@ mod tests {
     async fn guest_emits_flatbuffer_input_reference_output(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(path))
+            .compile_processor(&Executor::default(), read_guest(path))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -3809,7 +3831,7 @@ mod tests {
 
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -3872,7 +3894,7 @@ mod tests {
     async fn rust_guest_timeout_shares_one_generated_column_across_routes() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -3941,7 +3963,7 @@ mod tests {
     async fn quiesce_flush_releases_the_batch_the_guest_still_buffers() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -4008,7 +4030,7 @@ mod tests {
     async fn a_quiesce_flush_releases_buffered_input_before_the_handoff_snapshot() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let buffered = WasmEnvelope::input(
@@ -4095,7 +4117,7 @@ mod tests {
     async fn a_timeout_after_a_quiesce_flush_emits_nothing() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -4149,7 +4171,7 @@ mod tests {
     async fn the_go_guest_releases_its_buffered_batch_on_quiesce_flush() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&go_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&go_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -4202,7 +4224,7 @@ mod tests {
     async fn repeated_read_emit_calls_return_multiple_output_groups() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -4271,7 +4293,7 @@ mod tests {
     async fn guest_restores_its_row_ordinal_without_the_input_it_buffered(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(path))
+            .compile_processor(&Executor::default(), read_guest(path))
             .await
             .expect("guest module must compile");
         let mut owner = compiled
@@ -4342,7 +4364,7 @@ mod tests {
     async fn guest_that_cannot_serialize_its_state_reports_why(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(path))
+            .compile_processor(&Executor::default(), read_guest(path))
             .await
             .expect("guest module must compile");
         let mut branch = compiled
@@ -4392,7 +4414,7 @@ mod tests {
     async fn a_rust_guest_restored_after_its_error_state_processes_input() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
+            .compile_processor(&Executor::default(), read_guest(&rust_guest_path()))
             .await
             .expect("guest module must compile");
         let mut owner = compiled
@@ -4458,7 +4480,7 @@ mod tests {
     async fn guest_rejects_a_snapshot_of_another_branch_configuration(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(path))
+            .compile_processor(&Executor::default(), read_guest(path))
             .await
             .expect("guest module must compile");
         let mut owner = compiled
@@ -4597,7 +4619,7 @@ mod tests {
     async fn branch_instances_reuse_compiled_module_with_isolated_stores() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let left_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(100));
@@ -4657,7 +4679,7 @@ mod tests {
     async fn every_guest_invocation_uses_its_explicit_context() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let mut branch = compiled
@@ -4694,7 +4716,7 @@ mod tests {
     async fn saved_state_loads_into_new_branch_store() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let first_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(700));
@@ -4728,7 +4750,7 @@ mod tests {
     async fn resetting_a_guest_clears_its_saved_computation_state() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let context = test_execution_context();
@@ -4766,7 +4788,7 @@ mod tests {
     async fn emitted_batches_can_be_streamed_to_integration_owner() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -4820,7 +4842,7 @@ mod tests {
         let ticks_before_compile = ticks.load(Ordering::Relaxed);
 
         runtime
-            .compile_processor(wasm.as_bytes())
+            .compile_processor(&Executor::default(), wasm.as_bytes())
             .await
             .expect("stress module must compile");
 
@@ -4836,7 +4858,7 @@ mod tests {
     async fn max_fuel_traps_a_cpu_bound_guest() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(CPU_BOUND_WASM)
+            .compile_processor(&Executor::default(), CPU_BOUND_WASM)
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
@@ -4871,7 +4893,7 @@ mod tests {
     async fn max_fuel_is_reset_for_each_logical_guest_operation() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(TEST_WASM)
+            .compile_processor(&Executor::default(), TEST_WASM)
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
@@ -4907,7 +4929,7 @@ mod tests {
     async fn max_memory_traps_guest_linear_memory_growth() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(MEMORY_GROWING_WASM)
+            .compile_processor(&Executor::default(), MEMORY_GROWING_WASM)
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
@@ -4947,7 +4969,7 @@ mod tests {
     async fn max_memory_rejects_guest_initial_linear_memory() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(MEMORY_GROWING_WASM)
+            .compile_processor(&Executor::default(), MEMORY_GROWING_WASM)
             .await
             .expect("module must compile");
         let configured_limits = WasmProcessorLimits {
@@ -4989,7 +5011,7 @@ mod tests {
         })
         .expect("runtime must initialize");
         let compiled = runtime
-            .compile_processor(CPU_BOUND_WASM)
+            .compile_processor(&Executor::default(), CPU_BOUND_WASM)
             .await
             .expect("module must compile");
         let mut branch = compiled
@@ -5025,5 +5047,20 @@ mod tests {
             ticks.load(Ordering::Relaxed) > 0,
             "epoch async yielding should allow another task to run during guest execution"
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_compiles_on_the_bulk_workers() {
+        let executor = Executor::default();
+
+        runtime()
+            .compile_processor(&executor, TEST_WASM)
+            .await
+            .expect("the bulk workers compile the module");
+
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.bulk_cpu.admitted, 1);
+        assert_eq!(snapshot.bulk_cpu.completed, 1);
+        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     }
 }

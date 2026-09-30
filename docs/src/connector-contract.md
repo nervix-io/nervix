@@ -22,8 +22,8 @@ outbound request, from Arrow preparation to response and recovery.
 | Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse NSPL or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
-boundary, and configuration helpers for TLS, HTTP clients, service URLs, resource mounts, and
-physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
+boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
+URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -261,6 +261,24 @@ sequenceDiagram
     Driver-->>Host: Source messages or sink outcomes
     Host->>Graph: Decode, route, and track ACKs
 ```
+
+### Blocking work and the node's executor
+
+A connector runs on the host's asynchronous tasks and never blocks one. Synchronous work it does
+itself, such as writing or reading a local file, goes through the node's bounded executor, which the
+sink host hands a connector as `SinkHost::executor`. The connector chooses the storage or CPU class
+of its work and the memory it charges; the executor admits that work beside the rest of the node's,
+and a refusal is the connector's own typed failure. The Iceberg sink writes and reads its staged
+Arrow IPC files on the filesystem storage workers, so a node that cannot take the job now fails the
+publish or the commit, which the host retries as it retries any other.
+
+A driver call that parks its thread while it waits on the network computes nothing, and admitting
+it would hold a worker idle for the whole wait. librdkafka's producer flush and metadata fetch are
+such calls, so the Kafka connector runs them on the runtime's blocking pool as declared owners
+outside the executor, bounded by the host's flush deadline and a per-request metadata timeout.
+[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor)
+lists every declared owner, and the boundary check rejects any other connector code that names the
+pool.
 
 ## Source boundary
 
@@ -681,9 +699,9 @@ sequenceDiagram
   `SendError` with that error's server code and reason. The broker itself only closes the
   connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
   other message in flight on it.
-- **Iceberg sink.** It stages Arrow data locally, prepares data files, and publishes a catalog
-  update on its explicit commit cadence or maximum size. Staging does not complete an ACK;
-  successful catalog commit does. The sink retains ACKs and its client while a failed commit is
+- **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
+  prepares data files, and publishes a catalog update on its explicit commit cadence or maximum
+  size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
   limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
