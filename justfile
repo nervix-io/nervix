@@ -1392,11 +1392,11 @@ qualify-typed-ratchet-cache: typed-ratchet-build
 test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
-fmt-typed-ratchet:
+fmt-typed-ratchet: typed-ratchet-setup
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
 
-fmt-check-typed-ratchet:
+fmt-check-typed-ratchet: typed-ratchet-setup
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
 
