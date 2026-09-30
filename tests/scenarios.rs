@@ -10497,6 +10497,44 @@ async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld,
         .release_remote_relay_dispatch_pause(&domain);
 }
 
+#[given(expr = "the next record acknowledgement node {string} returns to node {string} is lost")]
+async fn given_next_remote_acknowledgement_is_lost(
+    world: &mut ScenarioWorld,
+    resolver: String,
+    registrar: String,
+) {
+    let resolver = expand_placeholders(world, &resolver);
+    let registrar = expand_placeholders(world, &registrar);
+    world.fault_injection.lose_next_remote_acknowledgement(
+        crate::common::cluster::node_name(&resolver),
+        crate::common::cluster::node_name(&registrar),
+    );
+}
+
+#[then(expr = "the record acknowledgement node {string} returned to node {string} was lost")]
+async fn then_remote_acknowledgement_was_lost(
+    world: &mut ScenarioWorld,
+    resolver: String,
+    registrar: String,
+) {
+    let resolver = crate::common::cluster::node_name(&expand_placeholders(world, &resolver));
+    let registrar = crate::common::cluster::node_name(&expand_placeholders(world, &registrar));
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_lost_remote_acknowledgement(&resolver, &registrar),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "no record acknowledgement from node '{}' to node '{}' was lost: {error}",
+            resolver.as_str(),
+            registrar.as_str()
+        )
+    });
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
