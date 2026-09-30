@@ -1707,12 +1707,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("i16_arithmetic", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&i16_arithmetic_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&i16_arithmetic_compiled), black_box(batch)))
             },
         );
         let batch = i64_arithmetic_batch(&i64_add_sub_mul_compiled, failures);
@@ -1720,12 +1715,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("i64_add_sub_mul", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&i64_add_sub_mul_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&i64_add_sub_mul_compiled), black_box(batch)))
             },
         );
         let batch = i32_arithmetic_batch(&i32_add_sub_mul_compiled, failures);
@@ -1733,12 +1723,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("i32_add_sub_mul", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&i32_add_sub_mul_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&i32_add_sub_mul_compiled), black_box(batch)))
             },
         );
         let batch = i16_arithmetic_batch(&i16_add_sub_mul_compiled, failures);
@@ -1746,12 +1731,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("i16_add_sub_mul", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&i16_add_sub_mul_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&i16_add_sub_mul_compiled), black_box(batch)))
             },
         );
         let batch = f64_arithmetic_batch(&f64_arithmetic_compiled, failures);

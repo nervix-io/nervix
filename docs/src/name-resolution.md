@@ -63,7 +63,10 @@ seam where the Turmoil build substitutes simulated names, as
 A node loads its resolver once, at startup, after its TLS material and before it opens its runtime
 state or binds the interconnect. Loading reads the resolver configuration and the hosts file on the
 blocking pool, so a slow filesystem never stalls a reactor thread, and then builds Hickory's
-resolver on the node's Tokio runtime. Neither file is read again: a changed resolver configuration
+resolver on the node's Tokio runtime. The read is one of the declared owners of the blocking pool
+outside the bounded executor, because a node loads its resolver before it builds its executor and a
+client tool loads the same resolver without one; see
+[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
 or hosts file takes effect when the node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.

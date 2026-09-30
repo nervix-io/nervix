@@ -223,7 +223,13 @@ impl TransformedEncodingBenchmark {
                 clock,
             },
             codec,
-            batch: EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(1)),
+            batch: EmitterPublishBatch::new(
+                identifier("admitted_work_relay"),
+                batch,
+                None,
+                Timestamp::from_unix_nanos(1),
+            )
+            .assured("a batch without headers has no header count to mismatch"),
             rows: (0..rows).collect(),
         }
     }
