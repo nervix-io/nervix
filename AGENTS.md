@@ -347,11 +347,14 @@ choose a backend.
   takes the credentials class. A refusal from the
   executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
   stays retryable rather than becoming a decode, encode or authentication failure.
-  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other
-  file that names it needs a permission in `crates/primitives/blocking-permissions.toml` stating
-  its owner, why that owner stays outside the executor, and what bounds its work instead, such as
-  a client tool that is not a node or an external driver that waits on the network. A use without
-  a permission and a permission nothing uses both fail.
+  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers, and
+  `nervix_primitives::task::block_in_place`, which blocks the runtime worker thread that calls it,
+  belongs to no file by default. Any other file that names either needs a permission in
+  `crates/primitives/blocking-permissions.toml` listing the items it names and stating its owner,
+  why that owner stays outside the executor, and what bounds its work instead, such as a client
+  tool that is not a node or an external driver that waits on the network. A permission declares
+  its file for exactly the items it lists, so an item no permission lists for its file and a listed
+  item the file no longer names both fail.
 - Tokio's unstable runtime controls belong to the Turmoil build: only a Turmoil recipe in the
   `justfile` passes `--cfg tokio_unstable`, never Cargo configuration, a workflow or a build
   script. Turmoil is also a runner: beside `nervix-primitives`, a package whose harness drives a
