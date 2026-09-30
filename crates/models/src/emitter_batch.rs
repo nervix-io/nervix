@@ -15,8 +15,12 @@ use std::{
     str::FromStr,
 };
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+use error_stack::Report;
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
+    rancor::{Fallible, Source},
+};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 /// Why a batching limit is not a value an emitter can declare.
@@ -36,27 +40,38 @@ pub enum EmitterBatchLimitError {
     MalformedSize { literal: String },
     #[error("BATCH MAX SIZE '{literal}' exceeds the largest size a 64-bit byte count can hold")]
     SizeOverflow { literal: String },
+    /// A stored size whose byte count its unit does not divide. Every size is constructed as a
+    /// whole number of its unit, so no encoder writes one.
+    #[error("stored BATCH MAX SIZE of {bytes} bytes is not a whole number of {unit}")]
+    SizeNotWholeUnits {
+        bytes: NonZeroU64,
+        unit: ByteSizeUnit,
+    },
 }
 
 /// The most members one batch may carry: a count from 1 to [`BatchMessageLimit::MAX`].
 ///
 /// The upper bound is the largest batch the message histograms track, so a batch at the limit is
 /// still observable as one batch.
+///
+/// Every form of the limit is decoded through its range check: the serde form through
+/// `TryFrom<u32>`, the archived form through the same conversion.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Archive, RkyvSerialize,
 )]
 #[serde(try_from = "u32", into = "u32")]
 pub struct BatchMessageLimit(NonZeroU32);
+
+impl<D> RkyvDeserialize<BatchMessageLimit, D> for ArchivedBatchMessageLimit
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<BatchMessageLimit, D::Error> {
+        let count: NonZeroU32 = self.0.deserialize(deserializer)?;
+        BatchMessageLimit::try_from(count.get()).map_err(D::Error::new)
+    }
+}
 
 impl BatchMessageLimit {
     /// The largest member count an emitter may declare.
@@ -159,27 +174,62 @@ impl ByteSizeUnit {
 /// `SHOW CREATE` reproduces the declaration. A fractional size, a size past the 64-bit byte range,
 /// and a size of zero are rejected rather than rounded, saturated or treated as unbounded. Limits
 /// compare by [`PayloadSizeLimit::bytes`]; two spellings of the same size are different
-/// declarations.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+/// declarations. The serde and archived forms are decoded through
+/// [`PayloadSizeLimit::from_whole_units`], so a decoded size is a whole number of its unit too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Archive, RkyvSerialize)]
 pub struct PayloadSizeLimit {
     /// The size in bytes, which is always a whole number of `unit`.
     bytes: NonZeroU64,
     unit: ByteSizeUnit,
 }
 
+impl<'de> Deserialize<'de> for PayloadSizeLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        /// The byte count and unit as the serde form carries them, before they are checked.
+        #[derive(Deserialize)]
+        struct Fields {
+            bytes: NonZeroU64,
+            unit: ByteSizeUnit,
+        }
+
+        let Fields { bytes, unit } = Fields::deserialize(deserializer)?;
+        Self::from_whole_units(bytes, unit)
+            .map_err(|report| D::Error::custom(report.current_context()))
+    }
+}
+
+impl<D> RkyvDeserialize<PayloadSizeLimit, D> for ArchivedPayloadSizeLimit
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<PayloadSizeLimit, D::Error> {
+        let bytes: NonZeroU64 = self.bytes.deserialize(deserializer)?;
+        let unit: ByteSizeUnit = self.unit.deserialize(deserializer)?;
+        PayloadSizeLimit::from_whole_units(bytes, unit)
+            .map_err(|report| D::Error::new(report.current_context().clone()))
+    }
+}
+
 impl PayloadSizeLimit {
+    /// A stored byte count read back with its unit, which must divide it: the only sizes ever
+    /// constructed are whole numbers of their unit.
+    fn from_whole_units(
+        bytes: NonZeroU64,
+        unit: ByteSizeUnit,
+    ) -> Result<Self, Report<EmitterBatchLimitError>> {
+        if !bytes.get().is_multiple_of(unit.bytes()) {
+            return Err(Report::new(EmitterBatchLimitError::SizeNotWholeUnits {
+                bytes,
+                unit,
+            }));
+        }
+        Ok(Self { bytes, unit })
+    }
+
     /// `count` of `unit`, or nothing when that many bytes do not fit in 64 bits.
     pub const fn new(count: NonZeroU64, unit: ByteSizeUnit) -> Option<Self> {
         let Some(bytes) = count.get().checked_mul(unit.bytes()) else {
@@ -280,6 +330,33 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    /// The archived layout of a size limit, so a test can archive a byte count its unit does not
+    /// divide.
+    #[derive(Archive, RkyvSerialize)]
+    struct ArchivedSizeFields {
+        bytes: NonZeroU64,
+        unit: ByteSizeUnit,
+    }
+
+    #[test]
+    fn archived_message_limits_above_the_maximum_are_refused() {
+        let archived =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&nonzero!(65_537_u32)).expect("a count archives");
+        assert!(rkyv::from_bytes::<BatchMessageLimit, rkyv::rancor::Error>(&archived).is_err());
+    }
+
+    #[test]
+    fn decoders_refuse_sizes_that_are_not_whole_units() {
+        let json = r#"{"bytes":1025,"unit":"KiB"}"#;
+        assert!(serde_json::from_str::<PayloadSizeLimit>(json).is_err());
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&ArchivedSizeFields {
+            bytes: nonzero!(1025_u64),
+            unit: ByteSizeUnit::KiB,
+        })
+        .expect("the fields archive");
+        assert!(rkyv::from_bytes::<PayloadSizeLimit, rkyv::rancor::Error>(&archived).is_err());
+    }
 
     #[rstest]
     #[case::bytes("1B", 1)]

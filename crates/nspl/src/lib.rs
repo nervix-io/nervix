@@ -11,6 +11,8 @@
 //!
 pub mod backup;
 pub mod branch;
+#[cfg(test)]
+mod canonical_round_trip_tests;
 pub mod client;
 #[cfg(feature = "client")]
 pub mod client_statement;

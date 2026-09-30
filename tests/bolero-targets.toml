@@ -24,43 +24,43 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/statement__tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
-domain_version = 1
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
+domain_version = 2
 features = []
 id = "nspl-expression"
-invariant = "Rendering and reparsing a generated current expression preserves its complete structured value."
+invariant = "A generated current expression of every form renders to text a statement reads back as the complete structured expression."
 manifest = "Cargo.toml"
-max_input_bytes = 128
+max_input_bytes = 512
 package = "nervix-nspl"
 random_iterations = 256
-source = "crates/nspl/src/statement_tests.rs"
-test = "statement::tests::bolero_expression_roundtrip_minimal_parentheses"
+source = "crates/nspl/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_expression_roundtrip_minimal_parentheses"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/statement__tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 2
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
+domain_version = 3
 features = []
 id = "nspl-model"
-invariant = "Canonical NSPL reparses to the complete generated current Create Model."
+invariant = "Canonical NSPL of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
 manifest = "Cargo.toml"
-max_input_bytes = 128
+max_input_bytes = 2048
 package = "nervix-nspl"
 random_iterations = 256
-source = "crates/nspl/src/statement_tests.rs"
-test = "statement::tests::bolero_model_roundtrip_canonical_nspl"
+source = "crates/nspl/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_model_roundtrip_canonical_nspl"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-archive-model"
-invariant = "An archived canonical Model document reparses to the complete ordered generated Model sequence."
+invariant = "An archived canonical document of generated Models of every family reparses to the complete ordered Model sequence."
 manifest = "Cargo.toml"
-max_input_bytes = 128
+max_input_bytes = 4096
 package = "nervix-nspl"
 random_iterations = 64
 source = "crates/nspl/src/backup/mod.rs"
@@ -114,6 +114,276 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
+domain_version = 1
+features = []
+id = "nspl-statement"
+invariant = "Canonical NSPL of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-nspl"
+random_iterations = 256
+source = "crates/nspl/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_statement_roundtrip_canonical_nspl"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "nspl-statement-text"
+invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical NSPL reparses to them."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-nspl"
+random_iterations = 256
+source = "crates/nspl/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_statement_text_is_canonical_or_rejected"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
+domain_version = 1
+features = []
+id = "nspl-format-document"
+invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-nspl-format"
+random_iterations = 256
+source = "crates/nspl-format/src/format_round_trip_tests.rs"
+test = "format_round_trip_tests::bolero_formatted_documents_keep_their_statements"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "nspl-format-text"
+invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-nspl-format"
+random_iterations = 256
+source = "crates/nspl-format/src/format_round_trip_tests.rs"
+test = "format_round_trip_tests::bolero_formatter_text_is_formatted_or_rejected"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/names__bolero_names_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-names"
+invariant = "Every name type keeps valid text through parsing, display, conversions, JSON, the archive and model-name widening."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/names.rs"
+test = "names::bolero_names_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/names__bolero_name_text_is_validated_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "models-name-validation"
+invariant = "Name parsing matches the name rule on arbitrary text, and the JSON and archive decoders accept only canonical name text."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/names.rs"
+test = "names::bolero_name_text_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/timestamps__bolero_timestamps_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-timestamps"
+invariant = "Every signed Unix nanosecond survives the integer, RFC 3339 text, JSON, archive and chrono forms of a timestamp."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/timestamps.rs"
+test = "timestamps::bolero_timestamps_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/timestamps__bolero_timestamp_text_reads_as_its_instant_or_a_typed_error/corpus"
+domain_version = 1
+features = []
+id = "models-timestamp-text"
+invariant = "Generated RFC 3339 text reads as the instant a civil-date reference computes, offsets, truncation and leap seconds included, or fails with a typed error."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/timestamps.rs"
+test = "timestamps::bolero_timestamp_text_reads_as_its_instant_or_a_typed_error"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/domain_clock__bolero_domain_clock_values_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-domain-clock"
+invariant = "Clock periods, skews and time rates keep their exact values and bit patterns through text, durations, JSON and the archive."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/domain_clock.rs"
+test = "domain_clock::bolero_domain_clock_values_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/domain_clock__bolero_domain_clock_input_is_validated_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "models-domain-clock-validation"
+invariant = "Clock text and numbers read as values in range or fail with typed errors, and the decoders refuse zero periods and non-positive or non-finite rates."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/domain_clock.rs"
+test = "domain_clock::bolero_domain_clock_input_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/json_paths__bolero_json_paths_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-json-paths"
+invariant = "Every generated JSON path keeps its steps through its text, JSON and archive forms."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/json_paths.rs"
+test = "json_paths::bolero_json_paths_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/json_paths__bolero_json_path_input_is_validated_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "models-json-path-validation"
+invariant = "Path text reads as a path whose canonical text is a fixed point or fails with a typed error, and decoders admit exactly the step counts construction does."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/json_paths.rs"
+test = "json_paths::bolero_json_path_input_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/batch_limits__bolero_batch_limits_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-batch-limits"
+invariant = "Batch message and size limits keep their values and units through text, JSON and the archive."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/batch_limits.rs"
+test = "batch_limits::bolero_batch_limits_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/batch_limits__bolero_batch_limit_input_is_validated_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "models-batch-limit-validation"
+invariant = "Limit input reads as a limit in range or fails with a typed error, and decoders refuse counts past the maximum and sizes that are not whole units."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/batch_limits.rs"
+test = "batch_limits::bolero_batch_limit_input_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/identities__bolero_identities_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-identities"
+invariant = "Execution references, upload identities, node endpoints and pool bounds keep their values through text, JSON and the archive."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/identities.rs"
+test = "identities::bolero_identities_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/identities__bolero_identity_input_is_validated_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "models-identity-validation"
+invariant = "Identity parsers and decoders accept exactly the text their rule allows, endpoints reach a canonical text, and pool-bound decoders refuse an unreachable minimum."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/identities.rs"
+test = "identities::bolero_identity_input_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
+domain_version = 1
+features = []
+id = "models-archived-models"
+invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/models.rs"
+test = "models::bolero_models_and_statements_round_trip_through_their_archives"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/checked__tests__bolero_checked_lanes_match_overflowing_arithmetic_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-checked-lanes"
+invariant = "At every SIMD level, the checked sums, differences and products of generated integer lanes of every width, with runs or a shared operand on either side, equal the scalar overflowing reference lane for lane, and no failure bit is set past the last lane."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/checked.rs"
+test = "checked::tests::bolero_checked_lanes_match_overflowing_arithmetic_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_compiler_reports_round_trip/corpus"
 domain_version = 1
 features = []
@@ -126,6 +396,7 @@ random_iterations = 256
 source = "tools/nervix-lint/report/src/tests.rs"
 test = "tests::bolero_compiler_reports_round_trip"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
@@ -141,6 +412,7 @@ random_iterations = 256
 source = "tools/nervix-lint/report/src/tests.rs"
 test = "tests::bolero_catalog_and_scopes_round_trip"
 test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10

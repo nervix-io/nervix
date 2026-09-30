@@ -18,9 +18,14 @@ nervix-primitives = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 criterion = { workspace = true }
 fastrand = { workspace = true }
 hdrhistogram = { workspace = true }
+
+[[bench]]
+harness = false
+name = "checked_lanes"
 
 [[bench]]
 harness = false

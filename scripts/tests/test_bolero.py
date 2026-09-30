@@ -34,14 +34,39 @@ class InventoryTests(unittest.TestCase):
             "client-processor-choice-request",
             "branch-membership",
             "typed-report", "typed-catalog-scope", "typed-site-union",
+            "nspl-statement",
+            "nspl-statement-text",
+            "nspl-format-document",
+            "nspl-format-text",
+            "models-names",
+            "models-name-validation",
+            "models-timestamps",
+            "models-timestamp-text",
+            "models-domain-clock",
+            "models-domain-clock-validation",
+            "models-json-paths",
+            "models-json-path-validation",
+            "models-batch-limits",
+            "models-batch-limit-validation",
+            "models-identities",
+            "models-identity-validation",
+            "models-archived-models",
+            "simd-checked-lanes",
         })
-        self.assertEqual({target.package for target in inventory.targets},
-                         {"nervix-client-wire", "nervix-nspl", "nervix-backup",
-                          "nervix-branch-instances", "nervix-lint-report"})
+        self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-client-wire",
+            "nervix-nspl",
+            "nervix-nspl-format",
+            "nervix-models",
+            "nervix-backup",
+            "nervix-branch-instances",
+            "nervix-simd-kernels",
+            "nervix-lint-report",
+        })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
-            self.assertEqual(target.test_target, "lib")
+            self.assertIn(target.test_target, {"lib", "test:representations"})
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
@@ -63,7 +88,7 @@ class InventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "inventory.toml"
             path.write_text(text.replace(
-                "statement__tests__bolero_expression_roundtrip_minimal_parentheses/corpus",
+                "canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus",
                 "wrong/corpus", 1,
             ))
             with self.assertRaisesRegex(bolero.BoleroError, "actual work directory"):
@@ -92,18 +117,17 @@ class InventoryTests(unittest.TestCase):
 
     def test_paths_and_missing_source_are_rejected(self) -> None:
         text = bolero.INVENTORY.read_text()
+        source = 'source = "crates/nspl/src/canonical_round_trip_tests.rs"'
         self.assert_invalid_inventory(
-            text.replace('source = "crates/nspl/src/statement_tests.rs"', 'source = ""', 1),
+            text.replace(source, 'source = ""', 1),
             "repository-relative path",
         )
         self.assert_invalid_inventory(
-            text.replace('source = "crates/nspl/src/statement_tests.rs"',
-                         'source = "../statement_tests.rs"', 1),
+            text.replace(source, 'source = "../canonical_round_trip_tests.rs"', 1),
             "normalized repository-relative path",
         )
         self.assert_invalid_inventory(
-            text.replace('source = "crates/nspl/src/statement_tests.rs"',
-                         'source = "crates/nspl/src/missing.rs"', 1),
+            text.replace(source, 'source = "crates/nspl/src/missing.rs"', 1),
             "missing source",
         )
 
@@ -124,8 +148,8 @@ class InventoryTests(unittest.TestCase):
     def test_target_names_and_empty_registry_are_rejected(self) -> None:
         text = bolero.INVENTORY.read_text()
         self.assert_invalid_inventory(
-            text.replace('statement::tests::bolero_expression_roundtrip_minimal_parentheses',
-                         'statement::tests::expression_roundtrip_minimal_parentheses', 1),
+            text.replace('canonical_round_trip_tests::bolero_expression_roundtrip_minimal_parentheses',
+                         'canonical_round_trip_tests::expression_roundtrip_minimal_parentheses', 1),
             "test name must start with bolero_",
         )
         self.assert_invalid_inventory(
@@ -303,6 +327,33 @@ class ExecutionTests(unittest.TestCase):
                 with self.assertRaisesRegex(bolero.BoleroError, "expected one instrumented"):
                     bolero.build_instrumented(self.inventory, self.target,
                                               pathlib.Path(directory))
+
+    def test_library_executable_is_told_apart_from_a_binary_of_the_same_name(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-nspl-format")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_nspl_format-1111"
+            binary = run / "nervix_nspl_format-2222"
+            integration = run / "repository_files-3333"
+            for executable in (library, binary, integration):
+                executable.write_bytes(b"")
+            output = (
+                f"  Executable unittests src/lib.rs ({library})\n"
+                f"  Executable unittests src/main.rs ({binary})\n"
+                f"  Executable tests/repository_files.rs ({integration})\n"
+            )
+            build = subprocess.CompletedProcess([], 0, output, "")
+            with mock.patch.object(bolero, "command", return_value=build):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
+                integration_target = dataclasses.replace(
+                    target, test_target="test:repository_files"
+                )
+                again = run / "again"
+                again.mkdir()
+                self.assertEqual(
+                    bolero.build_instrumented(self.inventory, integration_target, again),
+                    integration,
+                )
 
     def test_feature_and_integration_test_target_arguments(self) -> None:
         target = dataclasses.replace(self.target, test_target="test:property_suite",

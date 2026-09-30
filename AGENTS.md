@@ -108,6 +108,19 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
   deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
   connection lifecycle, failure semantics, and observability.
+- [Name Resolution](docs/src/name-resolution.md) is the authoritative architecture reference for how
+  Nervix turns host names into addresses. Any change to `nervix-dns`, to how a node or a native
+  client loads its resolver, to a path that resolves a host name or the hook, budget or dialling
+  policy it uses, to a dependency feature that selects a resolver, or to the DNS checks and fixtures
+  must keep that chapter current in the same change. Its scope includes resolver ownership and
+  lifetime, configuration and its failures, the resolution order of literal, hosts-file and DNS
+  names, IPv4 and IPv6 answers, cache and TTL bounds, lookup budgets, concurrency and cancellation,
+  lookup outcomes, the matrix of call sites and client-library hooks, dialling policy, connection
+  identity for TLS, HTTP authority, proxies and request signing, failure ownership, dependency
+  selection and its validation, residual driver, SDK and browser resolution, deployment limits,
+  build modes and the simulation boundary, evidence, operator diagnostics, and recovery.
+  Interconnect, connector, session, shutdown and test-harness details remain in their own
+  authoritative chapters.
 - [Client Session Protocol](docs/src/client-session-protocol.md) is the authoritative architecture
   reference for client-to-node communication, and the
   [Client Implementation Manual](docs/src/client-implementation-manual.md) is its normative
@@ -971,8 +984,9 @@ build and the existing tests, and nothing in it changes behavior.
   independently of the ordinary tests. `just cargo-clippy-loom`, part of `just lint`, keeps every
   Loom build compiling, including the server and consensus libraries as they ship and in test mode.
 - `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
-  natively in ordinary mode, `bench-smoke`, `test-primitives` and `nspl-completion-walk`, exactly as
-  their recipes do but under LLVM source instrumentation, and CI's extra-tests job runs them only
+  natively in ordinary mode, `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
+  `nspl-completion-walk`, exactly as their recipes do but under LLVM source instrumentation, and
+  CI's extra-tests job runs them only
   that way. Each run writes `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
   fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
   beside a `complete` completion record; a failed, interrupted or incomplete collection never is

@@ -26,6 +26,9 @@ RUNS = ROOT / "target/bolero/runs"
 QUALIFICATION = ROOT / "tests/bolero-qualification/Cargo.toml"
 TARGET_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 TEST_LINE = re.compile(r"^(\S+): test$", re.MULTILINE)
+# Cargo names every test executable it builds: a library's or binary's as `unittests <root>`, an
+# integration test's by its source path.
+EXECUTABLE = re.compile(r"Executable (?P<description>[^(]+?) \((?P<path>[^)]+)\)")
 MACRO = re.compile(r"\bbolero::check!\s*\(")
 UNQUALIFIED_CHECK = re.compile(r"(?<![:\w])check!\s*\(")
 FUNCTION = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(")
@@ -592,7 +595,7 @@ def build_instrumented(
         target.test,
     ]
     build = command(args, timeout=1800, log=path / "build.log")
-    executables = re.findall(r"Executable ([^(]+) \(([^)]+)\)", build.stdout)
+    executables = EXECUTABLE.findall(build.stdout)
     manifest_path = QUALIFICATION if target.manifest == QUALIFICATION else package_manifests()[target.package]
     with manifest_path.open("rb") as file:
         manifest = tomllib.load(file)

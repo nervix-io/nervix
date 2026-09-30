@@ -23,7 +23,8 @@ Paced domains maintain a domain clock.
 
 `PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
 fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
-is stored.
+is stored. Duration text anywhere in NSPL whose spans could add up to 18446744073709551615 seconds,
+however they are written, is rejected when the statement is parsed.
 
 While the domain is running:
 
@@ -172,7 +173,9 @@ An explicit `START AT` timestamp must fit exactly in signed Unix nanoseconds. Th
 is `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`; valid RFC 3339 values
 immediately outside those endpoints are rejected by the command. Nervix converts accepted text to
 a timestamp at the language boundary and carries that timestamp through persistence and runtime
-state without reparsing it.
+state without reparsing it. An offset is converted to UTC, fractional digits past the ninth are
+truncated, and a leap second, which RFC 3339 writes as `:60`, reads as the instant one second past
+the second before it, because Unix nanoseconds have no leap seconds.
 
 `TIME RATE` accepts every positive finite `f64`, including scientific notation such as `5e-324`
 and `1.7976931348623157e308`. Zero, negative values, infinities, and NaN are rejected. The committed

@@ -41,4 +41,6 @@ arrow-buffer = { workspace = true }
 nervix-simd-kernels = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 rstest = { workspace = true }

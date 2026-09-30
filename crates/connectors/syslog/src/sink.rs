@@ -261,7 +261,9 @@ impl SyslogSink {
     }
 
     fn config_error(error: Report<super::config::SyslogConfigError>) -> Report<SinkStartError> {
-        let reason = error.current_context().to_string();
+        // A configuration value that does not parse keeps its parser's error as the frame beneath
+        // it, so the reason is the whole chain.
+        let reason = format!("{error:#}");
         error
             .change_context(SinkStartError::InvalidConfiguration { sink: SYSLOG })
             .attach_printable(reason)
@@ -343,6 +345,7 @@ async fn write_stream_frame(
 mod tests {
     use std::net::Ipv6Addr;
 
+    use error_stack::{AttachmentKind, FrameKind};
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
@@ -382,6 +385,39 @@ mod tests {
         assert_eq!(
             report.current_context(),
             &SinkStartError::InvalidConfiguration { sink: SYSLOG }
+        );
+    }
+
+    #[test]
+    fn startup_describes_a_value_that_does_not_parse_with_its_parser_error() {
+        let entries = [
+            ("protocol", "tcp"),
+            ("addr", "127.0.0.1:5514"),
+            ("max_message_size", "many"),
+        ]
+        .into_iter()
+        .map(|(key, value)| ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+        .collect::<Vec<_>>();
+        let failure = SyslogClientConfig::parse(&entries, SyslogDirection::Emit)
+            .expect_err("a message size must be a positive integer");
+
+        let report = SyslogSink::config_error(failure);
+
+        let mut descriptions = Vec::new();
+        for frame in report.frames() {
+            if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+                descriptions.push(attachment.to_string());
+            }
+        }
+        assert_eq!(
+            descriptions,
+            [
+                "invalid Syslog client config key 'max_message_size' value 'many': invalid digit \
+                 found in string"
+            ]
         );
     }
 

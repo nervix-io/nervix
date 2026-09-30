@@ -83,6 +83,19 @@ same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
+The node resolver's own errors belong to `nervix-dns`. A resolver configuration that cannot be
+loaded is a `DnsConfigurationError`, which fails node startup beneath
+`failed to load the name resolver configuration` and a native client's connection as
+`ClientError::LoadDnsConfiguration`. A lookup that fails is a `DnsLookupError`: the host as the
+caller wrote it and one `DnsLookupFailure`, the closed set that
+[Lookup Outcomes](./name-resolution.md#lookup-outcomes) lists. A client library that resolves
+through one of the resolver's hooks receives the `DnsLookupError` itself and keeps it among the
+causes of its own connection error, where `DnsLookupError::find_in` recovers it. The HTTP request
+sink, RabbitMQ, Syslog, WebSocket, Redis, MQTT, ClickHouse, SQS and the native session client keep
+it beneath their own failure, as the paragraphs below describe. HTTP polling, Prometheus, Sentry,
+OTEL and Iceberg report their failed request, export or catalog call without it, so their
+diagnostics do not name the lookup failure.
+
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
@@ -107,6 +120,24 @@ unexpected fields, nullability, exact wire types, integer ranges, datetime parsi
 nested sequence shapes keep their existing typed codec or runtime-schema failures. Diagnostics name
 the codec and field when one is known and never attach the rejected payload value.
 
+Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
+codec, and the field when one is at fault, and the typed reason stays beneath it: a
+`CodecContractError` for a declaration or use the wire format does not support, such as a missing
+wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
+does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
+builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+An unfolding payload keeps the report of the message that failed and names its zero-based input and
+output position after it. The ingest group returns that report unchanged. A source host keeps it
+beneath its intake's decode or dispatch failure and reports the whole chain, an HTTP or WebSocket
+endpoint renders the whole chain in its decode notice, a lookup line keeps it beneath the line it
+failed on, and an emitter keeps it beneath the record it rejects or the encoding it could not start. The rendered chain reads as the codec
+diagnostic did before: `codec 'events_codec' failed to parse field 'user_id': ...` followed by the
+Arrow builder's own reason. A codec that fails to compile while a domain execution is built keeps its
+report in the runtime build error. A codec failure whose parser or writer error is its `#[source]`,
+such as a simd-json, CBOR, Avro, protobuf, I/O, UTF-8 or timestamp error, leaves that error out of
+its own message: `error-stack` records a context's source as the frame beneath it, so the rendered
+chain names each cause once.
+
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
 is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operation can fail as
@@ -114,13 +145,14 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 sink failure and retry path; they do not release a staged record's acknowledgement before commit.
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
-module: an invalid address or CA file, a lookup failure that keeps the resolver's
-`DnsLookupFailure` as a typed field, no address that accepted a connection, a failed or overdue
-TLS handshake, or a failed AMQP handshake, each naming the broker host. The source keeps it beneath
-its connect and resume contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the
-resolver's own lookup error. The sink changes it into a configuration failure for an invalid
-address or CA file and an initialization failure otherwise, leading with the connection error's
-message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
+as a typed field, no address that accepted a connection, a failed or overdue TLS handshake, a Lapin
+runtime that could not be created, or a failed AMQP handshake, each naming the broker host where one
+is involved. The source keeps it beneath its connect and resume contexts, so `DESCRIBE INGESTOR`
+shows the deepest cause, such as the resolver's own lookup error. The sink changes it into a
+configuration failure for an invalid address or CA file and an initialization failure otherwise,
+leading with the connection error's message, which `DESCRIBE EMITTER` shows. Neither attaches
+credentials from the address.
 
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
@@ -157,13 +189,14 @@ driver the resolver's `DnsLookupError` as the failure of the lookup. The driver 
 cause of its connection error, and the connector finds it there by type and keeps it as the context
 beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
 an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
-`SqsSourceError` of opening the queue, receiving or deleting beneath the source's `SourceError`.
-The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER` and
-`DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection or a
-certificate that does not name the configured host, is described by every cause of the driver's
-connection error, which describes the connection and carries neither credentials nor a record; a
-response from the service keeps its existing description. None is a record rejection, and none
-acknowledges input.
+`SqsSourceError` of receiving or deleting beneath the source's `SourceError`. An SQS source looks
+its queue up while its ingestor starts; the runtime keeps that failure's text, the lookup failure
+included, as the reason of the ingestor's start failure rather than as a typed cause. The failure's
+message names the host and the lookup failure, which `DESCRIBE EMITTER` and `DESCRIBE INGESTOR`
+show. Any other failure to reach the service, such as a refused connection or a certificate that
+does not name the configured host, is described by every cause of the driver's connection error,
+which describes the connection and carries neither credentials nor a record; a response from the
+service keeps its existing description. None is a record rejection, and none acknowledges input.
 
 The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MySQL and ClickHouse
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
@@ -387,6 +420,19 @@ The last carries the runtime planning failure beneath it, such as a relay withou
 an unparseable flush or collection cadence, rather than restating it. Runtime installation adds
 domain context to either report, and an ingestor that fails to start while its domain execution is
 built records that report as its transient error.
+
+Starting an ingestor on a node returns an `IngestorStartError` report. An ingestor already running,
+a domain execution or codec the node has not instantiated, and a binding failure beneath the
+binding context are start failures of their own. Every failure to compose or open the source is
+`IngestorStartError::Initialize`, naming the ingestor and its domain, with the cause beneath it: a
+`SourceStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
+offsets this node does not own, or a delivery-mode duration that does not parse, or else the report
+of the client configuration, connector plan, source instance or domain cadence that failed. A
+runtime caller that still returns `RuntimeError` keeps the whole report in
+`RuntimeError::IngestorStart`, whose message is the report's chain, such as
+`failed to initialize ingestor 'syslog_source' in domain 'edge': invalid Syslog client config key
+'framing': UDP does not use stream framing`. That message is what the failed command and the
+ingestor's transient status show.
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
@@ -689,7 +735,11 @@ owns where these outcomes occur during stop and drain.
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
-in the type. A dropped result with no stated recovery class does not establish that it was handled.
+in the type. A dependency that panics on input a caller can supply is such a failure too: its owner
+refuses that input with a typed error before the dependency reads it, as the vocabulary's duration
+parser does with `DurationTextError::TooLong` for text whose spans would overflow `humantime`'s
+duration arithmetic. A dropped result with no stated recovery class does not establish that it was
+handled.
 
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
