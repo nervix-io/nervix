@@ -60,6 +60,7 @@
   - [Errors And Diagnostics](./errors-and-diagnostics.md)
   - [Typed States And Validation Boundaries](./typed-states.md)
   - [Connector Crates And The Connector Contract](./connector-contract.md)
+  - [HTTP Emitter Architecture](./http-emitter-architecture.md)
   - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
   - [Client Session Protocol](./client-session-protocol.md)

@@ -21,8 +21,8 @@ use crate::{
         emitter_ref, expression_before_clause, flush_each, from_relay_clauses,
         general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
         lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
-        render_expression_tokens, retry_policy, route_construction, string_lit, subject_ref,
-        suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
+        render_expression_tokens, retry_policy, route_construction, schema_ref, string_lit,
+        subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
         where_only_route_construction, word_raw,
     },
 };
@@ -43,6 +43,22 @@ fn broker_ack_publishing_mode<'src>()
         .then(retry_policy())
         .map(
             |((window, ack_timeout), retry_policy)| EmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            },
+        )
+        .boxed()
+}
+
+fn client_ack_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
+        .ignore_then(ack_window())
+        .then(ack_timeout())
+        .then(retry_policy())
+        .map(
+            |((window, ack_timeout), retry_policy)| EmitterPublishingMode::ClientAck {
                 window,
                 ack_timeout,
                 retry_policy,
@@ -170,6 +186,14 @@ fn kafka_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Topic))
         .then(topic_ref())
         .map(|(client, topic)| EmitSink::Kafka { client, topic })
+}
+
+fn client_emit_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Client)
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(schema_ref())
+        .map(|schema| EmitSink::Client { schema })
 }
 
 fn pulsar_emit_sink_parser<'src>()
@@ -1025,6 +1049,21 @@ fn codec_free_sink<'src>(
         .boxed()
 }
 
+/// Native client output is constructed against its declared schema without a codec or VALUES.
+fn native_client_sink<'src>()
+-> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    sink_with_publishing_mode(client_emit_sink_parser(), client_ack_publishing_mode())
+        .then(route_construction().or_not())
+        .map(|(sink, construction)| ParsedSink {
+            sink: sink.sink,
+            publishing_mode: sink.publishing_mode,
+            body: EmitterBody::Client,
+            construction,
+            batch: None,
+        })
+        .boxed()
+}
+
 /// A complete sink clause followed by the batching clause its sink cannot do without.
 fn batch_required<'src>(
     sink: impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone + 'src,
@@ -1059,6 +1098,7 @@ fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         http_create_sink_parser(),
+        batch_required(native_client_sink()),
         batch_optional(codec_free_sink(sink_with_publishing_mode(
             otel_emit_sink_parser(),
             request_ack_publishing_mode(),
@@ -1132,6 +1172,7 @@ fn emit_sink_parser<'src>()
 fn alter_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
+        sink_with_publishing_mode(client_emit_sink_parser(), client_ack_publishing_mode()),
         sink_with_publishing_mode(otel_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(clickhouse_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(postgres_emit_sink_parser(), request_ack_publishing_mode()),
@@ -1186,10 +1227,16 @@ pub fn alter_emitter_parser<'src>()
     let set_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
         .ignore_then(alter_emit_sink_parser())
-        .map(|sink| AlterEmitterOperation::SetSink {
-            sink: Box::new(sink.sink),
-            publishing_mode: sink.publishing_mode,
-            body: None,
+        .map(|sink| {
+            let body = match &sink.sink {
+                EmitSink::Client { .. } => Some(EmitterBody::Client),
+                _ => None,
+            };
+            AlterEmitterOperation::SetSink {
+                sink: Box::new(sink.sink),
+                publishing_mode: sink.publishing_mode,
+                body,
+            }
         });
     let set_http_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
@@ -1848,6 +1895,51 @@ mod tests {
     }
 
     #[test]
+    fn native_client_emitter_constructs_output_and_round_trips() {
+        let source = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing MODE ACK \
+                      PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s INHERIT id \
+                      SET cents = input.amount * 100 WHERE output.cents > 0 BATCH MAX MESSAGES 16 \
+                      MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        assert_canonical_emitter_roundtrip(source, "CLIENT ACK");
+        let parsed = parse_create_emitter(source).expect("native client output parses");
+        assert!(matches!(parsed.sink.as_ref(), EmitSink::Client { .. }));
+        assert!(matches!(parsed.body.body, EmitterBody::Client));
+        assert!(parsed.batch.is_some());
+    }
+
+    #[test]
+    fn native_client_emitter_requires_ack_mode_and_batch_limits() {
+        let prefix = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing ";
+        let tail = " FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        for body in [
+            "MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX MESSAGES 16 MAX SIZE 1MiB",
+            "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s",
+            "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX \
+             MESSAGES 0 MAX SIZE 1MiB",
+            "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING \
+             codec BATCH MAX MESSAGES 16 MAX SIZE 1MiB",
+        ] {
+            assert!(
+                parse_create_emitter(&format!("{prefix}{body}{tail}")).is_err(),
+                "invalid native CLIENT emitter parsed: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_client_emitter_completion_stays_on_its_grammar_branch() {
+        let source = "CREATE EMITTER app_output FROM orders TO CLIENT ";
+        let suggestions = suggest_create_emitter(source, source.len());
+        assert!(suggestions.contains(&"SCHEMA".to_string()));
+        assert!(!suggestions.contains(&"TOPIC".to_string()));
+        let source = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing MODE ACK ";
+        let suggestions = suggest_create_emitter(source, source.len());
+        assert!(suggestions.contains(&"SEQUENTIAL".to_string()));
+        assert!(suggestions.contains(&"PARALLEL".to_string()));
+        assert!(!suggestions.contains(&"NO_ACK".to_string()));
+    }
+
+    #[test]
     fn every_publishing_mode_body_parses_and_canonical_round_trips() {
         for sink in [
             "KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
@@ -2216,7 +2308,10 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
 
         assert_eq!(parsed.sink.transport_label(), "SENTRY");
-        assert_eq!(parsed.sink.client().as_str(), "sentry_main");
+        assert_eq!(
+            parsed.sink.client().map(|client| client.as_str()),
+            Some("sentry_main")
+        );
     }
 
     #[test]

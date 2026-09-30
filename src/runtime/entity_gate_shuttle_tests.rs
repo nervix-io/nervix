@@ -819,3 +819,67 @@ fn shuttle_releasing_an_ownership_handoff_wakes_every_waiter_frozen_by_it() {
     let deadline = far_future_deadline(Instant::now());
     explore(move || releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline));
 }
+
+/// The branch task must observe a release that lands while it is deciding whether to wait.
+/// Registration must precede the freeze read, or that release has no waiter to wake.
+fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
+    shuttle::future::block_on(async {
+        let domain = DomainName::parse("default").assured("the check names a valid domain");
+        let relay = RelayName::parse("events").assured("the check names a valid relay");
+        let entity = NodeRef {
+            kind: ModelKind::Relay,
+            identifier: ModelName::from(&relay),
+        };
+        let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
+        let frozen_entities: Arc<
+            DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>,
+        > = Arc::new(DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0)));
+        let changed = Arc::new(Notify::new());
+        frozen_entities
+            .entry(key.clone())
+            .or_default()
+            .insert(coordination());
+        let watch = Arc::new(OwnershipHandoffFreezeWatch::over(
+            frozen_entities.clone(),
+            changed.clone(),
+            key,
+        ));
+
+        let waiter = nervix_primitives::task::spawn(wait_until_thawed(watch));
+        let releasing_entities = frozen_entities.clone();
+        let release = nervix_primitives::task::spawn(async move {
+            let ingestors = DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0));
+            let ingestor_quiescence = DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0));
+            Runtime::release_entity_alter_hold(
+                &ingestors,
+                &ingestor_quiescence,
+                &releasing_entities,
+                &changed,
+                &domain,
+                EntityAlterHold {
+                    coordination: coordination(),
+                    gates: EntityGateHold {
+                        gates: Vec::new(),
+                        branch_gates: Vec::new(),
+                    },
+                    affected_entities: vec![entity],
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    quiesced_ingestors: Vec::new(),
+                },
+            )
+            .await;
+        });
+
+        release.await.assured(CHECK_TASK_JOINS);
+        waiter.await.assured(CHECK_TASK_JOINS);
+        assert!(
+            frozen_entities.is_empty(),
+            "the thawed entity and its waiter both observe the release"
+        );
+    });
+}
+
+#[test]
+fn shuttle_an_ownership_handoff_freeze_observation_registers_before_its_read() {
+    explore(observing_an_ownership_handoff_freeze_never_misses_its_release);
+}

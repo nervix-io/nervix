@@ -2397,6 +2397,29 @@ impl SessionServiceImpl {
         };
         Ok(Some((ingestor.clone(), ingestor_node.clone())))
     }
+
+    pub(in crate::application) async fn emitter_target_from_schedule(
+        &self,
+        domain: &DomainName,
+        name: impl Into<ModelName>,
+    ) -> error_stack::Result<Option<(nervix_models::CreateEmitter, ScheduledNode)>, ObservationError>
+    {
+        let name = name.into();
+        let schedule = self.inner.consensus.current_schedule().await;
+        let Some(domain_schedule) = schedule.domain(domain) else {
+            return Ok(None);
+        };
+        let Some(node) = domain_schedule
+            .nodes
+            .get(&NodeRef::new(ModelKind::Emitter, name))
+        else {
+            return Ok(None);
+        };
+        let Model::Emitter(emitter) = node.config.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some((emitter.clone(), node.clone())))
+    }
 }
 
 #[cfg(test)]

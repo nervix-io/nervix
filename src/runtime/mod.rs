@@ -192,6 +192,7 @@ mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
+mod client_emitter;
 mod client_ingestor;
 mod correlator;
 mod deduplicator;
@@ -200,6 +201,7 @@ mod domain_execution;
 mod domain_rebuild;
 mod emitter_batch_packing;
 mod emitter_buffer;
+mod emitter_client;
 mod emitter_encoding;
 mod emitter_http_requests;
 mod emitter_ordering_group;
@@ -303,6 +305,11 @@ use branch_runtime::{
     internal_processor_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
 };
+pub(crate) use client_emitter::{
+    ClientEmitterAnswer, ClientEmitterDelivery, ClientEmitterDescription, ClientEmitterEndpoint,
+    ClientEmitterGrant, ClientEmitterPayload, ClientEmitterRefusal, ClientEmitterResponder,
+    ClientEmitterResult,
+};
 pub(crate) use client_ingestor::{
     ClientIngestorGauges, ClientProducerEvent, ClientProducerEvents, ClientProducerHandle,
     ClientProducerOpenRequest, ClientProducerReservation, ClientProducerRetention,
@@ -335,6 +342,7 @@ use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
     EmitterPublishBatch, PublishReport, RowToPack,
 };
+use emitter_client::{ClientEmitterSink, ClientPayload};
 use emitter_encoding::EncodedRecordSink;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{

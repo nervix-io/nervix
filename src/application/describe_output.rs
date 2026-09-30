@@ -847,6 +847,7 @@ pub(in crate::application) fn format_emitter_describe_output(
                 EmitterBody::Codec { .. } => "codec",
                 EmitterBody::WithoutBody => "without body",
                 EmitterBody::Values => "values",
+                EmitterBody::Client => "native Arrow",
             }
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)?),
@@ -873,6 +874,7 @@ pub(in crate::application) fn format_emitter_describe_output(
 
 fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(match sink {
+        EmitSink::Client { schema } => format!("CLIENT schema={}", schema.as_str()),
         EmitSink::Http {
             client,
             method,

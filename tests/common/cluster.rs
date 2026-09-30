@@ -108,6 +108,7 @@ use super::{
         PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
         SQS_TLS_ENDPOINT,
     },
+    kafka_group_member::ExternalKafkaGroupMember,
     node_liveness::{
         NodeStartupError, NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask,
         ReadinessProbeOutcome,
@@ -1884,6 +1885,15 @@ impl Cluster {
         partitions: i32,
     ) -> io::Result<()> {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
+    }
+
+    /// Subscribes a consumer group member that Nervix does not run to `topic` in `group`.
+    pub(crate) fn join_external_kafka_group_member(
+        &self,
+        group: &str,
+        topic: &str,
+    ) -> io::Result<ExternalKafkaGroupMember> {
+        ExternalKafkaGroupMember::join(kafka_client_config(&self.dependencies)?, group, topic)
     }
 
     pub(crate) async fn reset_kafka_topic_partitions(

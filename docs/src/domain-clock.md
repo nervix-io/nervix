@@ -363,6 +363,11 @@ does not re-evaluate an admitted request under the replacement. Attempt timeouts
 an HTTP-date `Retry-After`, and shutdown or drain deadlines remain physical waits; a domain's
 `TIME RATE` does not shorten them.
 
+A native client emitter similarly freezes the Arrow IPC bytes, source members, delivery identity
+and execution snapshot when the batch is prepared. Consumer retry or ACK timeout gives that same
+batch a new attempt reference without re-running expressions at a later domain time. Its ACK
+deadline, retry backoff, interconnect heartbeat and peer-silence deadline are physical waits.
+
 ## Admission Windows
 
 Paced ingestion obtains its execution time and admission window from one clock read. Given the

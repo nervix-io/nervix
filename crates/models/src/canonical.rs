@@ -2150,7 +2150,7 @@ impl CreateEmitter {
                 sink_clauses.push(Clause::line(format!("ENCODE USING {}", codec.as_str())));
             }
             EmitterBody::WithoutBody => sink_clauses.push(Clause::line("WITHOUT BODY".to_string())),
-            EmitterBody::Values => {}
+            EmitterBody::Values | EmitterBody::Client => {}
         }
 
         let mut clauses = vec![Clause::line(format!(
@@ -2673,7 +2673,7 @@ fn alter_emitter_operation_to_nspl(
             let body_clause = match body {
                 Some(EmitterBody::Codec { codec }) => format!(" ENCODE USING {}", codec.as_str()),
                 Some(EmitterBody::WithoutBody) => " WITHOUT BODY".to_string(),
-                Some(EmitterBody::Values) | None => String::new(),
+                Some(EmitterBody::Values | EmitterBody::Client) | None => String::new(),
             };
             Ok(format!(
                 "SET TO {}{commit_policy} MODE {}{body_clause}",
@@ -3299,6 +3299,11 @@ impl EmitterPublishingMode {
                 )
             };
         match self {
+            EmitterPublishingMode::ClientAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => confirmed("ACK", window, ack_timeout, retry_policy),
             EmitterPublishingMode::NoAck { retry_policy } => {
                 format!("NO_ACK {}", retry(retry_policy))
             }
@@ -3459,6 +3464,7 @@ fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
 
 fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
     match sink {
+        EmitSink::Client { schema } => Ok(format!("CLIENT SCHEMA {}", schema.as_str())),
         EmitSink::Http {
             client,
             method,

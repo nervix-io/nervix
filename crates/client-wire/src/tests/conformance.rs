@@ -8,44 +8,53 @@
 //! is held to the frames Rust writes. Setting `NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1` rewrites the
 //! corpus instead of checking it; `just update-client-wire-corpus` does that.
 
-use std::{fmt::Write as _, fs, num::NonZeroU64, path::PathBuf};
+use std::{
+    fmt::Write as _,
+    fs,
+    num::{NonZeroU32, NonZeroU64},
+    path::PathBuf,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
-    ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerEndReason, ClientProducerRefusal,
-    ClientSubmissionOutcome, ClientSubmissionRefusal, CommandExecutionReference,
-    DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, ModelKind,
-    ModelName, NodeRef, ParseAsType, PlacementPolicy, RequestedResourceVersion, RestoreArchive,
-    RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain,
-    RestoredUsers, SchemaField, Timestamp,
+    ClientBatchDefect, ClientConsumerLimits, ClientOutcomeUncertainty, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    CommandExecutionReference, DomainClockObservation, DomainClockObservedState,
+    DomainClockTickObservation, ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy,
+    RequestedResourceVersion, RestoreArchive, RestoreMode, RestoreReport, RestoreStep,
+    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField, Timestamp,
 };
 
 use super::{
     fixtures::{limits, name, non_zero, request},
     samples::{
         client_messages, command_outcome, domain_clock_observations, leader, producer,
-        producer_description, row_schema, rows_frame, subscription,
+        producer_description, producer_fields, row_schema, rows_frame, subscription,
     },
 };
 use crate::{
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadFrame,
     BackupDownloadMessage, BackupDownloadRequest, BackupDownloadRequestFrame, CellView, CellsView,
     Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, ClientFrame,
-    ClientMessage, ClientRequest, CloseIngestorDisposition, CloseIngestorOutcome,
-    CommandDisposition, CommandOutcome, DomainClockAttachDisposition, DomainClockAttachOutcome,
-    DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked, DomainPaceChoice,
-    LeaderRedirect, OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged,
-    ProducerEnded, ProducerOpened, Reply, ReplyBody, ReplyDelivery, RequestRejected,
-    RequestRejection, RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply,
-    RestoreReplyFrame, RestoreStart, RestoreUploadFailure, ServerEvent, ServerFrame, ServerMessage,
-    SubmissionOutcome, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-    SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion,
-    SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
-    producer::wire_refusal, restore::RestoreChunk, wire,
+    ClientMessage, ClientRequest, CloseEmitterOutcome, CloseIngestorDisposition,
+    CloseIngestorOutcome, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
+    DomainPaceChoice, EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened,
+    EmitterSettlement, LeaderRedirect, OpenEmitterDisposition, OpenEmitterOutcome,
+    OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
+    ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply, ReplyBody,
+    ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
+    RestoreMessage, RestoreReply, RestoreReplyFrame, RestoreStart, RestoreUploadFailure,
+    ServerEvent, ServerFrame, ServerMessage, SettleEmitterBatchOutcome, SubmissionOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded,
+    SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
+    SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal,
+    restore::RestoreChunk, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -252,12 +261,16 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_cancel.nxcm", client(13)),
         ("client_choice.nxcm", client(14)),
         ("client_choice_relay_field.nxcm", client(17)),
+        ("client_close_emitter.nxcm", client(24)),
         ("client_close_ingestor.nxcm", client(20)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
         ("client_detach_domain_clock.nxcm", client(16)),
+        ("client_open_emitter.nxcm", client(21)),
         ("client_open_ingestor.nxcm", client(18)),
+        ("client_read_emitter_batch.nxcm", client(22)),
+        ("client_settle_emitter_batch.nxcm", client(23)),
         ("client_submit_batch.nxcm", client(19)),
         ("client_subscribe.nxcm", client(11)),
         ("client_suggest.nxcm", client(3)),
@@ -488,6 +501,68 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         (
             "server_domain_clock_unpaced.nxsm",
             clock_observed(1, DomainClockObservedState::Unpaced),
+        ),
+        (
+            "server_emitter_batch.nxsm",
+            reply(
+                23,
+                ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome {
+                    disposition: ReadEmitterDisposition::Batch(EmitterBatchReceived {
+                        identity: uuid::Uuid::from_bytes([0xA3; 16]),
+                        reference: uuid::Uuid::from_bytes([0xB4; 16]),
+                        source_relay: name("orders"),
+                        branch_fingerprint: Some([0xC5; 32]),
+                        batch: Bytes::from_static(b"ARROW-IPC-OUTPUT"),
+                        members: 2,
+                        execution_now: Timestamp::from_unix_nanos(1_700_000_000_000_000_000),
+                    }),
+                    message: String::new(),
+                }),
+            ),
+        ),
+        (
+            "server_emitter_closed.nxsm",
+            reply(
+                25,
+                ReplyBody::CloseEmitter(CloseEmitterOutcome {
+                    disposition: EmitterCloseDisposition::Closed,
+                    message: String::new(),
+                }),
+            ),
+        ),
+        (
+            "server_emitter_opened.nxsm",
+            reply(
+                22,
+                ReplyBody::OpenEmitter(OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Opened(Box::new(EmitterOpened {
+                        domain: name("tenant"),
+                        emitter: name("app_output"),
+                        fields: producer_fields(),
+                        window: AckWindow::Parallel { max: non_zero(8) },
+                        ack_timeout: Duration::from_secs(30),
+                        retry_backoff: Duration::from_millis(100),
+                        retry_max_backoff: Duration::from_secs(1),
+                        granted: ClientConsumerLimits {
+                            batches: NonZeroU32::new(8).assured("literal nonzero"),
+                            bytes: non_zero(4 * 1024 * 1024),
+                        },
+                        max_batch_bytes: 1024 * 1024,
+                        max_batch_rows: 16,
+                    })),
+                    message: "consumer attached".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_emitter_settled.nxsm",
+            reply(
+                24,
+                ReplyBody::SettleEmitterBatch(SettleEmitterBatchOutcome {
+                    disposition: EmitterSettlement::Confirmed,
+                    message: String::new(),
+                }),
+            ),
         ),
         (
             "server_ingestor_closed.nxsm",
@@ -1025,6 +1100,69 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                         text(&outcome.message)
                     ));
                 }
+                ReplyBody::OpenEmitter(outcome) => match &outcome.disposition {
+                    OpenEmitterDisposition::Opened(opened) => {
+                        let window = match opened.window {
+                            AckWindow::Sequential => "sequential".to_string(),
+                            AckWindow::Parallel { max } => format!("parallel:{}", max.get()),
+                        };
+                        lines.push(format!(
+                            "REPLY {id} EMITTER_OPENED domain={} emitter={} window={window} \
+                             ack_timeout={} retry={}/{} granted={}/{} max_batch={}/{} message={}",
+                            opened.domain.as_str(),
+                            opened.emitter.as_str(),
+                            opened.ack_timeout.as_nanos(),
+                            opened.retry_backoff.as_nanos(),
+                            opened.retry_max_backoff.as_nanos(),
+                            opened.granted.batches,
+                            opened.granted.bytes,
+                            opened.max_batch_bytes,
+                            opened.max_batch_rows,
+                            text(&outcome.message)
+                        ));
+                        for field in &opened.fields {
+                            lines.push(field_line("FIELD", field));
+                        }
+                    }
+                    OpenEmitterDisposition::Refused(refusal) => lines.push(format!(
+                        "REPLY {id} EMITTER_REFUSED refusal={} message={}",
+                        schema_name(wire::EmitterOpenRefusal::from(*refusal).variant_name()),
+                        text(&outcome.message)
+                    )),
+                },
+                ReplyBody::ReadEmitterBatch(outcome) => match &outcome.disposition {
+                    ReadEmitterDisposition::Batch(batch) => lines.push(format!(
+                        "REPLY {id} EMITTER_BATCH identity={} reference={} source={} branch={} \
+                         body={} members={} now={}",
+                        hex(batch.identity.as_bytes()),
+                        hex(batch.reference.as_bytes()),
+                        batch.source_relay.as_str(),
+                        batch
+                            .branch_fingerprint
+                            .as_ref()
+                            .map(|branch| hex(branch))
+                            .unwrap_or_else(|| "none".to_string()),
+                        hex(&batch.batch),
+                        batch.members,
+                        batch.execution_now.unix_nanos(),
+                    )),
+                    ReadEmitterDisposition::Ended => lines.push(format!(
+                        "REPLY {id} EMITTER_ENDED message={}",
+                        text(&outcome.message)
+                    )),
+                },
+                ReplyBody::SettleEmitterBatch(outcome) => lines.push(format!(
+                    "REPLY {id} EMITTER_SETTLED disposition={} message={}",
+                    schema_name(wire::EmitterSettlement::from(outcome.disposition).variant_name()),
+                    text(&outcome.message)
+                )),
+                ReplyBody::CloseEmitter(outcome) => lines.push(format!(
+                    "REPLY {id} EMITTER_CLOSE disposition={} message={}",
+                    schema_name(
+                        wire::EmitterCloseDisposition::from(outcome.disposition).variant_name()
+                    ),
+                    text(&outcome.message)
+                )),
                 other => panic!("the corpus holds no {other:?} reply"),
             }
         }
@@ -1197,6 +1335,36 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
         ClientRequest::CloseIngestor(close) => lines.push(format!(
             "REQUEST {id} CLOSE_INGESTOR producer={}",
             close.producer
+        )),
+        ClientRequest::OpenEmitter(open) => {
+            lines.push(format!(
+                "REQUEST {id} OPEN_EMITTER domain={} emitter={} batches={} bytes={}",
+                open.domain.as_str(),
+                open.emitter.as_str(),
+                open.limits.batches,
+                open.limits.bytes
+            ));
+            for field in &open.expected_fields {
+                lines.push(field_line("FIELD", field));
+            }
+        }
+        ClientRequest::ReadEmitterBatch(read) => lines.push(format!(
+            "REQUEST {id} READ_EMITTER_BATCH consumer={}",
+            read.consumer
+        )),
+        ClientRequest::SettleEmitterBatch(settle) => lines.push(format!(
+            "REQUEST {id} SETTLE_EMITTER_BATCH consumer={} reference={} decision={}",
+            settle.consumer,
+            hex(settle.reference.as_bytes()),
+            match &settle.decision {
+                crate::EmitterBatchDecision::Ack => "ack".to_string(),
+                crate::EmitterBatchDecision::Retry => "retry".to_string(),
+                crate::EmitterBatchDecision::Reject(reason) => format!("reject:{}", text(reason)),
+            }
+        )),
+        ClientRequest::CloseEmitter(close) => lines.push(format!(
+            "REQUEST {id} CLOSE_EMITTER consumer={}",
+            close.consumer
         )),
         other => panic!("the corpus holds no {other:?} request"),
     }

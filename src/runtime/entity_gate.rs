@@ -1195,6 +1195,23 @@ impl Runtime {
                     .map(|fanout| fanout.outstanding_work_len())
             })
             .sum();
+        #[cfg(feature = "testing")]
+        let buffered_relay_batches =
+            if self
+                .inner
+                .remote_dispatcher
+                .load()
+                .as_deref()
+                .is_some_and(|dispatcher| {
+                    self.inner
+                        .fault_injection
+                        .report_no_owner_buffered_batches(domain, dispatcher.local_node_id())
+                })
+            {
+                0
+            } else {
+                buffered_relay_batches
+            };
         let node_work_items = affected_entities
             .iter()
             .map(|entity| {

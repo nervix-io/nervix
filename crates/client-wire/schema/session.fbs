@@ -176,7 +176,13 @@ enum ChoiceTarget : ubyte {
   IngestUnbranchedRelay,
   IngestBranchedRelay,
   /// Fields of the key schema selected by one branch reference.
-  BranchField
+  BranchField,
+  /// Relays with the same declared schema and exact branch as one selected input relay.
+  ProcessorCompatibleInputRelay,
+  /// Relays with the same exact branch as one selected input relay.
+  ProcessorInputBranchRelay,
+  /// Materialized relays with the same exact branch as one selected input relay.
+  ProcessorMaterializedRelay
 }
 
 enum DomainPaceChoice : ubyte {
@@ -1496,6 +1502,39 @@ table CloseIngestorRequest {
   producer: ulong;
 }
 
+// Client emitters are a separate graph-output operation family. A consumer is the request_id of
+// its OpenEmitterRequest. Read requests wait without occupying the ordered command lane; results
+// are settled by an application decision, never by reading the frame.
+
+table OpenEmitterRequest {
+  domain: string (required);
+  emitter: string (required);
+  /// The exact declared output schema, including sensitivity. Never empty.
+  expected_fields: [RowField] (required);
+  /// Non-zero; at most 1024.
+  max_outstanding_batches: uint;
+  /// Non-zero; at most 32 MiB and large enough for one maximum-sized delivery.
+  max_outstanding_bytes: ulong;
+}
+
+table ReadEmitterBatchRequest {
+  /// The request_id that opened this consumer. Non-zero.
+  consumer: ulong;
+}
+
+enum EmitterBatchDecision : ubyte { Ack, Retry, Reject }
+
+table SettleEmitterBatchRequest {
+  consumer: ulong;
+  /// Exactly 16 bytes. A replacement attempt has a different reference.
+  reference: [ubyte] (required);
+  decision: EmitterBatchDecision = null;
+  /// Required; empty except for Reject, whose bounded non-sensitive reason is nonempty.
+  reason: string (required);
+}
+
+table CloseEmitterRequest { consumer: ulong; }
+
 union ClientRequest {
   CommandRequest,
   SuggestRequest,
@@ -1511,7 +1550,11 @@ union ClientRequest {
   DetachDomainClockRequest,
   OpenIngestorRequest,
   SubmitBatchRequest,
-  CloseIngestorRequest
+  CloseIngestorRequest,
+  OpenEmitterRequest,
+  ReadEmitterBatchRequest,
+  SettleEmitterBatchRequest,
+  CloseEmitterRequest
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2110,6 +2153,84 @@ table CloseIngestorOutcome {
   message: string (required);
 }
 
+table SequentialConsumerWindow {}
+table ParallelConsumerWindow { max: ulong; }
+union ConsumerWindow { SequentialConsumerWindow, ParallelConsumerWindow }
+
+table EmitterOpened {
+  domain: string (required);
+  emitter: string (required);
+  fields: [RowField] (required);
+  window: ConsumerWindow (required);
+  ack_timeout_nanos: ulong;
+  retry_backoff_nanos: ulong;
+  retry_max_backoff_nanos: ulong;
+  granted_batches: uint;
+  granted_bytes: ulong;
+  max_batch_bytes: ulong;
+  max_batch_rows: uint;
+}
+
+enum EmitterOpenRefusal : ubyte {
+  DomainNotFound,
+  DomainStopped,
+  EmitterNotFound,
+  NotClientEmitter,
+  EndpointUnavailable,
+  SchemaMismatch,
+  TooManyConsumers,
+  SessionCapacityExhausted,
+  NodeCapacityExhausted,
+  InvalidLimits,
+  InTransaction
+}
+
+table EmitterRefused { refusal: EmitterOpenRefusal = null; }
+union OpenEmitterDisposition { EmitterOpened, EmitterRefused }
+table OpenEmitterOutcome {
+  disposition: OpenEmitterDisposition (required);
+  message: string (required);
+}
+
+table EmitterBatchReceived {
+  /// Stable through retries of this delivery. Exactly 16 bytes.
+  identity: [ubyte] (required);
+  /// Unique to this attempt. Exactly 16 bytes.
+  reference: [ubyte] (required);
+  source_relay: string (required);
+  /// Absent for unbranched output; otherwise an opaque 32-byte branch fingerprint.
+  branch_fingerprint: [ubyte];
+  /// One uncompressed Arrow IPC stream with exactly one record batch.
+  batch: [ubyte] (required);
+  members: uint;
+  execution_now_unix_nanos: long;
+}
+
+table EmitterConsumerEnded {}
+union ReadEmitterDisposition { EmitterBatchReceived, EmitterConsumerEnded }
+table ReadEmitterBatchOutcome {
+  disposition: ReadEmitterDisposition (required);
+  message: string (required);
+}
+
+enum EmitterSettlement : ubyte {
+  Confirmed,
+  StaleReference,
+  WrongConsumer,
+  InvalidReason,
+  ConsumerEnded
+}
+table SettleEmitterBatchOutcome {
+  disposition: EmitterSettlement = null;
+  message: string (required);
+}
+
+enum EmitterCloseDisposition : ubyte { Closed, NotOpen }
+table CloseEmitterOutcome {
+  disposition: EmitterCloseDisposition = null;
+  message: string (required);
+}
+
 union ReplyBody {
   CommandOutcome,
   AttachOutcome,
@@ -2128,7 +2249,11 @@ union ReplyBody {
   DomainClockDetachOutcome,
   OpenIngestorOutcome,
   SubmissionOutcome,
-  CloseIngestorOutcome
+  CloseIngestorOutcome,
+  OpenEmitterOutcome,
+  ReadEmitterBatchOutcome,
+  SettleEmitterBatchOutcome,
+  CloseEmitterOutcome
 }
 
 table Reply {

@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Self-checks the run's live Docker event recording: the window verifier over recorded fixtures,
-# the exact node lifecycle check, and the recorder against the local daemon, including a fault
-# followed by more daemon events than the daemon's 256-event replay buffer holds.
+# the exact node lifecycle check, the check that every container comes from a recorded image, and
+# the recorder against the local daemon, including a fault followed by more daemon events than the
+# daemon's 256-event replay buffer holds.
 
 chaos_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 verify="${chaos_dir}/verify-docker-events.sh"
@@ -18,6 +19,8 @@ fail() {
 
 # shellcheck source=../docker-event-recording.sh
 source "${chaos_dir}/docker-event-recording.sh"
+# shellcheck source=../tool-images.sh
+source "${chaos_dir}/tool-images.sh"
 
 docker_events_self_test_cleanup() {
     docker_event_recording_stop
@@ -219,6 +222,84 @@ sed 's/"signal":"9"/"signal":"15"/' "${tmp_dir}/nodes.ndjson" >"${tmp_dir}/sigte
 expect_lifecycle_failure 'the node received SIGTERM' --events "${tmp_dir}/sigterm.ndjson" \
     --target "${node_id}" --expect kill:9 --expect die:137 --expect start
 
+# Every container a run creates, markers included, must come from an image its manifest records:
+# the resolved Nervix image ID, or a tool image's pinned reference or image ID.
+broker_id="$(printf '9%.0s' {1..64})"
+fault_id="$(printf '8%.0s' {1..64})"
+link_probe_id="$(printf '7%.0s' {1..64})"
+nervix_image_id="sha256:$(printf '1%.0s' {1..64})"
+kafka_image_id="sha256:$(printf '2%.0s' {1..64})"
+pumba_image_id="sha256:$(printf '3%.0s' {1..64})"
+probe_image_id="sha256:$(printf '8%.0s' {1..64})"
+kafka_reference="registry.example/chaos/kafka@sha256:$(printf '4%.0s' {1..64})"
+probe_reference="registry.example/chaos/probe@sha256:$(printf '5%.0s' {1..64})"
+pumba_reference="registry.example/chaos/pumba@sha256:$(printf '6%.0s' {1..64})"
+unrecorded_reference="registry.example/chaos/unrecorded@sha256:$(printf '7%.0s' {1..64})"
+jq -n \
+    --arg nervix "${nervix_image_id}" \
+    --arg kafka "${kafka_reference}" --arg kafka_id "${kafka_image_id}" \
+    --arg probe "${probe_reference}" --arg probe_id "${probe_image_id}" \
+    --arg pumba "${pumba_reference}" --arg pumba_id "${pumba_image_id}" '
+    {resolved_image_id: $nervix,
+     tool_images: {kafka: {reference: $kafka, image_id: $kafka_id},
+                   probe: {reference: $probe, image_id: $probe_id},
+                   pumba: {reference: $pumba, image_id: $pumba_id}}}
+' >"${tmp_dir}/manifest.json"
+image_attributes() {
+    jq -nc --arg image "$1" '{image: $image}'
+}
+{
+    recorded_event "${start_marker_id}" event-marker create 0 "$(image_attributes "${probe_reference}")"
+    recorded_event "${node_id}" node create 100 "$(image_attributes "${nervix_image_id}")"
+    recorded_event "${other_node_id}" node create 110 "$(image_attributes "${nervix_image_id}")"
+    recorded_event "${admin_id}" admin create 120 "$(image_attributes "${nervix_image_id}")"
+    recorded_event "${broker_id}" broker create 130 "$(image_attributes "${kafka_reference}")"
+    recorded_event "${fault_id}" fault create 140 "$(image_attributes "${pumba_image_id}")"
+    recorded_event "${node_id}" node start 150 "$(image_attributes "${unrecorded_reference}")"
+} >"${tmp_dir}/images.ndjson"
+"${verify}" images --recording "${tmp_dir}/images.ndjson" --manifest "${tmp_dir}/manifest.json" \
+    --output "${tmp_dir}/images.json" \
+    || fail 'containers created from recorded images were reported as unrecorded'
+jq -e --arg nervix "${nervix_image_id}" --arg kafka "${kafka_reference}" \
+    --arg probe "${probe_reference}" --arg pumba_id "${pumba_image_id}" '
+    .verdict == "recorded"
+    and (.images | sort_by(.image) | map([.image, .recorded_as, .containers, .roles]))
+        == ([[$nervix, "nervix", 3, ["admin", "node"]], [$kafka, "kafka", 1, ["broker"]],
+             [$probe, "probe", 1, ["event-marker"]], [$pumba_id, "pumba", 1, ["fault"]]]
+            | sort_by(.[0]))
+' "${tmp_dir}/images.json" >/dev/null \
+    || fail 'the image check did not attribute every created container to its manifest entry'
+{
+    cat "${tmp_dir}/images.ndjson"
+    recorded_event "${link_probe_id}" link-probe create 160 "$(image_attributes "${unrecorded_reference}")"
+} >"${tmp_dir}/unrecorded-images.ndjson"
+images_status=0
+"${verify}" images --recording "${tmp_dir}/unrecorded-images.ndjson" \
+    --manifest "${tmp_dir}/manifest.json" --output "${tmp_dir}/unrecorded-images.json" \
+    >"${tmp_dir}/unrecorded-images.txt" 2>&1 || images_status=$?
+[[ "${images_status}" -eq 1 ]] \
+    || fail "a container from an unrecorded image returned ${images_status}, expected 1"
+jq -e --arg image "${unrecorded_reference}" '
+    .verdict == "unrecorded"
+    and ([.images[] | select(.recorded_as == null)] == [{image: $image, recorded_as: null,
+                                                         containers: 1, roles: ["link-probe"]}])
+' "${tmp_dir}/unrecorded-images.json" >/dev/null \
+    || fail 'the image check did not single out the container from an unrecorded image'
+grep -Fq "${unrecorded_reference}" "${tmp_dir}/unrecorded-images.txt" \
+    || fail 'the image check did not name the unrecorded image'
+images_status=0
+"${verify}" images --recording "${tmp_dir}/truncated.ndjson" --manifest "${tmp_dir}/manifest.json" \
+    --output "${tmp_dir}/truncated-images.json" >"${tmp_dir}/truncated-images.txt" 2>&1 \
+    || images_status=$?
+[[ "${images_status}" -eq 1 ]] || fail "an unreadable recording returned ${images_status}, expected 1"
+grep -Fq 'could not read the recording' "${tmp_dir}/truncated-images.txt" \
+    || fail 'the image check did not report an unreadable recording'
+expect_usage_error 'images without an output' images --recording "${tmp_dir}/images.ndjson" \
+    --manifest "${tmp_dir}/manifest.json"
+expect_usage_error 'images without a recording' images --recording "${tmp_dir}/absent.ndjson" \
+    --manifest "${tmp_dir}/manifest.json" --output "${tmp_dir}/usage.json"
+expect_usage_error 'unknown images option' images --since 1
+
 # A run that never started its recording has no bounds to verify, which the controller reports.
 # No recording has started yet in this self-test.
 never_started_status=0
@@ -231,15 +312,16 @@ docker_event_recording_finish diagnostics/docker-events.recording.json 67108864 
 # 320 unrelated volume events, and the node is started again: the window must still hold the kill.
 live_dir="${tmp_dir}/live"
 mkdir -p "${live_dir}/diagnostics"
-# Markers are created from a local image only, as the runner ensures its probe image first.
-docker image inspect alpine:3.22 >/dev/null 2>&1 || docker pull --quiet alpine:3.22 >/dev/null
+# Markers are created from a local image only, as the runner resolves its pinned probe image first.
+docker image inspect "${chaos_probe_image}" >/dev/null 2>&1 \
+    || docker pull --quiet "${chaos_probe_image}" >/dev/null
 start_status=0
 docker_event_recording_start "${live_dir}" diagnostics/docker-events.ndjson "${live_run_id}" \
-    alpine:3.22 300 || start_status=$?
+    "${chaos_probe_image}" 300 || start_status=$?
 [[ "${start_status}" -eq 0 ]] || fail "the live recorder did not start (status ${start_status})"
 live_node="$(docker run --detach \
     --label "io.nervix.chaos.run=${live_run_id}" \
-    --label io.nervix.chaos.role=node alpine:3.22 sleep 300)"
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 300)"
 fault_ns="$(date +%s%N)"
 docker kill --signal KILL "${live_node}" >/dev/null
 # The positional parameters belong to the inner shell, not this one.
@@ -267,13 +349,26 @@ docker_event_recording_finish diagnostics/docker-events.recording.json 67108864 
 jq -e '.verdict == "covered" and .window_events >= 3' \
     "${live_dir}/diagnostics/docker-events.recording.json" >/dev/null \
     || fail 'the closed recording did not report its whole-run bounds'
+# The daemon records the pinned reference each marker and the node were created from.
+jq -n --arg nervix "${nervix_image_id}" --arg probe "${chaos_probe_image}" \
+    --arg probe_id "$(docker image inspect --format '{{.Id}}' "${chaos_probe_image}")" '
+    {resolved_image_id: $nervix, tool_images: {probe: {reference: $probe, image_id: $probe_id}}}
+' >"${live_dir}/manifest.json"
+"${verify}" images --recording "${live_dir}/diagnostics/docker-events.ndjson" \
+    --manifest "${live_dir}/manifest.json" --output "${live_dir}/container-images.json" \
+    || fail 'the live recording attributed a container to an image other than the pinned probe'
+jq -e --arg probe "${chaos_probe_image}" '
+    .images | length == 1 and .[0].image == $probe and .[0].recorded_as == "probe"
+    and .[0].roles == ["event-marker", "node"]
+' "${live_dir}/container-images.json" >/dev/null \
+    || fail 'the live recording did not attribute every marker and the node to the pinned probe'
 
 # A subscriber that exits early leaves every later window uncovered, with its exit status.
 early_dir="${tmp_dir}/early"
 mkdir -p "${early_dir}/diagnostics"
 start_status=0
 docker_event_recording_start "${early_dir}" diagnostics/docker-events.ndjson "${live_run_id}" \
-    alpine:3.22 300 || start_status=$?
+    "${chaos_probe_image}" 300 || start_status=$?
 [[ "${start_status}" -eq 0 ]] || fail "the second live recorder did not start (status ${start_status})"
 window_open_ns="$(date +%s%N)"
 kill "${docker_event_recorder_pid}"

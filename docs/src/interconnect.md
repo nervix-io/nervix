@@ -669,6 +669,17 @@ keeps a previous branch lifetime from being confused with the new runtime instan
 
 ### Consumers That Leave The Receiver
 
+The relay owner also fences the start of each buffered batch's fan-out against its local schedule
+swap. It acquires a dispatch permit before reading the local and remote consumer sets, and keeps
+that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
+share. A swap closes the gate
+and waits for existing permits before changing those sets. If the gate is already closed when a
+buffered batch starts fan-out, the owner fails its record acknowledgements and the source retries
+after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
+swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
+an attached sibling on the old destination cannot acknowledge a batch while another attached
+consumer moves to a new destination before the owner selected routes for that batch.
+
 The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
 it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
 batch to a node because its schedule places an attached consumer of the relay there. That consumer
@@ -953,6 +964,28 @@ Each end reserves the producer's granted bytes in its own 128 MiB producer budge
 for the batches its session holds, and the owning node again for the batches it retains for another
 node. The link adds no reservation of its own beyond the transport's per-frame charge.
 [Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+
+## Client Consumer Streams
+
+When a session opens a consumer of a `TO CLIENT` emitter executing on another node, the serving
+node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
+shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
+schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
+own 128 MiB consumer budget and attaches to its local emitter endpoint before replying `Opened`
+with the endpoint description or `Refused` with a typed cause. The serving node has already
+reserved the same grant against its session and node budgets.
+
+The owner sends each attempt's identity, fresh ACK reference, source relay, opaque branch
+fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes.
+It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool.
+The serving node checks the announced length against the grant and reassembles one delivery before
+answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
+one typed result for each; an independent writer keeps settlement and heartbeat sends from
+blocking response reads. Both ends send two-second heartbeats and end the attachment after ten
+seconds of peer silence. A lost stream detaches the owner's consumer, revokes its attempts and
+allows the retained batches to be reassigned. Output and ACK state stay volatile, so an owner
+loss can require upstream replay. [Client Session
+Protocol](./client-session-protocol.md#emitter-consumers) owns what clients observe.
 
 ## Domain Clock Progress
 

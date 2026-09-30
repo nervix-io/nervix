@@ -34,6 +34,7 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
     DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
@@ -126,6 +127,7 @@ mod admitted_connection;
 mod authentication;
 mod background_task;
 mod backup;
+mod client_consumers;
 mod client_producers;
 mod cluster_status;
 mod command_execution;
@@ -1816,6 +1818,11 @@ impl Application {
                     interconnect.clone(),
                     consensus.proposer().local_node_id().clone(),
                 ),
+                client_consumers: ClientConsumerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
                 service_tasks: ServiceTasks::default(),
                 configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -1895,6 +1902,11 @@ impl Application {
         service
             .inner
             .client_producers
+            .serve_links(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service
+            .inner
+            .client_consumers
             .serve_links(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let describe_ingestor_service = service.clone();

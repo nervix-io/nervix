@@ -298,6 +298,7 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
         view: nervix_primitives::sync::blocking::RwLock::new(subscriptions.view()),
         selection,
         producers: SessionProducers::default(),
+        consumers: super::consumers::SessionConsumers::default(),
     };
 
     shared

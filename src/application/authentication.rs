@@ -302,9 +302,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create user '{}': {error}", create.name.as_str()),
+                    format!("failed to create user '{}'", create.name.as_str()),
                 )
                 .await
             }
@@ -351,9 +351,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create user '{}': {error}", name.as_str()),
+                    format!("failed to create user '{}'", name.as_str()),
                 )
                 .await
             }
@@ -363,10 +363,47 @@ impl SessionServiceImpl {
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{CreateStatement, CreateUser, UserName};
 
     use super::*;
+    #[cfg(feature = "testing")]
+    use crate::application::test_fixtures::build_test_service_with_probe;
     use crate::application::test_fixtures::{TestService, build_test_service};
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn user_creation_storage_failure_keeps_user_absent() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(false, probe.clone()).await;
+        let user = UserName::parse("report_user").expect("valid test user name");
+        probe.storage_fault().fail_next(
+            "create-user:report_user".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let result = service
+            .create_user(CreateStatement::new(
+                CreateUser {
+                    name: user.clone(),
+                    password: "secret-password".to_string(),
+                },
+                false,
+            ))
+            .await;
+        assert!(!result.succeeded(), "{result:?}");
+        assert!(result.message.contains("consensus storage"), "{result:?}");
+        assert!(service.inner.consensus.current_user(&user).await.is_none());
+
+        drop(service);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(path);
+    }
 
     #[nervix_primitives::test]
     async fn testing_feature_hashes_passwords_with_lean_argon2_params() {

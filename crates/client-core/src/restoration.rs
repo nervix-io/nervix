@@ -1,5 +1,5 @@
 //! Restoring on a new exchange what a client holds: the domain clocks it follows and the
-//! subscriptions the server acknowledged.
+//! subscriptions the server acknowledged and did not end.
 //!
 //! - **Owns.** Sending the restoration requests of a new exchange in the order the protocol
 //!   requires, waiting for their replies, and sending a restoration the exchange refused again

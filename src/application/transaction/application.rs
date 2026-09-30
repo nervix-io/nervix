@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction,
     TransactionApplicationOutcome, TransactionApplyingStep, TransactionState,
@@ -355,7 +355,7 @@ impl SessionServiceImpl {
                 outcome,
             )
             .await
-            .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))?;
+            .change_context(TransactionCommitError::Proposal)?;
         if rolls_back {
             Box::pin(self.apply_rolled_back_transaction_step(&transaction.domain)).await;
         }
@@ -373,11 +373,11 @@ impl SessionServiceImpl {
                 if self.inner.consensus.current_leader().await.as_ref()
                     != Some(self.inner.consensus.local_node_id())
                 {
-                    return Err(Report::new(TransactionCommitError::Proposal(
-                        ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
-                            leader_id: self.inner.consensus.current_leader().await,
-                        }),
-                    )));
+                    return Err(Report::new(ConsensusError::LeadershipLost {
+                        leader_id: self.inner.consensus.current_leader().await,
+                    })
+                    .change_context(ConsensusTransactionError::Consensus)
+                    .change_context(TransactionCommitError::Proposal));
                 }
                 sleep(Duration::from_millis(100)).await;
             }

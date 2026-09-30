@@ -55,6 +55,13 @@ validation errors while the draft stays editable. After submission, lookup loadi
 compilation or test failures retain their server diagnostics; correcting the same draft starts a
 new command without claiming the failed creation succeeded.
 
+Junction and reingestor drafts report the input, materialized dependency, route, or assignment
+whose required reference or expression is incomplete. A retained reference whose domain or
+upstream choice changed is reported as a changed context and must be selected again. These are
+local draft errors before canonical NSPL exists. A completed Model still passes through registry
+validation, whose schema, branch, sensitivity, and graph diagnostics remain authoritative and
+appear in the editable form after a rejected submission.
+
 The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
 its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
 the model and route context without losing that cause. Roto setup returns `UdfError` reports and
@@ -509,7 +516,11 @@ distinct from a new execution. Replicated admission preserves an expired executi
 the kind of a conflicting reference as typed consensus conflicts. The session returns
 `ExecutionReferenceExpired` or `ExecutionReferenceConflict` from those variants, including when a
 leader change lets the replicated check discover the conflict after the leader's local check. A
-client never has to classify those refusals from message text. [Command
+client never has to classify those refusals from message text. Consensus reports also keep Raft
+leadership, fatal storage, and other write failures distinct through the control plane. A
+transaction mutation refusal crosses the Raft response as its exact typed outcome and becomes a
+new report on the proposing node; the client still receives the same disposition and
+acknowledgement semantics. [Command
 Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
 that produces it, and what a client may conclude from it, and typed request rejections are covered
 in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
@@ -595,6 +606,15 @@ resends on its declared backoff, not a failure. A node that cannot reserve memor
 validate a batch answers `Busy` rather than holding the batch, and a batch that fails after it was
 dispatched resolves its acknowledgement root negatively, which the producer receives as
 `ProcessingFailed` with `Rejected`.
+
+A consumer open is either `Opened` or a typed `EmitterOpenRefusal` for the domain, emitter kind,
+schema, execution availability or capacity. A settlement is an ordinary typed outcome:
+`Confirmed`, `StaleReference`, `WrongConsumer`, `InvalidReason`, or `ConsumerEnded`. It is never
+inferred from a timeout or from reading a batch. A bounded application rejection reason is
+treated as non-sensitive display text and applies the emitter route's message error policy to
+each member. IPC encoding failures and an output row above the declared byte limit follow that
+policy, without quoting the row. Owner or forwarder loss revokes the attempt; the delivery remains
+volatile, and a client must not interpret a lost ACK reply as successful processing.
 
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
