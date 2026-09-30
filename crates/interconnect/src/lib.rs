@@ -69,6 +69,8 @@ pub use request::{
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
+    BranchCheckpointCursor, BranchCheckpointListing, BranchCheckpointListingRequest,
+    BranchCheckpointListingResponse, BranchCheckpointPage, BranchCheckpointRevision,
     OwnershipHandoffCheckpoint, RuntimeState, RuntimeStateKind, StateCheckpointAvailable,
     StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
     StateSyncRequest, StateSyncResponse,

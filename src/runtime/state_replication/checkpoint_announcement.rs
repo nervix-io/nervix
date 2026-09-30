@@ -1,6 +1,7 @@
 //! Layer: data plane.
 //! Owns: offering a placement's newest checkpoint to the replicas that lag behind it, and routing a
-//! replica's acknowledgement or an owner's announcement to the replication of the state it names.
+//! replica's acknowledgement to the replication of the state it names and an owner's announcement
+//! to the replica task that keeps the state current.
 //! May depend on: the replicated states this node holds, checkpoint replication, the committed
 //! schedule and the interconnect dispatcher.
 //! Must not know: what a checkpoint holds, how a replica installs it, NSPL parsing, or
@@ -130,7 +131,7 @@ impl Runtime {
                 }
             }
             RuntimeStateKind::BranchLru => {
-                if let Some(lifecycle) = self.inner.replicated_branch_lifecycles.get(placement) {
+                if let Some(lifecycle) = self.branch_lifecycle(placement) {
                     use_replication(lifecycle.replication());
                 }
             }
@@ -180,13 +181,24 @@ impl Runtime {
     }
 
     /// Act on `source`'s announcement that it holds a newer checkpoint of a placement this node
-    /// replicates: wake the task that keeps this node's copy current, and fetch the checkpoint of
-    /// a branch-local state or a branch lifecycle at once.
+    /// replicates.
+    ///
+    /// The branch lifecycle and the branch states of a branch-keyed entity are kept current by one
+    /// replica task for the whole entity: the announcement is left with the entity's lifecycle,
+    /// which wakes that task, and the task fetches or acknowledges the announced checkpoint in its
+    /// next round. Any other state wakes the task that keeps this node's copy of it current.
     pub(crate) fn handle_state_checkpoint_available(
         &self,
         source: &ClusterNodeName,
         checkpoint: nervix_interconnect::StateCheckpointAvailable,
     ) {
+        if self
+            .inner
+            .fault_injection
+            .state_checkpoint_announcements_are_lost()
+        {
+            return;
+        }
         let placement = match RuntimeStatePlacement::from_remote(checkpoint.placement) {
             Ok(placement) => placement,
             Err(error) => {
@@ -207,13 +219,35 @@ impl Runtime {
             lsm = checkpoint.lsm,
             "runtime state checkpoint is available"
         );
-        self.with_placement_replication(&placement, CheckpointReplication::announced);
-        if let RuntimeStateKind::Deduplicator
-        | RuntimeStateKind::WasmProcessor
-        | RuntimeStateKind::WindowProcessor
-        | RuntimeStateKind::BranchLru = placement.state.kind()
-        {
-            self.schedule_passive_state_replica_sync(placement, source.clone(), checkpoint.lsm);
+        match placement.state.kind() {
+            RuntimeStateKind::BranchLru => {
+                if let Some(lifecycle) = self.branch_lifecycle(&placement) {
+                    lifecycle.announce_lifecycle(checkpoint.lsm);
+                }
+            }
+            RuntimeStateKind::Deduplicator
+            | RuntimeStateKind::WasmProcessor
+            | RuntimeStateKind::WindowProcessor => {
+                let Some(entity) = placement.branch_lifecycle() else {
+                    return;
+                };
+                let Some(lifecycle) = self.branch_lifecycle(&entity) else {
+                    return;
+                };
+                lifecycle.announce_branch(
+                    placement.branch_key,
+                    AnnouncedCheckpoint {
+                        state: placement.state,
+                        lsm: checkpoint.lsm,
+                    },
+                );
+            }
+            RuntimeStateKind::BranchAggregated
+            | RuntimeStateKind::Correlator
+            | RuntimeStateKind::KafkaOffset
+            | RuntimeStateKind::MaterializedRelay => {
+                self.with_placement_replication(&placement, CheckpointReplication::announced);
+            }
         }
     }
 }

@@ -23,6 +23,20 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__replica_branch_checkpoints__tests__bolero_a_replica_catches_up_every_named_branch_with_its_owner/corpus"
+domain_version = 1
+features = []
+id = "replica-catch-up"
+invariant = "Whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, a replica holds every branch its lifecycle names at its owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form unchanged."
+max_input_bytes = 256
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_replication/replica_branch_checkpoints_tests.rs"
+test = "runtime::state_replication::replica_branch_checkpoints::tests::bolero_a_replica_catches_up_every_named_branch_with_its_owner"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/__fuzz__/tests__consumers__bolero_native_emitter_frames_round_trip/corpus"
 domain_version = 1
 features = []

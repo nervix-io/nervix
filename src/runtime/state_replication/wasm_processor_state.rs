@@ -376,10 +376,10 @@ impl Runtime {
                 .stored_runtime_state_snapshot(&placement)
                 .map_err(|error| error.current_context().clone())?,
         };
-        let state = Arc::new(ReplicatedWasmProcessorState::new(
-            placement.clone(),
-            initial,
-        ));
+        let catalog = self.branch_checkpoint_catalog(&placement);
+        let state = Arc::new(
+            ReplicatedWasmProcessorState::new(placement.clone(), initial).cataloged(&catalog),
+        );
         self.inner
             .replicated_wasm_processor_states
             .insert(placement, state.clone());

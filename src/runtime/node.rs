@@ -137,15 +137,17 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) remote_ack_watcher_shutdown: CancellationToken,
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
-    pub(in crate::runtime) pending_state_replica_syncs:
-        DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,
-    /// Owns replica synchronization and checkpoint announcement work that outlives the event that
-    /// scheduled it. Closing it when the runtime stops ends every announcer.
+    /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
+    /// when the runtime stops ends every announcer.
     pub(in crate::runtime) state_replication_tasks: TaskTracker,
+    /// The copy of each branch checkpoint this node installed as a replica, taken when it is
+    /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
     /// The branch lifecycle this node holds for each branch-keyed entity, as its owner or as a
-    /// replica. The replica task that synchronizes an entity's branches keeps its handle.
+    /// replica, with the catalog of the branch checkpoints it owns for the entity and the owner's
+    /// announcements a replica has not acted on yet. The replica task that keeps an entity current
+    /// retains its handle, and each owned branch state retains its catalog entry.
     pub(in crate::runtime) replicated_branch_lifecycles:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchLifecycle>, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_handoffs:

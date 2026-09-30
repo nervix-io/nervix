@@ -26,7 +26,7 @@ fn acknowledged_commits(iterations: u64) -> Duration {
 
 /// The time `iterations` catch-up rounds of a replica take while none of the `benchmark`'s branches
 /// changes.
-fn catch_up_rounds(benchmark: &ReplicaCatchUpBenchmark, iterations: u64) -> Duration {
+fn catch_up_rounds(benchmark: &mut ReplicaCatchUpBenchmark, iterations: u64) -> Duration {
     let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -41,13 +41,17 @@ fn catch_up_rounds(benchmark: &ReplicaCatchUpBenchmark, iterations: u64) -> Dura
     })
 }
 
-/// How many requests one catch-up round of the `benchmark`'s replica sends to its owner.
-fn catch_up_requests(benchmark: &ReplicaCatchUpBenchmark) -> usize {
+/// How many requests one catch-up round of the `benchmark`'s replica sends to its owner once the
+/// replica caught up.
+fn catch_up_requests(benchmark: &mut ReplicaCatchUpBenchmark) -> usize {
     let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
-    runtime.block_on(benchmark.catch_up_once())
+    runtime.block_on(async {
+        benchmark.catch_up_once().await;
+        benchmark.catch_up_once().await
+    })
 }
 
 fn state_replication_benches(criterion: &mut Criterion) {
@@ -73,13 +77,13 @@ fn state_replication_benches(criterion: &mut Criterion) {
 
     let mut catch_up = criterion.benchmark_group("state_replication/replica_catch_up_round");
     for branches in LIFECYCLE_BRANCHES {
-        let benchmark = ReplicaCatchUpBenchmark::new(branches);
+        let mut benchmark = ReplicaCatchUpBenchmark::new(branches);
         eprintln!(
             "replica catch-up round over {branches} unchanged branches: {} requests",
-            catch_up_requests(&benchmark)
+            catch_up_requests(&mut benchmark)
         );
         catch_up.bench_function(format!("{branches}_branches"), |bencher| {
-            bencher.iter_custom(|iterations| catch_up_rounds(&benchmark, iterations));
+            bencher.iter_custom(|iterations| catch_up_rounds(&mut benchmark, iterations));
         });
     }
     catch_up.finish();

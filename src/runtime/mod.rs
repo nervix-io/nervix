@@ -198,6 +198,7 @@ use crate::{
 pub mod admitted_work_benchmark;
 mod branch_aggregated_state;
 mod branch_buffering;
+mod branch_checkpoint_catalog;
 mod branch_key;
 mod branch_lifecycle_state;
 mod branch_lru_state;
@@ -531,7 +532,7 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateReplicaSync, PreparedForcedRuntimeStateRecovery,
+    DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
     PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
 };
 pub(in crate::runtime) use state_store::{

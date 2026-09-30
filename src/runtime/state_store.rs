@@ -551,15 +551,6 @@ pub(in crate::runtime) enum RuntimeStateOperationError {
     Checkpoint(String),
     #[error("runtime state replication failed: {0}")]
     Replication(String),
-    #[error(
-        "runtime state of {} '{}' cannot be placed in its published identity",
-        .kind.as_str(),
-        .identifier.as_str()
-    )]
-    StateIdentity {
-        kind: ModelKind,
-        identifier: ModelName,
-    },
 }
 
 pub(in crate::runtime) type RuntimeStateResult<T> = Result<T, Report<RuntimeStateOperationError>>;
@@ -598,6 +589,14 @@ impl PersistedRuntimeStateEntry {
             Some(after_lsm) => self.lsm > after_lsm,
             None => true,
         }
+    }
+
+    /// This checkpoint, when it is newer than `after_lsm`.
+    pub(in crate::runtime) fn after(self, after_lsm: Option<u64>) -> Option<Self> {
+        if self.is_after(after_lsm) {
+            return Some(self);
+        }
+        None
     }
 
     fn decode(raw: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {

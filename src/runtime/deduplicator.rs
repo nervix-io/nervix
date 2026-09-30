@@ -12,8 +12,9 @@ use triomphe::Arc;
 
 use super::{
     KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
-    RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor, checked_add_duration_to_timestamp,
-    compile_key_projection_program,
+    RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor,
+    branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
+    checked_add_duration_to_timestamp, compile_key_projection_program,
     published_generation::{Generation, PublishedGenerations},
 };
 
@@ -46,6 +47,9 @@ pub(super) struct ReplicatedDeduplicatorState {
     /// What each replica reported holding of the published keys, and the offer of the newest
     /// published keys to the replicas that lack them.
     replication: CheckpointReplication,
+    /// The entry of the entity's branch checkpoint catalog that every published generation is
+    /// recorded in, absent for a state that only encodes or checks a checkpoint.
+    catalog: Option<CatalogRegistration>,
 }
 
 /// One key a deduplicator branch held when its task published the keyspace, shared with that
@@ -189,11 +193,31 @@ impl ReplicatedDeduplicatorState {
             placement,
             generations,
             replication: CheckpointReplication::new(),
+            catalog: None,
         })
+    }
+
+    /// This state as the state of a branch this node owns, with every generation it publishes
+    /// recorded in `catalog`, so the entity's replicas learn of it.
+    pub(super) fn cataloged(mut self, catalog: &BranchCheckpointCatalog) -> Self {
+        let revision = self.generations.load().revision;
+        self.catalog = Some(catalog.register(
+            self.placement.branch_key.clone(),
+            self.placement.state,
+            revision,
+        ));
+        self
     }
 
     pub(super) fn replication(&self) -> &CheckpointReplication {
         &self.replication
+    }
+
+    /// Record in the entity's catalog that this state published `revision`.
+    fn record_published(&self, revision: u64) {
+        if let Some(catalog) = &self.catalog {
+            catalog.record(revision);
+        }
     }
 
     /// Build the keyspace a branch task owns from the keys published last.
@@ -303,7 +327,8 @@ impl DeduplicatorKeyspace {
             return;
         }
         let published = ReplicatedDeduplicatorState::published_keys(&self.recent_keys);
-        self.state.generations.publish(published);
+        let revision = self.state.generations.publish(published);
+        self.state.record_published(revision);
     }
 }
 

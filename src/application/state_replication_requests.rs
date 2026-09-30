@@ -2,15 +2,15 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Decoding a replica's state synchronization requests, refusing a placement this node
-//!   is not assigned, and encoding the answer.
+//! - **Owns.** Decoding a replica's state synchronization and branch checkpoint listing requests,
+//!   refusing a placement this node is not assigned, and encoding the answer.
 //! - **Depends on.** The runtime's answers and the interconnect's typed requests.
 //! - **Must not know.** How the runtime keeps, catalogues or encodes the state it answers from.
 
 use error_stack::ResultExt as _;
 use nervix_interconnect::{
-    RemoteOperationFailure, RemoteOperationSubject, StateSnapshotEnvelope, StateSyncRequest,
-    StateSyncResponse,
+    BranchCheckpointListingRequest, BranchCheckpointListingResponse, RemoteOperationFailure,
+    RemoteOperationSubject, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse,
 };
 
 use super::{AppError, session_service::SessionServiceImpl};
@@ -66,6 +66,43 @@ impl SessionServiceImpl {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
+        let checkpoint_listing_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<BranchCheckpointListingRequest, _, _>(move |_context, request| {
+                let service = checkpoint_listing_service.clone();
+                async move {
+                    let subject = RemoteOperationSubject::state(&request.lifecycle);
+                    let placement = match RuntimeStatePlacement::from_remote(request.lifecycle) {
+                        Ok(placement) => placement,
+                        Err(reason) => {
+                            return BranchCheckpointListingResponse {
+                                result: Err(RemoteOperationFailure::failed(
+                                    subject,
+                                    reason.to_string(),
+                                )),
+                            };
+                        }
+                    };
+                    if !service
+                        .inner
+                        .runtime
+                        .runtime_state_placement_is_assigned_locally(&placement)
+                    {
+                        return BranchCheckpointListingResponse {
+                            result: Err(RemoteOperationFailure::rejected(subject)),
+                        };
+                    }
+                    let listing = service
+                        .inner
+                        .runtime
+                        .handle_branch_checkpoint_listing(&placement, request.after);
+                    BranchCheckpointListingResponse {
+                        result: Ok(listing),
+                    }
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         Ok(())
     }
 }

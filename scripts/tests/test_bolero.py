@@ -55,6 +55,7 @@ class InventoryTests(unittest.TestCase):
             "models-archived-models",
             "simd-checked-lanes",
             "replica-progress",
+            "replica-catch-up",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",

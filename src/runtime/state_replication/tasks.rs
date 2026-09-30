@@ -371,13 +371,22 @@ impl Runtime {
         }))
     }
 
+    /// Spawn the replica task that keeps one branch-keyed entity current on this node: the
+    /// entity's branch lifecycle and, for a deduplicator, window or WASM processor, the state of
+    /// each of its branches.
+    ///
+    /// The task retains the entity's lifecycle handle and owns everything it learns of the
+    /// entity's branch checkpoints, so each round asks the owner only what changed since the
+    /// previous one. It runs a round when it starts, when the owner announces a checkpoint, and
+    /// once every replication poll interval, which catches up a checkpoint whose announcement was
+    /// lost.
     pub(in crate::runtime) fn spawn_branch_state_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
         domain: &DomainName,
         node: &ExecutionNode,
     ) -> error_stack::Result<Option<JoinHandle<()>>, StateIdentityError> {
-        let state_kind = match node.kind() {
+        let branch_states = match node.kind() {
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
             ModelKind::WasmProcessor => Some(RuntimeStateKind::WasmProcessor),
             ModelKind::WindowProcessor => Some(RuntimeStateKind::WindowProcessor),
@@ -404,7 +413,11 @@ impl Runtime {
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Ok(Some(nervix_primitives::task::spawn(async move {
+            if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
+                warn!(error = %error, "failed to read the stored replicated branch lifecycle");
+            }
             let owner = RemoteStateOwner::new(runtime.clone(), primary_node, poll_interval);
+            let mut checkpoints = ReplicaBranchCheckpoints::default();
             let mut initial_sync_pending = true;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -421,7 +434,13 @@ impl Runtime {
                 }
                 initial_sync_pending = false;
                 runtime
-                    .synchronize_replica_branch_states(&owner, &branch_lru, &lifecycle, state_kind)
+                    .catch_up_replica_branches(
+                        &owner,
+                        &branch_lru,
+                        &lifecycle,
+                        &mut checkpoints,
+                        branch_states,
+                    )
                     .await;
             }
         })))
@@ -969,9 +988,6 @@ impl Runtime {
             .retain(|placement, _| &placement.domain != domain);
         self.inner
             .passive_runtime_state_snapshots
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .pending_state_replica_syncs
             .retain(|placement, _| &placement.domain != domain);
     }
 }
