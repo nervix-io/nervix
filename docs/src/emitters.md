@@ -1100,10 +1100,11 @@ opens a connection, and tries the answers in order; a literal IPv4 or IPv6 addre
 written. Every request is still signed for the configured host, and over HTTPS the service
 certificate must name that host, whichever address accepted the connection. The lookup counts
 against the SDK's 3.1-second connect timeout and against `timeout_ms`. Without `tls_ca_file` the
-client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
-environment variables; with it, the client trusts that CA alone and connects directly. A missing
-name, a silent name server or an unreachable answer fails the queue lookup or the send, which the
-emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS answers.
+client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`
+and `NO_PROXY` environment variables; with it, the client trusts that CA alone and connects
+directly. A missing name, a silent name server or an unreachable answer fails the queue lookup or
+the send, which the emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS
+answers.
 
 For FIFO queues, one batch request contains at most one record from each message group. A partial
 batch failure therefore cannot deliver a later record from a group ahead of the failed record;
@@ -1170,8 +1171,8 @@ Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters re
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
 fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
 `tls_key_file` have their usual meanings.
-Sentry resolves the DSN endpoint through the node's configured DNS resolver; its HTTP request
-timeout includes that lookup, connection setup, TLS, and the response.
+Sentry resolves the DSN endpoint through the node's configured DNS resolver; a `timeout_ms`
+includes that lookup, connection setup, TLS, and the response.
 
 ### OTEL
 
@@ -1191,15 +1192,17 @@ CREATE CLIENT otel_main
   };
 ```
 
-`endpoint` and `protocol` are required. `protocol` is exactly `grpc` or `http/protobuf`.
-`headers` is the OTLP comma-separated `key=value` form, `compression` accepts only `gzip`, and an
-absent compression key sends an uncompressed request. `timeout_ms` is an optional positive request
-bound. For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint
-path. Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client;
-the certificate and key must be supplied together.
-OTLP/HTTP-protobuf resolves through the node's configured DNS resolver. OTLP/gRPC continues to
-use its gRPC transport resolver. The configured request timeout covers HTTP DNS and connection
-setup as well as the response.
+`endpoint` and `protocol` are required. `protocol` is exactly `grpc` or `http/protobuf`. `headers`
+is the OTLP comma-separated `key=value` form, `compression` accepts only `gzip`, and an absent
+compression key sends an uncompressed request. `timeout_ms` is an optional positive request bound.
+For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint path.
+Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client; the
+certificate and key must be supplied together. Both protocols resolve the endpoint's host through
+the node's configured DNS resolver for every new connection, and keep the endpoint's host for the
+HTTP authority and the TLS server name. A `timeout_ms` covers the lookup and connection setup as
+well as the response, and for `grpc` it is also the connection timeout. Without it, only a
+thirty-second limit bounds the lookup, and neither the connection nor the export has a deadline of
+its own. A failed lookup is an export failure that the emitter retries on its `RETRY POLICY`.
 
 One log record is mapped as follows:
 

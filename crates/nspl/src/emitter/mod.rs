@@ -16,14 +16,14 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, ack_window,
-        alter_op_separator, bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref,
-        client_ref, codec_ref, collect_for, collection_ref, duration_lit, emitter_name,
-        emitter_ref, expression_before_clause, flush_each, from_relay_clauses,
-        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
-        render_expression_tokens, retry_policy, route_construction, schema_ref, string_lit,
-        subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
-        where_only_route_construction, word_raw,
+        alter_op_separator, bodyless_route_construction, boxed_choice, braced_list_value_tokens,
+        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
+        duration_lit, emitter_name, emitter_ref, expression_before_clause, flush_each,
+        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
+        queue_ref, relay_ref, render_expression_tokens, retry_policy, route_construction,
+        schema_ref, string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value,
+        where_expression, where_only_route_construction, word_raw,
     },
 };
 
@@ -470,44 +470,15 @@ fn otel_emit_sink_parser<'src>()
         )
 }
 
-fn balanced_value_expression_group<'src>()
--> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    recursive(|element| {
-        let contents = element
-            .repeated()
-            .collect::<Vec<_>>()
-            .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>());
-        let parenthesized = contents
-            .delimited_by(tok(Token::LParen), tok(Token::RParen))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LParen);
-                tokens.push(Token::RParen);
-                tokens
-            });
-        let leaf = any()
-            .filter(|token: &Token| !matches!(token, Token::LParen | Token::RParen | Token::RBrace))
-            .map(|token| vec![token]);
-        // Naming the slot stops the raw delimiters leaking out as suggestions: a bare "(" offered
-        // here cannot be completed into anything the expression grammar accepts.
-        choice((parenthesized, leaf)).labelled("value_expression")
-    })
-}
-
 fn clickhouse_value_expr<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    balanced_value_expression_group()
-        .filter(|tokens| !matches!(tokens.as_slice(), [Token::Comma]))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>())
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
+    braced_list_value_tokens().try_map(|tokens, span| {
+        let source = render_expression_tokens(&tokens);
+        crate::parse_expression(&source).map_err(|error| {
+            Rich::custom(span, error.current_context().embedded_expression_message())
         })
+    })
 }
 
 fn clickhouse_value_mapping<'src>()
@@ -2401,6 +2372,70 @@ mod tests {
         assert!(
             errs.iter().any(|err| format!("{err:?}").contains("FLUSH")),
             "expected ClickHouse flush diagnostic, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn clickhouse_values_keep_an_array_value_whole() {
+        let tokens = to_tokens(
+            r#"
+            CREATE EMITTER to_ch FROM notifications
+            TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
+            VALUES { "tags" = [input.first_tag, input.second_tag], "id" = input.id }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            "#,
+        );
+
+        let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
+
+        let EmitSink::ClickHouse { values, .. } = parsed.sink.as_ref() else {
+            panic!("expected a ClickHouse sink, got {:?}", parsed.sink);
+        };
+        assert_eq!(
+            values,
+            &vec![
+                ClickHouseValueMapping {
+                    column: "tags".to_string(),
+                    expression: expression("[input.first_tag, input.second_tag]"),
+                },
+                ClickHouseValueMapping {
+                    column: "id".to_string(),
+                    expression: expression("input.id"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_clickhouse_values_with_an_unclosed_array() {
+        let tokens = to_tokens(
+            r#"
+            CREATE EMITTER to_ch FROM notifications
+            TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
+            VALUES { "tags" = [input.first_tag, input.second_tag }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            "#,
+        );
+
+        parse_create_emitter_tokens(&tokens).expect_err("an unclosed array must not parse");
+    }
+
+    #[test]
+    fn clickhouse_completion_after_values_holding_an_array_offers_the_mode() {
+        let input = "CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client \
+                     INSERT TO TABLE my_table VALUES { 'tags' = [input.first_tag, \
+                     input.second_tag], 'id' = input.id } ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"MODE".to_string()), "{suggestions:?}");
+        assert!(!suggestions.contains(&"]".to_string()), "{suggestions:?}");
+        assert!(
+            !suggestions.contains(&"VALUES".to_string()),
+            "{suggestions:?}"
         );
     }
 

@@ -79,13 +79,23 @@ Formatting a hand-written file for the first time normalizes more than layout:
 - Keywords are uppercased, including type names, and identifiers are lowercased — NSPL lowercases
   identifiers when it parses them, so this is the name the cluster already uses.
 - String literals prefer single quotes; a value containing an apostrophe uses double quotes, and a
-  value containing a newline or both quote styles is dollar-quoted.
+  value containing a newline or both quote styles is dollar-quoted, with a delimiter the value
+  cannot close early, not even with its last characters.
+- Line endings become `\n`, except inside a string literal, whose line breaks are part of its value
+  and are kept exactly as written. Trailing whitespace is dropped from comments.
+- An MQTT topic stays bare only when it is a lower-case identifier; any other topic, including one
+  with an upper-case letter, is quoted, because MQTT topics are case-sensitive.
+- A `START AT` timestamp is written in UTC with an explicit `+00:00` offset. A leap second, which
+  RFC 3339 writes as `:60`, is written as the instant it reads as: one second past the second
+  before it.
 - Values that were left implicit are written out, such as a relay's `CAPACITY` and an ingestor's
   `INSTANCES`.
 - Redundant parentheses are dropped from expressions, keeping only those that change grouping.
 
 Durations and byte sizes keep the spelling you wrote: `250ms` stays `250ms`, and `1MiB` stays
-`1MiB`.
+`1MiB`. A domain's `PERIOD` and `SKEW`, a generator's `EACH` and a polling ingestor's `EVERY` are
+held as nanoseconds, so they are written as one whole number of the largest unit that divides them
+exactly: `1500ms` stays `1500ms`, and `60s` becomes `1m`.
 
 ## Comments Inside A Statement
 

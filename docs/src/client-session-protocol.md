@@ -813,6 +813,7 @@ DNS, address attempts, and TLS. A lookup takes at most 30 seconds when no shorte
 deadline cancels it. Failed resolution is a connection failure under the same bounded reconnect
 policy. Server-internal sessions to a peer's session service reuse the node's loaded resolver.
 Browser WebSocket and fetch resolution remains owned by the browser.
+[Name Resolution](./name-resolution.md) describes the resolver, its bounds and its failures.
 
 ### Reconnecting A Session
 
