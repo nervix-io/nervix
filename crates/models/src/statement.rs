@@ -2934,22 +2934,44 @@ pub enum ClientPoolBoundsError {
 ///
 /// The two counts only mean anything together: a minimum above its maximum asks for a maintained
 /// size the ceiling forbids. [`ClientPoolBounds::new`] is the one place that ordering is decided,
-/// so every holder of a pair already knows its minimum is reachable.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+/// so every holder of a pair already knows its minimum is reachable. The serde and archived forms
+/// are decoded through it too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
 pub struct ClientPoolBounds {
     minimum: u32,
     maximum: NonZeroU32,
+}
+
+impl<'de> Deserialize<'de> for ClientPoolBounds {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// The two counts as the serde form carries them, before they are paired.
+        #[derive(Deserialize)]
+        struct Counts {
+            minimum: u32,
+            maximum: NonZeroU32,
+        }
+
+        let Counts { minimum, maximum } = Counts::deserialize(deserializer)?;
+        Self::new(minimum, maximum)
+            .map_err(|report| <D::Error as serde::de::Error>::custom(report.current_context()))
+    }
+}
+
+impl<D> RkyvDeserialize<ClientPoolBounds, D> for ArchivedClientPoolBounds
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<ClientPoolBounds, D::Error> {
+        let minimum: u32 = self.minimum.deserialize(deserializer)?;
+        let maximum: NonZeroU32 = self.maximum.deserialize(deserializer)?;
+        ClientPoolBounds::new(minimum, maximum).map_err(|report| {
+            <D::Error as rkyv::rancor::Source>::new(report.current_context().clone())
+        })
+    }
 }
 
 impl ClientPoolBounds {
@@ -6423,6 +6445,25 @@ mod tests {
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField, SchemaFingerprint,
         TableName,
     };
+
+    /// The archived layout of pool bounds, so a test can archive a pair the constructor refuses.
+    #[derive(rkyv::Archive, rkyv::Serialize)]
+    struct ArchivedPoolBounds {
+        minimum: u32,
+        maximum: std::num::NonZeroU32,
+    }
+
+    #[test]
+    fn decoders_refuse_a_minimum_above_the_maximum() {
+        let json = r#"{"minimum":5,"maximum":3}"#;
+        assert!(serde_json::from_str::<ClientPoolBounds>(json).is_err());
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&ArchivedPoolBounds {
+            minimum: 5,
+            maximum: nonzero!(3_u32),
+        })
+        .assured("the fields archive");
+        assert!(rkyv::from_bytes::<ClientPoolBounds, rkyv::rancor::Error>(&archived).is_err());
+    }
 
     #[test]
     fn branch_selection_displays_its_named_or_unbranched_declaration() {

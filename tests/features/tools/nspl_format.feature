@@ -217,6 +217,19 @@ Feature: NSPL file formatting
       """
     And the NSPL file "broken.nspl" is unchanged
 
+  Scenario: A duration longer than any clock can hold is reported and left untouched
+    Given an NSPL file "broken.nspl" containing
+      """
+      create paced domain simulation with period 18446744073709551615.5s500000000ns skew 1s;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      expected duration_literal
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
   Scenario: A later statement that cannot be parsed is reported at its own line
     Given an NSPL file "broken.nspl" containing
       """
@@ -257,4 +270,137 @@ Feature: NSPL file formatting
     And the last command output contains
       """
       USE demo;
+      """
+
+  Scenario: An MQTT topic keeps its exact case through formatting
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create ingestor sensor_readings
+        from mqtt mqtt_main topic 'Sensors' mode no_ack sequential on quiesce drop
+        decode using reading_codec
+        to readings unbranched flush immediate on message error log
+        on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      FROM MQTT mqtt_main TOPIC 'Sensors' MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+      """
+
+  Scenario: A dollar-quoted value ending in part of its delimiter keeps its value
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create user auditor with password $p$it's "quoted"$s$p$;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE USER auditor WITH PASSWORD $s_1$it's "quoted"$s$s_1$;
+      """
+
+  Scenario: A configuration value holding a comma and a line break stays one entry
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create client kafka_main type kafka config { 'bootstrap.servers' = 'localhost:9092', 'sasl.jaas.config' = $v$first,
+      second$v$ };
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      'sasl.jaas.config' = $s$first,
+      second$s$
+      """
+
+  Scenario: A Protobuf message name holding a closing brace keeps its value
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create codec notification_codec from protobuf using resource proto_bundle version 2
+        config { 'file' = 'notification.proto' } message 'nervix.test.Notification}'
+        to schema notification_schema with jaq transformations on ingestion '.';
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      MESSAGE 'nervix.test.Notification}'
+      """
+
+  Scenario: A domain clock period is written as one duration
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create paced domain simulation with period 1500ms skew 250ms;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE PACED DOMAIN simulation WITH PERIOD 1500ms SKEW 250ms;
+      """
+
+  Scenario: A leap second in a start time is written as the instant it reads as
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      start at '2016-12-31T23:59:60.5Z';
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      START AT '2017-01-01T00:00:00.500+00:00' TIME RATE 1;
+      """
+
+  Scenario: An SQS queue longer than a name stays unquoted
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create emitter order_events from orders to sqs sqs_main queue orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      TO SQS sqs_main QUEUE orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo
+      """
+
+  Scenario: An array in a VALUES map is one column value
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create emitter to_ch from notifications
+        to clickhouse clickhouse_client insert to table my_table
+        values { 'tags' = [input.first_tag, input.second_tag] }
+        mode ack retry policy backoff 250ms max 30s
+        batch max messages 500 max size 8MiB
+        flush immediate on message error log on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      'tags' = [input.first_tag, input.second_tag]
+      """
+
+  Scenario: A carriage return inside a literal survives formatting
+    Given an NSPL file "pipeline.nspl" containing the escaped text
+      """
+      create user auditor with password $p$first line\r\nsecond line$p$;\r\nuse demo;\r\n
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains the escaped text
+      """
+      CREATE USER auditor WITH PASSWORD $s$first line\r\nsecond line$s$;\nUSE demo;\n
+      """
+
+  Scenario: A trailing comment ending in a carriage return is formatted in one pass
+    Given an NSPL file "pipeline.nspl" containing the escaped text
+      """
+      COMMIT; // done \r
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains the escaped text
+      """
+      COMMIT; // done\n
       """
