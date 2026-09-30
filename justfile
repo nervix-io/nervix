@@ -40,7 +40,7 @@ prepare-archive-counts-fuzz: bolero-deps
     started = time.monotonic()
     result = "instrumented preparation failed"
     try:
-        bolero.command(args, log=path / "build.log")
+        bolero.command(args, timeout=7200, log=path / "build.log")
         result = "instrumented preparation"
     finally:
         bolero.metadata(path, target, args, result, time.monotonic() - started)

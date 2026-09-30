@@ -100,7 +100,7 @@ jobs:
   bolero-fuzz:
     name: bolero-fuzz
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 360 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 180 || 360 }}
     env:
       CARGO_BUILD_JOBS: "1"
     permissions:

@@ -146,7 +146,9 @@ On a shared host, a cold server sanitizer build can exceed the runner's build de
 registered registry and window campaigns with `just fuzz`. Preparation records its own build log
 and metadata; it does not count as a completed fuzz campaign. The dedicated sanitizer CI job also
 prepares the server binary and builds with one Cargo job to bound compiler memory; its overall
-deadline includes that preparation before the ordinary and sanitizer evidence is collected.
+deadline includes that preparation before the sanitizer evidence is collected. Preparation has
+a 7,200-second deadline. The CI job allows 180 minutes on a PR and 360 minutes for longer campaigns,
+including compilation, all selected target campaigns, failure qualification and artifact upload.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
