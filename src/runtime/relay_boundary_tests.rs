@@ -840,7 +840,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
                     ..DomainRoutingSnapshot::default()
                 },
             ),
-            message_error_plans: Arc::default(),
+
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
@@ -1196,7 +1196,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
                 routing: DomainRouting::new(DomainRoutingSnapshot::default()),
-                message_error_plans: Arc::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),

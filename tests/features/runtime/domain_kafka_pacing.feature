@@ -411,6 +411,7 @@ Feature: Kafka ingestor domain pacing
       | 3            | 0             |
       | 3            | 1             |
 
+  @retained_task_handles
   Scenario Outline: Domain-owned Kafka offsets reset on START AT NOW
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
