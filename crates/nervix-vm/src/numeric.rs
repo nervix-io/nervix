@@ -116,10 +116,9 @@ impl<N: Copy + Default> Lanes<N> {
     ///
     /// Validity is read one word at a time. A word with no valid lane computes nothing and fails
     /// no lane. A word whose lanes are all valid runs the loop [`Lanes::unary`] runs, and any other
-    /// word computes its valid lanes only, with the failure bytes of the rest cleared. Either way
-    /// the word's failure bytes are packed through vector compares, so no lane writes the failure
-    /// word. A lane here is a call into the platform math library or a calendar, so one packing
-    /// call per word costs little beside it.
+    /// word computes its valid lanes only, with the failure bytes of the rest cleared. The words'
+    /// failure bytes fill the same blocks [`Lanes::unary`] packs, so no lane writes a failure word
+    /// and a word with few valid lanes pays for no call of its own.
     pub(crate) fn unary_valid<I: Copy>(
         operands: &[I],
         valid: &NullBuffer,
@@ -128,7 +127,8 @@ impl<N: Copy + Default> Lanes<N> {
         let packer = FlagPacker::new();
         let mut values = vec![N::default(); operands.len()];
         let mut words = Vec::with_capacity(operands.len().div_ceil(WORD_LANES));
-        let mut flags = [0_u8; WORD_LANES];
+        let mut flags = [0_u8; BLOCK_LANES];
+        let mut block_lanes = 0;
         let validity = valid.inner().bit_chunks();
         let value_words = values.chunks_mut(WORD_LANES);
         let operand_words = operands.chunks(WORD_LANES);
@@ -136,12 +136,10 @@ impl<N: Copy + Default> Lanes<N> {
         for ((value_word, operand_word), valid_bits) in
             value_words.zip(operand_words).zip(valid_words)
         {
-            let word_flags = &mut flags[..value_word.len()];
+            let word_end = block_lanes + value_word.len();
+            let word_flags = &mut flags[block_lanes..word_end];
             match WordValidity::of(valid_bits, value_word.len()) {
-                WordValidity::Empty => {
-                    words.push(0);
-                    continue;
-                }
+                WordValidity::Empty => word_flags.fill(0),
                 WordValidity::Full => {
                     Self::unary_run(value_word, operand_word, word_flags, &mut lane);
                 }
@@ -154,8 +152,13 @@ impl<N: Copy + Default> Lanes<N> {
                     }
                 }
             }
-            packer.pack(word_flags, &mut words);
+            block_lanes = word_end;
+            if block_lanes == BLOCK_LANES {
+                packer.pack(&flags, &mut words);
+                block_lanes = 0;
+            }
         }
+        packer.pack(&flags[..block_lanes], &mut words);
         Self::new(values, words)
     }
 
@@ -170,7 +173,8 @@ impl<N: Copy + Default> Lanes<N> {
         let packer = FlagPacker::new();
         let mut values = vec![N::default(); left.len()];
         let mut words = Vec::with_capacity(left.len().div_ceil(WORD_LANES));
-        let mut flags = [0_u8; WORD_LANES];
+        let mut flags = [0_u8; BLOCK_LANES];
+        let mut block_lanes = 0;
         let validity = valid.inner().bit_chunks();
         let value_words = values.chunks_mut(WORD_LANES);
         let left_words = left.chunks(WORD_LANES);
@@ -181,12 +185,10 @@ impl<N: Copy + Default> Lanes<N> {
             .zip(right_words)
             .zip(valid_words)
         {
-            let word_flags = &mut flags[..value_word.len()];
+            let word_end = block_lanes + value_word.len();
+            let word_flags = &mut flags[block_lanes..word_end];
             match WordValidity::of(valid_bits, value_word.len()) {
-                WordValidity::Empty => {
-                    words.push(0);
-                    continue;
-                }
+                WordValidity::Empty => word_flags.fill(0),
                 WordValidity::Full => {
                     Self::binary_run(value_word, left_word, right_word, word_flags, &mut lane);
                 }
@@ -199,8 +201,13 @@ impl<N: Copy + Default> Lanes<N> {
                     }
                 }
             }
-            packer.pack(word_flags, &mut words);
+            block_lanes = word_end;
+            if block_lanes == BLOCK_LANES {
+                packer.pack(&flags, &mut words);
+                block_lanes = 0;
+            }
         }
+        packer.pack(&flags[..block_lanes], &mut words);
         Self::new(values, words)
     }
 

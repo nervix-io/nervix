@@ -60,11 +60,10 @@ pub fn lane_mask(lanes: usize) -> u64 {
 
 #[inline(always)]
 fn pack_run<S: Simd>(simd: S, flags: &[u8], words: &mut Vec<u64>) {
-    let mut blocks = flags.chunks_exact(WORD_LANES);
-    for block in blocks.by_ref() {
+    let (blocks, tail) = flags.as_chunks::<WORD_LANES>();
+    for block in blocks {
         words.push(pack_block(simd, block));
     }
-    let tail = blocks.remainder();
     if !tail.is_empty() {
         // Clear bytes pad the last word, so its lanes past the run pack as clear bits.
         let mut padded = [0_u8; WORD_LANES];
@@ -73,9 +72,8 @@ fn pack_run<S: Simd>(simd: S, flags: &[u8], words: &mut Vec<u64>) {
     }
 }
 
-/// The word of exactly [`WORD_LANES`] flags.
 #[inline(always)]
-fn pack_block<S: Simd>(simd: S, block: &[u8]) -> u64 {
+fn pack_block<S: Simd>(simd: S, block: &[u8; WORD_LANES]) -> u64 {
     let clear = S::u8s::splat(simd, 0);
     let width = S::u8s::LEN;
     // Every native byte vector is 16, 32 or 64 lanes wide, so the registers tile the block.

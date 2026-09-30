@@ -778,8 +778,9 @@ come from the platform math library as opaque calls per lane that no loop vector
 kernels compute valid lanes only, as the decimal rounding and calendar kernels do. They read
 validity one 64-lane word at a time: a word without a valid lane computes nothing and fails no
 lane, a fully valid word runs the ordinary lane loop over its 64 lanes, and any other word computes
-its valid lanes alone with the failure bytes of its null lanes cleared. The word's bytes are then
-packed as a block's are, so a null lane never fails and no lane writes the failure word. `round(value, digits)` rounds exactly in integer arithmetic
+its valid lanes alone with the failure bytes of its null lanes cleared. The words' failure bytes
+fill the same blocks the other kernels pack, so a null lane never fails, no lane writes a failure
+word, and a word with few valid lanes pays for no packing call of its own. `round(value, digits)` rounds exactly in integer arithmetic
 on the value's significand, and a digit count beyond ±400 rounds as ±400 does. A shift reads its
 count from any integer type and fails a negative one. A count at or beyond the value's width moves
 every bit out, and the lanes stay branch-free.
