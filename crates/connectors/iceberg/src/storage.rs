@@ -710,9 +710,10 @@ mod tests {
         })
         .await
         .expect("the fixture DNS configuration is valid");
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("the token endpoint can bind");
+        let listener =
+            nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("the token endpoint can bind");
         let port = listener
             .local_addr()
             .expect("the token endpoint has an address")

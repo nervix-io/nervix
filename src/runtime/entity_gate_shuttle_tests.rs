@@ -9,7 +9,7 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records. The counters under test are Shuttle's atomics, so a
 // check reads them while another task is between two of its own adjustments.
-use std::{collections::BTreeSet, sync::Arc as StdArc};
+use std::{collections::BTreeSet, sync::Arc as StdArc, time::Duration};
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -21,9 +21,9 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     sync::{Notify, oneshot},
+    time::Instant,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use tokio::time::{Duration, Instant};
 use triomphe::Arc;
 
 use super::{

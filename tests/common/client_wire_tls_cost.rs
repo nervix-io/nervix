@@ -6,16 +6,12 @@
 //! - **Depends on.** The native client and the Cucumber cluster fixture.
 //! - **Must not know.** Server scheduling, execution plans or transport internals.
 
-use std::{
-    fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context as _, Result, ensure};
 use nervix_client_core::Client;
+use nervix_primitives::time::{Instant, timeout};
 use serde::Serialize;
-use tokio::time::timeout;
 
 use super::cluster::{client_connect_options, client_domain};
 

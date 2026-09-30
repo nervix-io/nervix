@@ -10,10 +10,12 @@
 
 use std::time::Duration;
 
-use nervix_primitives::sync::CancellationToken;
+use nervix_primitives::{
+    sync::CancellationToken,
+    time::{MissedTickBehavior, interval, sleep},
+};
 use thiserror::Error;
 use tikv_jemalloc_ctl::{epoch, stats};
-use tokio::time::{MissedTickBehavior, interval, sleep};
 use tracing::{debug, info, warn};
 use typed_builder::TypedBuilder;
 use ubyte::ByteUnit;

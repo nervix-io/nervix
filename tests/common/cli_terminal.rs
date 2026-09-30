@@ -36,13 +36,14 @@ use std::{
     path::Path,
     process::{ExitStatus, Stdio},
     sync::Arc as StdArc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use meticulous::OptionExt as _;
 use nervix_primitives::{
     sync::{blocking::Mutex, mpsc},
     task::AbortOnDropHandle,
+    time::Instant,
 };
 use nix::{
     fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
@@ -181,7 +182,7 @@ impl CliTerminal {
                 return Err(DisplayWaitError::Timeout { within });
             }
             self.type_line("").await?;
-            tokio::time::sleep(PROMPT_INTERVAL).await;
+            nervix_primitives::time::sleep(PROMPT_INTERVAL).await;
         }
     }
 
@@ -190,7 +191,7 @@ impl CliTerminal {
         &mut self,
         within: Duration,
     ) -> Result<ExitStatus, ExitWaitError> {
-        match tokio::time::timeout(within, self.cli.wait()).await {
+        match nervix_primitives::time::timeout(within, self.cli.wait()).await {
             Ok(Ok(status)) => Ok(status),
             Ok(Err(error)) => Err(ExitWaitError::Wait(error)),
             Err(_) => Err(ExitWaitError::Timeout { within }),

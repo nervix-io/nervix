@@ -11,13 +11,10 @@ use std::{
 };
 
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, NameServers};
-use nervix_primitives::task::JoinHandle;
+use nervix_primitives::{net::TcpListener, task::JoinHandle};
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
 

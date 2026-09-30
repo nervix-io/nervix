@@ -879,39 +879,14 @@ fn inferencer_materialization_requires_an_input_and_schema() {
 }
 
 #[test]
-fn relay_template_resolution_classifies_missing_runtime_surfaces() {
+fn relay_template_resolution_fails_for_a_relay_without_boundary_services() {
     let node = named::<ModelName>("orders_junction");
     let relay = named::<RelayName>("orders");
-    let relay_ids = || std::iter::once(relay.clone()).collect();
+    let relay_ids = std::iter::once(relay.clone()).collect();
 
-    let missing_registry = resolve_branch_relay_templates(
-        ModelKind::Junction,
-        &node,
-        relay_ids(),
-        &HashMap::default(),
-        &HashMap::default(),
-    )
-    .expect_err("a relay without a registry must fail planning");
-    assert!(matches!(
-        missing_registry.current_context(),
-        PlanningError::MissingRelayRegistry {
-            kind: ModelKind::Junction,
-            node: error_node,
-            route,
-        } if error_node == &node && route == &relay
-    ));
-
-    let relay_registries = [(relay.clone(), RelayRegistry::new())]
-        .into_iter()
-        .collect();
-    let missing_services = resolve_branch_relay_templates(
-        ModelKind::Junction,
-        &node,
-        relay_ids(),
-        &relay_registries,
-        &HashMap::default(),
-    )
-    .expect_err("a relay without boundary services must fail planning");
+    let missing_services =
+        resolve_branch_relay_templates(ModelKind::Junction, &node, relay_ids, &HashMap::default())
+            .expect_err("a relay without boundary services must fail planning");
     assert!(matches!(
         missing_services.current_context(),
         PlanningError::MissingRelayServices {
@@ -947,7 +922,6 @@ fn processor_instance_materialization_requires_an_input_relay() {
     };
     let error = materialize_processor_instance_template(
         &node,
-        &HashMap::default(),
         &HashMap::default(),
         &HashMap::default(),
         None,

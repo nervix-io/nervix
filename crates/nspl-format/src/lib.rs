@@ -14,6 +14,8 @@
 
 pub mod diagnostics;
 pub mod document;
+#[cfg(test)]
+mod format_round_trip_tests;
 
 use document::{Gap, GapItem};
 use error_stack::{Report, ResultExt as _};
@@ -47,11 +49,34 @@ pub enum FormatError {
 }
 
 /// Formats NSPL source into its canonical form.
+///
+/// Line endings are normalized to `\n` everywhere except inside string literals, whose content is
+/// part of a statement's meaning. The output is verified against the statements of `input` exactly
+/// as given.
 pub fn format_source(input: &str) -> error_stack::Result<String, FormatError> {
-    let normalized = input.replace("\r\n", "\n");
+    let normalized = normalize_line_endings(input);
     let formatted = render(&normalized)?;
-    verify(&normalized, &formatted)?;
+    verify(input, &formatted)?;
     Ok(formatted)
+}
+
+/// Replaces every `\r\n` outside a string literal with `\n`.
+///
+/// A literal keeps its line endings, because they are its value. Text that does not lex is returned
+/// unchanged: parsing it reports the lexical error at its place in the text as written.
+fn normalize_line_endings(input: &str) -> String {
+    let Ok(tokens) = nervix_nspl::lex(input) else {
+        return input.to_string();
+    };
+    let mut normalized = String::with_capacity(input.len());
+    let mut previous_end = 0usize;
+    for token in &tokens {
+        normalized.push_str(&input[previous_end..token.span.start].replace("\r\n", "\n"));
+        normalized.push_str(&input[token.span.start..token.span.end]);
+        previous_end = token.span.end;
+    }
+    normalized.push_str(&input[previous_end..].replace("\r\n", "\n"));
+    normalized
 }
 
 /// Reports whether `input` is already in canonical form.
@@ -78,15 +103,17 @@ fn render(input: &str) -> error_stack::Result<String, FormatError> {
 
         // A statement whose body holds a comment is emitted exactly as written: the formatter
         // will not guess where the comment belongs.
+        // Statements are split at `\n` alone: a carriage return left in a statement belongs to a
+        // string literal, and `str::lines` would drop it from the literal's value.
         if document::contains_interior_comment(input, &parsed.span, &tokens) {
-            lines.extend(parsed.source(input).lines().map(str::to_string));
+            lines.extend(parsed.source(input).split('\n').map(str::to_string));
         } else {
             let line = line_of(input, parsed.span.start);
             let rendered = parsed
                 .statement
                 .to_canonical_nspl()
                 .change_context(FormatError::Render { line })?;
-            lines.extend(rendered.lines().map(str::to_string));
+            lines.extend(rendered.split('\n').map(str::to_string));
         }
 
         previous_end = parsed.span.end;
@@ -230,6 +257,29 @@ mod tests {
             format_source("USE demo;\r\nBEGIN;\r\n").expect("must format"),
             "USE demo;\nBEGIN;\n"
         );
+    }
+
+    #[test]
+    fn a_carriage_return_inside_a_literal_is_kept() {
+        let input = "CREATE USER u WITH PASSWORD $p$line\r\nnext$p$;\r\nUSE demo;\r\n";
+        let formatted = format_source(input).expect("must format");
+
+        assert_eq!(
+            formatted,
+            "CREATE USER u WITH PASSWORD $s$line\r\nnext$s$;\nUSE demo;\n"
+        );
+        assert_eq!(
+            parse_client_statements(&formatted).expect("the output parses"),
+            parse_client_statements(input).expect("the input parses")
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_ending_in_a_carriage_return_formats_once() {
+        let once = format_source("COMMIT; // done \r").expect("must format");
+
+        assert_eq!(once, "COMMIT; // done\n");
+        assert_eq!(format_source(&once).expect("must format"), once);
     }
 
     #[test]

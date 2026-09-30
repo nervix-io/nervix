@@ -364,7 +364,7 @@ async fn http_receiver(
 ) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
         .await
         .assured("the loopback interface accepts a test listener");
     let endpoint = format!(
@@ -564,7 +564,7 @@ async fn grpc_receiver(
 ) {
     use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
         .await
         .assured("the loopback interface accepts a test listener");
     let endpoint = format!(

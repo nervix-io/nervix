@@ -11,13 +11,14 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use meticulous::ResultExt as _;
 use nervix_dns::{
     DnsConfiguration, DnsLookupFailure, DnsResolver, MAX_CONCURRENT_LOOKUPS, NameServers,
 };
+use nervix_primitives::time::Instant;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 
@@ -118,7 +119,7 @@ impl Fixture {
                 Instant::now() < deadline,
                 "{host} still resolved to {resolved:?} instead of {expected:?}"
             );
-            tokio::time::sleep(POLL_INTERVAL).await;
+            nervix_primitives::time::sleep(POLL_INTERVAL).await;
         }
     }
 }
@@ -364,7 +365,7 @@ async fn lookups_beyond_the_concurrency_bound_wait_and_cancellation_frees_their_
         let name = format!("hold-{index}.nervix.test");
         while fixture.authority.questions_for(&name) == 0 {
             assert!(Instant::now() < deadline, "{name} was never asked");
-            tokio::time::sleep(POLL_INTERVAL).await;
+            nervix_primitives::time::sleep(POLL_INTERVAL).await;
         }
     }
     fixture.authority.set(

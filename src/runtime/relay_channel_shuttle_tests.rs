@@ -20,10 +20,10 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     sync::oneshot,
+    time::Instant,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use shuttle::rand::{Rng as _, thread_rng};
-use tokio::time::Instant;
 use triomphe::Arc;
 
 use super::{
@@ -298,7 +298,7 @@ async fn expect_expired_fence(mut lease: RelayDispatchGateLease) {
 fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_deadline: Instant) {
     // Timeout triggers are thread-local rather than per execution, so every execution starts
     // without the trigger an earlier one registered.
-    tokio::time::clear_triggers();
+    nervix_primitives::time::clear_triggers();
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
         let earlier_permit = gate.acquire_dispatch().await;
@@ -327,7 +327,7 @@ fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_dead
         // not, only an expiry that another gate operation observes can free the waiters.
         let deadline = nervix_primitives::task::spawn(async {
             if thread_rng().gen_bool(0.5) {
-                tokio::time::trigger_timeouts(|labels| {
+                nervix_primitives::time::trigger_timeouts(|labels| {
                     labels.get::<GateDeadlineMayFire>().is_some()
                 });
             }

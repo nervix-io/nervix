@@ -12,7 +12,9 @@
 //! | Atomics, orderings and fences | [`sync::atomic`] | Portable |
 //! | Async synchronization: locks, notification, semaphores, channels, cancellation | [`sync`] | `native` |
 //! | Thread-blocking synchronization: locks, condition variables, barriers, one-time initialization, channels | `sync::blocking` | `native` |
-//! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting | `task` | `native` |
+//! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting, and the mechanism that runs an admitted CPU job | `task` | `native` |
+//! | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | `native` |
+//! | Sockets: TCP listeners and streams, UDP and local sockets | `net` | `native` |
 //! | The async runtime, and the attributes and macro that build and drive it | `runtime`, `test`, `main`, `select!` | `native` |
 //! | Streams over channels | `stream` | `native` |
 //! | Atomic reference publication | `publication` | `native` |
@@ -21,9 +23,15 @@
 //! | Real primitives outside every model | [`unmodeled`] | As the family |
 //!
 //! Loom models isolated synchronous owners: atomics, the threads a model spawns, joins, parks and
-//! yields, and thread-local storage. It models no async family, lock, collection or publication,
-//! so a Loom build takes the ordinary libraries for those, outside every model, and the boundary
-//! check rejects them in Loom model code: a model never reaches a real primitive silently.
+//! yields, and thread-local storage. It models no async family, lock, collection, publication,
+//! timer or socket, so a Loom build takes the ordinary libraries for those, outside every model,
+//! and the boundary check rejects them in Loom model code: a model never reaches a real primitive
+//! silently.
+//!
+//! Turmoil replaces the network and the clock, not synchronization. A Turmoil build takes the
+//! ordinary primitives, running on the simulated host whose task uses them; its sockets and its
+//! name lookup are Turmoil's, its timers follow the simulated host's clock, and an admitted CPU job
+//! runs as one task of that host's scheduler.
 //!
 //! Ordinary execution pays nothing for the boundary: every path is a direct re-export of the
 //! library item, with no wrapper, allocation, dispatch or scheduling point. A modeled primitive
@@ -40,10 +48,14 @@
 //! - **Owns.** Selecting the backend of every governed primitive for the build's execution mode,
 //!   rejecting incompatible modes and target capabilities, and the one named path to a real
 //!   primitive that stays outside every model.
-//! - **Depends on.** The standard library, the synchronization and runtime libraries it selects
-//!   from, and the Shuttle or Loom runtime while that mode is selected.
+//! - **Depends on.** The standard library, the synchronization, runtime and network libraries it
+//!   selects from, and the Shuttle or Loom runtime or Turmoil's network while that mode is
+//!   selected.
 //! - **Must not know.** Anything in Nervix, and any scenario, exploration bound or assertion of a
 //!   check. It selects a backend; the harness that runs a model owns how the model is explored.
+//!   It supplies mechanisms and decides no policy: which resolver answers a name, whether work is
+//!   admitted, and which clock a deadline is measured on stay with the resolver, the bounded
+//!   executor and the clock owners.
 
 #[cfg(all(feature = "loom", feature = "shuttle"))]
 compile_error!(
@@ -84,6 +96,8 @@ extern crate self as nervix_primitives;
 #[cfg(feature = "native")]
 pub mod collections;
 #[cfg(feature = "native")]
+pub mod net;
+#[cfg(feature = "native")]
 pub mod publication;
 #[cfg(feature = "native")]
 pub mod runtime;
@@ -96,6 +110,8 @@ pub mod sync;
 pub mod task;
 #[cfg(feature = "native")]
 pub mod thread;
+#[cfg(feature = "native")]
+pub mod time;
 pub mod unmodeled;
 
 #[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]

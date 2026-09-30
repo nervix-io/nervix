@@ -13,9 +13,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod connection;
 mod source;
 #[cfg(test)]
@@ -44,9 +41,12 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
-use nervix_primitives::sync::{
-    atomic::{AtomicU32, Ordering},
-    watch,
+use nervix_primitives::{
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        watch,
+    },
+    time::{Instant, sleep},
 };
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
@@ -58,7 +58,6 @@ pub use source::{
     MqttSourcePosition, MqttSourceSettings,
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep};
 use tracing::warn;
 use triomphe::Arc;
 use url::{Host, Url};
@@ -1037,7 +1036,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_event_loop_records_the_maximum_packet_size_the_broker_declares() {
-        let broker = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let broker = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port is available");
         let addr = broker
@@ -1061,7 +1060,7 @@ mod tests {
             .await
             .expect("the test broker answers the CONNECT");
 
-        let declared = tokio::time::timeout(Duration::from_secs(30), async {
+        let declared = nervix_primitives::time::timeout(Duration::from_secs(30), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if let Some(maximum) = sink.broker_limit.declared() {
@@ -1088,7 +1087,7 @@ mod tests {
         let _sink = MqttSink::new(config, SinkHost::new(RecordingHost { transient_error }))
             .expect("the test sink config is valid");
 
-        let reason = tokio::time::timeout(Duration::from_secs(30), async {
+        let reason = nervix_primitives::time::timeout(Duration::from_secs(30), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if let Some(reason) = recorded.borrow_and_update().clone() {

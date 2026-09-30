@@ -8,10 +8,9 @@
 //! - **Depends on.** The owned node task and the phase deadline.
 //! - **Must not know.** What a node is, how it was configured, or what it holds.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use futures_util::future::join_all;
-use tokio::time::Duration;
 
 use super::{
     node_liveness::{NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask},

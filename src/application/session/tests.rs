@@ -130,7 +130,7 @@ impl SessionUnderTest {
         let mut frames = 0_usize;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
+            let frame = nervix_primitives::time::timeout(REPLY_TIMEOUT, self.outbound.next())
                 .await
                 .assured("the session answers within the deadline")
                 .assured("the session sends until the test closes it");
@@ -170,7 +170,7 @@ impl SessionUnderTest {
             .send(InboundFrame::Closed)
             .assured("the session reads until the test closes it");
         drop(self.outbound);
-        tokio::time::timeout(REPLY_TIMEOUT, self.task)
+        nervix_primitives::time::timeout(REPLY_TIMEOUT, self.task)
             .await
             .assured("the session ends once its client closes")
             .assured("the session does not panic");
@@ -459,7 +459,7 @@ impl SessionUnderTest {
     async fn next_clock_message(&mut self) -> ClockMessage {
         loop {
             nervix_primitives::task::consume_budget().await;
-            let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
+            let frame = nervix_primitives::time::timeout(REPLY_TIMEOUT, self.outbound.next())
                 .await
                 .assured("the session sends within the deadline")
                 .assured("the session sends until the test closes it");
@@ -496,7 +496,8 @@ impl SessionUnderTest {
 
     /// Whether the session sends no reply and no clock frame for [`UNANSWERED_WINDOW`].
     async fn sends_no_clock_message(&mut self) -> bool {
-        let message = tokio::time::timeout(UNANSWERED_WINDOW, self.next_clock_message()).await;
+        let message =
+            nervix_primitives::time::timeout(UNANSWERED_WINDOW, self.next_clock_message()).await;
         message.is_err()
     }
 }

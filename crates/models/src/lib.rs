@@ -25,6 +25,7 @@ mod cluster_node;
 mod command;
 mod completion;
 mod domain_clock;
+mod duration_text;
 mod emitter_batch;
 mod expression;
 mod http_request;
@@ -83,6 +84,7 @@ pub use domain_clock::{
     DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
+pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter_batch::{
     BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
     EmitterBatchRequirement, PayloadSizeLimit,

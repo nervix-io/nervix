@@ -783,7 +783,7 @@ async fn then_restore_pauses_at_step(
 ) {
     let step = restore_step(world, &kind, &domain);
     let node = expand_placeholders(world, &node);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         RESTORE_PAUSE_TIMEOUT,
         world
             .fault_injection

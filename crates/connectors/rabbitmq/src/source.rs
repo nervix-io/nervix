@@ -412,7 +412,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn failed_connections_keep_their_typed_cause_and_leave_the_source_to_resume() {
         let (_files, dns) = literal_address_resolver().await;
-        let refusing = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let refusing = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port is available");
         let port = refusing

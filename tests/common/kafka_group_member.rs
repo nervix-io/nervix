@@ -97,7 +97,7 @@ impl ExternalKafkaGroupMember {
         let assigned = self
             .assignment
             .wait_for(|partitions| partitions.contains(&partition));
-        let elapsed = match tokio::time::timeout(budget, assigned).await {
+        let elapsed = match nervix_primitives::time::timeout(budget, assigned).await {
             Ok(Ok(_)) => return Ok(()),
             Ok(Err(_)) => {
                 return Err(io::Error::other(

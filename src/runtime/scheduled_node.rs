@@ -151,7 +151,7 @@ impl ScheduledNodeTask {
         grace_period: Duration,
     ) -> error_stack::Result<Vec<ProcessorBranchHandoff>, ScheduledNodeHandoffError> {
         let (response, receiver) = oneshot::channel();
-        match tokio::time::timeout(
+        match nervix_primitives::time::timeout(
             grace_period,
             self.commands
                 .send(ProcessorNodeCommand::Handoff { response }),
@@ -168,7 +168,7 @@ impl ScheduledNodeTask {
                 return Err(Report::new(ScheduledNodeHandoffError::CommandTimeout));
             }
         }
-        let handoffs = match tokio::time::timeout(grace_period, receiver).await {
+        let handoffs = match nervix_primitives::time::timeout(grace_period, receiver).await {
             Ok(Ok(handoffs)) => handoffs,
             Ok(Err(_)) => {
                 self.abort_and_join().await;
@@ -179,7 +179,7 @@ impl ScheduledNodeTask {
                 return Err(Report::new(ScheduledNodeHandoffError::ResponseTimeout));
             }
         };
-        match tokio::time::timeout(grace_period, &mut self.task).await {
+        match nervix_primitives::time::timeout(grace_period, &mut self.task).await {
             Ok(Ok(())) => Ok(handoffs),
             Ok(Err(error)) => {
                 Err(Report::new(ScheduledNodeHandoffError::TaskJoin).attach_printable(error))

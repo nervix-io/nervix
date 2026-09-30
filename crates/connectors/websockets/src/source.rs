@@ -20,9 +20,8 @@ use nervix_connector::{
 };
 use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::sync::mpsc;
+use nervix_primitives::{net::TcpStream, sync::mpsc, time::timeout};
 use thiserror::Error;
-use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config, tungstenite::Message,
 };
@@ -346,12 +345,10 @@ mod tests {
 
     use meticulous::OptionExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_primitives::net::TcpListener;
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
     use tempfile::TempDir;
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpListener,
-    };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 
     use super::*;

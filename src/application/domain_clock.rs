@@ -7,7 +7,7 @@
 //! - **Depends on.** Consensus for the recorded authority and typed interconnect progress requests.
 //! - **Must not know.** What a domain does with the time it is given.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use ahash::{HashMap, HashMapExt};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -18,8 +18,10 @@ use nervix_models::{
     DomainClockPeriod, DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainStatus,
     DomainTick, Timestamp,
 };
-use nervix_primitives::sync::{CancellationToken, watch};
-use tokio::time::{Duration, Instant, sleep};
+use nervix_primitives::{
+    sync::{CancellationToken, watch},
+    time::{Instant, sleep},
+};
 use tracing::{debug, warn};
 
 use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};

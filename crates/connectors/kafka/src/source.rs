@@ -23,7 +23,10 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, Timestamp, TopicName};
-use nervix_primitives::sync::watch;
+use nervix_primitives::{
+    sync::watch,
+    time::{Instant, sleep_until},
+};
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -31,7 +34,6 @@ use rdkafka::{
     topic_partition_list::{Offset, TopicPartitionList},
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 use triomphe::Arc;
 

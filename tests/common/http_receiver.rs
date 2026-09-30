@@ -54,13 +54,15 @@ use std::{
     path::Path,
     str::FromStr,
     sync::Arc as StdArc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
+    net::{TcpListener, TcpStream},
     sync::{CancellationToken, blocking::Mutex, watch},
     task::{AbortOnDropHandle, JoinSet},
+    time::Instant,
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{
@@ -71,10 +73,7 @@ use rustls::{
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use tempfile::TempDir;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_rustls::TlsAcceptor;
 use triomphe::Arc;
 
@@ -1133,8 +1132,11 @@ impl HttpReceiver {
         within: Duration,
     ) -> Result<Vec<CapturedRequest>, ReceiverWaitError> {
         let mut captured_count = self.state.captured_count.subscribe();
-        let waited =
-            tokio::time::timeout(within, captured_count.wait_for(|count| *count >= expected)).await;
+        let waited = nervix_primitives::time::timeout(
+            within,
+            captured_count.wait_for(|count| *count >= expected),
+        )
+        .await;
         match waited {
             Ok(Ok(_)) => Ok(self.captured()),
             Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Requests {
@@ -1155,7 +1157,7 @@ impl HttpReceiver {
     ) -> Result<Vec<CapturedRequest>, ReceiverWaitError> {
         let mut captured_count = self.state.captured_count.subscribe();
         let state = self.state.clone();
-        let waited = tokio::time::timeout(
+        let waited = nervix_primitives::time::timeout(
             within,
             captured_count.wait_for(|_| state.has_request_line(request_line)),
         )
@@ -1185,8 +1187,11 @@ impl HttpReceiver {
         within: Duration,
     ) -> Result<(), ReceiverWaitError> {
         let mut abandoned = self.state.abandoned_count.subscribe();
-        let waited =
-            tokio::time::timeout(within, abandoned.wait_for(|count| *count >= expected)).await;
+        let waited = nervix_primitives::time::timeout(
+            within,
+            abandoned.wait_for(|count| *count >= expected),
+        )
+        .await;
         match waited {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Abandoned {
@@ -1208,8 +1213,11 @@ impl HttpReceiver {
     ) -> Result<(), ReceiverWaitError> {
         let mut fault_count = self.state.fault_count.subscribe();
         let state = self.state.clone();
-        let waited =
-            tokio::time::timeout(within, fault_count.wait_for(|_| state.has_fault(expected))).await;
+        let waited = nervix_primitives::time::timeout(
+            within,
+            fault_count.wait_for(|_| state.has_fault(expected)),
+        )
+        .await;
         match waited {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Fault {
@@ -1231,7 +1239,7 @@ impl HttpReceiver {
             mut accept_loop,
             ..
         } = self;
-        let joined = tokio::time::timeout(RECEIVER_STOP_BUDGET, &mut accept_loop).await;
+        let joined = nervix_primitives::time::timeout(RECEIVER_STOP_BUDGET, &mut accept_loop).await;
         let ending = match joined {
             Ok(Ok(connections)) => AcceptLoopEnding::Returned(connections),
             Ok(Err(error)) => AcceptLoopEnding::Failed(error),
@@ -1388,10 +1396,10 @@ impl AcceptLoop {
                 }
             }
         }
-        let deadline = tokio::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
+        let deadline = nervix_primitives::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, connections.join_next()).await {
+            match nervix_primitives::time::timeout_at(deadline, connections.join_next()).await {
                 Ok(Some(joined)) => summary.joined(joined),
                 Ok(None) => break,
                 Err(_) => {
@@ -1517,7 +1525,7 @@ impl Connection {
         if let Some(delay) = response.delay {
             nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
-                () = tokio::time::sleep(delay) => {}
+                () = nervix_primitives::time::sleep(delay) => {}
             }
         }
         if let Some(interim_head) = response.interim_head() {

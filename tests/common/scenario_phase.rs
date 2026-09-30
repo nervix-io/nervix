@@ -8,12 +8,14 @@
 //! - **Depends on.** Tokio's monotonic clock.
 //! - **Must not know.** What a phase does, how a cluster is torn down, or scenario state.
 
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, time::Duration};
 
 use meticulous::OptionExt as _;
 use nervix_approx_into::ApproxInto as _;
-use nervix_primitives::sync::blocking::{LazyLock, Mutex};
-use tokio::time::{Duration, Instant};
+use nervix_primitives::{
+    sync::blocking::{LazyLock, Mutex},
+    time::Instant,
+};
 
 use super::scenario_schedule::AdmissionWait;
 

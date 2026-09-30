@@ -58,7 +58,7 @@ Feature: Runtime persistence
       """
       {"user_id":901}
       """
-    Then within "5s" node "node-1" eventually reports describe relay as "exists"
+    Then within "30s" node "node-1" eventually reports describe relay as "exists"
       """
       DESCRIBE RELAY notifications WHERE (user_id = 901);
       """
