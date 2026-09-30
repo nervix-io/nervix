@@ -85,7 +85,8 @@ use nervix_interconnect::{
     Transport, TransportIdentity,
 };
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
+    ClusterNodeName, DomainName, DomainStatus, DurationTextError, ModelKind, NodeEndpoint,
+    NodeServiceUrl, UserName, parse_duration_text,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -624,7 +625,7 @@ pub struct Application {
 #[derive(Debug, thiserror::Error)]
 enum CliValueError {
     #[error("invalid duration: {source}")]
-    Duration { source: humantime::DurationError },
+    Duration { source: DurationTextError },
     #[error("invalid byte quantity")]
     Bytes,
     #[error("invalid trace sample ratio: {source}")]
@@ -633,9 +634,16 @@ enum CliValueError {
     TraceSampleRatioRange,
 }
 
+/// Reads a duration option. Clap prints only the outermost context of a rejected value, so that
+/// context carries the reason the text names no duration.
 fn parse_human_duration(input: &str) -> error_stack::Result<Duration, CliValueError> {
-    humantime::parse_duration(input)
-        .map_err(|source| Report::new(CliValueError::Duration { source }))
+    match parse_duration_text(input) {
+        Ok(duration) => Ok(duration),
+        Err(report) => {
+            let source = report.current_context().clone();
+            Err(report.change_context(CliValueError::Duration { source }))
+        }
+    }
 }
 
 fn parse_human_bytes(input: &str) -> error_stack::Result<ubyte::ByteUnit, CliValueError> {

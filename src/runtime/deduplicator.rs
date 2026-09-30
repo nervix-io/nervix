@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_primitives::sync::{Arc, StdArc};
@@ -42,6 +43,9 @@ pub(super) struct CompiledDeduplicatorKeyProgram {
 pub(super) struct ReplicatedDeduplicatorState {
     pub(super) placement: RuntimeStatePlacement,
     pub(super) generations: PublishedGenerations<Vec<PublishedDeduplicatorKey>>,
+    /// What each replica reported holding of the published keys, and the offer of the newest
+    /// published keys to the replicas that lack them.
+    replication: CheckpointReplication,
 }
 
 /// One key a deduplicator branch held when its task published the keyspace, shared with that
@@ -184,7 +188,12 @@ impl ReplicatedDeduplicatorState {
         Ok(Self {
             placement,
             generations,
+            replication: CheckpointReplication::new(),
         })
+    }
+
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     /// Build the keyspace a branch task owns from the keys published last.

@@ -3,7 +3,8 @@
 //! Layer: test harness.
 //! - **Owns.** The fencing, admission, counter and waiter invariants an entity gate hold and the
 //!   node quiesce counters are held to while work is admitted, parked, resumed and released.
-//! - **Depends on.** The entity gate types, the relay dispatch gate, and the server Shuttle runner.
+//! - **Depends on.** The entity gate types, the relay dispatch gate, and the model harness's
+//!   Shuttle runner.
 //! - **Must not know.** What an entity is, what a relay carries, or what a work item does.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same

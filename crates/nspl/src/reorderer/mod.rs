@@ -11,8 +11,8 @@ use crate::{
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
         completion_tokens, duration_lit, filter_where_clause, flushed_processor_outputs,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_expression_tokens, reorderer_name, reorderer_ref,
-        suggest_from, suggestions_from_errors, tok,
+        materialized_state_dependencies, nested_expression_tokens, render_expression_tokens,
+        reorderer_name, reorderer_ref, suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -34,14 +34,7 @@ fn by_exprs<'src>()
     // same thing here as in `ALTER REORDERER ... SET BY <expressions>`. Labelling the keyword too
     // would give one completion label two different contracts.
     kw(Identifier::By)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .labelled("reorder_by"),
-        )
+        .ignore_then(nested_expression_tokens(boundary_token).labelled("reorder_by"))
         .try_map(|tokens, span| {
             crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
                 Rich::custom(span, error.current_context().embedded_expression_message())
@@ -266,6 +259,60 @@ mod tests {
             panic!("first operation should set the ordering key");
         };
         assert_eq!(expressions.len(), 2);
+    }
+
+    #[test]
+    fn a_max_call_stays_in_the_ordering_before_max_time() {
+        let parsed = parse_create_reorderer(
+            "CREATE REORDERER peaks_in_order FROM readings BY max(input.readings), input.id MAX \
+             TIME 10s UNBRANCHED TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG;",
+        )
+        .expect("a call to max must stay in the ordering");
+
+        assert_eq!(
+            parsed.order_by,
+            vec![
+                crate::parse_expression("max(input.readings)").expect("valid expression"),
+                crate::parse_expression("input.id").expect("valid expression"),
+            ]
+        );
+        assert_eq!(parsed.max_time, "10s");
+    }
+
+    #[test]
+    fn an_ordering_opening_with_a_parenthesis_still_begins_after_the_filters() {
+        let parsed = parse_create_reorderer(
+            "CREATE REORDERER peaks_in_order FROM readings WHERE input.id > 0 FILTER WHERE \
+             input.active BY (input.first + input.second) * 2, input.id MAX TIME 10s UNBRANCHED \
+             TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("BY takes an expression, so the parenthesis after it opens that expression");
+
+        assert_eq!(
+            parsed.filter_where,
+            Some(crate::parse_expression("input.active").expect("valid expression"))
+        );
+        assert_eq!(
+            parsed.order_by,
+            vec![
+                crate::parse_expression("(input.first + input.second) * 2")
+                    .expect("valid expression"),
+                crate::parse_expression("input.id").expect("valid expression"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_max_still_begins_max_time() {
+        assert!(
+            parse_create_reorderer(
+                "CREATE REORDERER peaks_in_order FROM readings BY input.id, max MAX TIME 10s \
+                 UNBRANCHED TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"
+            )
+            .is_err(),
+            "a bare max heads the MAX TIME clause, so the ordering before it ends in a comma"
+        );
     }
 
     #[test]

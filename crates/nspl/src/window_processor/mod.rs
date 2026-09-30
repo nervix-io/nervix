@@ -4,6 +4,7 @@ use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, CreateStatement, CreateWindowProcessor, WindowBound, WindowStateLimit,
+    parse_duration_text,
 };
 
 use crate::{
@@ -154,9 +155,9 @@ fn validate_step<'src>(
         ));
     }
     if let (Some(step), Some(width)) = (&step.duration, &width.duration) {
-        let step = humantime::parse_duration(step)
+        let step = parse_duration_text(step)
             .map_err(|err| Rich::custom(span, format!("invalid STEP duration: {err}")))?;
-        let width = humantime::parse_duration(width)
+        let width = parse_duration_text(width)
             .map_err(|err| Rich::custom(span, format!("invalid WIDTH duration: {err}")))?;
         if step > width {
             return Err(Rich::custom(
@@ -364,6 +365,40 @@ mod tests {
         let suggestions = suggest_create_window_processor(input, input.len());
         assert!(suggestions.contains(&"MAX STATE SIZE".to_string()));
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+    }
+
+    #[test]
+    fn window_durations_say_why_their_text_names_no_duration() {
+        for (bounds, expected) in [
+            (
+                "WIDTH oops DURATION STEP 1s DURATION",
+                "invalid WIDTH duration: expected number at 0",
+            ),
+            (
+                "WIDTH 2s DURATION STEP oops DURATION",
+                "invalid STEP duration: expected number at 0",
+            ),
+        ] {
+            let source = format!(
+                "CREATE WINDOW PROCESSOR p FROM s {bounds} MAX STATE SIZE 1MiB UNBRANCHED TO out \
+                 SET n = COUNT(input.value) ON MESSAGE ERROR LOG;"
+            );
+            let error = crate::statement::parse_statement(&source)
+                .expect_err("the window bound names no duration");
+            assert!(error.to_string().contains(expected), "{source:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_window_duration_longer_than_a_duration_is_refused() {
+        // The duration literal itself refuses the text before the window reads it.
+        let source = "CREATE WINDOW PROCESSOR p FROM s WIDTH 18446744073709551615s DURATION STEP \
+                      1s DURATION MAX STATE SIZE 1MiB UNBRANCHED TO out SET n = \
+                      COUNT(input.value) ON MESSAGE ERROR LOG;";
+        assert!(
+            crate::statement::parse_statement(source).is_err(),
+            "the window width is longer than a duration can be"
+        );
     }
 
     #[test]

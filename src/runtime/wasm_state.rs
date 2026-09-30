@@ -3,24 +3,24 @@
 //! Layer: data plane.
 //! - **Owns.** The committed and published checkpoints of one branch, the revisions they are
 //!   stamped with, the typed stages a checkpoint passes through, the boundary each checkpoint has
-//!   to reach, the progress of the latest checkpoint, and the durable progress each replica
-//!   reports.
-//! - **Depends on.** Runtime-state placements, the revision sequence and cluster node names.
+//!   to reach, the progress of the latest checkpoint, and the replication through which each
+//!   replica reports its durable progress.
+//! - **Depends on.** Runtime-state placements, the revision sequence, cluster node names and
+//!   checkpoint replication.
 //! - **Must not know.** How a checkpoint reaches stable storage or a replica, guest execution, or
 //!   which acknowledgements a completed checkpoint releases.
 
 use std::{collections::BTreeSet, num::NonZeroU64};
 
-use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_interconnect::RuntimeState;
 use nervix_models::{
     ClusterNodeName, WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration,
 };
 use nervix_primitives::{
-    collections::DashMap,
     publication::{ArcSwap, ArcSwapOption},
-    sync::{Notify, StdArc},
+    sync::StdArc,
 };
 
 use super::{PersistedRuntimeStateEntry, RuntimeStatePlacement, lsm_sequence::LsmSequence};
@@ -48,10 +48,10 @@ pub(super) struct ReplicatedWasmProcessorState {
     /// The latest checkpoint's non-sensitive revision and boundary, published as one read-only
     /// observation. Absence means this lifetime has not captured a checkpoint on this owner.
     latest: ArcSwapOption<ObservedWasmCheckpoint>,
-    /// The highest revision each replica reported holding on its stable storage.
-    replica_progress: DashMap<ClusterNodeName, u64, RandomState>,
-    /// Wakes a checkpoint waiting for its replicas when one of them reports progress.
-    replication_notify: Notify,
+    /// The highest revision each replica reported holding on its stable storage, the offer of the
+    /// newest checkpoint to the replicas that lack it, and the wake-up of a checkpoint waiting for
+    /// its replicas when one of them reports.
+    replication: CheckpointReplication,
 }
 
 /// The bytes a WASM processor guest returned when its state was saved, and the revision of that
@@ -286,8 +286,7 @@ impl ReplicatedWasmProcessorState {
             published: ArcSwap::from(committed.clone()),
             committed: ArcSwap::from(committed),
             latest: ArcSwapOption::empty(),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
+            replication: CheckpointReplication::new(),
         }
     }
 
@@ -485,20 +484,10 @@ impl ReplicatedWasmProcessorState {
         Some(published.snapshot())
     }
 
-    /// Record that `node` reported holding revision `lsm` on its stable storage.
-    ///
-    /// A replica reports its progress in order, and an older report never lowers what is recorded.
-    /// Two reports of one replica racing here can at worst record the lower revision, which only
-    /// delays a confirmation until that replica's next report: nothing is ever recorded above what
-    /// a replica reported.
-    pub(super) fn mark_replica_progress(&self, node: &ClusterNodeName, lsm: u64) {
-        let recorded = self.replica_progress.get(node).map(|held| *held);
-        let reported = match recorded {
-            Some(recorded) => recorded.max(lsm),
-            None => lsm,
-        };
-        self.replica_progress.insert(node.clone(), reported);
-        self.replication_notify.notify_waiters();
+    /// This branch's replication: what each replica reported holding, and the offer of its newest
+    /// checkpoint to the replicas that lack it.
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     /// The replicas of `replicas` that have not reported holding revision `lsm`.
@@ -507,24 +496,8 @@ impl ReplicatedWasmProcessorState {
         replicas: &WasmCheckpointReplicas,
         lsm: u64,
     ) -> BTreeSet<ClusterNodeName> {
-        let mut awaiting = BTreeSet::new();
-        for replica in replicas.nodes() {
-            let held = self.replica_progress.get(replica).map(|held| *held);
-            let holds = match held {
-                Some(held) => held >= lsm,
-                None => false,
-            };
-            if !holds {
-                awaiting.insert(replica.clone());
-            }
-        }
-        awaiting
-    }
-
-    /// Signals every replica report. A waiter registers for the next signal before it reads the
-    /// progress it waits for, so a report that lands in between is not missed.
-    pub(super) fn replica_progress_signal(&self) -> &Notify {
-        &self.replication_notify
+        self.replication
+            .with_progress(|progress| progress.awaiting(replicas.nodes(), lsm))
     }
 }
 
@@ -587,18 +560,18 @@ mod tests {
             state.replicas_awaiting(&replicas, lsm),
             BTreeSet::from([node("node-2"), node("node-3")])
         );
-        state.mark_replica_progress(&node("node-2"), lsm);
+        state.replication().record(&node("node-2"), lsm);
         assert_eq!(
             state.replicas_awaiting(&replicas, lsm),
             BTreeSet::from([node("node-3")])
         );
-        state.mark_replica_progress(&node("node-3"), lsm);
+        state.replication().record(&node("node-3"), lsm);
         assert!(state.replicas_awaiting(&replicas, lsm).is_empty());
 
         let older = lsm
             .checked_sub(1)
             .expect("the first capture is revision one");
-        state.mark_replica_progress(&node("node-3"), older);
+        state.replication().record(&node("node-3"), older);
         assert!(
             state.replicas_awaiting(&replicas, lsm).is_empty(),
             "an older report must not lower the progress a replica already reported"
@@ -729,11 +702,11 @@ mod tests {
         let state = ReplicatedWasmProcessorState::new(placement(), None);
         let captured = state.capture(vec![1], replicas(&["node-2", "node-3"]));
         let durable = state.record_locally_durable(captured);
-        state.mark_replica_progress(&node("node-2"), 1);
+        state.replication().record(&node("node-2"), 1);
         let inspection = state.inspection();
         assert_eq!(inspection.required_replicas, Some(2));
         assert_eq!(inspection.confirmed_replicas, Some(1));
-        state.mark_replica_progress(&node("node-3"), 1);
+        state.replication().record(&node("node-3"), 1);
         assert_eq!(state.inspection().confirmed_replicas, Some(2));
         state.commit(durable.completed());
         assert_eq!(

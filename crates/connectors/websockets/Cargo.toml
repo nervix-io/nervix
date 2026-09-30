@@ -12,7 +12,6 @@ workspace = true
 async-trait = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
-humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }

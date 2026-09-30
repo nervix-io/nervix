@@ -30,7 +30,7 @@ use nervix_client_wire::{
 use nervix_models::{
     ClientProducerAdmission, ClientProducerDescription, ClientProducerLimits,
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
-    IngestorName, ParseAsType, SchemaField,
+    IngestorName, ParseAsType, SchemaField, parse_duration_text,
 };
 use nervix_primitives::sync::{StdArc, watch};
 
@@ -811,7 +811,7 @@ async fn when_client_eventually_opens_producer(
 ) {
     let client = expand_placeholders(world, &client);
     let session = SessionRef::Client(client);
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let within = parse_duration_text(&within).expect("the step names a valid duration");
     let limits = default_limits();
     open_named_producer(world, within, session, producer, ingestor, fields, limits).await;
 }
@@ -830,7 +830,7 @@ async fn when_websocket_session_eventually_opens_producer(
 ) {
     let session = expand_placeholders(world, &session);
     let session = SessionRef::WebSocket(session);
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let within = parse_duration_text(&within).expect("the step names a valid duration");
     let limits = default_limits();
     open_named_producer(world, within, session, producer, ingestor, fields, limits).await;
 }
@@ -951,7 +951,7 @@ async fn when_producer_submits_long_id(
 
 #[then(expr = "batch {string} remains pending for {string}")]
 async fn then_batch_remains_pending(world: &mut ScenarioWorld, batch: String, duration: String) {
-    let duration = humantime::parse_duration(&duration).expect("a literal duration");
+    let duration = parse_duration_text(&duration).expect("a literal duration");
     let submission = world
         .producers
         .submissions
@@ -1084,7 +1084,7 @@ async fn then_batch_completed_after_receiver_request(
     position: usize,
 ) {
     let minimum_gap =
-        humantime::parse_duration(&minimum_gap).expect("the step names a valid minimum gap");
+        parse_duration_text(&minimum_gap).expect("the step names a valid minimum gap");
     let answered = answered(world, &batch).await;
     assert_eq!(
         answered.outcome.class, "completed",
@@ -1386,7 +1386,7 @@ async fn then_leader_describes_ingestor_with(
     ingestor: String,
     #[step] step: &Step,
 ) {
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let within = parse_duration_text(&within).expect("the step names a valid duration");
     let expected = expand_placeholders(world, docstring(step));
     let ingestor = expand_placeholders(world, &ingestor);
     let deadline = Instant::now() + within;

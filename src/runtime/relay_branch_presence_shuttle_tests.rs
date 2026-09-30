@@ -5,7 +5,7 @@
 //!   never an older step than one the owner finished, and never a replaced owner's branches once
 //!   its successor has claimed the presence.
 //! - **Depends on.** The production relay presence, the branch owner the relay owner task holds,
-//!   and the server Shuttle runner.
+//!   and the model harness's Shuttle runner.
 //! - **Must not know.** Relay buffers, fan-out, metrics, or how batches reach the owner.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each step record below changes in the

@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The proof that the server's `shuttle` feature reaches the atomics a dependency owns.
-//! - **Depends on.** The vocabulary's atomic timestamp and the server Shuttle runner.
+//! - **Depends on.** The vocabulary's atomic timestamp and the model harness's Shuttle runner.
 //! - **Must not know.** What a timestamp marks, or any runtime protocol.
 
 use nervix_model_harness::shuttle::check_random;

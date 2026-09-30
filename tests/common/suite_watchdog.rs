@@ -36,9 +36,13 @@
 //! [`SUITE_CLEANUP_RESERVE`] after its budget expires. What is left is the budget, and a healthy
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
 
-use std::{collections::BTreeMap, fmt, future::Future, io::Write as _, time::Duration};
+use std::{
+    collections::BTreeMap, fmt, future::Future, io::Write as _, str::FromStr, time::Duration,
+};
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_models::DurationTextError;
 use nervix_primitives::sync::{
     StdArc,
     blocking::{LazyLock, Mutex},
@@ -154,17 +158,37 @@ pub(crate) struct SuiteWatchdogArgs {
     #[arg(
         long = "suite-budget",
         env = SUITE_BUDGET_ENV,
-        default_value_t = humantime::Duration::from(SUITE_BUDGET),
+        default_value_t = SuiteBudgetText(SUITE_BUDGET),
         value_name = "DURATION"
     )]
-    suite_budget: humantime::Duration,
+    suite_budget: SuiteBudgetText,
 }
 
 impl SuiteWatchdogArgs {
     /// The watchdog this run uses: the budget the run was given, and the suite's own cleanup
     /// window, which is a property of how long a cluster takes to stop rather than of the run.
     pub(crate) fn watchdog(self) -> SuiteWatchdog {
-        SuiteWatchdog::new(self.suite_budget.into(), WATCHDOG_CLEANUP_WINDOW)
+        SuiteWatchdog::new(self.suite_budget.0, WATCHDOG_CLEANUP_WINDOW)
+    }
+}
+
+/// A suite budget as its option spells it: read through the guarded duration parser, and written
+/// the way that parser reads it back, so the option's help shows the policy default.
+#[derive(Clone, Copy, Debug)]
+struct SuiteBudgetText(Duration);
+
+impl FromStr for SuiteBudgetText {
+    type Err = Report<DurationTextError>;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let budget = nervix_models::parse_duration_text(text)?;
+        Ok(Self(budget))
+    }
+}
+
+impl fmt::Display for SuiteBudgetText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&humantime::format_duration(self.0), formatter)
     }
 }
 

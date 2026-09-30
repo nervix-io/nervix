@@ -12,7 +12,7 @@ use std::{num::NonZeroUsize, time::Duration};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
-use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
+use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction, parse_duration_text};
 use sorted_vec::SortedSet;
 use thiserror::Error;
 
@@ -826,7 +826,7 @@ fn linear_histogram_config(
             ));
         }
     };
-    let delay = humantime::parse_duration(&delay).map_err(|error| {
+    let delay = parse_duration_text(&delay).map_err(|error| {
         invalid_window_aggregate(format!(
             "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '{delay}': {error}"
         ))
@@ -1479,6 +1479,28 @@ mod tests {
             "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, input.delay)",
         )
         .expect_err("delay must be constant");
+    }
+
+    #[test]
+    fn a_linear_histogram_delay_says_why_its_text_names_no_duration() {
+        for (delay, why) in [
+            ("not-a-duration", "expected number at 0"),
+            (
+                "18446744073709551615s 1000000000ns",
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let error = lower_aggregate_program(&format!(
+                "p = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, '{delay}')"
+            ))
+            .expect_err("the delay names no duration");
+            assert!(
+                error.contains(&format!(
+                    "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '{delay}': {why}"
+                )),
+                "{error}"
+            );
+        }
     }
 
     #[test]

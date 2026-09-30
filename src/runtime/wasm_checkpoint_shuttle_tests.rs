@@ -5,7 +5,7 @@
 //!   confirm it, while an inspection reads its progress, and while the acknowledgements it holds
 //!   race the deliveries of the same inputs.
 //! - **Depends on.** The production checkpoint state, checkpoint holds, acknowledgement sets and
-//!   the server Shuttle runner.
+//!   the model harness's Shuttle runner.
 //! - **Must not know.** Guest execution, stable storage, or how a replica reaches the owner.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
@@ -102,7 +102,7 @@ async fn checkpoint_and_confirm(
         panic!("the checkpoint was captured for replicas");
     };
     loop {
-        let progressed = state.replica_progress_signal().notified();
+        let progressed = state.replication().progress_signal().notified();
         tokio::pin!(progressed);
         progressed.as_mut().enable();
         if state.replicas_awaiting(&replicas, revision).is_empty() {
@@ -147,7 +147,7 @@ async fn replicate(
         .get(replica)
         .assured("the record holds a flag for every named replica")
         .store(true, Ordering::SeqCst);
-    state.mark_replica_progress(&name, held);
+    state.replication().record(&name, held);
 }
 
 /// Read the branch's checkpoint progress while it is being captured, written and confirmed.

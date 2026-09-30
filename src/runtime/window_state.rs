@@ -11,6 +11,7 @@ use std::io::Write as _;
 
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::Timestamp;
 use nervix_primitives::sync::StdArc;
@@ -72,6 +73,9 @@ pub(super) struct ReplicatedWindowProcessorState {
     pub(super) placement: RuntimeStatePlacement,
     /// Absent until the branch task first publishes, which restores as an empty window.
     pub(super) generations: PublishedGenerations<Option<WindowPublishedSnapshot>>,
+    /// What each replica reported holding of the published window, and the offer of the newest
+    /// published window to the replicas that lack it.
+    replication: CheckpointReplication,
 }
 
 #[derive(Debug, Clone)]
@@ -604,7 +608,12 @@ impl ReplicatedWindowProcessorState {
         Ok(Self {
             placement,
             generations,
+            replication: CheckpointReplication::new(),
         })
+    }
+
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     /// Build the live window a branch task owns from the window published last.

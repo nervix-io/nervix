@@ -358,9 +358,9 @@ impl ScriptedResponse {
     }
 
     fn duration(text: &str) -> Result<Duration, ReceiverScriptError> {
-        humantime::parse_duration(text).map_err(|source| ReceiverScriptError::Duration {
+        nervix_models::parse_duration_text(text).map_err(|report| ReceiverScriptError::Duration {
             text: text.to_string(),
-            source,
+            source: report.current_context().clone(),
         })
     }
 
@@ -466,7 +466,7 @@ pub(crate) enum ReceiverScriptError {
     Duration {
         text: String,
         #[source]
-        source: humantime::DurationError,
+        source: nervix_models::DurationTextError,
     },
     #[error("{text:?} is not a header count")]
     Count {

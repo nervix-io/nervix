@@ -3,8 +3,8 @@
 //! Layer: test harness.
 //! - **Owns.** The fencing, waiter-release and admission invariants the production relay dispatch
 //!   gate and relay fan-out are held to.
-//! - **Depends on.** The relay channel types, the server Shuttle runner, and the task labels and
-//!   timeout triggers of Shuttle's Tokio.
+//! - **Depends on.** The relay channel types, the model harness's Shuttle runner, and the task
+//!   labels and timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, or what a dispatch delivers.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each gate and wake record below changes

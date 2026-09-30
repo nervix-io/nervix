@@ -333,6 +333,41 @@ mod tests {
     }
 
     #[test]
+    fn right_calls_and_scopes_stay_in_the_input_filters() {
+        let parsed = parse_create_correlator(
+            "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE right(left.name, 2) = \
+             right.suffix RIGHT FROM labels WHERE max(right.readings) > output.id CORRELATE WHERE \
+             left.id = right.id MATCH EARLIEST MAX TIME 5s ON CORRELATION TIMEOUT DROP, DROP \
+             UNBRANCHED TO matched SET id = left.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("calls and scopes named like side keywords must stay in the input filters");
+
+        assert_eq!(
+            parsed.left.where_clauses()[0].where_clause,
+            crate::parse_expression("right(left.name, 2) = right.suffix")
+                .expect("valid expression")
+        );
+        assert_eq!(
+            parsed.right.where_clauses()[0].where_clause,
+            crate::parse_expression("max(right.readings) > output.id").expect("valid expression")
+        );
+    }
+
+    #[test]
+    fn a_bare_right_still_begins_the_right_inputs() {
+        assert!(
+            parse_create_correlator(
+                "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE left.name = right RIGHT \
+                 FROM labels CORRELATE WHERE left.id = right.id MATCH EARLIEST MAX TIME 5s ON \
+                 CORRELATION TIMEOUT DROP, DROP UNBRANCHED TO matched SET id = left.id FLUSH \
+                 IMMEDIATE ON MESSAGE ERROR LOG;"
+            )
+            .is_err(),
+            "a bare right heads the RIGHT FROM clause, so the left filter before it is unfinished"
+        );
+    }
+
+    #[test]
     fn parses_compound_predicate_and_latest_match() {
         let tokens = to_tokens(
             "CREATE DETACHED CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \

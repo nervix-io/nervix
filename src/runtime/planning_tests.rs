@@ -9,10 +9,11 @@ use std::num::NonZeroU32;
 use nervix_models::{
     BranchSelection, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema, CreateWasmProcessor,
-    CreateWindowProcessor, EmitSink, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, ZeroMqIngestMode,
+    CreateWindowProcessor, DurationTextError, EmitSink, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy,
+    WindowBound, ZeroMqIngestMode,
 };
 use nervix_primitives::sync::Arc;
 use nonzero_ext::nonzero;
@@ -789,6 +790,106 @@ fn planning_parsers_preserve_typed_contract_failures() {
             node,
         } if node == &processor
     ));
+}
+
+#[test]
+fn planning_parsers_keep_why_duration_text_is_too_long() {
+    let processor = named::<ModelName>("orders_processor");
+    let relay = named::<RelayName>("orders");
+    let too_long = Some(&DurationTextError::TooLong);
+
+    let window_duration = parse_optional_window_duration(
+        &processor,
+        WindowDurationSetting::Width,
+        Some(TOO_LONG_DURATION_TEXT),
+    )
+    .expect_err("a window width longer than a duration must fail");
+    assert!(matches!(
+        window_duration.current_context(),
+        PlanningError::InvalidWindowDuration {
+            node,
+            setting: WindowDurationSetting::Width,
+        } if node == &processor
+    ));
+    assert_eq!(
+        window_duration.downcast_ref::<DurationTextError>(),
+        too_long
+    );
+
+    let output = BranchedProcessorOutputSpec {
+        relay: relay.clone(),
+        construction: RouteConstruction::default(),
+        flush_policy: Some(FlushPolicy::Each {
+            interval: TOO_LONG_DURATION_TEXT.to_string(),
+            max_batch_size: "1MiB".to_string(),
+        }),
+        message_error_policy: MessageErrorPolicy::Log,
+    };
+    let flush_interval = materialize_output(
+        ModelKind::Deduplicator,
+        &processor,
+        &output,
+        FlushPolicyRequirement::Required,
+    )
+    .expect_err("a flush interval longer than a duration must fail");
+    assert!(matches!(
+        flush_interval.current_context(),
+        PlanningError::InvalidFlushInterval {
+            kind: ModelKind::Deduplicator,
+            node,
+            route,
+        } if node == &processor && route == &relay
+    ));
+    assert_eq!(flush_interval.downcast_ref::<DurationTextError>(), too_long);
+
+    let collect_interval = parse_input_collect_policy(
+        ModelKind::Junction,
+        &processor,
+        &relay,
+        &nervix_models::InputCollectPolicy {
+            collect_for: TOO_LONG_DURATION_TEXT.to_string(),
+            max_batch_size: None,
+        },
+    )
+    .expect_err("a collection interval longer than a duration must fail");
+    assert!(matches!(
+        collect_interval.current_context(),
+        PlanningError::InvalidCollectInterval {
+            kind: ModelKind::Junction,
+            node,
+            relay: error_relay,
+        } if node == &processor && error_relay == &relay
+    ));
+    assert_eq!(
+        collect_interval.downcast_ref::<DurationTextError>(),
+        too_long
+    );
+
+    let max_time = parse_max_time(ModelKind::Deduplicator, &processor, TOO_LONG_DURATION_TEXT)
+        .expect_err("a retention time longer than a duration must fail");
+    assert!(matches!(
+        max_time.current_context(),
+        PlanningError::InvalidMaxTime {
+            kind: ModelKind::Deduplicator,
+            node,
+        } if node == &processor
+    ));
+    assert_eq!(max_time.downcast_ref::<DurationTextError>(), too_long);
+
+    let branch_ttl = parse_branch_ttl_setting(
+        Some(TOO_LONG_DURATION_TEXT),
+        ModelKind::Deduplicator,
+        &processor,
+    )
+    .expect_err("a branch TTL longer than a duration must fail");
+    assert!(matches!(
+        branch_ttl.current_context(),
+        PlanningError::InvalidBranchTtl {
+            kind: ModelKind::Deduplicator,
+            node,
+        } if node == &processor
+    ));
+    assert_eq!(branch_ttl.downcast_ref::<DurationTextError>(), too_long);
 }
 
 #[test]

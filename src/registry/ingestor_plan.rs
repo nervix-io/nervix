@@ -25,7 +25,7 @@ use nervix_models::{
     IngestQuiesceMode, IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput,
     IngestorName, KafkaIngestMode, KafkaOffsetMode, MessageErrorOperation, Model, ModelName,
     MqttIngestMode, PulsarIngestMode, RabbitMqIngestMode, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode,
+    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -474,9 +474,7 @@ impl ClientIngestorStartPlan {
             clause,
             value: value.to_string(),
         };
-        let Ok(parsed) = humantime::parse_duration(value) else {
-            return Err(Report::new(invalid));
-        };
+        let parsed = parse_duration_text(value).change_context_lazy(|| invalid.clone())?;
         if parsed.is_zero() {
             return Err(Report::new(invalid));
         }
@@ -1455,6 +1453,13 @@ mod tests {
 
     #[rstest]
     #[case::unparsable_timeout("soon", "100ms", "1s", "ACK TIMEOUT", "soon")]
+    #[case::too_long_timeout(
+        "18446744073709551615s 1000000000ns",
+        "100ms",
+        "1s",
+        "ACK TIMEOUT",
+        "18446744073709551615s 1000000000ns"
+    )]
     #[case::zero_timeout("0s", "100ms", "1s", "ACK TIMEOUT", "0s")]
     #[case::zero_backoff("30s", "0ms", "1s", "RETRY POLICY BACKOFF", "0ms")]
     #[case::unparsable_maximum("30s", "100ms", "later", "RETRY POLICY MAX", "later")]

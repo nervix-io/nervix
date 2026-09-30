@@ -5,7 +5,7 @@
 //!   and an endpoint's answers are held to while reservations, admissions, acknowledgements,
 //!   closes and endings race.
 //! - **Depends on.** The client ingestor endpoint and budget, the ingestor quiesce control, ACK
-//!   roots and their trackers, and the server Shuttle runner.
+//!   roots and their trackers, and the model harness's Shuttle runner.
 //! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
 use std::{

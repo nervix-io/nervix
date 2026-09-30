@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** The coverage, exclusion, liveness and fail-stop invariants the barrier is held to
 //!   while writers that applied writes wait for, share, fail and abandon synchronizations.
-//! - **Depends on.** The production durability barrier and the server Shuttle runner.
+//! - **Depends on.** The production durability barrier and the model harness's Shuttle runner.
 //! - **Must not know.** The database a synchronization flushes, or what the writes hold.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same

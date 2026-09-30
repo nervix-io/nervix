@@ -878,8 +878,6 @@ mod tests {
                 placement.clone(),
                 Some(ClusterNodeName::parse("node-3").expect("valid name")),
                 ClusterNodeName::parse("node-3").expect("valid name"),
-                Vec::new(),
-                0,
                 &RuntimeMetrics::default(),
                 store
                     .latest_snapshot(&placement)
@@ -959,8 +957,6 @@ mod tests {
                 placement.clone(),
                 Some(ClusterNodeName::parse("node-3").expect("valid name")),
                 ClusterNodeName::parse("node-3").expect("valid name"),
-                Vec::new(),
-                0,
                 &RuntimeMetrics::default(),
                 store
                     .latest_snapshot(&placement)

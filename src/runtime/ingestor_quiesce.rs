@@ -6,6 +6,7 @@
 //! - **Must not know.** NSPL parsing, consensus decisions or persisted payload state.
 
 use nervix_connector::{IngestMetadataRow, RetainedIngestHeaders};
+use nervix_models::parse_duration_text;
 
 use super::*;
 
@@ -771,7 +772,7 @@ pub(super) fn quiesce_max_size_bytes(value: &str) -> usize {
 }
 
 fn quiesce_retry_after(value: &str) -> Option<Duration> {
-    humantime::parse_duration(value).ok()
+    parse_duration_text(value).ok()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1464,6 +1465,13 @@ mod tests {
                 .payload(),
             b"retained"
         );
+    }
+
+    #[test]
+    fn a_reject_retry_delay_that_names_no_duration_gives_no_hint() {
+        assert_eq!(quiesce_retry_after("7s"), Some(Duration::from_secs(7)));
+        assert_eq!(quiesce_retry_after("oops"), None);
+        assert_eq!(quiesce_retry_after(TOO_LONG_DURATION_TEXT), None);
     }
 
     #[test]

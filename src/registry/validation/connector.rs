@@ -21,7 +21,7 @@ use nervix_models::{
     HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource,
     IngestorInput, Model, ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind,
     OtelSignal, OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
-    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
+    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, parse_duration_text,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticScopePolicy,
@@ -86,7 +86,7 @@ pub(in crate::registry) fn validate_ingestor_source(
             }
         }
         nervix_models::IngestQuiesceMode::Reject { retry_after } => {
-            humantime::parse_duration(retry_after).map_err(|error| {
+            parse_duration_text(retry_after).map_err(|error| {
                 invalid(format!(
                     "invalid quiesce REJECT RETRY AFTER duration '{retry_after}': {error}"
                 ))
@@ -115,7 +115,7 @@ fn validate_client_ingest_mode(
 ) -> Result<(), Report<RegistryError>> {
     // A producer is told each policy duration in whole nanoseconds, so each must be one.
     let positive = |clause: &str, value: &str| {
-        let parsed = humantime::parse_duration(value)
+        let parsed = parse_duration_text(value)
             .map_err(|error| invalid(format!("invalid {clause} duration '{value}': {error}")))?;
         if parsed.is_zero() {
             return Err(invalid(format!("{clause} must be greater than zero")));
@@ -211,13 +211,13 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         .map_err(|error| invalid(error.current_context().to_string()))?;
 
     let retry = emitter.publishing_mode.retry_policy();
-    let backoff = humantime::parse_duration(&retry.backoff).map_err(|error| {
+    let backoff = parse_duration_text(&retry.backoff).map_err(|error| {
         invalid(format!(
             "invalid MODE RETRY POLICY BACKOFF '{}': {error}",
             retry.backoff
         ))
     })?;
-    let max_backoff = humantime::parse_duration(&retry.max_backoff).map_err(|error| {
+    let max_backoff = parse_duration_text(&retry.max_backoff).map_err(|error| {
         invalid(format!(
             "invalid MODE RETRY POLICY MAX '{}': {error}",
             retry.max_backoff
@@ -236,7 +236,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     }
 
     if let Some(timeout) = emitter.publishing_mode.ack_timeout() {
-        let timeout = humantime::parse_duration(timeout)
+        let timeout = parse_duration_text(timeout)
             .map_err(|error| invalid(format!("invalid MODE ACK TIMEOUT '{timeout}': {error}")))?;
         if timeout.is_zero() {
             return Err(invalid(
@@ -1035,7 +1035,7 @@ pub(in crate::registry) fn ensure_signaling_protocol_is_valid(
         }
     }
 
-    humantime::parse_duration(&protocol.on_connect.timeout).map_err(|error| {
+    parse_duration_text(&protocol.on_connect.timeout).map_err(|error| {
         invalid(format!(
             "invalid signaling protocol timeout '{}': {error}",
             protocol.on_connect.timeout

@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** The fence, exclusion and yield invariants the production state assignment authority
 //!   is held to across admission, rebind, exclusive installation and capture.
-//! - **Depends on.** The state assignment types and the server Shuttle runner.
+//! - **Depends on.** The state assignment types and the model harness's Shuttle runner.
 //! - **Must not know.** Which runtime state an assignment governs, or what an operation does to it.
 
 use meticulous::{OptionExt as _, ResultExt as _};

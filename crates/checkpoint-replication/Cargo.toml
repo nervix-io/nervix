@@ -1,0 +1,17 @@
+[package]
+description = "The replication of one runtime-state placement's checkpoints between the node that owns it and its replicas"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-checkpoint-replication"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+meticulous = { workspace = true }
+nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
+
+[dev-dependencies]
+bolero = { workspace = true }

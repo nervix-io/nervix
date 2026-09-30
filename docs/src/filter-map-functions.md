@@ -281,6 +281,17 @@ These words are reserved in expressions, including after a field scope such as `
 `CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`, `DISTINCT`, `FROM`, and `UDF`. A schema
 may declare one of these field names, but an NSPL expression cannot reference it.
 
+### Expressions Inside Statements
+
+A statement reads an expression it embeds up to the keyword that begins its next clause, such as
+`TO`, `MAX TIME`, or a correlator's `RIGHT FROM`, so an expression needs no parentheses to end. A
+builtin or a field scope whose name is also such a keyword belongs to the expression wherever it is
+written: followed by `(` it is a call, and followed by `.` it is the scope of a field, never the
+start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the first `max` is a call
+and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
+before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
+expression.
+
 ## Logical Operators
 
 `AND`, `OR`, and `NOT` take `BOOL` operands and return `BOOL`. They follow three-valued logic, in
@@ -1890,8 +1901,10 @@ and `min` and `max` numeric literals with `min` below `max`. A negative number i
 unary minus, which is not a literal, so `min` and `max` are zero or above. `delay` is a duration
 literal such as `'2s'`: a row that stepping removes from the window stays counted until the
 watermark or the domain clock passes its removal time plus `delay`, and `'0s'` removes it at once.
-An invalid delay is rejected with `invalid PERCENTILE_LINEAR_HISTOGRAM delay duration`. Each branch
-holds eight bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
+A delay that names no duration, or whose spans could add up to 18446744073709551615 seconds, is
+rejected when the window processor is created, with
+`invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '<delay>': <reason>`. Each branch holds eight
+bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
 
 ### Approximate Sketches
 

@@ -25,10 +25,11 @@ use crate::registry::{
     mutation::RegistryMutation,
     storage::Registry,
     test_fixtures::{
-        branch, branch_for_relay, branch_schema, branch_schema_with_types, branched_by,
-        client_model, codec, emitter, explicitly_unbranched_relay, jaq_native_codec, named,
-        protobuf_codec, relay, relay_branched_by, relay_branched_by_relay_branch, schema,
-        signaling_protocol, temp_db_path, unbranched_transforming_outputs, vhost, wire_schema,
+        TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_schema, branch_schema_with_types,
+        branched_by, client_model, codec, emitter, explicitly_unbranched_relay, ingestor_statement,
+        jaq_native_codec, named, protobuf_codec, relay, relay_branched_by,
+        relay_branched_by_relay_branch, schema, signaling_protocol, temp_db_path,
+        unbranched_transforming_outputs, vhost, wire_schema,
     },
 };
 
@@ -976,6 +977,141 @@ fn a_client_ingestor_needs_its_schema() {
         "unexpected error: {error:#}"
     );
     let _ = fs::remove_dir_all(path);
+}
+
+/// Duration text that names no duration, with the reason each owner reports for it.
+const UNREADABLE_DURATIONS: [(&str, &str); 2] = [
+    ("oops", "expected number at 0"),
+    (
+        TOO_LONG_DURATION_TEXT,
+        "it is longer than a duration can be",
+    ),
+];
+
+/// Asserts that `error` rejects an invalid Model for exactly `expected`.
+fn assert_invalid_model_reason(error: &Report<RegistryError>, expected: &str) {
+    assert!(
+        matches!(
+            error.current_context(),
+            RegistryError::InvalidModel { reason, .. } if reason == expected
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_signaling_protocol_says_why_its_timeout_names_no_duration() {
+    for (timeout, why) in UNREADABLE_DURATIONS {
+        let mut protocol =
+            signaling_protocol(SignalingWireFormat::Json, &["{id: 1}"], &[".id == 1"], &[]);
+        protocol.on_connect.timeout = timeout.to_string();
+        let error = validate_signaling_protocol(&protocol)
+            .expect_err("the signaling timeout names no duration");
+        assert_invalid_model_reason(
+            &error,
+            &format!("invalid signaling protocol timeout '{timeout}': {why}"),
+        );
+    }
+}
+
+#[test]
+fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out") else {
+        unreachable!("emitter helper must build an emitter model")
+    };
+    let models = ModelIndex::new();
+    for (value, why) in UNREADABLE_DURATIONS {
+        let retry_policies = [
+            RetryPolicy {
+                backoff: value.to_string(),
+                max_backoff: "1s".to_string(),
+            },
+            RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: value.to_string(),
+            },
+        ];
+        for (retry_policy, clause) in retry_policies.into_iter().zip(["BACKOFF", "MAX"]) {
+            emitter.publishing_mode = EmitterPublishingMode::NoAck { retry_policy };
+            let error = validate_emitter_publishing_contract(
+                &domain,
+                &ModelName::from(&emitter.name),
+                &models,
+                &emitter,
+            )
+            .expect_err("the retry policy names no duration");
+            assert_invalid_model_reason(
+                &error,
+                &format!("invalid MODE RETRY POLICY {clause} '{value}': {why}"),
+            );
+        }
+
+        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+            window: AckWindow::Sequential,
+            ack_timeout: value.to_string(),
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &models,
+            &emitter,
+        )
+        .expect_err("the confirmation timeout names no duration");
+        assert_invalid_model_reason(
+            &error,
+            &format!("invalid MODE ACK TIMEOUT '{value}': {why}"),
+        );
+    }
+}
+
+#[test]
+fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let mut ingestor = ingestor_statement("edge_in", "notifications", "event_codec", "kafka", &[]);
+    let identifier = ModelName::from(&ingestor.name);
+    for (retry_after, why) in UNREADABLE_DURATIONS {
+        let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
+            unreachable!("the fixture builds a transport ingestor")
+        };
+        input.source = IngestSource::Endpoint {
+            endpoint: named("ingress"),
+            mode: nervix_models::EndpointIngestMode::NoAckSequential,
+            quiesce: nervix_models::IngestQuiesceMode::Reject {
+                retry_after: retry_after.to_string(),
+            },
+        };
+        let error = validate_ingestor_source(&domain, &identifier, &ingestor)
+            .expect_err("the retry delay names no duration");
+        assert_invalid_model_reason(
+            &error,
+            &format!("invalid quiesce REJECT RETRY AFTER duration '{retry_after}': {why}"),
+        );
+    }
+}
+
+#[test]
+fn a_client_ingestor_says_why_its_policy_duration_names_no_duration() {
+    for (value, why) in UNREADABLE_DURATIONS {
+        for (mode, clause) in [
+            (client_mode(value, "100ms", "5s"), "ACK TIMEOUT"),
+            (client_mode("30s", value, "5s"), "RETRY POLICY BACKOFF"),
+        ] {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+            let error = apply_client_ingestor(&registry, true, mode)
+                .expect_err("the policy duration names no duration");
+            assert_invalid_model_reason(
+                &error,
+                &format!("invalid {clause} duration '{value}': {why}"),
+            );
+            let _ = fs::remove_dir_all(path);
+        }
+    }
 }
 
 #[test]

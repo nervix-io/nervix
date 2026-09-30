@@ -21,7 +21,7 @@ use nervix_client_wire::{
     EmitterOpenRefusal, EmitterSettlement, OpenEmitterDisposition, OpenEmitterRequest,
     ReadEmitterBatchRequest, ReadEmitterDisposition, ReplyBody, SettleEmitterBatchRequest,
 };
-use nervix_models::{ClientConsumerLimits, EmitterName};
+use nervix_models::{ClientConsumerLimits, EmitterName, parse_duration_text};
 use nervix_primitives::sync::StdArc;
 
 use super::{
@@ -83,7 +83,7 @@ async fn then_leader_describes_emitter_with(
     emitter: String,
     #[step] step: &Step,
 ) {
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let within = parse_duration_text(&within).expect("the step names a valid duration");
     let expected = expand_placeholders(world, docstring(step));
     let emitter = expand_placeholders(world, &emitter);
     let deadline = Instant::now() + within;

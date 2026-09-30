@@ -50,7 +50,7 @@ impl Arbitrary<'_> {
             input,
             timestamp_source,
             general_error_policy: self.general_error_policy(),
-            filter_where: self.filter_expression(),
+            filter_where: self.optional_expression(),
         }
     }
 
