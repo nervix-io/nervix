@@ -804,6 +804,44 @@ async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, 
     assert_eq!(attached.frontier(), Some(latest.logical_boundary));
 }
 
+#[then(
+    expr = "within {string} client {string} reports an interruption of its attached domain clock"
+)]
+async fn then_client_reports_clock_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+) {
+    let duration = humantime::parse_duration(&duration).expect("step durations are valid");
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let domain = scenario_domain(world, &world.domain);
+    nervix_primitives::time::timeout(duration, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match client
+                .next_domain_clock_event()
+                .await
+                .expect("the client reads clock events")
+            {
+                nervix_client_core::DomainClockEvent::Interrupted(interrupted)
+                    if interrupted.domain == domain =>
+                {
+                    break;
+                }
+                nervix_client_core::DomainClockEvent::Observed(_)
+                | nervix_client_core::DomainClockEvent::Ticked(_) => {}
+                other => panic!("unexpected clock event while waiting for interruption: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the clock reports its session gap within the scenario deadline");
+}
+
 async fn post_timestamped_event(
     world: &mut ScenarioWorld,
     host: &str,

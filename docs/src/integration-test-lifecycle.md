@@ -67,8 +67,11 @@ arrive in either order, as their delivery has no shared ordering contract.
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
-report as the CLI's binary unit tests and the server's public scenarios. The focused CLI process
-coverage recipe exercises transaction inspection and the clock-following process scenarios.
+report as the CLI's binary unit tests and the server's public scenarios. The general
+`coverage-scenarios` and `coverage-scenarios-append` recipes provision the same instrumented CLI
+and formatter, so a selection containing CLI scenarios needs no separate binary setup. The focused
+CLI process coverage recipe exercises transaction inspection and the clock-following process
+scenarios.
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
@@ -131,7 +134,9 @@ bounds and do not shorten the product's completion deadline.
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
-  with its execution identity, redirects, and reconnects. No harness deadline shortens them. Only
+  with its execution identity, redirects, and reconnects. This includes the transaction qualification
+  graph's setup commands, which retain each execution reference if leadership changes while setup
+  is applying. No harness deadline shortens them. Only
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second
   client policy.
@@ -193,7 +198,10 @@ Everything else a scenario's body does, including its NSPL commands, broker and 
 assertions, keeps whatever bound its step declares. Some of those steps check their bound only
 between requests, so a request that never returns outlasts it; the suite budget bounds them in every
 case. It is also the only bound on the time a scenario spends queued for its concurrency permits and
-on closing the browser during cleanup, neither of which has a budget of its own.
+on closing the browser during cleanup, neither of which has a budget of its own. Browser cleanup
+explicitly awaits the Playwright driver's shutdown before dropping its handle. The driver's own
+five-second exit grace is asynchronous, so cleanup keeps the shared scenario runner and its
+watchdog available rather than waiting in Playwright's blocking destructor.
 
 ## Absolute Phase Deadlines
 
@@ -920,6 +928,11 @@ ends on its own.
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
 current profiles and reuses unchanged instrumented artifacts for another scenario selection.
+When collecting a different source revision, first run `just coverage-clean-workspace` so
+instrumented binaries and line mappings from earlier sources cannot enter the new report.
+After collecting unit and scenario profiles, `just coverage-report-workspace` exports all
+workspace packages; pass `--no-default-ignore-filename-regex` when measuring changed test files
+as well as product files.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |

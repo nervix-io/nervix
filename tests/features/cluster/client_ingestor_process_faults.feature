@@ -5,7 +5,7 @@ Feature: Client producers across real node process faults
   acknowledging HTTP emitter run on the leader, so a fault in either of the first two leaves the
   sink and the cluster's quorum running.
 
-  Scenario: Killing the node that executes an ingestor ends its forwarded producer as owner lost and leaves only its admitted batches unknown
+  Scenario: Killing an ingestor owner leaves admitted batches uncertain and restores the producer
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
@@ -72,7 +72,6 @@ Feature: Client producers across real node process faults
       """
     When server process node "{{owner}}" receives SIGKILL
     Then server process node "{{owner}}" is terminated by SIGKILL
-    And producer "orders" eventually ends because "owner lost"
     And batch "first" has an unknown outcome because "owner_lost"
     And batch "second" has an unknown outcome because "owner_lost"
     And batch "third" is not admitted because "producer ended"
@@ -87,8 +86,7 @@ Feature: Client producers across real node process faults
       """
       owner: {{owner}}
       """
-    When within "60s" client "app" opens producer "after restart" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64"
-    And producer "after restart" submits batch "fifth" with rows
+    When producer "orders" submits batch "fifth" with rows
       | region | order_id | amount |
       | us     | o-5      | 5      |
     Then batch "fifth" completes
@@ -103,7 +101,7 @@ Feature: Client producers across real node process faults
     And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-3"
     And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-4"
 
-  Scenario: Killing the node that forwards a producer leaves its batches unknown to the client while the owner detaches it and finishes the admitted ones
+  Scenario: Killing a forwarding node leaves its batches uncertain while the producer restores
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
@@ -166,7 +164,6 @@ Feature: Client producers across real node process faults
       """
     When server process node "{{entry}}" receives SIGKILL
     Then server process node "{{entry}}" is terminated by SIGKILL
-    And producer "orders" eventually ends because "session lost"
     And batch "first" has an unknown outcome because "session_lost"
     And batch "second" has an unknown outcome because "session_lost"
     And batch "third" has an unknown outcome because "session_lost"
@@ -184,10 +181,7 @@ Feature: Client producers across real node process faults
       """
       admitted batches: 0
       """
-    When server process node "{{entry}}" restarts from its existing database
-    And client "app after restart" is connected to server process node "{{entry}}"
-    And within "60s" client "app after restart" opens producer "after restart" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64"
-    And producer "after restart" submits batch "fourth" with rows
+    When producer "orders" submits batch "fourth" with rows
       | region | order_id | amount |
       | us     | o-4      | 4      |
     Then batch "fourth" completes
@@ -205,7 +199,7 @@ Feature: Client producers across real node process faults
       """
     And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-3"
 
-  Scenario: Freezing the node that executes an ingestor ends its forwarded producer as owner lost once the silent link reaches its limit
+  Scenario: Freezing an ingestor owner makes admitted batches uncertain and restores the producer
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
@@ -268,8 +262,7 @@ Feature: Client producers across real node process faults
       """
     # A stopped process keeps its connections open and answers nothing, so no reset ends the link.
     When server process node "{{owner}}" receives SIGSTOP
-    Then producer "orders" eventually ends because "owner lost"
-    And batch "first" has an unknown outcome because "owner_lost"
+    Then batch "first" has an unknown outcome because "owner_lost"
     And batch "second" has an unknown outcome because "owner_lost"
     And batch "third" is not admitted because "producer ended"
     When server process node "{{owner}}" receives SIGCONT
@@ -279,8 +272,7 @@ Feature: Client producers across real node process faults
       producers: 0
       admitted batches: 0
       """
-    When within "60s" client "app" opens producer "after resume" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64"
-    And producer "after resume" submits batch "fourth" with rows
+    When producer "orders" submits batch "fourth" with rows
       | region | order_id | amount |
       | us     | o-4      | 4      |
     Then batch "fourth" completes
