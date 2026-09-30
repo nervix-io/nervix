@@ -1685,7 +1685,7 @@ impl SessionServiceImpl {
                     ))
                     .await
                     {
-                        let err = error.to_string();
+                        let err = ConsensusError::report_message(&error);
                         if let Some(handoff) = ownership_handoff.take() {
                             Box::pin(self.abort_planned_ownership_handoff(
                                 &domain,
@@ -1711,7 +1711,7 @@ impl SessionServiceImpl {
                             .await
                         {
                             return Box::pin(self.consensus_error_response(
-                                &error,
+                                error.current_context(),
                                 format!(
                                     "failed to publish model alteration schedule for domain '{}': \
                                      {err}; {rollback_error}",
@@ -1730,7 +1730,9 @@ impl SessionServiceImpl {
                             error = %err,
                             "failed to publish schedule for model mutation batch"
                         );
-                        if let ConsensusError::LeadershipLost { leader_id } = &error {
+                        if let ConsensusError::LeadershipLost { leader_id } =
+                            error.current_context()
+                        {
                             return Box::pin(self.not_leader_response(query, leader_id.clone()))
                                 .await;
                         }
@@ -2448,7 +2450,7 @@ mod tests {
         },
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
         let TestService {
             service,
@@ -2496,7 +2498,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn persistent_model_command_replays_one_terminal_result_for_its_reference() {
         let TestService {
             service,
@@ -2540,7 +2542,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_rejects_implicit_semicolon_batch() {
         let TestService {
             service,
@@ -2577,7 +2579,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
         let TestService {
             service,
@@ -2631,7 +2633,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
         let TestService {
             service,
@@ -2675,7 +2677,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
         let TestService {
             service,
@@ -2739,7 +2741,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_creates_junction_model() {
         let TestService {
             service,
@@ -2801,7 +2803,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_creates_deduplicator_model() {
         let TestService {
             service,

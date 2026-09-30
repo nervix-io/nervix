@@ -1,120 +1,237 @@
-# Every use of `nervix_primitives::unmodeled`: a real atomic that stays outside every model.
+# Every use of `nervix_primitives::unmodeled`: a real primitive that stays outside every model.
 #
-# A permission names the file, the items it uses, the owner that needs a real atomic, why, and what
-# the choice leaves unverified. `just validate-primitive-boundary` rejects an unmodeled use without a
-# permission, an item a permission does not list, and a permission or listed item nothing uses. A
-# real atomic may keep runner statistics, cross an external boundary, or record what a check
-# observes. It never carries the protocol under test, chooses its branches, supplies its wakeups, or
-# establishes an ordering an assertion relies on.
+# A permission names the file, the items it uses by their paths below `unmodeled`, the owner that
+# needs a real primitive, why, and what the choice leaves unverified. `just validate-primitive-boundary`
+# rejects an unmodeled use without a permission, an item a permission does not list, and a permission
+# or listed item nothing uses. A real primitive may keep runner statistics, cross an external
+# boundary, serve a thread or process-wide state no model runs, or record what a check observes. It
+# never carries the protocol under test, chooses its branches, supplies its wakeups, or establishes
+# an ordering an assertion relies on.
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no invariant reads."
 owner = "The execution crate's Shuttle runner."
 path = "crates/execution/src/tests.rs"
 reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no invariant reads."
 owner = "The interconnect's Shuttle runner."
 path = "crates/interconnect/src/shuttle_test.rs"
 reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no invariant reads."
 owner = "The server's Shuttle runner."
 path = "src/shuttle_test.rs"
 reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no invariant reads."
 owner = "The Rust client's Shuttle runner."
 path = "crates/client-core/src/shuttle_test.rs"
 reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
-items = ["AtomicBool", "AtomicUsize", "Ordering"]
-limit = "Records observe the node budget and the admission fence and never synchronize them; the budget's and the quiesce control's own atomics are modeled."
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
+limit = "Records observe the node budget, the admission fence, and a forwarded batch's clearance and never synchronize them; the budget's and the quiesce control's own atomics are modeled, and the clearance travels on the endpoint's modeled channels."
 owner = "The client ingestor's Shuttle checks."
 path = "src/runtime/client_ingestor_shuttle_tests.rs"
-reason = "Each record must change in the same scheduling step as the reservation or drain it records, so recording adds no scheduling point."
+reason = "Each record must change in the same scheduling step as the reservation, drain, or clearance it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicU64", "sync::atomic::Ordering"]
+limit = "Fixture bookkeeping that no invariant reads; no model builds these fixtures."
+owner = "The application unit-test fixtures."
+path = "src/application/test_fixtures.rs"
+reason = "Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test and each model execution."
+
+[[permission]]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no model reads."
 owner = "The Loom runner of nervix-model-harness."
 path = "crates/model-harness/src/loom.rs"
 reason = "The number of executions a search explored spans every execution and is reported after the search ends, where no modeled atomic can exist."
 
 [[permission]]
-items = ["AtomicBool", "Ordering"]
-limit = "The epoch driver's shutdown is outside every model: no check covers when the thread observes the flag."
-owner = "The WASM runtime's epoch driver."
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::Ordering",
+  "task_local",
+  "thread::Builder",
+  "thread::sleep",
+]
+limit = "The epoch driver and a guest callback's time scope are outside every model: no check covers when the epoch thread observes the flag, and under Shuttle every task shares the storage a time scope sets while it is polled."
+owner = "The WASM runtime: its epoch driver, and the domain time of a guest callback."
 path = "crates/nervix-wasm/src/lib.rs"
-reason = "The flag stops a dedicated operating-system thread that no model runs, and a modeled atomic cannot be used from a thread outside its model."
+reason = "The epoch driver is a dedicated operating-system thread that no model runs, sleeping for real between ticks and stopped by a flag a modeled atomic could not share with it. A guest callback reads its domain time from Tokio's task-local storage, which no model provides."
 
 [[permission]]
-items = ["AtomicBool", "AtomicUsize", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Benchmark statistics; the benchmark claims nothing about synchronization."
 owner = "The VM benchmarks' allocation probe."
 path = "crates/nervix-vm/benches/vm/allocation_probe.rs"
 reason = "The global allocator counts every allocation of the process, on every thread, including the ones a model checker makes for itself."
 
 [[permission]]
-items = ["AtomicBool", "AtomicUsize", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the stream slots and never synchronize them; the slots' own atomics are modeled."
 owner = "The interconnect's stream-slot Shuttle checks."
 path = "crates/interconnect/src/connection/stream_slots/shuttle_checks.rs"
 reason = "Each record must change in the same scheduling step as the lease or drain operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicBool", "AtomicUsize", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the emitter and never synchronize it; the emitter's own counts are modeled."
 owner = "The emitter record-write Shuttle checks."
 path = "src/runtime/emitter_record_writes_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicBool", "AtomicUsize", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the entity gate and never synchronize it; the quiesce counters under test are modeled."
 owner = "The entity gate Shuttle checks."
 path = "src/runtime/entity_gate_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicBool", "AtomicUsize", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the relay gate and fan-out and never synchronize them; the relay's own atomics are modeled."
 owner = "The relay dispatch gate and fan-out Shuttle checks."
 path = "src/runtime/relay_channel_shuttle_tests.rs"
 reason = "Each gate and wake record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicBool", "AtomicU64", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicU64",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the durability barrier and never synchronize it; the barrier's own atomics are modeled."
 owner = "The state store durability-barrier Shuttle checks."
 path = "src/runtime/state_store/durability_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicBool", "AtomicU64", "Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicU64",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the checkpoint hold and never synchronize it; the owner's own atomics are modeled."
 owner = "The WASM checkpoint Shuttle checks."
 path = "src/runtime/wasm_checkpoint_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "The count observes the source loop and never synchronizes it; the quiesce control under test is modeled."
 owner = "The source host-loop Shuttle checks."
 path = "src/runtime/ingestors/source_shuttle_tests.rs"
 reason = "The dispatch count must change in the same scheduling step as the dispatch it counts, so counting adds no scheduling point."
 
 [[permission]]
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Release counts observe the retained archive and never synchronize it; the download stream's own synchronization is modeled."
 owner = "The retained backup archive tests and their Shuttle checks."
 path = "src/application/backup/retained.rs"
 reason = "A release count must change in the same scheduling step as the release it counts, so counting adds no scheduling point."
+
+[[permission]]
+items = ["runtime::Builder", "runtime::Runtime"]
+limit = "Nothing the binding does runs in a model; the client protocol it drives has its own checks through the Rust client."
+owner = "The C binding's session."
+path = "crates/client-ffi/src/session.rs"
+reason = "The binding owns the runtime its host's threads enter, and entering it and shutting it down in the background are the binding's contract with the host, which Shuttle's runtime does not provide."
+
+[[permission]]
+items = [
+  "select",
+  "sync::Mutex",
+  "sync::mpsc",
+  "sync::watch",
+  "task::consume_budget",
+  "task::spawn",
+  "time::sleep",
+]
+limit = "Cluster membership gossip is outside every model: no check covers chitchat or the transport tasks it drives."
+owner = "The cluster membership transport."
+path = "src/cluster.rs"
+reason = "Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait on Tokio's primitives."
+
+[[permission]]
+items = ["sync::OnceLock"]
+limit = "The detected level is process-wide; no check covers detection."
+owner = "The SIMD kernels' instruction-level detection."
+path = "crates/simd-kernels/src/lib.rs"
+reason = "The instruction level is detected once per process and read by every kernel afterwards, in every model execution the process runs."
+
+[[permission]]
+items = ["sync::OnceLock"]
+limit = "Installing the process's cryptography provider is outside every model."
+owner = "The interconnect's TLS configuration."
+path = "crates/interconnect/src/lib.rs"
+reason = "The process installs its default cryptography provider once, for every connection it ever makes."
+
+[[permission]]
+items = ["sync::OnceLock"]
+limit = "Fixture bookkeeping that no invariant reads."
+owner = "The interconnect's test certificates."
+path = "crates/interconnect/src/tests.rs"
+reason = "Test certificates are generated once per test process and shared by every test in it, including every model execution."
+
+[[permission]]
+items = ["sync::OnceLock"]
+limit = "Fixture bookkeeping that no invariant reads."
+owner = "The relay interaction tests' schema fixture."
+path = "src/runtime/relay_interaction.rs"
+reason = "The compiled schema is built once per test process and shared by every test in it."
+
+[[permission]]
+items = ["sync::OnceLock"]
+limit = "Benchmark bookkeeping; the benchmark claims nothing about synchronization."
+owner = "The relay interaction benchmark's schema fixture."
+path = "src/runtime/relay_interaction_benchmark.rs"
+reason = "The compiled schema is built once per benchmark process and shared by every measured iteration."
+
+[[permission]]
+items = ["sync::OnceLock"]
+limit = "Fixture bookkeeping that no invariant reads."
+owner = "The runtime test fixtures' schema."
+path = "src/runtime/test_fixtures.rs"
+reason = "The compiled schema is built once per test process and shared by every test in it, including every model execution."
+
+[[permission]]
+items = ["sync::Once"]
+limit = "The browser console runs in no execution mode, so nothing it does is modeled."
+owner = "The browser console's executor installation."
+path = "crates/web-console/src/main.rs"
+reason = "The console installs its task executor once per page, and a browser build has no native capability to select a modeled primitive from."

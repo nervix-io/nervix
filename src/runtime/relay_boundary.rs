@@ -10,6 +10,10 @@
 
 use super::*;
 
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "relay_boundary_shuttle_tests.rs"]
+mod shuttle_tests;
+
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
 
@@ -116,7 +120,7 @@ pub(super) struct RelayOutboundChannel {
 #[derive(Debug)]
 pub(super) struct RelayOutboundSlot {
     pub(super) gate: Mutex<()>,
-    sequence: parking_lot::Mutex<RelayOutboundSequence>,
+    sequence: nervix_primitives::sync::blocking::Mutex<RelayOutboundSequence>,
     cancellation: CancellationToken,
 }
 
@@ -139,7 +143,7 @@ impl RelayOutboundSlot {
     fn new() -> Self {
         Self {
             gate: Mutex::new(()),
-            sequence: parking_lot::Mutex::new(RelayOutboundSequence {
+            sequence: nervix_primitives::sync::blocking::Mutex::new(RelayOutboundSequence {
                 channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
                 next_sequence: 0,
                 last_delivery_at: None,
@@ -612,7 +616,7 @@ impl RelayConsumerFanout {
         let gates = self.branch_dispatch_gates.entries.load_full();
         let mut permits = Vec::new();
         for scoped in gates.iter() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if scoped.scope.contains(fingerprint.as_ref()) {
                 permits.push(RelayDispatchGate::acquire_owned(&scoped.gate).await);
             }
@@ -1033,7 +1037,7 @@ impl RelayRuntimeFanIn {
     }
 
     pub(super) async fn recv(&mut self) -> Option<RelayRecordBatch> {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         self.receiver.recv().await
     }
 
@@ -1257,7 +1261,6 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let local_node_id = dispatcher.local_node_id();
         let ingress_slot = self.ingress_slot(&batch.key);
         let _slot = ingress_slot.gate.lock().await;
         let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1270,23 +1273,16 @@ impl RelayBoundaryServices {
             }
         };
         let delivery = ingress_slot.next_delivery();
-        let mut registered_ack_ids = Vec::new();
-        let remote_acks = batch
-            .acks
-            .iter()
-            .map(|ack| {
-                if ack.is_empty() {
-                    return None;
-                }
-                let ack_id = dispatcher.next_ack_id();
-                dispatcher.register_pending_ack(ack_id, RemoteDispatcher::forwarded_ack(ack));
-                registered_ack_ids.push(ack_id);
-                Some(RemoteAckRegistration {
-                    ack_id,
-                    reply_node_id: local_node_id.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut remote_acks = Vec::with_capacity(batch.acks.len());
+        for ack in &batch.acks {
+            if ack.is_empty() {
+                remote_acks.push(None);
+                continue;
+            }
+            let registration =
+                dispatcher.register_pending_ack(RemoteDispatcher::forwarded_ack(ack));
+            remote_acks.push(Some(registration));
+        }
         let admission_result = dispatcher
             .dispatch_admitted_relay_payload(
                 &owner_node,
@@ -1298,7 +1294,7 @@ impl RelayBoundaryServices {
                     key: BranchKey::to_remote_key(&batch.key),
                     batch_ipc,
                     metadata: batch.metadata.to_remote(),
-                    acks: remote_acks,
+                    acks: remote_acks.clone(),
                     admission: None,
                 },
                 &ingress_slot,
@@ -1306,8 +1302,8 @@ impl RelayBoundaryServices {
             .await;
         if let Err(error) = admission_result {
             let reason = error.to_string();
-            for ack_id in registered_ack_ids {
-                dispatcher.clear_pending_ack(ack_id);
+            for registration in remote_acks.iter().flatten() {
+                dispatcher.clear_pending_ack(registration);
             }
             for ack in batch.acks.iter() {
                 ack.no_ack(reason.clone());
@@ -1393,7 +1389,7 @@ impl RelayBoundaryServices {
         // and reach the slot ahead of an earlier one, delivering the relay out of order.
         let mut encoded_body: Option<ChargedBytes> = None;
         for consumer in remote_runtime_consumers.iter() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outbound_slot = self.outbound_slot(
                 &consumer.node_id,
                 &consumer.relay,
@@ -1431,18 +1427,10 @@ impl RelayBoundaryServices {
                 AckMode::Detached => batch.detached(),
             };
             let remote_acks = if consumer.mode == AckMode::Attached {
-                let local_node_id = dispatcher.local_node_id();
                 remote_batch
                     .acks
                     .iter()
-                    .map(|ack| {
-                        let ack_id = dispatcher.next_ack_id();
-                        dispatcher.register_pending_ack(ack_id, ack.clone());
-                        Some(RemoteAckRegistration {
-                            ack_id,
-                            reply_node_id: local_node_id.clone(),
-                        })
-                    })
+                    .map(|ack| Some(dispatcher.register_pending_ack(ack.clone())))
                     .collect::<Vec<_>>()
             } else {
                 vec![None; remote_batch.acks.len()]
@@ -1469,7 +1457,7 @@ impl RelayBoundaryServices {
                     let reason = error.to_string();
                     for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {
                         if let Some(remote_ack) = remote_ack {
-                            dispatcher.clear_pending_ack(remote_ack.ack_id);
+                            dispatcher.clear_pending_ack(remote_ack);
                         }
                         ack_set.no_ack(reason.clone());
                     }
@@ -1521,12 +1509,31 @@ impl RelayBoundaryServices {
         domain: &DomainName,
         relay: &RelayName,
         batch: &RelayRecordBatch,
+        fault_injection: &ConfiguredFaultInjection,
     ) -> RelayDispatchResult {
+        fault_injection
+            .pause_owner_relay_fanout_if_armed(domain)
+            .await;
+        let gate = self.fanout.dispatch_gate();
+        let Some(_dispatch_permit) = gate.try_acquire_dispatch() else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("relay routing changed before owner fan-out");
+            }
+            batch.ack_success();
+            return Err(Box::new(batch.clone()));
+        };
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
-            .await?;
-        self.dispatch_remote_runtime_consumers(domain, batch).await
+        if let Err(failed) = self
+            .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
+            .await
+        {
+            batch.ack_success();
+            return Err(failed);
+        }
+        let result = self.dispatch_remote_runtime_consumers(domain, batch).await;
+        batch.ack_success();
+        result
     }
 
     /// Hands a batch another node's relay owner routed here to the runtime consumers this node runs
@@ -1686,8 +1693,12 @@ impl Runtime {
             batch.domain_timestamp(),
         );
         services.observe_owner_buffer_length(&metrics);
-        let result = services.fanout_owner_batch(domain, relay, batch).await;
-        batch.ack_success();
+        let result = services
+            .fanout_owner_batch(domain, relay, batch, &self.inner.fault_injection)
+            .await;
+        self.inner
+            .fault_injection
+            .mark_owner_relay_fanout_complete(domain);
         result
     }
 
@@ -1799,7 +1810,7 @@ impl Runtime {
             branch_capacity,
         } = retention;
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
                 registry,
                 instances: BranchInstanceRegistry::new(),
@@ -1810,8 +1821,8 @@ impl Runtime {
             };
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     biased;
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -1868,7 +1879,7 @@ impl Runtime {
             }
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let batch = match receiver.try_recv() {
                     RelayTryRecv::Batch(batch) => batch,
                     RelayTryRecv::Empty | RelayTryRecv::Closed => {
@@ -1914,7 +1925,7 @@ impl Runtime {
         let quiesce_counters =
             self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
         let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let interaction_input = RelayInteractionInput::immediate(relay.clone(), receiver);
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
@@ -1937,7 +1948,7 @@ impl Runtime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime.ownership_handoff_entity_is_frozen(&ownership_entity)
                     && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
@@ -1954,7 +1965,7 @@ impl Runtime {
                         }
                     };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &key);
                         if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
                             warn!(
@@ -2061,7 +2072,7 @@ impl Runtime {
                 if let Some(branch_capacity) = branch_capacity {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
                             runtime.delete_materialized_stream_key(&state, &evicted_key)

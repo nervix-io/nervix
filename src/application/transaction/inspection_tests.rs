@@ -104,7 +104,7 @@ async fn two_operation_transaction(
     .await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_the_attached_transaction_reads_its_open_report() {
     let TestService {
         service,
@@ -148,7 +148,7 @@ async fn inspecting_the_attached_transaction_reads_its_open_report() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn repeated_inspection_of_an_unchanged_transaction_reads_the_same_basis() {
     let TestService {
         service,
@@ -173,7 +173,7 @@ async fn repeated_inspection_of_an_unchanged_transaction_reads_the_same_basis() 
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_unfinished_model_run_reads_as_an_incomplete_open_report() {
     let TestService {
         service,
@@ -213,7 +213,7 @@ async fn an_unfinished_model_run_reads_as_an_incomplete_open_report() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_another_owned_transaction_changes_no_binding_or_queue_position() {
     let TestService {
         service,
@@ -290,7 +290,7 @@ async fn inspecting_another_owned_transaction_changes_no_binding_or_queue_positi
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_without_an_attached_transaction_is_refused() {
     let TestService {
         service,
@@ -315,7 +315,7 @@ async fn inspecting_without_an_attached_transaction_is_refused() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_an_unknown_transaction_is_refused() {
     let TestService {
         service,
@@ -340,7 +340,7 @@ async fn inspecting_an_unknown_transaction_is_refused() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_a_transaction_owned_by_another_user_is_refused() {
     let TestService {
         service,
@@ -375,7 +375,7 @@ async fn inspecting_a_transaction_owned_by_another_user_is_refused() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn selecting_an_operation_names_it_without_narrowing_the_report() {
     let TestService {
         service,
@@ -415,7 +415,7 @@ async fn selecting_an_operation_names_it_without_narrowing_the_report() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn selecting_an_operation_past_the_accepted_position_is_refused() {
     let TestService {
         service,
@@ -444,7 +444,7 @@ async fn selecting_an_operation_past_the_accepted_position_is_refused() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_a_committed_transaction_reads_its_frozen_report_and_recorded_outcomes() {
     let TestService {
         service,
@@ -487,7 +487,7 @@ async fn inspecting_a_committed_transaction_reads_its_frozen_report_and_recorded
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspecting_a_transaction_that_never_planned_an_operation_is_refused() {
     let TestService {
         service,

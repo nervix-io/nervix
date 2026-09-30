@@ -17,13 +17,25 @@
 //! scenario gave its own answer takes that answer instead, so requests whose order is not part of
 //! the contract, such as those of independent branches, can each be answered deliberately. A
 //! response can complete normally, answer after a delay, precede its final response with an interim
-//! one, declare more body than it sends and then stall, never answer, answer only once the scenario
-//! releases it, close the connection without answering, or write arbitrary bytes. The last four are
-//! how a scenario holds an attempt past its timeout, keeps an attempt unresolved for exactly as long
-//! as it needs to observe it, loses a response the endpoint already acted on, and sends framing no
-//! valid endpoint would. Generated field counts and value bytes can be set independently for the
-//! interim and final block, and a `Retry-After` date is computed when its response is written.
-//! Capture times precede the scripted response, so timing assertions need no silence window.
+//! one, carry a generated body of a given size, declare more body than it sends and then stall,
+//! never answer, answer only once the scenario releases it, close the connection without answering,
+//! or write arbitrary bytes. The last four are how a scenario holds an attempt past its timeout,
+//! keeps an attempt unresolved for exactly as long as it needs to observe it, loses a response the
+//! endpoint already acted on, and sends framing no valid endpoint would. Generated field counts and
+//! value bytes can be set independently for the interim and final block, and a `Retry-After` date is
+//! computed when its response is written. Capture times precede the scripted response, so timing
+//! assertions need no silence window.
+//!
+//! # What the receiver observes of its clients
+//!
+//! Beyond the requests themselves, the receiver records two things about how its clients treat
+//! their answers. It keeps the most requests that were ever awaiting a response at once: a request
+//! awaits from its capture until the receiver begins writing its final head, or until its
+//! connection ends without one, so a client that sends its next request only after reading the
+//! previous final head never has two. And it counts the responses a client abandoned: those whose
+//! connection the client closed while the receiver still held it, or still had part of the response
+//! to write. A client that stops reading at the final head of a stalled or oversized body abandons
+//! it; a stop of the receiver itself abandons nothing.
 //!
 //! # Bounds
 //!
@@ -46,7 +58,10 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use parking_lot::Mutex;
+use nervix_primitives::{
+    sync::{CancellationToken, blocking::Mutex, watch},
+    task::{AbortOnDropHandle, JoinSet},
+};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{
     RootCertStore, ServerConfig,
@@ -59,11 +74,8 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
-    sync::watch,
-    task::JoinSet,
 };
 use tokio_rustls::TlsAcceptor;
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use triomphe::Arc;
 
 /// How long stopping waits for connections to end on their own before it aborts and joins them,
@@ -99,6 +111,10 @@ pub(crate) const MAX_RECORDED_FAULTS: usize = 256;
 /// The largest generated response header value the script permits. It reaches beyond the
 /// emitter's 64 KiB response limit without letting one scenario allocate without a bound.
 const MAX_SCRIPTED_HEADER_VALUE_BYTES: usize = 128 * 1024;
+/// The largest generated response body the script permits. A policy input: many times the socket
+/// buffers of a loopback connection, so a client that reads only the head cannot absorb the body
+/// in its kernel buffers, and written in chunks, so the receiver never holds it in memory.
+const MAX_SCRIPTED_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Enough generated fields to exceed the emitter limit without unbounded fixture allocation.
 const MAX_SCRIPTED_HEADER_COUNT: usize = 512;
 /// The longest delay a scripted `Retry-After` date may ask for. A policy input: far longer than
@@ -106,6 +122,8 @@ const MAX_SCRIPTED_HEADER_COUNT: usize = 512;
 const MAX_SCRIPTED_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// The bytes one read takes from a connection.
 const READ_CHUNK_BYTES: usize = 16 * 1024;
+/// The bytes a generated response body is written from, one chunk at a time.
+static GENERATED_BODY_CHUNK: [u8; READ_CHUNK_BYTES] = [b'x'; READ_CHUNK_BYTES];
 
 const _: () = assert!(
     HTTP_EMITTER_HEADER_BYTES + HTTP_EMITTER_TARGET_BYTES < MAX_REQUEST_HEAD_BYTES,
@@ -164,7 +182,7 @@ pub(crate) enum ReceiverResponse {
 pub(crate) struct ScriptedResponse {
     status: u16,
     headers: Vec<ResponseHeader>,
-    body: Vec<u8>,
+    body: ResponseBody,
     interim: Option<u16>,
     interim_extra_headers: usize,
     interim_header_value_bytes: Option<usize>,
@@ -189,12 +207,30 @@ enum BodyDelivery {
     Stalled,
 }
 
+/// The content a response carries after its head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResponseBody {
+    /// Exactly these bytes.
+    Bytes(Vec<u8>),
+    /// This many generated bytes, written in chunks rather than held in memory.
+    Generated(usize),
+}
+
+impl ResponseBody {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Generated(size) => *size,
+        }
+    }
+}
+
 impl ScriptedResponse {
     fn status(status: u16) -> Self {
         Self {
             status,
             headers: Vec::new(),
-            body: Vec::new(),
+            body: ResponseBody::Bytes(Vec::new()),
             interim: None,
             interim_extra_headers: 0,
             interim_header_value_bytes: None,
@@ -279,8 +315,12 @@ impl ScriptedResponse {
             });
             return Ok(());
         }
+        if let Some(size) = clause.strip_prefix("body bytes ") {
+            self.body = ResponseBody::Generated(Self::body_size(size)?);
+            return Ok(());
+        }
         if let Some(body) = clause.strip_prefix("body ") {
-            self.body = body.as_bytes().to_vec();
+            self.body = ResponseBody::Bytes(body.as_bytes().to_vec());
             return Ok(());
         }
         if let Some(delay) = clause.strip_prefix("retry after date in ") {
@@ -349,6 +389,14 @@ impl ScriptedResponse {
         }
         Ok(size)
     }
+
+    fn body_size(text: &str) -> Result<usize, ReceiverScriptError> {
+        let size = Self::parse_count(text)?;
+        if size > MAX_SCRIPTED_BODY_BYTES {
+            return Err(ReceiverScriptError::BodySize { size });
+        }
+        Ok(size)
+    }
 }
 
 fn status_line(status: u16) -> String {
@@ -404,10 +452,10 @@ pub(crate) enum ReceiverScriptError {
     #[error("{text:?} is not a three-digit HTTP status")]
     Status { text: String },
     #[error(
-        "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, `retry \
-         after date in <duration>`, `interim <status>`, `interim extra headers <count>`, `interim \
-         header value bytes <count>`, `after <duration>`, `stall body`, `extra headers <count>`, \
-         or `header value bytes <count>`"
+        "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, `body \
+         bytes <count>`, `retry after date in <duration>`, `interim <status>`, `interim extra \
+         headers <count>`, `interim header value bytes <count>`, `after <duration>`, `stall \
+         body`, `extra headers <count>`, or `header value bytes <count>`"
     )]
     UnknownClause { clause: String },
     #[error(
@@ -431,6 +479,8 @@ pub(crate) enum ReceiverScriptError {
     },
     #[error("generated response header value of {size} bytes exceeds the receiver script limit")]
     HeaderValueSize { size: usize },
+    #[error("generated response body of {size} bytes exceeds the receiver script limit")]
+    BodySize { size: usize },
     #[error("{count} generated response headers exceed the receiver script limit")]
     HeaderCount { count: usize },
     #[error("raw bytes {text:?} end inside an escape; use `\\r`, `\\n`, or `\\\\`")]
@@ -527,6 +577,11 @@ impl PartialEq for CapturedRequest {
 impl Eq for CapturedRequest {}
 
 impl CapturedRequest {
+    /// `<METHOD> <target>`, as a scenario names a request.
+    pub(crate) fn request_line(&self) -> String {
+        format!("{} {}", self.method, self.target)
+    }
+
     /// Every value sent under `name`, compared without ASCII case, in the order they arrived.
     pub(crate) fn header_values(&self, name: &str) -> Vec<&[u8]> {
         self.headers
@@ -644,6 +699,28 @@ pub(crate) enum ReceiverWaitError {
         waited: Duration,
         faults: usize,
         latest_fault: LatestFault,
+    },
+    #[error(
+        "the receiver captured no request with the request line '{request_line}' within \
+         {waited:?}; it captured {captured} request(s) and {faults} fault(s), the latest: \
+         {latest_fault}"
+    )]
+    RequestLine {
+        request_line: String,
+        captured: usize,
+        waited: Duration,
+        faults: usize,
+        latest_fault: LatestFault,
+    },
+    #[error(
+        "clients abandoned {abandoned} of the {expected} unfinished responses expected within \
+         {waited:?}; the receiver captured {captured} request(s)"
+    )]
+    Abandoned {
+        expected: usize,
+        abandoned: usize,
+        captured: usize,
+        waited: Duration,
     },
 }
 
@@ -771,6 +848,58 @@ struct ReceiverState {
     /// The response every request held until released answers with, once a scenario releases
     /// them. A release holds for every such request, including one held after it.
     release: watch::Sender<Option<ReceiverResponse>>,
+    awaiting: Mutex<AwaitingResponses>,
+    /// How many responses clients abandoned before the receiver finished them.
+    abandoned_count: watch::Sender<usize>,
+}
+
+/// The requests captured but not yet answered with a final head, now and at their most.
+#[derive(Default)]
+struct AwaitingResponses {
+    current: usize,
+    most: usize,
+}
+
+/// One captured request that awaits its response until the guard is released or dropped, whichever
+/// comes first.
+struct AwaitingResponse {
+    state: Option<Arc<ReceiverState>>,
+}
+
+impl AwaitingResponse {
+    fn begin(state: &Arc<ReceiverState>) -> Self {
+        {
+            let mut awaiting = state.awaiting.lock();
+            awaiting.current = awaiting
+                .current
+                .checked_add(1)
+                .assured("a receiver's awaiting requests are bounded by its captures");
+            awaiting.most = awaiting.most.max(awaiting.current);
+        }
+        Self {
+            state: Some(state.clone()),
+        }
+    }
+
+    /// Ends the wait, once: the receiver begins writing the final head, so a sequential client can
+    /// no longer be waiting for it when it sends the next request, or the connection is ending
+    /// without one. A connection releases it before it counts an abandoned response, so whoever
+    /// observes the abandonment also observes the request no longer awaiting.
+    fn release(&mut self) {
+        if let Some(state) = self.state.take() {
+            let mut awaiting = state.awaiting.lock();
+            awaiting.current = awaiting
+                .current
+                .checked_sub(1)
+                .assured("each awaiting request is released once, after it was counted");
+        }
+    }
+}
+
+impl Drop for AwaitingResponse {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 struct ReceiverScript {
@@ -806,7 +935,25 @@ impl ReceiverState {
             captured_count: watch::Sender::new(0),
             fault_count: watch::Sender::new(0),
             release: watch::Sender::new(None),
+            awaiting: Mutex::new(AwaitingResponses::default()),
+            abandoned_count: watch::Sender::new(0),
         }
+    }
+
+    /// Counts one response a client abandoned before the receiver finished it.
+    fn abandoned(&self) {
+        self.abandoned_count.send_modify(|abandoned| {
+            *abandoned = abandoned
+                .checked_add(1)
+                .assured("a receiver's abandoned responses are bounded by its captures");
+        });
+    }
+
+    fn has_request_line(&self, request_line: &str) -> bool {
+        self.captured
+            .lock()
+            .iter()
+            .any(|request| request.request_line() == request_line)
     }
 
     /// The response a request for `target` takes: the answer the scenario gave that target, or
@@ -924,7 +1071,7 @@ impl HttpReceiver {
             tls_files,
             state,
             cancellation,
-            accept_loop: AbortOnDropHandle::new(tokio::spawn(accept_loop.run())),
+            accept_loop: AbortOnDropHandle::new(nervix_primitives::task::spawn(accept_loop.run())),
         })
     }
 
@@ -1000,6 +1147,57 @@ impl HttpReceiver {
         }
     }
 
+    /// Waits until the receiver has captured a request whose request line is `request_line`.
+    pub(crate) async fn wait_for_request_line(
+        &self,
+        request_line: &str,
+        within: Duration,
+    ) -> Result<Vec<CapturedRequest>, ReceiverWaitError> {
+        let mut captured_count = self.state.captured_count.subscribe();
+        let state = self.state.clone();
+        let waited = tokio::time::timeout(
+            within,
+            captured_count.wait_for(|_| state.has_request_line(request_line)),
+        )
+        .await;
+        match waited {
+            Ok(Ok(_)) => Ok(self.captured()),
+            Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::RequestLine {
+                request_line: request_line.to_string(),
+                captured: *self.state.captured_count.borrow(),
+                waited: within,
+                faults: self.state.fault_total(),
+                latest_fault: self.state.latest_fault(),
+            }),
+        }
+    }
+
+    /// The most captured requests that were ever awaiting their final head at once.
+    pub(crate) fn most_awaiting_responses(&self) -> usize {
+        self.state.awaiting.lock().most
+    }
+
+    /// Waits until clients have abandoned at least `expected` responses before the receiver
+    /// finished them.
+    pub(crate) async fn wait_for_abandoned_responses(
+        &self,
+        expected: usize,
+        within: Duration,
+    ) -> Result<(), ReceiverWaitError> {
+        let mut abandoned = self.state.abandoned_count.subscribe();
+        let waited =
+            tokio::time::timeout(within, abandoned.wait_for(|count| *count >= expected)).await;
+        match waited {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Abandoned {
+                expected,
+                abandoned: *self.state.abandoned_count.borrow(),
+                captured: *self.state.captured_count.borrow(),
+                waited: within,
+            }),
+        }
+    }
+
     /// Waits until the receiver has recorded a fault that `expected` accepts. `description` names
     /// the fault in the failure.
     pub(crate) async fn wait_for_fault(
@@ -1071,7 +1269,7 @@ pub(crate) enum AcceptLoopEnding {
     /// The accept loop outlived the stop budget and was aborted and joined.
     Aborted,
     /// The accept loop panicked.
-    Failed(tokio::task::JoinError),
+    Failed(nervix_primitives::task::JoinError),
 }
 
 impl HttpReceiverStop {
@@ -1130,7 +1328,7 @@ impl ConnectionSummary {
     }
 
     /// Counts how a connection's task ended once the accept loop joined it.
-    pub(crate) fn joined(&mut self, joined: Result<(), tokio::task::JoinError>) {
+    pub(crate) fn joined(&mut self, joined: Result<(), nervix_primitives::task::JoinError>) {
         match joined {
             Ok(()) => {}
             Err(error) if error.is_panic() => {
@@ -1160,8 +1358,8 @@ impl AcceptLoop {
         let mut summary = ConnectionSummary::default();
         let mut next_connection = 0_u64;
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.cancellation.cancelled() => break,
                 Some(joined) = connections.join_next(), if !connections.is_empty() => {
@@ -1192,14 +1390,14 @@ impl AcceptLoop {
         }
         let deadline = tokio::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match tokio::time::timeout_at(deadline, connections.join_next()).await {
                 Ok(Some(joined)) => summary.joined(joined),
                 Ok(None) => break,
                 Err(_) => {
                     connections.abort_all();
                     while let Some(joined) = connections.join_next().await {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         summary.joined(joined);
                     }
                     break;
@@ -1212,7 +1410,8 @@ impl AcceptLoop {
 
 /// Why one connection stopped serving requests.
 enum ConnectionEnd {
-    /// The client closed between requests, or the receiver stopped.
+    /// The client closed between requests, the receiver stopped, or the client abandoned a
+    /// response, which the receiver has already counted.
     Closed,
     /// The connection did something the receiver recorded as a fault.
     Faulted(ReceiverFault),
@@ -1229,7 +1428,7 @@ impl Connection {
         let ending = match acceptor {
             None => self.serve_requests(stream).await,
             Some(acceptor) => {
-                let accepted = tokio::select! {
+                let accepted = nervix_primitives::select! {
                     () = self.cancellation.cancelled() => return,
                     accepted = acceptor.accept(stream) => accepted,
                 };
@@ -1254,7 +1453,7 @@ impl Connection {
     {
         let mut buffer = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = match self.read_request(&mut stream, &mut buffer).await {
                 Ok(Some(request)) => request,
                 Ok(None) => return ConnectionEnd::Closed,
@@ -1271,22 +1470,28 @@ impl Connection {
                     });
                 }
             }
+            // The request awaits its response from its capture until the receiver begins writing a
+            // final head, or until its connection ends without one.
+            let mut awaiting = AwaitingResponse::begin(&self.state);
             let mut response = self.state.next_response(&target);
             if let ReceiverResponse::HoldUntilReleased = response {
-                response = match self.hold_until_released(&mut stream).await {
+                response = match self.hold_until_released(&mut stream, &mut awaiting).await {
                     Ok(released) => released,
                     Err(end) => return end,
                 };
             }
             let answered = match response {
-                ReceiverResponse::Respond(response) => self.respond(&mut stream, &response).await,
+                ReceiverResponse::Respond(response) => {
+                    self.respond(&mut stream, &response, &mut awaiting).await
+                }
                 ReceiverResponse::LoseResponse => return ConnectionEnd::Closed,
                 ReceiverResponse::HoldResponse | ReceiverResponse::HoldUntilReleased => {
-                    return self.hold(&mut stream).await;
+                    return self.hold(&mut stream, &mut awaiting).await;
                 }
                 ReceiverResponse::Raw(bytes) => {
-                    return match self.write(&mut stream, &bytes).await {
-                        Ok(Answered::Continue | Answered::Hold) => ConnectionEnd::Closed,
+                    awaiting.release();
+                    return match self.write(&mut stream, &bytes, &mut awaiting).await {
+                        Ok(()) => ConnectionEnd::Closed,
                         Err(end) => end,
                     };
                 }
@@ -1294,7 +1499,7 @@ impl Connection {
             match answered {
                 Ok(Answered::Continue) if !closes => {}
                 Ok(Answered::Continue) => return ConnectionEnd::Closed,
-                Ok(Answered::Hold) => return self.hold(&mut stream).await,
+                Ok(Answered::Hold) => return self.hold(&mut stream, &mut awaiting).await,
                 Err(end) => return end,
             }
         }
@@ -1304,22 +1509,24 @@ impl Connection {
         &self,
         stream: &mut S,
         response: &ScriptedResponse,
+        awaiting: &mut AwaitingResponse,
     ) -> Result<Answered, ConnectionEnd>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
         if let Some(delay) = response.delay {
-            tokio::select! {
+            nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
                 () = tokio::time::sleep(delay) => {}
             }
         }
         if let Some(interim_head) = response.interim_head() {
-            self.write(stream, &interim_head).await?;
+            self.write(stream, &interim_head, awaiting).await?;
         }
-        self.write(stream, &response.head()).await?;
+        awaiting.release();
+        self.write(stream, &response.head(), awaiting).await?;
         if response.carries_content() {
-            self.write(stream, &response.body).await?;
+            self.write_body(stream, &response.body, awaiting).await?;
         }
         if response.status == 101 {
             return Ok(Answered::Hold);
@@ -1330,11 +1537,18 @@ impl Connection {
         }
     }
 
-    async fn write<S>(&self, stream: &mut S, bytes: &[u8]) -> Result<Answered, ConnectionEnd>
+    /// Writes `bytes` of a response. A client that is gone before they are written abandoned the
+    /// response, which the receiver counts rather than records as a fault.
+    async fn write<S>(
+        &self,
+        stream: &mut S,
+        bytes: &[u8],
+        awaiting: &mut AwaitingResponse,
+    ) -> Result<(), ConnectionEnd>
     where
         S: AsyncWrite + Unpin,
     {
-        let written = tokio::select! {
+        let written = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
             written = async {
                 stream.write_all(bytes).await?;
@@ -1342,26 +1556,61 @@ impl Connection {
             } => written,
         };
         match written {
-            Ok(()) => Ok(Answered::Continue),
-            Err(source) => Err(self.connection_failed(source)),
+            Ok(()) => Ok(()),
+            Err(_) => {
+                awaiting.release();
+                self.state.abandoned();
+                Err(ConnectionEnd::Closed)
+            }
         }
     }
 
-    /// Writes nothing more, discarding whatever the client sends, until it leaves or the receiver
-    /// stops.
-    async fn hold<S>(&self, stream: &mut S) -> ConnectionEnd
+    /// Writes a response body, a generated one chunk by chunk so it is never held in memory.
+    async fn write_body<S>(
+        &self,
+        stream: &mut S,
+        body: &ResponseBody,
+        awaiting: &mut AwaitingResponse,
+    ) -> Result<(), ConnectionEnd>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let size = match body {
+            ResponseBody::Bytes(bytes) => return self.write(stream, bytes, awaiting).await,
+            ResponseBody::Generated(size) => *size,
+        };
+        let mut remaining = size;
+        while remaining > 0 {
+            nervix_primitives::task::consume_budget().await;
+            let length = remaining.min(GENERATED_BODY_CHUNK.len());
+            self.write(stream, &GENERATED_BODY_CHUNK[..length], awaiting)
+                .await?;
+            remaining = remaining
+                .checked_sub(length)
+                .verified("the chunk written is at most the bytes that remain");
+        }
+        Ok(())
+    }
+
+    /// Writes nothing more, discarding whatever the client sends, until it leaves, which abandons
+    /// the response, or the receiver stops.
+    async fn hold<S>(&self, stream: &mut S, awaiting: &mut AwaitingResponse) -> ConnectionEnd
     where
         S: AsyncRead + Unpin,
     {
         let mut discard = vec![0_u8; READ_CHUNK_BYTES];
         loop {
-            tokio::task::consume_budget().await;
-            let read = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let read = nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return ConnectionEnd::Closed,
                 read = stream.read(&mut discard) => read,
             };
             match read {
-                Ok(0) | Err(_) => return ConnectionEnd::Closed,
+                Ok(0) | Err(_) => {
+                    awaiting.release();
+                    self.state.abandoned();
+                    return ConnectionEnd::Closed;
+                }
                 Ok(_) => {}
             }
         }
@@ -1373,6 +1622,7 @@ impl Connection {
     async fn hold_until_released<S>(
         &self,
         stream: &mut S,
+        awaiting: &mut AwaitingResponse,
     ) -> Result<ReceiverResponse, ConnectionEnd>
     where
         S: AsyncRead + Unpin,
@@ -1380,8 +1630,8 @@ impl Connection {
         let mut release = self.state.release.subscribe();
         let mut discard = vec![0_u8; READ_CHUNK_BYTES];
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
                 released = release.wait_for(Option::is_some) => {
                     let released = released.assured(
@@ -1394,7 +1644,11 @@ impl Connection {
                     return Ok(response);
                 }
                 read = stream.read(&mut discard) => match read {
-                    Ok(0) | Err(_) => return Err(ConnectionEnd::Closed),
+                    Ok(0) | Err(_) => {
+                        awaiting.release();
+                        self.state.abandoned();
+                        return Err(ConnectionEnd::Closed);
+                    }
                     Ok(_) => {}
                 },
             }
@@ -1412,7 +1666,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         let head = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(head) = self.parse_head(buffer)? {
                 break head;
             }
@@ -1522,7 +1776,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         while buffer.len() < length {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.fill(stream, buffer).await? {
                 Filled::Read => {}
                 Filled::Closed => {
@@ -1550,7 +1804,7 @@ impl Connection {
         };
         let mut body = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let parsed =
                 httparse::parse_chunk_size(buffer).map_err(|_| ReceiverFault::MalformedChunk {
                     connection: self.id,
@@ -1581,7 +1835,7 @@ impl Connection {
                 .checked_add(2)
                 .verified("the chunk size was checked against the body limit above");
             while buffer.len() < chunk_with_delimiter {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !self.fill_body(stream, buffer).await? {
                     return Ok(None);
                 }
@@ -1608,7 +1862,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if buffer.starts_with(b"\r\n") {
                 buffer.drain(..2);
                 return Ok(true);
@@ -1653,7 +1907,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         let mut chunk = vec![0_u8; READ_CHUNK_BYTES];
-        let read = tokio::select! {
+        let read = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return Ok(Filled::Stopped),
             read = stream.read(&mut chunk) => read,
         };
@@ -1668,13 +1922,6 @@ impl Connection {
                 source: StdArc::new(source),
             }),
         }
-    }
-
-    fn connection_failed(&self, source: io::Error) -> ConnectionEnd {
-        ConnectionEnd::Faulted(ReceiverFault::Connection {
-            connection: self.id,
-            source: StdArc::new(source),
-        })
     }
 }
 

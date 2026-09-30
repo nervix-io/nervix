@@ -1,0 +1,206 @@
+name: Bolero
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bolero-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KACHE_VERSION: "0.28.1"
+  KACHE_REMOTE_KEY_LISTING: "false"
+  NO_COLOR: "1"
+  CARGO_TERM_COLOR: never
+  RUST_LOG_STYLE: never
+
+jobs:
+  bolero-random:
+    name: bolero-random
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+
+      - name: Install tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Install LLVM 23
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          EOF
+
+      - name: Configure kache remote
+        env:
+          KACHE_CONFIG: ${{ runner.temp }}/kache-bolero.toml
+          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          bash scripts/configure_kache_remote.sh "$KACHE_CONFIG"
+          echo "KACHE_CONFIG=$KACHE_CONFIG" >> "$GITHUB_ENV"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: bolero-random-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Run runner tests and every ordinary Bolero property
+        run: |
+          just test-bolero-runner
+          just test-bolero
+
+  bolero-fuzz:
+    name: bolero-fuzz
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+
+      - name: Setup pinned sanitizer nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-17
+
+      - name: Install tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Setup uv for runner coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install LLVM 23
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          EOF
+
+      - name: Configure kache remote
+        env:
+          KACHE_CONFIG: ${{ runner.temp }}/kache-bolero.toml
+          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          bash scripts/configure_kache_remote.sh "$KACHE_CONFIG"
+          echo "KACHE_CONFIG=$KACHE_CONFIG" >> "$GITHUB_ENV"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: bolero-fuzz-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Install pinned cargo-bolero
+        run: just install-cargo-bolero
+
+      - name: Run every sanitizer libFuzzer target and qualify failures
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            budget=30
+          else
+            budget=300
+          fi
+          just coverage-bolero "$budget"
+
+      - name: Upload runner coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: target/bolero/python.lcov
+          flags: bolero
+          use_oidc: true
+
+      - name: Upload all fuzz and qualification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolero-runs
+          path: target/bolero/runs/
+          if-no-files-found: warn
+
+  bolero-gate:
+    name: bolero-gate
+    if: always()
+    needs: [bolero-random, bolero-fuzz]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both Bolero modes
+        env:
+          RANDOM_RESULT: ${{ needs.bolero-random.result }}
+          FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
+        run: |
+          test "$RANDOM_RESULT" = success
+          test "$FUZZ_RESULT" = success

@@ -48,10 +48,7 @@ use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dns::DnsResolver;
-use nervix_execution::{
-    ChargedBytes, Executor,
-    sync::{AbortOnDropHandle, ArcSwap, ArcSwapOption, Cache, DashMap},
-};
+use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -59,11 +56,11 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
-    ClientProducerEndReason, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
-    CodecName, CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
-    CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef,
-    DomainState, EmitterName, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
+    ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
+    ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
+    DomainName, DomainNodeRef, DomainState, EmitterName, EndpointName, EndpointType, ErrorPolicies,
+    FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
     InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
     IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
     MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
@@ -85,7 +82,17 @@ use nervix_models::{
     CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, CreateEmitter,
     EmitterPublishingMode,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    publication::{ArcSwap, ArcSwapOption, Cache},
+    stream::StreamExt,
+    sync::{
+        CancellationToken, Mutex, Notify,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        broadcast, mpsc, oneshot, watch,
+    },
+    task::{AbortOnDropHandle, JoinHandle, TaskTracker},
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
 #[cfg(test)]
@@ -118,20 +125,16 @@ use nervix_vm::{
     },
 };
 use nervix_wasm::{
-    WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit, WasmEnvelope,
-    WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput, WasmRuntime, WasmRuntimeConfig,
+    WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow,
+    WasmRoutedOutput, WasmRuntime, WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedSet;
 use thiserror::Error;
 use tokio::{
     io::AsyncBufReadExt,
-    sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch},
-    task::JoinHandle,
     time::{Duration, Instant, sleep, sleep_until},
 };
-use tokio_stream::StreamExt;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
@@ -192,6 +195,7 @@ mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
+mod client_emitter;
 mod client_ingestor;
 mod correlator;
 mod deduplicator;
@@ -200,6 +204,7 @@ mod domain_execution;
 mod domain_rebuild;
 mod emitter_batch_packing;
 mod emitter_buffer;
+mod emitter_client;
 mod emitter_encoding;
 mod emitter_http_requests;
 mod emitter_ordering_group;
@@ -307,6 +312,11 @@ use branch_runtime::{
     internal_processor_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
 };
+pub(crate) use client_emitter::{
+    ClientEmitterAnswer, ClientEmitterDelivery, ClientEmitterDescription, ClientEmitterEndpoint,
+    ClientEmitterGrant, ClientEmitterPayload, ClientEmitterRefusal, ClientEmitterResponder,
+    ClientEmitterResult,
+};
 pub(crate) use client_ingestor::{
     ClientIngestorGauges, ClientProducerEvent, ClientProducerEvents, ClientProducerHandle,
     ClientProducerOpenRequest, ClientProducerReservation, ClientProducerRetention,
@@ -339,6 +349,7 @@ use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
     EmitterPublishBatch, PublishReport, RowToPack,
 };
+use emitter_client::{ClientEmitterSink, ClientPayload};
 use emitter_encoding::EncodedRecordSink;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{

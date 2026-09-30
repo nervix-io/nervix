@@ -1,18 +1,19 @@
 //! The subscriptions a client wants across exchange replacements.
 //!
-//! - **Owns.** The acknowledged creation contracts, cancellation fences, lifecycle, gaps and failed
-//!   restorations of client subscriptions, and whether an open session may hold each one.
+//! - **Owns.** The acknowledged creation contracts, cancellation fences, lifecycle, gaps, ends and
+//!   failed restorations of client subscriptions, and whether an open session may hold each one.
 //! - **Depends on.** Typed subscription Models, wire identities and the client's event contract.
 //! - **Must not know.** How a request is transported or how an exchange routes its frames.
 
 use std::{collections::VecDeque, time::Duration};
 
 use ahash::HashMap;
-use nervix_client_wire::{SubscribeRequest, SubscriptionHandle, SubscriptionType};
+use nervix_client_wire::{
+    SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionType,
+};
 use nervix_models::{CreateSubscription, DomainName, SubscriptionName};
+use nervix_primitives::sync::{blocking::Mutex, watch};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use tokio::sync::watch;
 use triomphe::Arc;
 
 use crate::events::SubscriptionEvent;
@@ -25,6 +26,10 @@ pub enum SubscriptionLifecycle {
     Interrupted(SubscriptionHandle),
     Restoring(SubscriptionHandle),
     DeliveryFailed(SubscriptionHandle),
+    /// The server ended the generation, because its relay was redefined or removed. The client
+    /// never opens it again: subscribing under its name opens a new generation, and deleting it
+    /// needs no server.
+    Ended(SubscriptionHandle),
     Closing,
     DeletionFailed,
 }
@@ -92,6 +97,11 @@ struct DesiredSubscription {
     acknowledged: bool,
     /// Whether the exchange of `generation` ended, and every subscription its session held.
     generation_ended: bool,
+    /// The end of the generation the server ended, until the caller reads it. Its event follows
+    /// the generation's other events on the exchange, and the registry reports it itself when the
+    /// exchange ends first. Only an ended entry holds one, and not one whose delivery overflowed,
+    /// because that overflow is the last event of its generation.
+    unread_end: Option<SubscriptionEnded>,
 }
 
 impl DesiredSubscription {
@@ -119,7 +129,8 @@ impl DesiredSubscription {
     /// Whether a session that is still open may hold the subscription: one holds a generation
     /// it acknowledged, or an attempt that may still open one awaits its reply. The session of an
     /// ended exchange holds nothing, and neither does one that refused to open the subscription
-    /// again.
+    /// again. A generation the server ended holds nothing either: the server keeps its name only
+    /// until the name is reused or the session ends.
     fn may_be_held(&self) -> bool {
         if self.generation_ended {
             return false;
@@ -131,15 +142,45 @@ impl DesiredSubscription {
             | SubscriptionLifecycle::DeliveryFailed(_)
             | SubscriptionLifecycle::Closing
             | SubscriptionLifecycle::DeletionFailed => true,
-            SubscriptionLifecycle::Interrupted(_) => false,
+            SubscriptionLifecycle::Interrupted(_) | SubscriptionLifecycle::Ended(_) => false,
+        }
+    }
+
+    /// Whether an event the exchange of `generation` queued belongs to the generation the entry
+    /// delivers. An ended generation delivers what preceded its end until the caller reads the
+    /// end, and a consumer overflow, which dropped the end together with the events before it.
+    fn delivers(&self, event: &SubscriptionEvent, generation: &Arc<()>) -> bool {
+        if !Arc::ptr_eq(&self.generation, generation) || self.generation_ended {
+            return false;
+        }
+        let handle = event.subscription();
+        match &self.lifecycle {
+            SubscriptionLifecycle::Active(active)
+            | SubscriptionLifecycle::DeliveryFailed(active) => active == handle,
+            SubscriptionLifecycle::Ended(ended) => {
+                if ended != handle {
+                    return false;
+                }
+                if let SubscriptionEvent::ConsumerOverflow(_) = event {
+                    return true;
+                }
+                self.unread_end.is_some()
+            }
+            SubscriptionLifecycle::Creating
+            | SubscriptionLifecycle::Restoring(_)
+            | SubscriptionLifecycle::Interrupted(_)
+            | SubscriptionLifecycle::Closing
+            | SubscriptionLifecycle::DeletionFailed => false,
         }
     }
 }
 
-/// What the registry reports about a subscription without the server sending it.
+/// What the registry reports about a subscription itself, rather than the exchange's queue.
 enum RegistryEvent {
     Interrupted(SubscriptionInterruption),
     RestorationFailed(SubscriptionRestorationFailure),
+    /// An end the server sent that its exchange ended before the caller read.
+    Ended(SubscriptionEnded),
 }
 
 impl RegistryEvent {
@@ -147,6 +188,7 @@ impl RegistryEvent {
         match self {
             Self::Interrupted(interrupted) => &interrupted.subscription.name,
             Self::RestorationFailed(failure) => &failure.subscription.name,
+            Self::Ended(ended) => &ended.subscription.name,
         }
     }
 }
@@ -156,6 +198,7 @@ impl From<RegistryEvent> for SubscriptionEvent {
         match event {
             RegistryEvent::Interrupted(interrupted) => Self::Interrupted(interrupted),
             RegistryEvent::RestorationFailed(failure) => Self::RestorationFailed(failure),
+            RegistryEvent::Ended(ended) => Self::Ended(ended),
         }
     }
 }
@@ -167,7 +210,8 @@ struct State {
     /// because a deletion's outcome resolves the name, whatever entry holds it by then.
     deletions: HashMap<SubscriptionName, Deletion>,
     /// Unread events in the order they happened. Each subscription has at most one unread
-    /// interruption and one unread restoration failure, so they are bounded by the entries.
+    /// interruption, one unread restoration failure and one unread end, so they are bounded by the
+    /// entries.
     events: VecDeque<RegistryEvent>,
 }
 
@@ -192,6 +236,12 @@ impl State {
         });
         self.events
             .push_back(RegistryEvent::RestorationFailed(failure));
+    }
+
+    /// Reports an end whose exchange ended before the caller read it. It is the last event of its
+    /// generation, and a generation ends once.
+    fn report_end(&mut self, ended: SubscriptionEnded) {
+        self.events.push_back(RegistryEvent::Ended(ended));
     }
 
     /// Drops the unread events of a subscription its caller no longer wants.
@@ -220,6 +270,9 @@ pub(crate) enum Cancellation {
     /// No open session holds the subscription, so the client stopped wanting it without asking
     /// the server.
     Closed,
+    /// The server ended the subscription's generation, so nothing is left for it to delete and
+    /// the client stopped wanting it without asking.
+    Ended,
     /// A session may hold the subscription, or the client never held the name; the attempt asks
     /// the server to delete it.
     Delete(DeleteAttempt),
@@ -290,24 +343,34 @@ impl DesiredSubscriptions {
                     SubscriptionLifecycle::Closing
                         | SubscriptionLifecycle::DeletionFailed
                         | SubscriptionLifecycle::DeliveryFailed(_)
+                        | SubscriptionLifecycle::Ended(_)
                 )
         })
     }
 
+    /// Starts creating a subscription under the contract's name, on the exchange of `generation`.
+    ///
+    /// A name the client holds is refused, except one whose generation the server ended: the
+    /// server takes the reused name as a new generation, which replaces the ended one here.
     pub(crate) fn begin(
         &self,
         contract: SubscriptionContract,
         generation: Arc<()>,
     ) -> Option<RestoreAttempt> {
+        let name = contract.create.name.clone();
         let mut state = self.inner.state.lock();
-        if state.entries.contains_key(&contract.create.name)
-            || state.deletions.contains_key(&contract.create.name)
-        {
+        if state.deletions.contains_key(&name) {
             return None;
+        }
+        if let Some(existing) = state.entries.get(&name) {
+            let SubscriptionLifecycle::Ended(_) = existing.lifecycle else {
+                return None;
+            };
+            state.forget_events(&name);
         }
         let ticket = Arc::new(());
         state.entries.insert(
-            contract.create.name.clone(),
+            name,
             DesiredSubscription {
                 contract: contract.clone(),
                 lifecycle: SubscriptionLifecycle::Creating,
@@ -316,6 +379,7 @@ impl DesiredSubscriptions {
                 attempt_in_flight: true,
                 acknowledged: false,
                 generation_ended: false,
+                unread_end: None,
             },
         );
         drop(state);
@@ -329,8 +393,9 @@ impl DesiredSubscriptions {
 
     /// Starts deleting `name` on the exchange of `generation`.
     ///
-    /// A subscription no open session holds is deleted here: its session ended, or the session
-    /// now open refused to open it again, so there is nothing for a server to delete.
+    /// A subscription no open session holds is deleted here: its session ended, the session now
+    /// open refused to open it again, or the server ended its generation, so there is nothing for
+    /// a server to delete.
     pub(crate) fn cancel(&self, name: &SubscriptionName, generation: Arc<()>) -> Cancellation {
         let mut state = self.inner.state.lock();
         if state.deletions.contains_key(name) {
@@ -346,9 +411,16 @@ impl DesiredSubscriptions {
             Some(_) | None => false,
         };
         if tracked && !held {
-            state.entries.remove(name);
+            let released = state.entries.remove(name);
             drop(state);
             self.inner.changed.send_replace(());
+            if let Some(DesiredSubscription {
+                lifecycle: SubscriptionLifecycle::Ended(_),
+                ..
+            }) = released
+            {
+                return Cancellation::Ended;
+            }
             return Cancellation::Closed;
         }
         let ticket = Arc::new(());
@@ -388,6 +460,8 @@ impl DesiredSubscriptions {
         self.inner.changed.send_replace(());
     }
 
+    /// Records that the exchange's queue dropped the events of `handle` it could not retain, and
+    /// reports the overflow as the last event of that generation's delivery.
     pub(crate) fn overflow(&self, handle: &SubscriptionHandle, generation: &Arc<()>) {
         let mut state = self.inner.state.lock();
         let Some(entry) = state.entries.get_mut(&handle.name) else {
@@ -396,11 +470,43 @@ impl DesiredSubscriptions {
         if !Arc::ptr_eq(&entry.generation, generation) || entry.generation_ended {
             return;
         }
-        if let SubscriptionLifecycle::Active(active) = &entry.lifecycle
-            && active == handle
-        {
-            entry.lifecycle = SubscriptionLifecycle::DeliveryFailed(handle.clone());
+        match &entry.lifecycle {
+            SubscriptionLifecycle::Active(active) if active == handle => {
+                entry.lifecycle = SubscriptionLifecycle::DeliveryFailed(handle.clone());
+            }
+            // The end itself did not fit, and was dropped with the events before it.
+            SubscriptionLifecycle::Ended(ended) if ended == handle => {
+                entry.unread_end = None;
+            }
+            _ => {}
         }
+        drop(state);
+        self.inner.changed.send_replace(());
+    }
+
+    /// Applies the end of a generation the server ended, which is the generation's last frame.
+    ///
+    /// The exchange reader applies it before it queues the end's event, so the subscription reads
+    /// ended to a caller that has not read the end yet, and a session lost before the caller reads
+    /// it does not restore the generation. A generation whose delivery already failed ends without
+    /// an end to read: the consumer overflow stays its last event.
+    pub(crate) fn end(&self, ended: &SubscriptionEnded, generation: &Arc<()>) {
+        let mut state = self.inner.state.lock();
+        let Some(entry) = state.entries.get_mut(&ended.subscription.name) else {
+            return;
+        };
+        if !Arc::ptr_eq(&entry.generation, generation) || entry.generation_ended {
+            return;
+        }
+        match &entry.lifecycle {
+            SubscriptionLifecycle::Active(active) if *active == ended.subscription => {
+                entry.unread_end = Some(ended.clone());
+            }
+            SubscriptionLifecycle::DeliveryFailed(failed) if *failed == ended.subscription => {}
+            // The entry no longer delivers the generation that ended.
+            _ => return,
+        }
+        entry.lifecycle = SubscriptionLifecycle::Ended(ended.subscription.clone());
         drop(state);
         self.inner.changed.send_replace(());
     }
@@ -422,6 +528,9 @@ impl DesiredSubscriptions {
         }
         entry.attempt_in_flight = false;
         match opened {
+            // The reader applied the reply that opened the generation when it arrived, before the
+            // end that followed it, so the end stands.
+            _ if let SubscriptionLifecycle::Ended(_) = entry.lifecycle => {}
             Some(handle) if entry.generation_ended => {
                 if let SubscriptionLifecycle::Closing = entry.lifecycle {
                     state.entries.remove(name);
@@ -493,10 +602,15 @@ impl DesiredSubscriptions {
         true
     }
 
+    /// Ends every subscription the exchange of `generation` held. An acknowledged one is
+    /// interrupted until a later exchange restores it, and one the server ended stays ended: its
+    /// end is reported here if the caller has not read it, because the exchange's queue discards
+    /// the events the caller did not read.
     pub(crate) fn ended(&self, generation: &Arc<()>) {
         let mut state = self.inner.state.lock();
         let mut closed = Vec::new();
         let mut interruptions = Vec::new();
+        let mut unread_ends = Vec::new();
         for (name, entry) in &mut state.entries {
             if !Arc::ptr_eq(&entry.generation, generation) || entry.generation_ended {
                 continue;
@@ -512,6 +626,11 @@ impl DesiredSubscriptions {
                 }
                 SubscriptionLifecycle::Restoring(previous) => {
                     entry.lifecycle = SubscriptionLifecycle::Interrupted(previous.clone());
+                }
+                SubscriptionLifecycle::Ended(_) => {
+                    if let Some(unread) = entry.unread_end.take() {
+                        unread_ends.push(unread);
+                    }
                 }
                 SubscriptionLifecycle::Closing | SubscriptionLifecycle::DeletionFailed => {
                     closed.push(name.clone());
@@ -530,6 +649,9 @@ impl DesiredSubscriptions {
             .retain(|_, deletion| !Arc::ptr_eq(&deletion.generation, generation));
         for interruption in interruptions {
             state.interrupted(interruption);
+        }
+        for unread in unread_ends {
+            state.report_end(unread);
         }
         drop(state);
         self.inner.changed.send_replace(());
@@ -566,25 +688,25 @@ impl DesiredSubscriptions {
         attempt
     }
 
-    pub(crate) fn can_deliver(&self, handle: &SubscriptionHandle, generation: &Arc<()>) -> bool {
-        let state = self.inner.state.lock();
-        let Some(entry) = state.entries.get(&handle.name) else {
+    /// Whether an event the exchange of `generation` queued reaches the caller. Handing the caller
+    /// the end of a generation the server ended records that the caller read it, so the registry
+    /// never reports that end again.
+    pub(crate) fn admit(&self, event: &SubscriptionEvent, generation: &Arc<()>) -> bool {
+        let mut state = self.inner.state.lock();
+        let Some(entry) = state.entries.get_mut(&event.subscription().name) else {
             return false;
         };
-        if !Arc::ptr_eq(&entry.generation, generation) || entry.generation_ended {
+        if !entry.delivers(event, generation) {
             return false;
         }
-        match &entry.lifecycle {
-            SubscriptionLifecycle::Active(active) => active == handle,
-            SubscriptionLifecycle::DeliveryFailed(active) => active == handle,
-            SubscriptionLifecycle::Creating | SubscriptionLifecycle::Restoring(_) => false,
-            SubscriptionLifecycle::Interrupted(_)
-            | SubscriptionLifecycle::Closing
-            | SubscriptionLifecycle::DeletionFailed => false,
+        if let SubscriptionEvent::Ended(_) = event {
+            entry.unread_end = None;
         }
+        true
     }
 
-    /// Takes the earliest unread interruption or restoration failure.
+    /// Takes the earliest event the registry reports itself: an interruption, a failed
+    /// restoration, or an end its exchange ended before the caller read it.
     pub(crate) fn take_event(&self) -> Option<SubscriptionEvent> {
         let event = self.inner.state.lock().events.pop_front()?;
         Some(SubscriptionEvent::from(event))

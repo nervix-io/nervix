@@ -509,6 +509,14 @@ earlier attempt left unanswered, with the bytes and members it was first written
 emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 
+A native client emitter reaches its success boundary only on application ACK. Force flush prepares
+its bounded Arrow IPC batches, but a waiting consumer read or a batch already sent to a session
+does not drain them. Closing public sessions during intake stop detaches their consumers and
+revokes attempts; remaining prepared batches wait for another consumer within the physical drain
+deadline. On deadline expiry terminal teardown cancels the emitter task and discards volatile
+attempt history. An attached upstream source may replay after restart, including a batch whose
+application effect happened but whose ACK was lost. No durable consumer cursor is restored.
+
 An HTTP emitter force-flushes its collected records into one request per eligible record, then
 waits for complete successful final response headers. Each attempt and retry wait remains bounded
 by the remaining physical drain deadline, even in a paced domain. A request still unanswered at
@@ -614,7 +622,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Restored backup state: WASM guest saves, Kafka domain offsets and branch lifecycle | A restore installs the archive's verified checkpoints into the stopped domain before its next `START` | Reopens from the installed checkpoints on each assigned owner and replica; the next `START` continues the saved guest generation, source positions and branch incarnations |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
-| Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process, and every forwarded producer of the node ends as `owner lost` |
+| Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 

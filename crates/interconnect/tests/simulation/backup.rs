@@ -17,7 +17,7 @@ use nervix_interconnect::{
     },
 };
 use nervix_models::CoordinationIdentity;
-use parking_lot::Mutex;
+use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
@@ -287,7 +287,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
             let mut finished = finished_rx;
             tokio::time::timeout(Duration::from_secs(70), async {
                 while *finished.borrow() < 2 {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     finished.changed().await.assured("fixture hosts stay alive");
                 }
             })

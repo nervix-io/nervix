@@ -11,11 +11,11 @@
 
 use std::{
     collections::BTreeSet,
-    io::{self, Write},
+    io,
+    io::Write,
     net::SocketAddr,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Mutex as StdMutex,
 };
 
 use arch_into::ArchInto as _;
@@ -39,7 +39,14 @@ use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::{
+    runtime::Handle,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        blocking::Mutex,
+    },
+    task::block_in_place,
+};
 use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
@@ -47,7 +54,7 @@ use reedline::{
     Suggestion,
 };
 use thiserror::Error;
-use tokio::{runtime::Handle, signal, task::block_in_place};
+use tokio::signal;
 use triomphe::Arc;
 
 mod backup;
@@ -233,7 +240,7 @@ enum CliTlsRequirement {
 struct GrpcCompleter {
     runtime: Handle,
     client: Client,
-    buffer_prefix: Arc<StdMutex<String>>,
+    buffer_prefix: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Error)]
@@ -289,7 +296,7 @@ async fn collect_suggestions(
     let mut seen = BTreeSet::new();
     let mut suggestions = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let page = client
             .suggest(input.clone(), cursor, 100, continuation.take())
             .await
@@ -314,10 +321,7 @@ async fn collect_suggestions(
 
 impl Completer for GrpcCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let prefix = match self.buffer_prefix.lock() {
-            Ok(prefix) => prefix.clone(),
-            Err(_) => String::new(),
-        };
+        let prefix = self.buffer_prefix.lock().clone();
         let pos = line.floor_char_boundary(pos.min(line.len()));
         let Some(cursor) = prefix.len().checked_add(pos) else {
             return Vec::new();
@@ -401,7 +405,7 @@ impl GrpcCompleter {
     }
 }
 
-#[tokio::main]
+#[nervix_primitives::main]
 async fn main() -> Result<(), StackReport<ClientError>> {
     let args = Args::parse();
     match args.subcommand.clone() {
@@ -605,7 +609,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         );
         return Ok(());
     }
-    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let (event_sender, mut event_receiver) =
+        nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
     spawn_event_collectors(client.clone(), event_sender.clone());
     if let Some(command) = args.command {
@@ -613,7 +618,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         return Ok(());
     }
 
-    let buffer_prefix = Arc::new(StdMutex::new(String::new()));
+    let buffer_prefix = Arc::new(Mutex::new(String::new()));
 
     let completer = GrpcCompleter {
         runtime: Handle::current(),
@@ -644,9 +649,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             )
         };
 
-        if let Ok(mut guard) = buffer_prefix.lock() {
-            *guard = buffer.clone();
-        }
+        *buffer_prefix.lock() = buffer.clone();
 
         let mut line_editor = create_line_editor(completer.clone())?;
 
@@ -976,8 +979,8 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
     let interrupt = signal::ctrl_c();
     tokio::pin!(interrupt);
     loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             event = client.next_domain_clock_event() => {
                 let event = event.change_context(ClientError::ClockEventRead)?;
                 println!("{}", format_domain_clock_event(&event));
@@ -1237,7 +1240,7 @@ async fn execute_upload_and_print(
     let progress_uploaded = Arc::clone(&uploaded);
     let progress_finished = Arc::clone(&finished);
     let progress_identifier = identifier.clone();
-    let progress_task = tokio::spawn(async move {
+    let progress_task = nervix_primitives::task::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
         let frames = ["|", "/", "-", "\\"];
         let mut frame_index = 0_usize;
@@ -1329,12 +1332,12 @@ fn human_bytes(bytes: u64) -> String {
 
 #[derive(Clone)]
 struct EventLineSender {
-    sender: tokio::sync::mpsc::Sender<String>,
+    sender: nervix_primitives::sync::mpsc::Sender<String>,
     dropped: Arc<AtomicU64>,
 }
 
 impl EventLineSender {
-    fn new(sender: tokio::sync::mpsc::Sender<String>) -> Self {
+    fn new(sender: nervix_primitives::sync::mpsc::Sender<String>) -> Self {
         Self {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
@@ -1351,7 +1354,7 @@ impl EventLineSender {
         }
         match self.sender.try_send(line) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(nervix_primitives::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.dropped
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                         // The displayed gap count clamps once it reaches its representable limit.
@@ -1362,7 +1365,7 @@ impl EventLineSender {
                     })
                     .discarded("the updated drop count is read when the terminal next drains");
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+            Err(nervix_primitives::sync::mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 
@@ -1397,7 +1400,7 @@ fn print_event_gap(dropped: u64, output: EventOutput) {
 
 fn spawn_event_collectors(client: Client, sender: EventLineSender) {
     for stream in EventStream::ALL {
-        tokio::spawn(stream.collect(client.clone(), sender.clone()));
+        nervix_primitives::task::spawn(stream.collect(client.clone(), sender.clone()));
     }
 }
 
@@ -1429,7 +1432,7 @@ impl EventStream {
     /// other failure is printed and reading goes on.
     async fn collect(self, client: Client, sender: EventLineSender) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.next_lines(&client).await {
                 Ok(lines) => {
                     for line in lines {
@@ -1499,11 +1502,11 @@ impl EventStream {
 }
 
 fn spawn_event_loggers(client: Client, output: EventOutput) {
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let sender = EventLineSender::new(sender);
     let dropped = sender.dropped.clone();
     spawn_event_collectors(client, sender);
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         while let Some(line) = receiver.blocking_recv() {
             print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
             output.print(&line);
@@ -1512,7 +1515,10 @@ fn spawn_event_loggers(client: Client, output: EventOutput) {
     });
 }
 
-fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>, sender: &EventLineSender) {
+fn drain_event_queue(
+    receiver: &mut nervix_primitives::sync::mpsc::Receiver<String>,
+    sender: &EventLineSender,
+) {
     for _ in 0..EVENT_BUFFER_RECORDS {
         let Ok(line) = receiver.try_recv() else {
             break;
@@ -1716,7 +1722,7 @@ mod tests {
 
     #[test]
     fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+        let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
         let sink = EventLineSender::new(sender);
         for _ in 0..EVENT_BUFFER_RECORDS {
             sink.push("é".repeat(EVENT_LINE_BYTES));
@@ -1737,7 +1743,7 @@ mod tests {
 
     #[test]
     fn draining_events_resets_the_visible_gap_after_a_full_queue() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(2);
         let sink = EventLineSender::new(sender);
         sink.push("first".to_string());
         sink.push("second".to_string());
@@ -1755,7 +1761,7 @@ mod tests {
 
     #[test]
     fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (sender, receiver) = nervix_primitives::sync::mpsc::channel(1);
         let sink = EventLineSender::new(sender);
         sink.push("retained".to_string());
         sink.dropped.store(u64::MAX, Ordering::Relaxed);

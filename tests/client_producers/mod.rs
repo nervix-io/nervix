@@ -34,7 +34,7 @@ use nervix_models::{
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
     IngestorName, ParseAsType, SchemaField,
 };
-use tokio::sync::watch;
+use nervix_primitives::sync::watch;
 
 use super::*;
 use crate::common::producer_session::{ProducerFrame, RawProducerSession};
@@ -51,7 +51,7 @@ const DEFAULT_PRODUCER_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Default)]
 pub(crate) struct ScenarioProducers {
     /// Raw WebSocket sessions by the name a scenario gave them.
-    sessions: BTreeMap<String, RawProducerSession>,
+    pub(crate) sessions: BTreeMap<String, RawProducerSession>,
     producers: BTreeMap<String, ScenarioProducer>,
     submissions: BTreeMap<String, ScenarioSubmission>,
 }
@@ -201,12 +201,12 @@ struct OpenRefused {
     message: String,
 }
 
-fn scenario_domain(world: &ScenarioWorld) -> DomainName {
+pub(crate) fn scenario_domain(world: &ScenarioWorld) -> DomainName {
     DomainName::parse(&world.domain).expect("scenario domains are valid domain names")
 }
 
 /// The fields a producer expects, written as the column list of `CREATE SCHEMA`.
-fn expected_fields(text: &str) -> Vec<SchemaField> {
+pub(crate) fn expected_fields(text: &str) -> Vec<SchemaField> {
     let source = format!("CREATE SCHEMA expected_by_producer ({text});");
     let parsed = nervix_nspl::client_statement::parse_client_statement_sources(&source)
         .unwrap_or_else(|error| panic!("'{text}' is not a schema column list: {error:?}"));
@@ -500,7 +500,7 @@ async fn open_named_producer(
     let deadline = Instant::now() + within;
     let producer = expand_placeholders(world, &producer);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let opened = open_producer(world, session.clone(), &ingestor, &fields, limits).await;
         let refused = match opened {
             Ok(opened) => {
@@ -553,7 +553,7 @@ async fn refused_open_with(
 ) {
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let opened = open_producer(world, session.clone(), &ingestor, &fields, limits).await;
         let Err(refused) = opened else {
             panic!("a producer on ingestor '{ingestor}' opened although it must be refused");
@@ -856,7 +856,7 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 SubmittedBody::Written(body) => ProducerBatch::from_arrow_ipc(body),
             };
             let (identified, id) = watch::channel(None);
-            let wait = tokio::spawn(async move {
+            let wait = nervix_primitives::task::spawn(async move {
                 let submitted = native.submit(body).await;
                 let id = submitted.map_err(|error| error.to_string())?;
                 identified.send_replace(Some(id));
@@ -923,6 +923,63 @@ async fn when_producer_submits_rows(
         .clone();
     let rows = table_batch(&fields, step);
     submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
+}
+
+#[when(expr = "producer {string} submits batch {string} with one {int}-byte id")]
+async fn when_producer_submits_long_id(
+    world: &mut ScenarioWorld,
+    producer: String,
+    batch: String,
+    length: usize,
+) {
+    let fields = world
+        .scenario_producer(&producer)
+        .description()
+        .fields
+        .clone();
+    assert_eq!(
+        fields.len(),
+        2,
+        "long-id scenario uses id and amount fields"
+    );
+    let columns: Vec<ArrayRef> = vec![
+        StdArc::new(StringArray::from(vec!["x".repeat(length)])),
+        StdArc::new(Int64Array::from(vec![1])),
+    ];
+    let rows = RecordBatch::try_new(StdArc::new(SchemaField::arrow_schema(&fields)), columns)
+        .expect("long id and amount match the producer schema");
+    submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
+}
+
+#[then(expr = "batch {string} remains pending for {string}")]
+async fn then_batch_remains_pending(world: &mut ScenarioWorld, batch: String, duration: String) {
+    let duration = humantime::parse_duration(&duration).expect("a literal duration");
+    let submission = world
+        .producers
+        .submissions
+        .get(&batch)
+        .unwrap_or_else(|| panic!("batch '{batch}' was not submitted"));
+    match &submission.state {
+        SubmissionState::Native(native) => {
+            tokio::time::sleep(duration).await;
+            assert!(
+                native.answered.is_none()
+                    && native.wait.as_ref().is_some_and(|wait| !wait.is_finished()),
+                "batch '{batch}' completed before application ACK"
+            );
+        }
+        SubmissionState::Raw { session, request } => {
+            let raw = world
+                .producers
+                .sessions
+                .get(session)
+                .unwrap_or_else(|| panic!("WebSocket session '{session}' is not connected"));
+            assert!(
+                raw.reply(*request, duration).await.is_err(),
+                "batch '{batch}' completed before application ACK"
+            );
+        }
+    }
 }
 
 #[when(expr = "producer {string} submits batch {string} that is {string}")]
@@ -1123,7 +1180,7 @@ async fn when_producer_rejoins_batch(world: &mut ScenarioWorld, producer: String
         panic!("only the Rust client rejoins a submission");
     };
     let native = native.clone();
-    let wait = tokio::spawn(async move {
+    let wait = nervix_primitives::task::spawn(async move {
         let outcome = native.rejoin(id).await.map_err(|error| error.to_string())?;
         Ok(Answered {
             outcome: ObservedOutcome::from_native(outcome),
@@ -1155,7 +1212,7 @@ async fn then_producer_reports_admission(
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     let raw = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if native.admission() == expected {
                 return;
             }
@@ -1202,7 +1259,7 @@ async fn then_producer_ends(world: &mut ScenarioWorld, producer: String, expecte
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     let raw = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match native.end() {
                 Some(ProducerEnd::Ended { reason, message }) => {
                     assert_eq!(
@@ -1333,7 +1390,7 @@ async fn then_leader_describes_ingestor_with(
     let ingestor = expand_placeholders(world, &ingestor);
     let deadline = Instant::now() + within;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = running_leader_node(world).await;
         let described = world
             .cluster()

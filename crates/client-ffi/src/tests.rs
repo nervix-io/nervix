@@ -40,6 +40,7 @@ use crate::{
 };
 
 mod clock_events;
+mod domain_clock;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;
@@ -650,7 +651,7 @@ fn retained_references_keep_the_frame_until_the_last_one_is_released() {
         "a retained reference addresses the same event"
     );
     let second = Shared(second);
-    std::thread::spawn(move || drop(second))
+    nervix_primitives::thread::spawn(move || drop(second))
         .join()
         .assured("releasing on another thread does not panic");
     let mut again = ptr::null();
@@ -1277,7 +1278,7 @@ fn client_errors_are_classified_and_keep_their_causes() {
 
 #[test]
 fn a_token_bounds_a_call_by_cancellation_and_by_deadline() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .assured("a test runtime starts");

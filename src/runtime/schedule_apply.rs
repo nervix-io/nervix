@@ -445,7 +445,7 @@ impl Runtime {
         let mut relay_states_moved = false;
         let schedule_fingerprint = revision.ownership_handoff_fingerprint;
         for entity in reassignments {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let desired_node = Self::scheduled_node(revision, entity).ok_or_else(|| {
                 RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -539,7 +539,7 @@ impl Runtime {
                 None
             };
             for task in previous_tasks.unwrap_or_default() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 task.abort();
                 task.join_after_shutdown("placement").await;
             }
@@ -832,7 +832,7 @@ impl Runtime {
             .await?;
 
         for entity in entities {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if entity.kind == ModelKind::Relay {
                 let desired_node = revision.nodes.get(entity).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
@@ -929,7 +929,7 @@ impl Runtime {
                     services.remove_local_runtime_consumer(AckMode::Detached);
                 }
                 for task in previous_placement_tasks {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     task.abort();
                     task.join_after_shutdown("placement").await;
                 }
@@ -1157,6 +1157,13 @@ impl Runtime {
                         .emitter_tasks
                         .insert(entity.clone(), task);
                 }
+                #[cfg(feature = "testing")]
+                if had_old_task && !executes_locally {
+                    self.inner
+                        .fault_injection
+                        .pause_emitter_swap_after_detach_if_armed(domain, &emitter_name)
+                        .await;
+                }
                 continue;
             }
             if entity.kind == ModelKind::Reingestor {
@@ -1224,12 +1231,12 @@ impl Runtime {
                     }
                 };
                 for task in old_tasks {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     task.abort();
                     task.join_after_shutdown("scheduled node").await;
                 }
                 for runtime in old_entrypoints {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     runtime.shutdown().await;
                 }
 
@@ -1633,7 +1640,7 @@ impl Runtime {
         updates: &[DynamicExecutionUpdate],
     ) -> Result<(), RuntimeError> {
         for update in updates {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match update {
                 DynamicExecutionUpdate::RelayCapacity { relay, capacity } => {
                     self.set_relay_capacity(domain, relay, *capacity);
@@ -1954,7 +1961,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2018,7 +2025,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2094,7 +2101,7 @@ mod tests {
         assert!(execution.relay_registries.contains_key(&relay));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2217,7 +2224,7 @@ mod tests {
         assert!(!application.advances_beyond_applied(0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_largest_revision_still_suppresses_a_later_stale_cluster_state() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2292,7 +2299,7 @@ mod tests {
         assert!(execution.relay_registries.contains_key(&relay));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_application_leaves_its_revision_ready_to_apply_again() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2361,7 +2368,7 @@ mod tests {
         assert!(execution.relay_registries.contains_key(&relay));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2451,7 +2458,7 @@ mod tests {
             .expect("domain teardown must stop processor runtimes");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         let runtime = Runtime::default();
         attach_loopback_cluster(
@@ -2631,7 +2638,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         let runtime = Runtime::default();
         attach_loopback_cluster(

@@ -104,7 +104,7 @@ impl IngestionProbe {
             .checked_add(PUBLIC_PROBE_TIMEOUT)
             .assured("the public probe timeout fits the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .assured("the clock probe responds within the public probe timeout");
@@ -145,7 +145,7 @@ async fn clock_advances(
         .checked_add(humantime::parse_duration(&timeout).assured("scenario timeout is valid"))
         .assured("scenario timeout fits the monotonic clock");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = probe.clock(world).await;
         if now >= target {
             world
@@ -225,7 +225,7 @@ async fn retained_admission(
     ];
 
     for (index, candidate) in candidates.into_iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let sequence = i64::try_from(index)
             .assured("there are four candidates")
             .checked_add(1)

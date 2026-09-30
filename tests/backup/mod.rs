@@ -150,29 +150,31 @@ fn when_cli_backup_begins_in_background(
     let grpc_uri = world.cluster().grpc_uri(&node).expect("the node exists");
     let selected_domain = world.domain.clone();
     let scope = expand_placeholders(world, &scope);
-    world.background_backup = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut command = tokio::process::Command::new(scenario_cli_binary());
-        command.args([
-            "--server",
-            &grpc_uri,
-            "--domain",
-            &selected_domain,
-            "--username",
-            TEST_AUTH_USERNAME,
-            "--password",
-            TEST_AUTH_PASSWORD,
-        ]);
-        command.arg("backup");
-        command.args(scope.split_whitespace());
-        command
-            .arg("--output")
-            .arg(&archive)
-            .args(["--format", "json"]);
-        tokio::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
-            .await
-            .expect("the background backup finishes within its budget")
-            .expect("the CLI process starts")
-    })));
+    world.background_backup = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut command = tokio::process::Command::new(scenario_cli_binary());
+            command.args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &selected_domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+            ]);
+            command.arg("backup");
+            command.args(scope.split_whitespace());
+            command
+                .arg("--output")
+                .arg(&archive)
+                .args(["--format", "json"]);
+            tokio::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+                .await
+                .expect("the background backup finishes within its budget")
+                .expect("the CLI process starts")
+        },
+    )));
 }
 
 #[then(expr = "the backup cut for domain {string} has reached its pause")]

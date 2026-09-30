@@ -22,15 +22,18 @@ use nervix_models::{
     PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
-use nervix_recovery::Discarded as _;
-use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex, mpsc},
+use nervix_primitives::{
+    stream::wrappers::{ReceiverStream, TcpListenerStream},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     task::JoinHandle,
 };
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use nervix_recovery::Discarded as _;
+use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+use tokio::net::TcpListener;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -167,7 +170,7 @@ impl ServerExchange {
             ReplyDelivery::Frame(frame) => self.send(frame).await,
             ReplyDelivery::Transfer(parts) => {
                 for part in parts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     self.send(part).await;
                 }
             }
@@ -290,7 +293,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             };
             let mut archive = Vec::new();
             while let Some(frame) = inbound.message().await? {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let decoded = UploadMessage::decode(&frame)
                     .map_err(|error| Status::invalid_argument(error.to_string()))?;
                 let UploadMessage::Chunk(chunk) = decoded else {
@@ -410,7 +413,7 @@ impl TestServer {
             fail_upload_replies: fail_upload_replies.clone(),
             upload_reply_mode: upload_reply_mode.clone(),
         };
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             Server::builder()
                 .add_service(service)
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -453,7 +456,7 @@ impl TestServer {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn native_session_uses_ordered_fixture_addresses_and_original_host() {
     let mut server = TestServer::start().await;
     let authority = DnsAuthority::start_on_loopback()
@@ -499,7 +502,7 @@ async fn native_session_uses_ordered_fixture_addresses_and_original_host() {
     assert!(authority.questions_for(name) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
     let authority = DnsAuthority::start_on_loopback()
         .await
@@ -540,7 +543,7 @@ async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
     assert!(authority.questions_for(name) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn native_session_connection_error_preserves_the_typed_dns_failure() {
     let authority = DnsAuthority::start_on_loopback()
         .await
@@ -591,7 +594,7 @@ async fn native_session_connection_error_preserves_the_typed_dns_failure() {
     assert!(authority.questions_for(name) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn configured_seed_connects_when_the_primary_is_unavailable() {
     let mut seed = TestServer::start().await;
     let unused = TcpListener::bind("127.0.0.1:0")
@@ -617,7 +620,8 @@ async fn configured_seed_connects_when_the_primary_is_unavailable() {
     .assured("the configured seed accepts the session");
     let mut exchange = seed.next_exchange().await;
     let listing_client = client.clone();
-    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
     let request = exchange.next_request().await;
     assert!(matches!(request.request, ClientRequest::ListDomains));
     exchange
@@ -638,7 +642,7 @@ async fn configured_seed_connects_when_the_primary_is_unavailable() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_closed_session_recovers_through_a_configured_seed() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -658,11 +662,13 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     .assured("the primary accepts the session");
     let exchange = primary.next_exchange().await;
     let reading = client.clone();
-    let notice = tokio::spawn(async move { reading.next_server_event().await });
+    let notice = nervix_primitives::task::spawn(async move { reading.next_server_event().await });
     drop(exchange);
 
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let mut recovered = seed.next_exchange().await;
     let request = recovered.next_request().await;
     let ClientRequest::Command(sent) = request.request else {
@@ -711,7 +717,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -734,7 +740,10 @@ async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
         transaction_id: "tx-1".to_string(),
     };
     let inspector = client.clone();
-    let inspection = tokio::spawn(async move { inspector.inspect_transaction(target, None).await });
+    let inspection =
+        nervix_primitives::task::spawn(
+            async move { inspector.inspect_transaction(target, None).await },
+        );
     let first = first_exchange.next_request().await;
     assert!(matches!(
         first.request,
@@ -773,7 +782,7 @@ async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn typed_inspection_refreshes_the_attached_preview() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -782,7 +791,7 @@ async fn typed_inspection_refreshes_the_attached_preview() {
         .await;
     let mut exchange = server.next_exchange().await;
     let inspecting = client.clone();
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         inspecting
             .inspect_transaction(
                 TransactionInspectionTarget::Transaction {
@@ -822,13 +831,14 @@ async fn typed_inspection_refreshes_the_attached_preview() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn attaching_a_transaction_adopts_its_domain_and_status() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
     let attaching = client.clone();
-    let task = tokio::spawn(async move { attaching.attach_transaction("tx-1").await });
+    let task =
+        nervix_primitives::task::spawn(async move { attaching.attach_transaction("tx-1").await });
     let request = exchange.next_request().await;
     let ClientRequest::AttachTransaction(sent) = request.request else {
         panic!("an attach request is sent");
@@ -864,14 +874,14 @@ async fn attaching_a_transaction_adopts_its_domain_and_status() {
     assert_eq!(client.transaction_status().await, Some(status));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
     for query in [
         "BEGIN TRANSACTION;",
         "CREATE SCHEMA recovered_record (id I64);",
         "COMMIT;",
     ] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut primary = TestServer::start().await;
         let mut seed = TestServer::start().await;
         let seed_url = Url::parse(&format!("http://{}", seed.address))
@@ -891,7 +901,9 @@ async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
         let mut first_exchange = primary.next_exchange().await;
         let execution = client.prepare_execution(query).await;
         let command_client = client.clone();
-        let task = tokio::spawn(async move { command_client.execute_prepared(&execution).await });
+        let task = nervix_primitives::task::spawn(async move {
+            command_client.execute_prepared(&execution).await
+        });
         let first = first_exchange.next_request().await;
         let ClientRequest::Command(first_command) = first.request else {
             panic!("the client submitted a command");
@@ -937,7 +949,7 @@ async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     let mut server = TestServer::start().await;
     let options = ConnectOptions {
@@ -956,7 +968,10 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
     let expected = execution.reference().clone();
     let command_client = client.clone();
-    let task = tokio::spawn(async move { command_client.execute_prepared(&execution).await });
+    let task =
+        nervix_primitives::task::spawn(
+            async move { command_client.execute_prepared(&execution).await },
+        );
     let request = exchange.next_request().await;
     let ClientRequest::Command(sent) = request.request else {
         panic!("the command was sent");
@@ -972,7 +987,7 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     assert_eq!(reference, expected);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -997,9 +1012,12 @@ async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
         .await;
 
     let listing_client = client.clone();
-    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let first = exchange.next_request().await;
     let second = exchange.next_request().await;
     assert_ne!(first.request_id, second.request_id);
@@ -1048,7 +1066,7 @@ async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
     assert_eq!(observed, tenant_domains());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_domain_list_recovers_after_its_session_closes() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -1067,7 +1085,8 @@ async fn a_domain_list_recovers_after_its_session_closes() {
     .assured("the primary accepts the session");
     let mut first_exchange = primary.next_exchange().await;
     let listing_client = client.clone();
-    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
     let first = first_exchange.next_request().await;
     assert!(matches!(first.request, ClientRequest::ListDomains));
     drop(first_exchange);
@@ -1093,7 +1112,7 @@ async fn a_domain_list_recovers_after_its_session_closes() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1108,7 +1127,8 @@ async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values()
     .with_page(2, None)
     .assured("two choices fit the bounded page size");
     let choice_client = client.clone();
-    let choices = tokio::spawn(async move { choice_client.lookup_choices(lookup).await });
+    let choices =
+        nervix_primitives::task::spawn(async move { choice_client.lookup_choices(lookup).await });
 
     let request = exchange.next_request().await;
     let ClientRequest::Choice(lookup) = request.request else {
@@ -1154,7 +1174,7 @@ async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values()
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_suggestion_recovers_after_its_session_closes() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -1173,8 +1193,9 @@ async fn a_suggestion_recovers_after_its_session_closes() {
     .assured("the primary accepts the session");
     let mut first_exchange = primary.next_exchange().await;
     let suggestion_client = client.clone();
-    let suggestion =
-        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+    let suggestion = nervix_primitives::task::spawn(async move {
+        suggestion_client.suggest("CREATE ", 7, 64, None).await
+    });
     let first = first_exchange.next_request().await;
     assert!(matches!(first.request, ClientRequest::Suggest(_)));
     drop(first_exchange);
@@ -1210,7 +1231,7 @@ async fn a_suggestion_recovers_after_its_session_closes() {
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1218,20 +1239,23 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
 
     for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
         let suggestion_client = client.clone();
-        let suggestion =
-            tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+        let suggestion = nervix_primitives::task::spawn(async move {
+            suggestion_client.suggest("CREATE ", 7, 64, None).await
+        });
         let listing_client = client.clone();
-        let listing = tokio::spawn(async move { listing_client.list_domains().await });
+        let listing =
+            nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
         let command_client = client.clone();
-        let command =
-            tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+        let command = nervix_primitives::task::spawn(async move {
+            command_client.execute("SHOW CLUSTER STATUS;").await
+        });
         let mut requests = Vec::new();
         for _ in 0..3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             requests.push(exchange.next_request().await);
         }
         for index in order {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = &requests[index];
             let body = match &request.request {
                 ClientRequest::Suggest(suggest) => {
@@ -1287,14 +1311,16 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn suggestion_finishes_while_a_command_reply_is_pending() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let command_request = exchange.next_request().await;
     let ClientRequest::Command(command_body) = &command_request.request else {
         panic!("the first request is the pending command");
@@ -1302,8 +1328,9 @@ async fn suggestion_finishes_while_a_command_reply_is_pending() {
     let execution_reference = command_body.execution_reference.clone();
 
     let suggestion_client = client.clone();
-    let suggestion =
-        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+    let suggestion = nervix_primitives::task::spawn(async move {
+        suggestion_client.suggest("CREATE ", 7, 64, None).await
+    });
     let suggestion_request = exchange.next_request().await;
     assert!(matches!(
         suggestion_request.request,
@@ -1348,14 +1375,17 @@ async fn suggestion_finishes_while_a_command_reply_is_pending() {
         .assured("the command succeeds");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reply_larger_than_a_frame_arrives_in_parts() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW DOMAINS;").await });
+    let command =
+        nervix_primitives::task::spawn(
+            async move { command_client.execute("SHOW DOMAINS;").await },
+        );
     let request = exchange.next_request().await;
     let ClientRequest::Command(command_request) = request.request else {
         panic!("the statement is sent as a command");
@@ -1372,7 +1402,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
     };
     assert!(parts.len() > 2);
     for (index, part) in parts.enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         exchange.send(part).await;
         if index == 0 {
             // An unsolicited message may arrive between the parts of a reply.
@@ -1487,14 +1517,14 @@ fn opened_reply(handle: SubscriptionHandle) -> ReplyBody {
     })
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn subscription_rows_render_against_the_schema_the_subscription_opened_with() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let subscribe_client = client.clone();
-    let subscribe = tokio::spawn(async move {
+    let subscribe = nervix_primitives::task::spawn(async move {
         subscribe_client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -1567,14 +1597,14 @@ async fn subscription_rows_render_against_the_schema_the_subscription_opened_wit
     assert_eq!(ended.subscription, subscription(1));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let subscribe_client = client.clone();
-    let subscribe = tokio::spawn(async move {
+    let subscribe = nervix_primitives::task::spawn(async move {
         subscribe_client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -1612,15 +1642,16 @@ async fn a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription() 
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_command_waits_for_an_election_and_is_sent_again_with_its_reference() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let command_client = client.clone();
-    let command =
-        tokio::spawn(async move { command_client.execute("CREATE DOMAIN orders;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("CREATE DOMAIN orders;").await
+    });
     let first = exchange.next_request().await;
     let ClientRequest::Command(first_command) = first.request else {
         panic!("the statement is sent as a command");
@@ -1673,7 +1704,7 @@ async fn a_command_waits_for_an_election_and_is_sent_again_with_its_reference() 
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_command_redirect_from_a_preopened_channel_keeps_its_execution_reference() {
     let mut primary = TestServer::start().await;
     let mut leader = TestServer::start().await;
@@ -1689,7 +1720,7 @@ async fn a_command_redirect_from_a_preopened_channel_keeps_its_execution_referen
         .assured("the preopened channel starts a session");
     let mut first_exchange = primary.next_exchange().await;
     let command_client = client.clone();
-    let command = tokio::spawn(async move {
+    let command = nervix_primitives::task::spawn(async move {
         command_client
             .execute("CREATE SCHEMA redirected (id I64);")
             .await
@@ -1750,7 +1781,7 @@ fn write_file(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).assured("the test directory accepts files");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1806,7 +1837,7 @@ async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -1855,7 +1886,7 @@ async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
     assert!(outcome.succeeded());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_upload_redirect_keeps_its_identity_and_archive() {
     let mut primary = TestServer::start().await;
     let mut leader = TestServer::start().await;
@@ -1891,7 +1922,7 @@ async fn an_upload_redirect_keeps_its_identity_and_archive() {
     assert!(outcome.succeeded());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_prepared_upload_uses_its_captured_domain() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1916,13 +1947,13 @@ async fn a_prepared_upload_uses_its_captured_domain() {
     assert_eq!(received.start.upload_identity, *prepared.upload_identity());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn malformed_upload_replies_are_rejected_by_their_correlations() {
     for mode in [
         UploadReplyMode::WrongIdentity,
         UploadReplyMode::WrongRequestId,
     ] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut server = TestServer::start().await;
         *server.upload_reply_mode.lock().await = Some(mode);
         let client = server.connect().await;
@@ -1947,7 +1978,7 @@ async fn malformed_upload_replies_are_rejected_by_their_correlations() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn upload_permission_denial_is_reported_without_retry() {
     let mut server = TestServer::start().await;
     *server.upload_reply_mode.lock().await = Some(UploadReplyMode::Reject);
@@ -1990,14 +2021,17 @@ fn clock_in(
     crate::DomainClockObservation { generation, state }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn domain_clock_statements_are_sent_as_typed_requests_for_the_active_domain() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let attaching = client.clone();
-    let attach = tokio::spawn(async move { attaching.execute("ATTACH DOMAIN CLOCK;").await });
+    let attach =
+        nervix_primitives::task::spawn(
+            async move { attaching.execute("ATTACH DOMAIN CLOCK;").await },
+        );
     let request = exchange.next_request().await;
     let ClientRequest::AttachDomainClock(sent) = request.request else {
         panic!("ATTACH DOMAIN CLOCK is sent as an attach request");
@@ -2051,7 +2085,10 @@ async fn domain_clock_statements_are_sent_as_typed_requests_for_the_active_domai
     );
 
     let detaching = client.clone();
-    let detach = tokio::spawn(async move { detaching.execute("detach domain clock").await });
+    let detach =
+        nervix_primitives::task::spawn(
+            async move { detaching.execute("detach domain clock").await },
+        );
     let request = exchange.next_request().await;
     let ClientRequest::DetachDomainClock(sent) = request.request else {
         panic!("DETACH DOMAIN CLOCK is sent as a detach request");
@@ -2075,7 +2112,10 @@ async fn domain_clock_statements_are_sent_as_typed_requests_for_the_active_domai
     assert_eq!(client.domain_clock(&domain("tenant")), None);
 
     let refusing = client.clone();
-    let refused = tokio::spawn(async move { refusing.execute("DETACH DOMAIN CLOCK;").await });
+    let refused =
+        nervix_primitives::task::spawn(
+            async move { refusing.execute("DETACH DOMAIN CLOCK;").await },
+        );
     let request = exchange.next_request().await;
     exchange
         .reply(
@@ -2098,7 +2138,7 @@ async fn domain_clock_statements_are_sent_as_typed_requests_for_the_active_domai
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn domain_clock_statements_need_an_active_domain_and_no_transaction() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -2141,15 +2181,16 @@ async fn domain_clock_statements_need_an_active_domain_and_no_transaction() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let attaching = client.clone();
-    let attach =
-        tokio::spawn(async move { attaching.attach_domain_clock(domain("missing")).await });
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("missing")).await
+    });
     let request = exchange.next_request().await;
     let not_found = crate::DomainClockAttachOutcome {
         disposition: crate::DomainClockAttachDisposition::DomainNotFound(domain("missing")),
@@ -2172,7 +2213,9 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
     assert_eq!(client.domain_clock(&domain("missing")), None);
 
     let detaching = client.clone();
-    let detach = tokio::spawn(async move { detaching.detach_domain_clock(domain("tenant")).await });
+    let detach = nervix_primitives::task::spawn(async move {
+        detaching.detach_domain_clock(domain("tenant")).await
+    });
     let request = exchange.next_request().await;
     exchange
         .reply(
@@ -2198,7 +2241,9 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
     ));
 
     let attaching = client.clone();
-    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
     let request = exchange.next_request().await;
     exchange
         .reply(
@@ -2222,13 +2267,15 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
     ));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
     let attaching = client.clone();
-    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
     let request = exchange.next_request().await;
     exchange
         .reply(
@@ -2253,7 +2300,8 @@ async fn an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_cl
     );
 
     let reading = client.clone();
-    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
     let mut restored = server.next_exchange().await;
     let request = restored.next_request().await;
     let ClientRequest::AttachDomainClock(sent) = request.request else {
@@ -2307,7 +2355,7 @@ fn opened(generation: u64) -> ReplyBody {
 async fn session_closed(client: &Client) {
     within_deadline(async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let requests = client.inner.exchange.lock().await.requests();
             if !requests.pending.lock().is_open() {
                 return;
@@ -2318,7 +2366,7 @@ async fn session_closed(client: &Client) {
     .await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_subscription_requested_on_a_closed_session_opens_on_a_new_session() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -2327,12 +2375,12 @@ async fn a_subscription_requested_on_a_closed_session_opens_on_a_new_session() {
     session_closed(&client).await;
 
     let subscribing = client.clone();
-    let mut subscribe = tokio::spawn(async move {
+    let mut subscribe = nervix_primitives::task::spawn(async move {
         subscribing
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
     });
-    let mut reopened = tokio::select! {
+    let mut reopened = nervix_primitives::select! {
         exchange = server.next_exchange() => exchange,
         finished = &mut subscribe => {
             panic!("the subscription ended without opening a new session: {finished:?}")
@@ -2359,7 +2407,7 @@ async fn a_subscription_requested_on_a_closed_session_opens_on_a_new_session() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -2368,8 +2416,9 @@ async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session
     session_closed(&client).await;
 
     let deleting = client.clone();
-    let mut unsubscribe = tokio::spawn(async move { deleting.unsubscribe("ghost").await });
-    let mut reopened = tokio::select! {
+    let mut unsubscribe =
+        nervix_primitives::task::spawn(async move { deleting.unsubscribe("ghost").await });
+    let mut reopened = nervix_primitives::select! {
         exchange = server.next_exchange() => exchange,
         finished = &mut unsubscribe => {
             panic!("the deletion ended without opening a new session: {finished:?}")
@@ -2402,7 +2451,7 @@ async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session
     );
 
     let subscribing = client.clone();
-    let subscribe = tokio::spawn(async move {
+    let subscribe = nervix_primitives::task::spawn(async move {
         subscribing
             .subscribe(&SubscriptionRequest::new("ghost", "orders"))
             .await
@@ -2429,13 +2478,13 @@ async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session
         .assured("the refusal is an outcome");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
     let subscribing = client.clone();
-    let subscribe = tokio::spawn(async move {
+    let subscribe = nervix_primitives::task::spawn(async move {
         subscribing
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2465,7 +2514,7 @@ async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_tra
     assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
 
     let recovering = client.clone();
-    let recovery = tokio::spawn(async move {
+    let recovery = nervix_primitives::task::spawn(async move {
         recovering
             .recover_session(crate::client::RecoveryMode::IfClosed)
             .await
@@ -2502,13 +2551,159 @@ async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_tra
         .assured("the session recovers");
 }
 
-#[tokio::test]
+/// The frame that ends `handle` because its relay was redefined.
+fn relay_changed(handle: SubscriptionHandle) -> EncodedFrame<ServerFrame> {
+    SubscriptionEnded {
+        subscription: handle,
+        reason: SubscriptionEndReason::RelayChanged,
+        message: "session subscription 'live' ended because relay 'orders' was redefined"
+            .to_string(),
+    }
+    .encode(&limits())
+    .assured("a subscription end fits a frame")
+}
+
+/// Subscribes `live` to `orders` on `exchange`, which opens it as `generation`.
+async fn subscribe_live(client: &Client, exchange: &mut ServerExchange, generation: u64) {
+    let subscribing = client.clone();
+    let subscribe = nervix_primitives::task::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    let ClientRequest::Subscribe(sent) = request.request else {
+        panic!("a subscription is requested with a subscribe request");
+    };
+    assert_eq!(sent.statement, "CREATE SUBSCRIPTION live TO orders;");
+    exchange
+        .reply(request.request_id, opened(generation), &limits())
+        .await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription is answered");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_the_server_ended_is_not_opened_again_on_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    subscribe_live(&client, &mut exchange, 1).await;
+    exchange.send(relay_changed(subscription(1))).await;
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the end of the subscription is delivered");
+    let SubscriptionEvent::Ended(ended) = event else {
+        panic!("the server's end is the subscription's next event, not {event:?}");
+    };
+    assert_eq!(ended.subscription, subscription(1));
+    let live = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1)))
+    );
+
+    drop(exchange);
+    session_closed(&client).await;
+    let listing_client = client.clone();
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
+    let mut reopened = server.next_exchange().await;
+    let first = reopened.next_request().await;
+    assert!(
+        matches!(first.request, ClientRequest::ListDomains),
+        "nothing is restored on the new session, so its first request is the caller's: {:?}",
+        first.request
+    );
+    reopened
+        .reply(
+            first.request_id,
+            ReplyBody::DomainList(DomainList {
+                domains: tenant_domains(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(listing)
+        .await
+        .assured("the listing task finishes")
+        .assured("the listing succeeds on the new session");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1))),
+        "a new session leaves an ended subscription ended"
+    );
+
+    subscribe_live(&client, &mut reopened, 2).await;
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Active(subscription(2))),
+        "subscribing under the ended name opens a new generation"
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_end_its_session_lost_before_it_was_read_is_still_reported() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    subscribe_live(&client, &mut exchange, 1).await;
+    exchange
+        .send(rows_frame(subscription(1), &[(1, "before the end")]))
+        .await;
+    exchange.send(relay_changed(subscription(1))).await;
+    drop(exchange);
+    within_deadline(async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if client.inner.events.sinks.subscriptions.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the end is reported after its session ended");
+    let SubscriptionEvent::Ended(ended) = event else {
+        panic!(
+            "the rows ended with their session, and the subscription's end is reported, not \
+             {event:?}"
+        );
+    };
+    assert_eq!(ended.subscription, subscription(1));
+    assert_eq!(ended.reason, SubscriptionEndReason::RelayChanged);
+    let live = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1)))
+    );
+
+    let outcome = within_deadline(client.unsubscribe("live"))
+        .await
+        .assured("deleting an ended subscription needs no session");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(
+        outcome.message,
+        "subscription 'live' deleted; the server had already ended it"
+    );
+    assert_eq!(client.subscription_lifecycle(&live), None);
+}
+
+#[nervix_primitives::test]
 async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
     let attaching = client.clone();
-    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
     let request = exchange.next_request().await;
     exchange
         .reply(
@@ -2532,7 +2727,8 @@ async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
         })
     );
     let reading = client.clone();
-    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
     let mut restored = server.next_exchange().await;
     let request = restored.next_request().await;
     assert!(matches!(
@@ -2619,13 +2815,15 @@ async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_clock_restoration_answered_already_attached_follows_the_new_session() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
     let attaching = client.clone();
-    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
     let request = exchange.next_request().await;
     exchange
         .reply(
@@ -2649,7 +2847,8 @@ async fn a_clock_restoration_answered_already_attached_follows_the_new_session()
         })
     );
     let reading = client.clone();
-    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
     let mut restored = server.next_exchange().await;
     let request = restored.next_request().await;
     restored
@@ -2682,7 +2881,7 @@ async fn a_clock_restoration_answered_already_attached_follows_the_new_session()
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read() {
     let mut primary = TestServer::start().await;
     let unused = TcpListener::bind("127.0.0.1:0")
@@ -2709,7 +2908,9 @@ async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_r
     .assured("the primary accepts the session");
     let mut exchange = primary.next_exchange().await;
     let attaching = client.clone();
-    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
     let request = exchange.next_request().await;
     let unpaced = clock_in(1, crate::DomainClockObservedState::Unpaced);
     exchange
@@ -2751,7 +2952,8 @@ async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_r
 
     let mut seed = TestServer::start_at(seed_address).await;
     let reading = client.clone();
-    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
     let mut restored = seed.next_exchange().await;
     let request = restored.next_request().await;
     let ClientRequest::AttachDomainClock(sent) = request.request else {

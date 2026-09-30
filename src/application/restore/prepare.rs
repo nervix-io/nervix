@@ -368,7 +368,7 @@ impl SessionServiceImpl {
     ) -> Result<Vec<Option<TransactionImpactReport>>, Report<RestoreRefusal>> {
         let mut reports = Vec::with_capacity(plan.domains.len());
         for domain in plan.domains.values() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if domain.models.is_empty() {
                 reports.push(None);
                 continue;

@@ -24,8 +24,8 @@ use nervix_models::{
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
+use nervix_primitives::sync::CancellationToken;
 use tokio::time::{Duration, Instant, sleep};
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{
@@ -346,9 +346,9 @@ impl SessionServiceImpl {
                 Ok(()) => {}
                 Err(error) => {
                     return self
-                        .consensus_error_response(
+                        .consensus_report_response(
                             &error,
-                            format!("failed to drop node '{node_id}': {error}"),
+                            format!("failed to drop node '{node_id}'"),
                         )
                         .await;
                 }
@@ -479,10 +479,7 @@ impl SessionServiceImpl {
         {
             let action = if cordoned { "cordon" } else { "uncordon" };
             return self
-                .consensus_error_response(
-                    error.current_context(),
-                    format!("failed to {action} node '{node_id}': {error}"),
-                )
+                .consensus_report_response(&error, format!("failed to {action} node '{node_id}'"))
                 .await;
         }
 
@@ -512,9 +509,9 @@ impl SessionServiceImpl {
             .await
         {
             return self
-                .consensus_error_response(
-                    error.current_context(),
-                    format!("failed to cordon node '{node_id}' before drain: {error}"),
+                .consensus_report_response(
+                    &error,
+                    format!("failed to cordon node '{node_id}' before drain"),
                 )
                 .await;
         }
@@ -568,11 +565,10 @@ impl SessionServiceImpl {
                         Ok(acquired) => acquired,
                         Err(error) => {
                             return self
-                                .consensus_error_response(
-                                    error.current_context(),
+                                .consensus_report_response(
+                                    &error,
                                     format!(
-                                        "failed to acquire drain ownership for domain '{}': \
-                                         {error}",
+                                        "failed to acquire drain ownership for domain '{}'",
                                         domain.as_str()
                                     ),
                                 )
@@ -655,13 +651,14 @@ impl SessionServiceImpl {
                         .replace_domain_schedule(inputs, Some(desired), domain_mutation.as_ref())
                         .await
                     {
-                        if let ConsensusError::LeadershipLost { .. } = &error {
+                        let message = ConsensusError::report_message(&error);
+                        if let ConsensusError::LeadershipLost { .. } = error.current_context() {
                             return self
                                 .consensus_error_response(
-                                    &error,
+                                    error.current_context(),
                                     format!(
                                         "failed to publish initial drain schedule for domain \
-                                         '{domain}': {error}"
+                                         '{domain}': {message}"
                                     ),
                                 )
                                 .await;
@@ -670,7 +667,7 @@ impl SessionServiceImpl {
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: could not publish initial \
-                             schedule: {error}",
+                             schedule: {message}",
                             domain.as_str()
                         ));
                         handled_this_iteration = true;
@@ -762,17 +759,18 @@ impl SessionServiceImpl {
                     .replace_domain_schedule(inputs, Some(next), domain_mutation.as_ref())
                     .await
                 {
+                    let message = ConsensusError::report_message(&error);
                     if let Some(handoff) = handoff.take() {
                         self.abort_planned_ownership_handoff(&domain, handoff, None)
                             .await;
                     }
-                    if let ConsensusError::LeadershipLost { .. } = &error {
+                    if let ConsensusError::LeadershipLost { .. } = error.current_context() {
                         return self
                             .consensus_error_response(
-                                &error,
+                                error.current_context(),
                                 format!(
                                     "failed to commit drain schedule for domain '{domain}': \
-                                     {error}"
+                                     {message}"
                                 ),
                             )
                             .await;
@@ -781,7 +779,7 @@ impl SessionServiceImpl {
                     failed_units.insert(unit_key);
                     outcomes.extend(planned_moves.iter().map(|moved| {
                         format!(
-                            "- kind={} name={} owner={} failed: schedule commit failed: {error}",
+                            "- kind={} name={} owner={} failed: schedule commit failed: {message}",
                             moved.entity.kind.as_ref(),
                             moved.entity.identifier.as_str(),
                             moved.former_owner
@@ -1038,7 +1036,7 @@ impl SessionServiceImpl {
 
     async fn wait_for_shutdown_drain_leader(&self) -> ClusterNodeName {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let leader = self.inner.consensus.current_leader().await;
             if let Some(leader) = leader {
                 return leader;
@@ -2006,7 +2004,7 @@ impl SessionServiceImpl {
             let cancel_child = cancel.clone();
             let service = self.clone();
             let spec_for_task = spec.clone();
-            let handle = tokio::spawn(async move {
+            let handle = nervix_primitives::task::spawn(async move {
                 let resolved = match service.inner.runtime.resolve_client_config(
                     &spec_for_task.domain,
                     spec_for_task.client.mount.as_ref(),
@@ -2047,7 +2045,7 @@ impl SessionServiceImpl {
                 };
                 let mut last_observed = None::<Vec<i32>>;
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
@@ -2059,7 +2057,7 @@ impl SessionServiceImpl {
                                     spec_for_task.domain.as_str(),
                                     error
                                 ));
-                                tokio::select! {
+                                nervix_primitives::select! {
                                     _ = service.inner.drain_support_shutdown.cancelled() => break,
                                     _ = cancel_child.cancelled() => break,
                                     _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
@@ -2089,7 +2087,7 @@ impl SessionServiceImpl {
                             last_observed = Some(partitions);
                         }
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         _ = service.inner.drain_support_shutdown.cancelled() => break,
                         _ = cancel_child.cancelled() => break,
                         _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}

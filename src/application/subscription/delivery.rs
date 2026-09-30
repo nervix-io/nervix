@@ -30,8 +30,8 @@ use nervix_client_wire::{
     SubscriptionEnded, SubscriptionHandle, SubscriptionRowsSkipped, WireEncodeError,
 };
 use nervix_models::{DomainName, RelayName, SubscriptionDeliveryBehavior};
+use nervix_primitives::sync::oneshot;
 use nervix_recovery::NoReceiver as _;
-use tokio::sync::oneshot;
 use tracing::debug;
 
 use super::{SkippedRows, interest::SubscriptionInterestLease, select_subscription_rows};
@@ -157,8 +157,8 @@ async fn wait_for_announcement(
 ) -> Announcement {
     let mut relay_open = true;
     loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             biased;
             _ = lane.withdrawn() => return Announcement::Abandoned,
             released = &mut announced => {
@@ -187,8 +187,8 @@ impl ActiveDelivery {
         receiver: &mut RelaySubscriptionReceiver<RelayRecordBatch>,
     ) -> DeliveryStop {
         loop {
-            tokio::task::consume_budget().await;
-            let batch = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let batch = nervix_primitives::select! {
                 biased;
                 _ = self.sender.lane.withdrawn() => return DeliveryStop::Withdrawn,
                 batch = receiver.recv() => batch,
@@ -209,6 +209,7 @@ impl ActiveDelivery {
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,
+            &self.service.inner.subscription_sampler,
             &self.service.inner.runtime,
             &self.domain,
         )
@@ -244,7 +245,7 @@ impl ActiveDelivery {
             }
         };
         for frame in frames {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.sender.send_rows(frame).await?;
         }
         Ok(())
@@ -421,8 +422,8 @@ mod tests {
         RowSchema, RowsSkippedCause, ServerEvent, ServerMessage, SubscriptionHandle, VerifiedFrame,
     };
     use nervix_models::{DomainName, RelayName, SchemaField, SubscriptionName};
+    use nervix_primitives::sync::CancellationToken;
     use tokio::time::timeout;
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::{
@@ -521,7 +522,7 @@ mod tests {
         rows.batch().len()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_dropping_subscription_reports_what_it_dropped_before_its_next_rows() {
         let encoder = encoder();
         let (mut sender, mut frames, _outbound) = sender(SubscriptionDeliveryBehavior::Dropping);
@@ -569,7 +570,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn skipped_rows_are_reported_with_their_cause_and_count() {
         let (sender, mut frames, _outbound) = sender(SubscriptionDeliveryBehavior::Blocking);
         let skipped = SkippedRows {

@@ -38,15 +38,14 @@ use nervix_models::{
     ClientProducerGrant, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DomainStatus, IngestorInput, MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
+use nervix_primitives::sync::{blocking::Mutex, mpsc};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
 use tracing::debug;
 use triomphe::Arc;
 
 use super::{InFlightKind, QueuedReply, SessionShared};
 use crate::{
-    application::client_producers::{OpenedRoute, ProducerOpen, ProducerRoute},
+    application::client_producers::{OpenedRoute, ProducerOpen, ProducerRoute, RouteEnded},
     runtime::{
         ClientProducerEvent, ClientProducerEvents, ClientProducerReservation, ClientSubmissionId,
     },
@@ -576,8 +575,8 @@ enum PumpEnd {
 impl ProducerPump {
     async fn run(mut self) {
         let end = loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.shared.ended() => {
                     // The session is gone: dropping the route detaches the producer, and admitted
@@ -637,8 +636,16 @@ impl ProducerPump {
                         .await;
                     return;
                 };
+                let routed = route.submit(ClientSubmissionId::new(submission.get()), batch);
+                if let Err(RouteEnded) = routed {
+                    // The link to the executing node ended before it took the batch, so the batch
+                    // never left this node; the link's end follows among the producer's events.
+                    self.credit.release(bytes);
+                    self.refuse(submission, ClientSubmissionRefusal::ProducerEnded)
+                        .await;
+                    return;
+                }
                 self.outstanding.insert(submission, bytes);
-                route.submit(ClientSubmissionId::new(submission.get()), batch);
             }
             PumpCommand::Violation { submission } => {
                 self.violated = true;
@@ -684,7 +691,7 @@ impl ProducerPump {
                 "the batch exceeds the credit granted to producer {}, which ends it",
                 self.producer
             ),
-            _ => format!("producer {} is closing", self.producer),
+            _ => format!("producer {} takes no more batches", self.producer),
         };
         let outcome = SubmissionOutcome {
             outcome: ClientSubmissionOutcome::NotAdmitted(refusal),
@@ -742,7 +749,7 @@ impl ProducerPump {
         };
         let outstanding = std::mem::take(&mut self.outstanding);
         for (submission, bytes) in outstanding {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.credit.release(bytes);
             let outcome = SubmissionOutcome {
                 outcome: ClientSubmissionOutcome::OutcomeUnknown(cause),

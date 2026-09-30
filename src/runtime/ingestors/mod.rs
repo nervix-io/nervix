@@ -78,7 +78,10 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateClientSqs, RabbitMqIngestMode, SqsIngestMode};
+    use nervix_models::{
+        ClientPoolBounds, CreateClientRedis, CreateClientSqs, RabbitMqIngestMode,
+        RedisPubSubIngestMode, SqsIngestMode,
+    };
 
     use super::*;
 
@@ -90,7 +93,7 @@ mod tests {
         T::try_from(value.to_string()).assured("the fixture name is valid")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sources_that_resolve_names_report_missing_node_dns_as_start_failure() {
         let runtime = Runtime::default();
         let domain: DomainName = named("sales");
@@ -160,6 +163,21 @@ mod tests {
                 },
                 Model::ClientSqs(CreateClientSqs {
                     name: client_name.clone(),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+            ),
+            (
+                IngestSource::RedisPubSub {
+                    client: client_name.clone(),
+                    channel: named("events"),
+                    mode: RedisPubSubIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::Drop,
+                },
+                Model::ClientRedis(CreateClientRedis {
+                    name: client_name.clone(),
+                    pool: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
+                        .assured("zero is below one"),
                     mount: None,
                     config: Vec::new(),
                 }),
@@ -234,6 +252,9 @@ mod tests {
                     source.compose(&runtime, &plan.ingestor).await
                 }
                 SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &plan.ingestor).await,
+                SourceStartPlan::RedisPubSub(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
                 SourceStartPlan::Sqs(source) => source.compose(&runtime, &plan.ingestor).await,
                 _ => panic!("the fixture only includes sources that resolve names"),
             };

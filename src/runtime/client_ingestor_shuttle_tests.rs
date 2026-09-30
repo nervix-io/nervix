@@ -9,7 +9,7 @@
 //! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc as StdArc,
 };
@@ -19,12 +19,12 @@ use nervix_models::{
     ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
     FieldName, IngestQuiesceMode, ParseAsType, SchemaField,
 };
+use nervix_primitives::sync::{mpsc, oneshot};
 // Real atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
 use nervix_primitives::unmodeled::sync::atomic::{
     AtomicBool, AtomicUsize, Ordering as RecordOrdering,
 };
-use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::shuttle_test::check_interleavings;
@@ -73,7 +73,7 @@ async fn reserve_more_than_half(budget: ClientProducerBudget, live: StdArc<Atomi
         budget.reserved() <= CLIENT_PRODUCER_NODE_BYTES,
         "the node budget holds more than its bound"
     );
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     live.fetch_sub(1, RecordOrdering::SeqCst);
     drop(reservation);
 }
@@ -84,7 +84,7 @@ fn racing_reservations_stay_within_the_node_budget() {
         let live = StdArc::new(AtomicUsize::new(0));
         let mut producers = Vec::with_capacity(RACING_PRODUCERS);
         for _ in 0..RACING_PRODUCERS {
-            producers.push(tokio::spawn(reserve_more_than_half(
+            producers.push(nervix_primitives::task::spawn(reserve_more_than_half(
                 budget.clone(),
                 live.clone(),
             )));
@@ -117,7 +117,7 @@ async fn admit_one_batch(
         !drained.load(RecordOrdering::SeqCst),
         "a batch was dispatched after the drain that followed the quiesce concluded"
     );
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     root.ack_success();
 }
 
@@ -130,11 +130,11 @@ async fn quiesce_and_drain(
 ) {
     control.engage(IngestorQuiesceCause::EntityHold);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if trackers.ingestor_outstanding() == 0 {
             break;
         }
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
     drained.store(true, RecordOrdering::SeqCst);
 }
@@ -156,12 +156,13 @@ fn a_batch_racing_a_quiesce_is_counted_or_refused() {
         let drained = StdArc::new(AtomicBool::new(false));
         // The drain spins until the admitted root resolves, so it is spawned after the admission
         // it waits for.
-        let admission = tokio::spawn(admit_one_batch(
+        let admission = nervix_primitives::task::spawn(admit_one_batch(
             control.clone(),
             trackers.clone(),
             drained.clone(),
         ));
-        let drain = tokio::spawn(quiesce_and_drain(control, trackers.clone(), drained));
+        let drain =
+            nervix_primitives::task::spawn(quiesce_and_drain(control, trackers.clone(), drained));
         admission.await.assured(CHECK_TASK_JOINS);
         drain.await.assured(CHECK_TASK_JOINS);
         assert_eq!(
@@ -192,81 +193,112 @@ enum ProducerEnding {
 /// producer that submitted two batches the worker took.
 struct EndpointModel {
     commands: mpsc::UnboundedSender<EndpointCommand>,
-    endpoint: tokio::task::JoinHandle<()>,
+    endpoint: nervix_primitives::task::JoinHandle<()>,
     jobs: mpsc::Receiver<AdmissionJob>,
     handle: ClientProducerHandle,
     events: ClientProducerEvents,
 }
 
+/// An endpoint task, spawned with one installed execution admitting `window` batches at once and
+/// admission open, and the admission worker's side of that execution, which a model plays.
+struct StartedEndpoint {
+    commands: mpsc::UnboundedSender<EndpointCommand>,
+    endpoint: nervix_primitives::task::JoinHandle<()>,
+    jobs: mpsc::Receiver<AdmissionJob>,
+}
+
+fn start_endpoint(window: usize) -> StartedEndpoint {
+    let (commands, receiver) = mpsc::unbounded_channel();
+    let domain = DomainName::parse("tenant").assured("a literal domain name");
+    let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
+    let metrics = RuntimeMetrics::default();
+    let endpoint = Endpoint {
+        series: metrics.client_ingestor_series(&domain, &ingestor),
+        domain,
+        ingestor,
+        commands: receiver,
+        acknowledgements: FuturesUnordered::new(),
+        execution: None,
+        intake: ClientIntakeState::Suspended,
+        attachments: IndexMap::with_hasher(RandomState::default()),
+        cursor: 0,
+        window_used: 0,
+        in_worker: None,
+        gauges: Arc::new(PublishedClientGauges::default()),
+        published: ClientIngestorGauges::default(),
+    };
+    let endpoint = nervix_primitives::task::spawn(endpoint.run());
+    let (jobs, received) = mpsc::channel(1);
+    let window_size = NonZeroUsize::new(window).assured("a model admits at least one batch");
+    let window_max: u64 = window.arch_into();
+    let window_max = NonZeroU64::new(window_max).assured("a model admits at least one batch");
+    let execution = Arc::new(ClientExecution {
+        contract: ClientEndpointContract::from_digest([1; 32]),
+        generation: 1,
+        fields: fields(),
+        window: window_size,
+        policy: ClientProducerPolicy {
+            window: AckWindow::Parallel { max: window_max },
+            ack_timeout: Duration::from_secs(3_600),
+            retry_backoff: Duration::from_millis(10),
+            retry_max_backoff: Duration::from_millis(100),
+        },
+        jobs,
+    });
+    commands
+        .send(EndpointCommand::Install(execution))
+        .assured("the endpoint runs until the model ends it");
+    commands
+        .send(EndpointCommand::Intake(ClientIntakeState::Open))
+        .assured("the endpoint runs until the model ends it");
+    StartedEndpoint {
+        commands,
+        endpoint,
+        jobs: received,
+    }
+}
+
+/// Attaches one producer, served the way `serving` says, to a started endpoint.
+async fn attach_producer(
+    commands: &mpsc::UnboundedSender<EndpointCommand>,
+    serving: ProducerServing,
+) -> (ClientProducerHandle, ClientProducerEvents) {
+    let (reply, attached) = oneshot::channel();
+    commands
+        .send(EndpointCommand::Attach(AttachCommand {
+            expected_fields: fields(),
+            limits: ClientProducerLimits {
+                batches: NonZeroU32::new(4).assured("a literal non-zero count"),
+                bytes: NonZeroU64::new(1_024).assured("a literal non-zero size"),
+            },
+            max_batch_bytes: NonZeroU64::new(1_024).assured("a literal non-zero size"),
+            serving,
+            reply,
+        }))
+        .assured("the endpoint runs until the model ends it");
+    let AttachedProducer {
+        description,
+        events,
+    } = attached
+        .await
+        .assured("the endpoint answers every open")
+        .assured("an open expecting the execution's fields attaches");
+    let handle = ClientProducerHandle {
+        commands: commands.clone(),
+        attachment: description.attachment,
+        detached: false,
+    };
+    (handle, events)
+}
+
 impl EndpointModel {
     async fn start() -> Self {
-        let (commands, receiver) = mpsc::unbounded_channel();
-        let domain = DomainName::parse("tenant").assured("a literal domain name");
-        let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
-        let metrics = RuntimeMetrics::default();
-        let endpoint = Endpoint {
-            series: metrics.client_ingestor_series(&domain, &ingestor),
-            domain,
-            ingestor,
-            commands: receiver,
-            acknowledgements: FuturesUnordered::new(),
-            execution: None,
-            intake: ClientIntakeState::Suspended,
-            attachments: IndexMap::with_hasher(RandomState::default()),
-            cursor: 0,
-            window_used: 0,
-            in_worker: None,
-            gauges: Arc::new(PublishedClientGauges::default()),
-            published: ClientIngestorGauges::default(),
-        };
-        let endpoint = tokio::spawn(endpoint.run());
-        let (jobs, received) = mpsc::channel(1);
-        let execution = Arc::new(ClientExecution {
-            contract: ClientEndpointContract::from_digest([1; 32]),
-            generation: 1,
-            fields: fields(),
-            window: NonZeroUsize::new(2).assured("a literal non-zero window"),
-            policy: ClientProducerPolicy {
-                window: AckWindow::Parallel {
-                    max: NonZeroU64::new(2).assured("a literal non-zero window"),
-                },
-                ack_timeout: Duration::from_secs(3_600),
-                retry_backoff: Duration::from_millis(10),
-                retry_max_backoff: Duration::from_millis(100),
-            },
-            jobs,
-        });
-        commands
-            .send(EndpointCommand::Install(execution))
-            .assured("the endpoint runs until the model ends it");
-        commands
-            .send(EndpointCommand::Intake(ClientIntakeState::Open))
-            .assured("the endpoint runs until the model ends it");
-        let (reply, attached) = oneshot::channel();
-        commands
-            .send(EndpointCommand::Attach(AttachCommand {
-                expected_fields: fields(),
-                limits: ClientProducerLimits {
-                    batches: NonZeroU32::new(4).assured("a literal non-zero count"),
-                    bytes: NonZeroU64::new(1_024).assured("a literal non-zero size"),
-                },
-                max_batch_bytes: NonZeroU64::new(1_024).assured("a literal non-zero size"),
-                reservation: None,
-                reply,
-            }))
-            .assured("the endpoint runs until the model ends it");
-        let AttachedProducer {
-            description,
-            events,
-        } = attached
-            .await
-            .assured("the endpoint answers every open")
-            .assured("an open expecting the execution's fields attaches");
-        let handle = ClientProducerHandle {
-            commands: commands.clone(),
-            attachment: description.attachment,
-            detached: false,
-        };
+        let StartedEndpoint {
+            commands,
+            endpoint,
+            jobs: received,
+        } = start_endpoint(2);
+        let (handle, events) = attach_producer(&commands, ProducerServing::Local).await;
         handle.submit(submission(1), Bytes::from_static(b"one"));
         handle.submit(submission(2), Bytes::from_static(b"two"));
         Self {
@@ -369,15 +401,19 @@ fn an_ending_producer_answers_every_batch_once(ending: ProducerEnding) {
         // races the end and the first batch's acknowledgement.
         let second = model.next_job().await;
         let reporter_commands = model.commands.clone();
-        let reporter = tokio::spawn(async move {
+        let reporter = nervix_primitives::task::spawn(async move {
             let second_root = admitted(&reporter_commands, &second);
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             second_root.no_ack("a route rejected it");
         });
-        let acknowledger = tokio::spawn(async move {
+        let acknowledger = nervix_primitives::task::spawn(async move {
             first_root.ack_success();
         });
-        let ender = tokio::spawn(end_producer(ending, model.handle, model.commands.clone()));
+        let ender = nervix_primitives::task::spawn(end_producer(
+            ending,
+            model.handle,
+            model.commands.clone(),
+        ));
         let answered = read_every_event(model.events).await;
         reporter.await.assured(CHECK_TASK_JOINS);
         acknowledger.await.assured(CHECK_TASK_JOINS);
@@ -440,4 +476,203 @@ fn shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_las
     check_interleavings(|| {
         an_ending_producer_answers_every_batch_once(ProducerEnding::EndpointEnd)
     });
+}
+
+/// Attaches a producer that another node forwards, with the requests the endpoint sends that node
+/// to clear its batches.
+async fn attach_forwarded_producer(
+    commands: &mpsc::UnboundedSender<EndpointCommand>,
+) -> (
+    ClientProducerHandle,
+    ClientProducerEvents,
+    mpsc::UnboundedReceiver<ClientSubmissionId>,
+) {
+    let (clearance_requests, clearances) = mpsc::unbounded_channel();
+    let reservation = ClientProducerBudget::default()
+        .try_reserve(NonZeroU64::new(1_024).assured("a literal non-zero size"))
+        .assured("an empty node budget holds one producer's bytes");
+    let serving = ProducerServing::Forwarded {
+        _reservation: reservation,
+        clearance_requests,
+    };
+    let (handle, events) = attach_producer(commands, serving).await;
+    (handle, events, clearances)
+}
+
+/// The bit a batch sets in a record of the batches cleared so far.
+fn cleared_bit(submission: ClientSubmissionId) -> usize {
+    let shift = u32::try_from(submission.get().get())
+        .assured("a model's submission identities are small literals");
+    1_usize
+        .checked_shl(shift)
+        .assured("a model's submission identities are below the word size")
+}
+
+/// Plays the node that forwards a producer: it clears every batch the endpoint asks about until
+/// the producer is gone, and records each clearance before it sends it, as a serving link records
+/// a batch as possibly admitted before its `Clear` leaves.
+async fn clear_requested_batches(
+    mut clearances: mpsc::UnboundedReceiver<ClientSubmissionId>,
+    commands: mpsc::UnboundedSender<EndpointCommand>,
+    attachment: ClientAttachmentId,
+    cleared: StdArc<AtomicUsize>,
+) {
+    while let Some(submission) = clearances.recv().await {
+        cleared.fetch_or(cleared_bit(submission), RecordOrdering::SeqCst);
+        commands
+            .send(EndpointCommand::Clear {
+                attachment,
+                submission,
+            })
+            .discarded("an endpoint that ended already answered the batch it would have cleared");
+    }
+}
+
+/// Asserts that the worker was handed a batch only after its serving node cleared it.
+fn assert_cleared_before_the_worker(cleared: &AtomicUsize, job: &AdmissionJob) {
+    let recorded = cleared.load(RecordOrdering::SeqCst) & cleared_bit(job.submission);
+    assert_ne!(
+        recorded, 0,
+        "a forwarded batch reached the worker before its serving node cleared it"
+    );
+}
+
+fn a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot() {
+    shuttle::future::block_on(async {
+        let StartedEndpoint {
+            commands,
+            endpoint,
+            mut jobs,
+        } = start_endpoint(1);
+        let (forwarded, _forwarded_events, clearances) = attach_forwarded_producer(&commands).await;
+        let (local, mut local_events) = attach_producer(&commands, ProducerServing::Local).await;
+        // The forwarded batch takes the window's one slot while it is cleared, and the local batch
+        // waits for that slot.
+        forwarded.submit(submission(1), Bytes::from_static(b"forwarded"));
+        local.submit(submission(2), Bytes::from_static(b"local"));
+        let cleared = StdArc::new(AtomicUsize::new(0));
+        let serving = nervix_primitives::task::spawn(clear_requested_batches(
+            clearances,
+            commands.clone(),
+            forwarded.attachment,
+            cleared.clone(),
+        ));
+        // The forwarding node is lost, which detaches its producer.
+        let detacher = nervix_primitives::task::spawn(async move {
+            drop(forwarded);
+        });
+        loop {
+            let job = jobs
+                .recv()
+                .await
+                .assured("the endpoint hands the worker every batch the window admits");
+            if job.submission == submission(1) {
+                assert_cleared_before_the_worker(&cleared, &job);
+            }
+            admitted(&commands, &job).ack_success();
+            if job.submission == submission(2) {
+                break;
+            }
+        }
+        let answered = local_events.outcomes.recv().await;
+        assert_eq!(
+            answered,
+            Some(ClientProducerEvent::Outcome {
+                submission: submission(2),
+                outcome: ClientSubmissionOutcome::Completed,
+                detail: None,
+            }),
+            "the local batch took the slot the forwarded batch returned or finished with"
+        );
+        serving.await.assured(CHECK_TASK_JOINS);
+        detacher.await.assured(CHECK_TASK_JOINS);
+        drop(local);
+        drop(commands);
+        endpoint.await.assured(CHECK_TASK_JOINS);
+    });
+}
+
+/// A forwarded batch reaches the worker only after its serving node cleared it, and a detach that
+/// races the clearance either leaves the cleared batch admitted or drops the uncleared one and
+/// returns its slot of the window, so another producer's batch is admitted either way.
+#[test]
+fn shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot() {
+    check_interleavings(
+        a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot,
+    );
+}
+
+fn an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it() {
+    shuttle::future::block_on(async {
+        let StartedEndpoint {
+            commands,
+            endpoint,
+            mut jobs,
+        } = start_endpoint(2);
+        let (forwarded, events, clearances) = attach_forwarded_producer(&commands).await;
+        forwarded.submit(submission(1), Bytes::from_static(b"first"));
+        forwarded.submit(submission(2), Bytes::from_static(b"second"));
+        let cleared = StdArc::new(AtomicUsize::new(0));
+        let serving = nervix_primitives::task::spawn(clear_requested_batches(
+            clearances,
+            commands.clone(),
+            forwarded.attachment,
+            cleared.clone(),
+        ));
+        // The worker takes what it is handed and never reports it, like a worker that the node's
+        // end stops, so a second cleared batch waits for it. Its channel closes once the ended
+        // endpoint drops its execution.
+        let worker_cleared = cleared.clone();
+        let worker = nervix_primitives::task::spawn(async move {
+            let mut taken = BTreeSet::new();
+            while let Some(job) = jobs.recv().await {
+                assert_cleared_before_the_worker(&worker_cleared, &job);
+                taken.insert(job.submission.get().get());
+            }
+            taken
+        });
+        let ender = nervix_primitives::task::spawn(end_producer(
+            ProducerEnding::EndpointEnd,
+            forwarded,
+            commands.clone(),
+        ));
+        let answered = read_every_event(events).await;
+        serving.await.assured(CHECK_TASK_JOINS);
+        ender.await.assured(CHECK_TASK_JOINS);
+        drop(commands);
+        endpoint.await.assured(CHECK_TASK_JOINS);
+        let taken = worker.await.assured(CHECK_TASK_JOINS);
+
+        assert_eq!(
+            answered.ended,
+            Some(ClientProducerEndReason::ShuttingDown),
+            "the endpoint's end is the producer's last event"
+        );
+        for id in [1, 2] {
+            let outcome = answered
+                .outcomes
+                .get(&id)
+                .assured("an ending endpoint answers every batch its producer submitted");
+            let expected = if taken.contains(&id) {
+                ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted)
+            } else {
+                ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::ProducerEnded)
+            };
+            assert_eq!(
+                outcome, &expected,
+                "batch {id} is not admitted exactly when the worker never took it"
+            );
+        }
+    });
+}
+
+/// An endpoint ending while a forwarded producer's batches are cleared answers each exactly once:
+/// as not admitted when the worker never took it, whether it was still being cleared or cleared and
+/// waiting for the worker, and as of unknown outcome when the worker took it.
+#[test]
+fn shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it()
+ {
+    check_interleavings(
+        an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it,
+    );
 }

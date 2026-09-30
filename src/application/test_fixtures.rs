@@ -6,18 +6,16 @@
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc as StdArc, OnceLock},
-};
+use std::{path::PathBuf, sync::Arc as StdArc};
 
 use ahash::RandomState;
 use clap::Parser;
 use fjall::Database;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
+#[cfg(feature = "testing")]
+use nervix_consensus::ConsensusTestProbe;
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
@@ -27,14 +25,17 @@ use nervix_models::{
     PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
     TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::CancellationToken,
+    unmodeled::sync::atomic::{AtomicU64, Ordering},
+};
 use nonzero_ext::nonzero;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 #[cfg(feature = "shuttle")]
@@ -44,7 +45,7 @@ use super::{
     command_result::{CommandResponse, CommandResult},
     session::admission::RequestAdmission,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
-    subscription::{SessionSubscriptions, SubscriptionInterests},
+    subscription::{SessionSubscriptions, SubscriptionInterests, SubscriptionSampler},
     tls::HttpsListenerCertificates,
     transaction::{
         DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
@@ -57,7 +58,10 @@ use crate::{
     runtime::Runtime, runtime_schema,
 };
 
-static NEXT_TEST_ID: OnceLock<AtomicU64> = OnceLock::new();
+/// The next identity of a test database and the port block of a test node. The unit tests of one
+/// process run in parallel and each needs its own, so the identities belong to the process rather
+/// than to any test or model.
+static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A fresh execution reference, as a client generates one for each command it sends.
 pub(in crate::application) fn test_execution_reference() -> CommandExecutionReference {
@@ -164,9 +168,7 @@ pub(in crate::application) fn test_tls_files(
 }
 
 fn test_db_path() -> PathBuf {
-    let id = NEXT_TEST_ID
-        .get_or_init(|| AtomicU64::new(1))
-        .fetch_add(1, Ordering::Relaxed);
+    let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("nervix-session-test-{}-{id}", std::process::id()))
 }
 
@@ -268,6 +270,11 @@ fn test_session_service(
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
     );
+    let client_consumers = super::client_consumers::ClientConsumerRouter::new(
+        runtime.clone(),
+        interconnect.clone(),
+        consensus.proposer().local_node_id().clone(),
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster: cluster.clone(),
@@ -283,7 +290,9 @@ fn test_session_service(
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),
             subscription_interests,
+            subscription_sampler: SubscriptionSampler::default(),
             client_producers,
+            client_consumers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             configured_basic_auth: None,
@@ -299,7 +308,7 @@ fn test_session_service(
             command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
-            ownership_handoff_operations: tokio::sync::Mutex::new(()),
+            ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
@@ -526,8 +535,31 @@ pub(in crate::application) struct TestService {
     pub(in crate::application) path: PathBuf,
 }
 
+#[cfg(feature = "testing")]
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag, None).await
+}
+
+#[cfg(not(feature = "testing"))]
+pub(in crate::application) async fn build_test_service(
+    create_default_domain_flag: bool,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag).await
+}
+
+#[cfg(feature = "testing")]
+pub(in crate::application) async fn build_test_service_with_probe(
+    create_default_domain_flag: bool,
+    probe: ConsensusTestProbe,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag, Some(probe)).await
+}
+
+async fn build_test_service_inner(
+    create_default_domain_flag: bool,
+    #[cfg(feature = "testing")] probe: Option<ConsensusTestProbe>,
 ) -> TestService {
     let path = test_db_path();
     let _ = std::fs::remove_dir_all(&path);
@@ -538,12 +570,8 @@ pub(in crate::application) async fn build_test_service(
     let registry = Arc::new(
         Registry::from_database(db.clone(), Some(path.as_path())).expect("registry should open"),
     );
-    let id = u16::try_from(
-        NEXT_TEST_ID
-            .get_or_init(|| AtomicU64::new(1))
-            .fetch_add(1, Ordering::Relaxed),
-    )
-    .verified("this suite reserves far fewer than u16::MAX test identifiers");
+    let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
+        .verified("this suite reserves far fewer than u16::MAX test identifiers");
     let grpc_addr = test_addr(
         64000u16
             .checked_add(id)
@@ -552,22 +580,27 @@ pub(in crate::application) async fn build_test_service(
     let expected_leader = test_node_name(id);
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
-    let consensus = Consensus::open(
-        path.join("consensus"),
-        ConsensusSettings {
-            cluster_name: "test".to_string(),
-            node_id: expected_leader.clone(),
-            interconnect_advertise_addr: interconnect.local_addr().into(),
-            interconnect: interconnect.clone(),
-            executor: executor.clone(),
-            raft_heartbeat_interval: Duration::from_millis(50),
-            raft_election_timeout_min: Duration::from_millis(150),
-            raft_election_timeout_max: Duration::from_millis(300),
-            raft_retention: RaftRetentionPolicy::default(),
-        },
-    )
-    .await
-    .expect("consensus should open");
+    let settings = ConsensusSettings {
+        cluster_name: "test".to_string(),
+        node_id: expected_leader.clone(),
+        interconnect_advertise_addr: interconnect.local_addr().into(),
+        interconnect: interconnect.clone(),
+        executor: executor.clone(),
+        raft_heartbeat_interval: Duration::from_millis(50),
+        raft_election_timeout_min: Duration::from_millis(150),
+        raft_election_timeout_max: Duration::from_millis(300),
+        raft_retention: RaftRetentionPolicy::default(),
+    };
+    #[cfg(feature = "testing")]
+    let consensus = match probe {
+        Some(probe) => {
+            Consensus::open_with_test_probe(path.join("consensus"), settings, probe).await
+        }
+        None => Consensus::open(path.join("consensus"), settings).await,
+    };
+    #[cfg(not(feature = "testing"))]
+    let consensus = Consensus::open(path.join("consensus"), settings).await;
+    let consensus = consensus.expect("consensus should open");
     consensus
         .administrator()
         .maybe_initialize()

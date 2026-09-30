@@ -12,6 +12,9 @@ use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError},
     command::{AttachOutcome, CommandOutcome},
     common::RequestId,
+    consumer::{
+        CloseEmitterOutcome, OpenEmitterOutcome, ReadEmitterBatchOutcome, SettleEmitterBatchOutcome,
+    },
     domain::{
         ClusterObserved, DomainList, DomainSelection, DomainSnapshotObserved, DomainsObserved,
     },
@@ -57,6 +60,10 @@ pub enum ReplyBody {
     OpenIngestor(OpenIngestorOutcome),
     Submission(SubmissionOutcome),
     CloseIngestor(CloseIngestorOutcome),
+    OpenEmitter(OpenEmitterOutcome),
+    ReadEmitterBatch(ReadEmitterBatchOutcome),
+    SettleEmitterBatch(SettleEmitterBatchOutcome),
+    CloseEmitter(CloseEmitterOutcome),
 }
 
 /// A complete reply to one request.
@@ -98,6 +105,10 @@ impl Reply {
             ReplyBody::OpenIngestor(outcome) => outcome.encode_body(&mut encoder)?,
             ReplyBody::Submission(outcome) => outcome.encode_body(&mut encoder)?,
             ReplyBody::CloseIngestor(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::OpenEmitter(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::ReadEmitterBatch(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::SettleEmitterBatch(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::CloseEmitter(outcome) => outcome.encode_body(&mut encoder)?,
         };
         let reply = wire::Reply::create(
             encoder.fbb(),
@@ -120,6 +131,7 @@ impl Reply {
     }
 
     fn decode(
+        frame: &VerifiedFrame<ServerFrame>,
         decoder: Decoder<'_>,
         request_id: RequestId,
         reply: wire::Reply<'_>,
@@ -204,6 +216,31 @@ impl Reply {
                     reply_member(reply.body_as_close_ingestor_outcome()),
                 )?)
             }
+            wire::ReplyBody::OpenEmitterOutcome => {
+                ReplyBody::OpenEmitter(OpenEmitterOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_open_emitter_outcome()),
+                )?)
+            }
+            wire::ReplyBody::ReadEmitterBatchOutcome => {
+                ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome::decode(
+                    frame,
+                    decoder,
+                    reply_member(reply.body_as_read_emitter_batch_outcome()),
+                )?)
+            }
+            wire::ReplyBody::SettleEmitterBatchOutcome => {
+                ReplyBody::SettleEmitterBatch(SettleEmitterBatchOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_settle_emitter_batch_outcome()),
+                )?)
+            }
+            wire::ReplyBody::CloseEmitterOutcome => {
+                ReplyBody::CloseEmitter(CloseEmitterOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_close_emitter_outcome()),
+                )?)
+            }
             undeclared => return Err(decoder.unknown_union("Reply.body", undeclared.0)),
         };
         Ok(Self { request_id, body })
@@ -257,7 +294,9 @@ impl ServerMessage {
                     let part = TransferPart::decode(frame, decoder, request_id, part)?;
                     return Ok(Self::TransferPart(part));
                 }
-                return Ok(Self::Reply(Reply::decode(decoder, request_id, reply)?));
+                return Ok(Self::Reply(Reply::decode(
+                    frame, decoder, request_id, reply,
+                )?));
             }
             wire::ServerBody::ServerNotice => ServerEvent::Notice(ServerNotice::decode(
                 decoder,

@@ -17,17 +17,22 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
     RestoreStep,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{
+        CancellationToken,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        blocking::{Mutex, RwLock},
+        broadcast, mpsc, oneshot, watch,
+    },
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
@@ -74,6 +79,8 @@ struct FaultInjectionState {
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
+    /// A stale drain observation on one node omits already buffered relay-owner batches.
+    stale_owner_buffer_drain_reports: DashMap<(DomainName, ClusterNodeName), (), RandomState>,
     /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
     forced_domain_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// One-shot entity-swap failures consumed by the selected runtime node and domain.
@@ -106,6 +113,11 @@ struct FaultInjectionState {
     /// A receiver pauses after it admitted a remote relay batch and returned the admission to the
     /// batch's owner, before it hands the batch to its local runtime consumers.
     remote_relay_dispatch_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
+    owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// A local schedule swap pauses after removing one attached emitter from its relay.
+    emitter_swap_after_detach_pauses:
+        DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
     /// A source pauses once inside dispatch so a test can engage quiesce while its loop awaits.
     ingestor_dispatch_pauses: DashMap<DomainNodeRef, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -185,7 +197,7 @@ impl std::fmt::Debug for ConsensusProbe {
 struct NodeBulkExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
+    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -300,6 +312,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
+                stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
@@ -317,6 +330,8 @@ impl Default for FaultInjection {
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
+                owner_relay_fanout_pauses: DashMap::default(),
+                emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
@@ -671,6 +686,18 @@ impl FaultInjection {
         self.inner.forced_entity_drain_timeouts.insert(domain, ());
     }
 
+    /// Simulates an incomplete drain observation so a scenario can exercise the local schedule
+    /// fence independently of the coordinator's normal quiescence check.
+    pub fn report_no_owner_buffered_batches_for_entity_drain(
+        &self,
+        domain: DomainName,
+        node: ClusterNodeName,
+    ) {
+        self.inner
+            .stale_owner_buffer_drain_reports
+            .insert((domain, node), ());
+    }
+
     /// Forces the next domain drain to time out after the durable pause has engaged.
     pub fn force_next_domain_drain_timeout(&self, domain: DomainName) {
         self.inner.forced_domain_drain_timeouts.insert(domain, ());
@@ -720,11 +747,11 @@ impl FaultInjection {
                 .unwrap_or_else(|error| {
                     panic!("bulk admission must accept a zero charge: {error}")
                 });
-            let (holder, held) = std::sync::mpsc::channel();
+            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
             holders.lock().push(holder);
             let executor = executor.clone();
             let started = started.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 executor
                     .run_cpu(
                         CpuClass::Bulk,
@@ -747,8 +774,8 @@ impl FaultInjection {
             });
         }
         while started.load(Ordering::Acquire) < workers {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     }
 
@@ -1155,6 +1182,54 @@ impl FaultInjection {
         pause.release();
     }
 
+    pub fn pause_owner_relay_fanout(&self, domain: impl Into<String>) {
+        self.inner.owner_relay_fanout_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_owner_relay_fanout_pause(&self, domain: &str) {
+        let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_owner_relay_fanout_pause(&self, domain: &str) {
+        let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
+        pause.release();
+    }
+
+    pub async fn wait_for_owner_relay_fanout_completion(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self.owner_relay_fanout_pause(&key);
+        pause.wait_until_delivered().await;
+        self.inner.owner_relay_fanout_pauses.remove(&key);
+    }
+
+    pub fn pause_emitter_swap_after_detach(&self, domain: DomainName, emitter: EmitterName) {
+        self.inner
+            .emitter_swap_after_detach_pauses
+            .insert((domain, emitter), Arc::new(TestPause::default()));
+    }
+
+    pub async fn wait_for_emitter_swap_after_detach_pause(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) {
+        let pause = self.emitter_swap_after_detach_pause(domain, emitter);
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_emitter_swap_after_detach_pause(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) {
+        let pause = self.emitter_swap_after_detach_pause(domain, emitter);
+        pause.release();
+    }
+
     pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {
         self.inner
             .ingestor_dispatch_pauses
@@ -1485,6 +1560,16 @@ impl FaultInjection {
             .is_some()
     }
 
+    pub(crate) fn report_no_owner_buffered_batches(
+        &self,
+        domain: &DomainName,
+        node: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .stale_owner_buffer_drain_reports
+            .contains_key(&(domain.clone(), node.clone()))
+    }
+
     pub(crate) fn take_forced_domain_drain_timeout(&self, domain: &DomainName) -> bool {
         self.inner
             .forced_domain_drain_timeouts
@@ -1804,6 +1889,52 @@ impl FaultInjection {
         self.inner.remote_relay_dispatch_pauses.remove(&key);
     }
 
+    pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .owner_relay_fanout_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+    }
+
+    pub(crate) fn mark_owner_relay_fanout_complete(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        if let Some(pause) = self.inner.owner_relay_fanout_pauses.get(&key) {
+            pause.mark_delivered();
+        }
+    }
+
+    pub(crate) async fn pause_emitter_swap_after_detach_if_armed(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) {
+        let key = (domain.clone(), emitter.clone());
+        let Some(pause) = self
+            .inner
+            .emitter_swap_after_detach_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.emitter_swap_after_detach_pauses.remove(&key);
+    }
+
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
         &self,
         domain: &DomainName,
@@ -1864,7 +1995,7 @@ impl FaultInjection {
             return false;
         };
         pause.reach();
-        tokio::select! {
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => false,
             _ = pause.wait_until_released() => true,
         }
@@ -2048,6 +2179,32 @@ impl FaultInjection {
     fn remote_relay_dispatch_pause(&self, key: &str) -> Arc<TestPause> {
         let Some(pause) = self.inner.remote_relay_dispatch_pauses.get(key) else {
             panic!("remote relay dispatch pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn owner_relay_fanout_pause(&self, key: &str) -> Arc<TestPause> {
+        let Some(pause) = self.inner.owner_relay_fanout_pauses.get(key) else {
+            panic!("relay owner fan-out pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn emitter_swap_after_detach_pause(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) -> Arc<TestPause> {
+        let Some(pause) = self
+            .inner
+            .emitter_swap_after_detach_pauses
+            .get(&(domain.clone(), emitter.clone()))
+        else {
+            panic!(
+                "emitter swap pause for '{}' in domain '{}' is not armed",
+                emitter.as_str(),
+                domain.as_str()
+            );
         };
         pause.value().clone()
     }

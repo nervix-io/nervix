@@ -33,14 +33,14 @@ async fn await_until_emitter_stop_deadline<T>(
 ) -> Result<T, ()> {
     tokio::pin!(future);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let stop_deadline = *stop_rx.borrow();
         if let Some(deadline) = stop_deadline {
             return tokio::time::timeout_at(deadline, &mut future)
                 .await
                 .map_err(|_| ());
         }
-        tokio::select! {
+        nervix_primitives::select! {
             output = &mut future => return Ok(output),
             changed = stop_rx.changed() => {
                 if changed.is_err() {
@@ -182,9 +182,9 @@ where
 {
     tokio::pin!(future);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         acks.keep_alive();
-        tokio::select! {
+        nervix_primitives::select! {
             result = &mut future => return result,
             _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
         }
@@ -228,15 +228,16 @@ impl EmitterSinkState {
         plan: &EmitterStartPlan,
         context: &EmitterSinkContext,
         input_schema: &CompiledSchema,
+        output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
         work_cancel_rx: &mut watch::Receiver<bool>,
     ) -> Self {
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = wait_for_emitter_work_cancel(work_cancel_rx) => Self::Unavailable {
                 reason: "emitter sink initialization canceled while stopping".to_string(),
             },
-            sink = Self::open(plan, context, input_schema, codec) => sink,
+            sink = Self::open(plan, context, input_schema, output_schema, codec) => sink,
         }
     }
 
@@ -246,9 +247,10 @@ impl EmitterSinkState {
         plan: &EmitterStartPlan,
         context: &EmitterSinkContext,
         input_schema: &CompiledSchema,
+        output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> Self {
-        match EmitterSinkStarter::start(plan, context, input_schema, codec).await {
+        match EmitterSinkStarter::start(plan, context, input_schema, output_schema, codec).await {
             Ok(sink) => Self::Open(sink),
             Err(error) => {
                 let reason = emitter_error_message(&error);
@@ -284,17 +286,6 @@ impl EmitterSinkState {
         match self {
             Self::Open(sink) => sink.lifecycle().commit_deadline(),
             Self::Unavailable { .. } => None,
-        }
-    }
-
-    /// Whether this sink publishes what it accepts later, on its own commit boundary.
-    ///
-    /// Such a sink neither acknowledges a row nor counts it as sent when the host's write returns:
-    /// its commit does both.
-    fn publishes_on_commit(&self) -> bool {
-        match self {
-            Self::Open(sink) => sink.lifecycle().retains_acknowledgements(),
-            Self::Unavailable { .. } => false,
         }
     }
 
@@ -382,7 +373,7 @@ impl EmitterSinkState {
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let flushed;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.flush_buffer(context, control, buffer).await {
                 Ok(report) => {
                     control.backoff.reset();
@@ -491,7 +482,7 @@ impl EmitterSinkState {
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let mut reason = reason;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self
                 .commit_staged_once(context, control, buffer, reason)
                 .await
@@ -590,12 +581,6 @@ impl EmitterSinkState {
             return Ok(None);
         }
         self.check_fault_injection(context, control)?;
-        // A sink that stages what it accepts has not published anything yet, so its commit counts
-        // these messages as sent and this write counts none.
-        let report = match self.publishes_on_commit() {
-            true => None,
-            false => buffer.report(),
-        };
         let pending_acks = buffer.pending_acks();
         {
             let _confirmation_wait = context
@@ -611,6 +596,10 @@ impl EmitterSinkState {
             buffer.report_staged_messages(self.staged_messages());
             published.map_err(|()| emitter_stop_deadline_elapsed())??;
         }
+        // Every buffered row is resolved now, and the rows the sink delivered are sent, however
+        // many attempts delivered them. A sink that stages what it accepts has not published those
+        // rows yet, so its commit counts them as sent and this write counts none.
+        let report = buffer.delivered_report();
         buffer.clear();
         Ok(report)
     }
@@ -718,7 +707,7 @@ pub(super) fn emitter_unavailable_reason(
 
 pub(super) async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>) {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if *work_cancel_rx.borrow() {
             return;
         }
@@ -830,7 +819,7 @@ pub(super) async fn finish_rejected_records(
     operation: MessageErrorOperation,
 ) -> EmitterRuntimeResult<()> {
     for rejected in rejected {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let SinkRecordPosition {
             batch_index,
             row_index,
@@ -909,14 +898,14 @@ mod tests {
     use super::*;
     use crate::runtime::test_fixtures::{input_batch, input_batch_with, input_value, sink_context};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn queued_stop_bounds_an_active_infrastructure_retry() {
         let (commands, mut command_rx) = mpsc::channel(1);
         let (stop_signal, mut stop_rx) = watch::channel(None);
         let task_stop_signal = stop_signal.clone();
         let retry_started = Arc::new(Notify::new());
         let task_retry_started = retry_started.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
                 backoff: Duration::from_secs(30),
                 max_backoff: Duration::from_secs(30),
@@ -1042,7 +1031,7 @@ mod tests {
         assert!(received.infrastructure_error.is_none());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn retry_wake_attempts_a_buffer_before_its_ordinary_deadline() {
         let fault_injection = ConfiguredFaultInjection::default();
         let mut backoff = RuntimeReconnectBackoff::default();
@@ -1097,7 +1086,7 @@ mod tests {
         assert_eq!(SinkCommitReason::Drain.forced(), SinkCommitReason::Drain);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn flush_all_returns_the_failure_and_retains_unpublished_batches() {
         let fault_injection = ConfiguredFaultInjection::default();
         let mut backoff = RuntimeReconnectBackoff::default();
@@ -1210,7 +1199,7 @@ mod tests {
     }
 
     #[cfg(feature = "testing")]
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn buffering_does_not_wait_for_sink_fault_until_a_flush_is_required() {
         let fault_injection = ConfiguredFaultInjection::default();
         fault_injection.fail_emitter("output");

@@ -2,6 +2,9 @@
 
 The data plane is the runtime execution engine.
 
+It executes the typed revision of a committed schedule. [Execution Plans](./execution-plans.md)
+describes the decisions, local binding, and publication that prepare its tasks.
+
 [Connector Crates And The Connector Contract](./connector-contract.md) defines how the host
 admits external source messages and publishes through external sinks, including their ACK and
 commit boundaries. This chapter follows the Arrow batches those boundaries hand to the graph.
@@ -27,7 +30,8 @@ remain volatile here.
 [Errors And Diagnostics](./errors-and-diagnostics.md) defines how branch-local failures,
 materialized-state outcomes, message errors, and recovery classes reach their reporting boundary.
 
-Decoded rows are processed in memory and are usually carried between runtime nodes as Apache Arrow batches rather than as individually serialized documents. That gives the runtime a columnar format suitable for fast vectorized processing and cheap batch serialization/deserialization.
+Decoded messages are processed in memory as Apache Arrow batches, including batches with one row.
+That gives the runtime a columnar format suitable for vectorized processing and batch transfer.
 
 Nervix has three separate persistence boundaries:
 
@@ -76,6 +80,12 @@ Relay fan-out gives each attached runtime consumer a descendant of the incoming 
 Detached consumers receive the batch without an upstream ACK dependency. The source ACK succeeds
 only when all attached descendants succeed. Any attached failure fails the shared source attempt,
 even when another descendant has already completed an external side effect.
+
+The relay owner holds a dispatch permit while it selects and fans out to attached consumers. If a
+schedule swap has already closed that gate before a buffered batch begins fan-out, the owner fails
+the batch's ACKs and lets the source retry under the new schedule. This prevents a sibling attached
+consumer on the old node from completing the source ACK while a moving consumer is absent from the
+owner's routes.
 
 A batch that a relay owner routes to another node for its attached consumers carries record
 acknowledgements for them. If no attached consumer of the relay runs on that node when the batch

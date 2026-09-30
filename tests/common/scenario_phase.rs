@@ -8,12 +8,11 @@
 //! - **Depends on.** Tokio's monotonic clock.
 //! - **Must not know.** What a phase does, how a cluster is torn down, or scenario state.
 
-use std::{collections::BTreeMap, fmt, sync::LazyLock};
+use std::{collections::BTreeMap, fmt};
 
 use meticulous::OptionExt as _;
 use nervix_approx_into::ApproxInto as _;
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex;
+use nervix_primitives::sync::blocking::{LazyLock, Mutex};
 use tokio::time::{Duration, Instant};
 
 use super::scenario_schedule::AdmissionWait;
@@ -96,7 +95,7 @@ impl ActiveScenario {
 
     /// Every scenario that has started and not yet finished, oldest registration first.
     pub(crate) fn active() -> Vec<Self> {
-        ACTIVE_SCENARIOS.lock().values().cloned().collect()
+        ACTIVE_SCENARIOS.lock().entries.values().cloned().collect()
     }
 
     pub(crate) fn suite_age() -> Duration {
@@ -126,12 +125,30 @@ impl fmt::Display for ActiveScenario {
     }
 }
 
-/// Every scenario currently registered, keyed by the registration that owns it. Scenarios run many
-/// at a time in one test binary and a name repeats across outlines and retries, so the key is the
-/// registration rather than anything the feature file supplies.
-static ACTIVE_SCENARIOS: LazyLock<Mutex<BTreeMap<u64, ActiveScenario>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
-static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(0);
+/// Every scenario currently registered, and the registration the next one takes.
+#[derive(Default)]
+struct ActiveScenarios {
+    /// Keyed by the registration that owns each entry. Scenarios run many at a time in one test
+    /// binary and a name repeats across outlines and retries, so the key is the registration
+    /// rather than anything the feature file supplies.
+    entries: BTreeMap<u64, ActiveScenario>,
+    next_registration: u64,
+}
+
+impl ActiveScenarios {
+    /// Publishes `active` under a registration no earlier scenario of the run took.
+    fn register(&mut self, active: ActiveScenario) -> u64 {
+        let registration = self.next_registration;
+        self.next_registration = registration
+            .checked_add(1)
+            .assured("a suite takes up far fewer than 2^64 scenarios");
+        self.entries.insert(registration, active);
+        registration
+    }
+}
+
+static ACTIVE_SCENARIOS: LazyLock<Mutex<ActiveScenarios>> =
+    LazyLock::new(|| Mutex::new(ActiveScenarios::default()));
 
 /// How many times the suite has taken up each scenario.
 ///
@@ -290,7 +307,6 @@ impl ActiveScenarioRegistration {
     /// never gets its permits visible, and it gives every scenario an entry its own cleanup can
     /// reach.
     pub(crate) fn start(feature: &str, scenario: &str, line: usize) -> Self {
-        let registration = NEXT_REGISTRATION.fetch_add(1, Ordering::Relaxed);
         let identity = ScenarioIdentity {
             feature: feature.to_string(),
             scenario: scenario.to_string(),
@@ -307,7 +323,7 @@ impl ActiveScenarioRegistration {
             phase_started_at: started_at,
             slot_started_at: None,
         };
-        ACTIVE_SCENARIOS.lock().insert(registration, active);
+        let registration = ACTIVE_SCENARIOS.lock().register(active);
         Self {
             registration,
             identity,
@@ -332,6 +348,7 @@ impl ActiveScenarioRegistration {
     pub(crate) fn enter(&self, phase: ScenarioPhase) -> ActiveScenario {
         let mut registry = ACTIVE_SCENARIOS.lock();
         let active = registry
+            .entries
             .get_mut(&self.registration)
             .verified("a registration holds its registry entry until it is dropped");
         let now = Instant::now();
@@ -363,6 +380,7 @@ impl ActiveScenarioRegistration {
     pub(crate) fn wait_for(&self, reason: AdmissionWait) -> ActiveScenario {
         let mut registry = ACTIVE_SCENARIOS.lock();
         let active = registry
+            .entries
             .get_mut(&self.registration)
             .verified("a registration holds its registry entry until it is dropped");
         let now = Instant::now();
@@ -377,7 +395,7 @@ impl ActiveScenarioRegistration {
 
 impl Drop for ActiveScenarioRegistration {
     fn drop(&mut self) {
-        if let Some(active) = ACTIVE_SCENARIOS.lock().remove(&self.registration)
+        if let Some(active) = ACTIVE_SCENARIOS.lock().entries.remove(&self.registration)
             && active.phase != ScenarioPhase::Finished
         {
             let mut measurement = MEASUREMENTS.lock();

@@ -24,17 +24,7 @@
 #![recursion_limit = "256"]
 
 #[cfg(feature = "shuttle")]
-extern crate shuttle_dashmap as dashmap;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_stream as tokio_stream;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
-#[cfg(feature = "shuttle")]
-extern crate tokio as tokio_real;
 
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(

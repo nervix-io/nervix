@@ -26,13 +26,16 @@ use nervix_interconnect::{
     RemoteOperationSubject, RequestError, RequestSubquota, TlsConfigBundle, Transport,
     TransportClock, TransportEntropy, TransportError, TransportIdentity, TransportOptions,
 };
-use nervix_models::{ClusterNodeName, DomainName, NodeEndpoint, RelayName, RemoteAckRegistration};
+use nervix_models::{
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeEndpoint,
+    RelayName, RemoteAckRegistration,
+};
+use nervix_primitives::sync::{mpsc, watch};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,
 };
 use rkyv::{Archive, Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
 
 use super::{
     runner::{
@@ -186,6 +189,18 @@ impl InterconnectRequest for RemoteFailureProbe {
     const TIMEOUT: Duration = Duration::from_secs(10);
 }
 
+/// The admission `registrar` hands out under `ack_id`. Fixtures choose their acknowledgement
+/// identities, and every one names the first run of its registering node.
+fn fixture_registration(ack_id: u64, registrar: &Transport) -> RemoteAckRegistration {
+    RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            registrar.node_id().clone(),
+            ClusterNodeIncarnation::new(1),
+        ),
+    }
+}
+
 fn arrow_batch() -> Vec<u8> {
     let schema = StdArc::new(Schema::new(vec![Field::new(
         "value",
@@ -280,7 +295,7 @@ async fn wait_for(signal: &mut watch::Receiver<bool>) {
 async fn wait_for_count(signal: &mut watch::Receiver<usize>, expected: usize) {
     tokio::time::timeout(HOST_DEADLINE, async {
         while *signal.borrow() < expected {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             signal.changed().await.assured("fixture hosts remain alive");
         }
     })
@@ -422,10 +437,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         batch_ipc,
                         metadata: Vec::new(),
                         acks: Vec::new(),
-                        admission: Some(RemoteAckRegistration {
-                            ack_id: 49,
-                            reply_node_id: client.node_id().clone(),
-                        }),
+                        admission: Some(fixture_registration(49, &client)),
                     };
                     client
                         .send(&server, Envelope::RelayPayload(relay))
@@ -571,7 +583,7 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                     let mut ready = ready;
                     wait_for_count(&mut ready, 2).await;
                     for name in ["server", "third"] {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         register_peer(&client, name).await;
                         let node =
                             ClusterNodeName::parse(name).assured("fixture node name is valid");
@@ -587,7 +599,7 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                             RemoteFailureCase::NotReady,
                             RemoteFailureCase::Failed,
                         ] {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             let response = client
                                 .request(&node, RemoteFailureProbe { case })
                                 .await
@@ -742,7 +754,7 @@ impl NetworkFault {
 async fn wait_for_connection(transport: &Transport, peer: &ClusterNodeName) {
     tokio::time::timeout(HOST_DEADLINE, async {
         while !transport.is_connected_to(peer) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -774,7 +786,7 @@ fn assert_bounded(transport: &Transport) {
         tcp_streams <= 64,
         "simulated TCP streams grew without bound: {tcp_streams}"
     );
-    let tasks = tokio::runtime::Handle::current()
+    let tasks = nervix_primitives::runtime::Handle::current()
         .metrics()
         .num_alive_tasks();
     assert!(
@@ -794,7 +806,7 @@ async fn assert_liveness(transport: &Transport, peer: &ClusterNodeName) {
 async fn wait_for_liveness_recovery(transport: &Transport, peer: &ClusterNodeName) {
     let recovered = tokio::time::timeout(Duration::from_secs(55), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match transport.request(peer, LivenessRequest).await {
                 Ok(response) => {
                     assert_eq!(response.peer, *transport.node_id());
@@ -899,7 +911,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                     ready.send_replace(true);
                     let completed = async {
                         while !*done.borrow() {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             done.changed()
                                 .await
                                 .assured("the client remains alive during repair");
@@ -943,7 +955,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                         NetworkFault::PartitionBeforeConnect | NetworkFault::AsymmetricBeforeConnect => {
                             let setup_failed = async {
                                 loop {
-                                    tokio::task::consume_budget().await;
+                                    nervix_primitives::task::consume_budget().await;
                                     let counters = client.snapshot().counters;
                                     let failures = counters.connection_failures
                                         [PoolClass::Management.index()]
@@ -1031,7 +1043,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
             let mut finished = finished_rx;
             tokio::time::timeout(Duration::from_secs(80), async {
                 while *finished.borrow() < 2 {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     finished.changed().await.assured("the fixture hosts remain alive");
                 }
             }).await.assured("the fault scenario hosts finish within their simulated budget");

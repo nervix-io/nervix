@@ -7,14 +7,13 @@
 //! - **Depends on.** Consensus observation, Tokio synchronization, and process shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
-use std::{sync::OnceLock, time::Duration};
+use std::time::Duration;
 
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusRuntimeState, Observer};
 use nervix_models::{ClusterNodeName, ClusterSchedule};
-use tokio::sync::{Mutex, MutexGuard};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::{CancellationToken, Mutex, MutexGuard, blocking::OnceLock};
 use tracing::{info, warn};
 
 use crate::{
@@ -88,7 +87,7 @@ impl RuntimeAdmission {
     ) -> Option<MutexGuard<'_, ()>> {
         let installation = self.installation.lock();
         tokio::pin!(installation);
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = shutdown.cancelled() => None,
             installation = &mut installation => Some(installation),
@@ -110,7 +109,7 @@ impl RuntimeAdmission {
 
         let attempt = self.attempt.lock();
         tokio::pin!(attempt);
-        let _attempt = tokio::select! {
+        let _attempt = nervix_primitives::select! {
             biased;
             _ = shutdown.cancelled() => return None,
             attempt = &mut attempt => attempt,
@@ -124,8 +123,8 @@ impl RuntimeAdmission {
 
         let mut reported_wait = false;
         loop {
-            tokio::task::consume_budget().await;
-            let admission = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let admission = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return None,
                 admission = consensus.admitted_runtime_state() => admission,
@@ -150,7 +149,7 @@ impl RuntimeAdmission {
                         );
                         reported_wait = true;
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         biased;
                         _ = shutdown.cancelled() => return None,
                         _ = tokio::time::sleep(ADMISSION_RETRY_INTERVAL) => {}
@@ -172,7 +171,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn stale_state_keeps_the_last_applied_schedule_as_the_next_predecessor() {
         let admission = RuntimeAdmission::new();
         let runtime = Runtime::new();

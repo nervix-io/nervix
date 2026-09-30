@@ -305,14 +305,14 @@ mod tests {
 
     /// A held input stays unresolved after every other share of it succeeded, and resolves only
     /// when the hold is released.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_held_input_resolves_only_once_its_hold_is_released() {
         let (acks, completion) = AckSet::root();
         let mut holds = WasmCheckpointHolds::default();
         holds.hold(&acks);
         acks.ack_success();
-        let completion = tokio::spawn(completion.wait());
-        tokio::task::yield_now().await;
+        let completion = nervix_primitives::task::spawn(completion.wait());
+        nervix_primitives::task::yield_now().await;
         assert!(
             !completion.is_finished(),
             "an input must not be acknowledged before the checkpoint that covers it completes"
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// Withholding a hold negatively acknowledges the input even after its deliveries succeeded.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_withheld_input_is_negatively_acknowledged() {
         let (acks, completion) = AckSet::root();
         let mut holds = WasmCheckpointHolds::default();

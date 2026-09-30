@@ -534,7 +534,7 @@ impl SessionServiceImpl {
             .owner()
             .verified("an applying execution retains its owner");
         for version in &domain.versions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let id = &version.resource.id;
             let import = ImportedResourceVersion {
                 restore: &execution.reference,

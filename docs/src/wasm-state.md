@@ -14,6 +14,9 @@ makes the guest's computation state durable before the source acknowledgements i
 released. It does not make the guest, its output, and external sinks one transaction, so a path
 through a WASM processor is at least once.
 
+[Execution Plans](./execution-plans.md) explains how the committed schedule carries a pinned
+module and state-generation identity into node-local WASM preparation and recovery.
+
 This chapter describes the architecture. [WASM Processor Guests](./wasm-processor-guests.md) owns
 the guest ABI and the user-facing account of checkpoints, resets, and failure diagnostics, the [Rust
 WASM Guest SDK](./wasm-guest-sdk.md) owns the Rust guest surface, and [Runtime

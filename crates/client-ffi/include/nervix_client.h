@@ -21,8 +21,8 @@
  *   The library calls no host code: it has no callbacks, so no host function ever runs on a thread
  *   the library owns. Every blocking call runs on the calling thread until it completes, fails,
  *   or is cancelled. A session may be used from several threads at once. Releasing an object while
- *   another thread still uses it is the caller's error; releasing an event or a clock event while
- *   another thread holds a retained reference to it is not.
+ *   another thread still uses it is the caller's error; releasing an event, a clock event or a
+ *   domain clock while another thread holds a retained reference to it is not.
  *
  * Cancellation and deadlines
  *   Every blocking call accepts an optional `nx_cancel`. Triggering it, from any thread, makes the
@@ -55,6 +55,7 @@ typedef struct nx_outcome nx_outcome;
 typedef struct nx_schema nx_schema;
 typedef struct nx_event nx_event;
 typedef struct nx_clock_event nx_clock_event;
+typedef struct nx_domain_clock nx_domain_clock;
 typedef struct nx_cancel nx_cancel;
 typedef struct nx_error nx_error;
 typedef struct nx_suggestions nx_suggestions;
@@ -80,7 +81,8 @@ typedef enum nx_error_kind {
     NX_ERROR_OVERFLOW = 8,
     /* The server answered with something the protocol does not allow here. */
     NX_ERROR_PROTOCOL = 9,
-    /* A column or field was read as a type it does not hold. */
+    /* A column or field was read as a type it does not hold, or a domain clock was read for what
+       its state does not carry. */
     NX_ERROR_TYPE = 10,
     /* The session ended and cannot be recovered. */
     NX_ERROR_CLOSED = 11
@@ -156,7 +158,8 @@ typedef enum nx_event_kind {
     NX_EVENT_DELIVERY_LOST = 2,
     /* Rows were skipped and the subscription stays open; `nx_event_row_count` is how many. */
     NX_EVENT_ROWS_SKIPPED = 3,
-    /* The server ended the subscription. */
+    /* The server ended the subscription's generation, because its relay was redefined or removed.
+       It is the generation's last event, and the session never opens the generation again. */
     NX_EVENT_ENDED = 4,
     /* The session was lost, leaving a gap before the subscription is restored. */
     NX_EVENT_INTERRUPTED = 5,
@@ -173,7 +176,8 @@ typedef enum nx_clock_event_kind {
        on a new session reported the clock again. */
     NX_CLOCK_EVENT_STATE = 1,
     /* The serving node accepted newer progress of its installed paced generation. A tick never
-       precedes the state of its generation, which the attach or a STATE event reported first. */
+       precedes the state of its generation, which the attach reported, as nx_session_domain_clock
+       reads it, or a STATE event reported first. */
     NX_CLOCK_EVENT_TICK = 2,
     /* The server ended the attachment. Nothing more follows about the domain's clock unless the
        session attaches to it again. */
@@ -196,8 +200,8 @@ typedef enum nx_clock_state {
     NX_CLOCK_UNINSTALLED = 2,
     /* The generation reads actual UTC. */
     NX_CLOCK_UNPACED = 3,
-    /* The generation projects UTC through its committed mapping, which nx_clock_event_paced
-       reads. */
+    /* The generation projects UTC through its committed mapping, which nx_clock_event_paced and
+       nx_domain_clock_paced read. */
     NX_CLOCK_PACED = 4
 } nx_clock_state;
 
@@ -359,13 +363,24 @@ nx_error *nx_event_cell_varlen(const nx_event *event, int32_t part, size_t row, 
 /* `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` run through nx_session_prepare and
    nx_session_execute like any statement, for the session's selected domain. An attached session
    follows the domain's clock across every reconnection, until it detaches or the server ends the
-   attachment. */
+   attachment.
+
+   An attach that completes leaves the clock its reply reported for nx_session_domain_clock to
+   read, before any event about the attachment. An attach the server refuses completes with
+   NX_DISPOSITION_FAILED and the server's reason: the session already follows the clock, the domain
+   does not exist on the serving node, or the request was refused. An attach whose session was lost
+   is sent again on the next session the library opens, and the call fails when none opens. An
+   attach that returns NX_ERROR_CANCELLED or NX_ERROR_DEADLINE may still have attached the session:
+   executing the same nx_execution again is answered after the earlier attempt, completing or
+   refused as already attached, and nx_session_domain_clock then tells whether the session follows
+   the clock. */
 
 /* Waits for the next event about the domain clocks the session follows. Events are coalesced per
    domain, so a caller that reads late receives the newest state and the newest tick of each domain
    rather than every change in between, and tick ids may skip. After an attach to a running paced
-   clock, the first event is the tick its serving node accepted last, when it has accepted one. A
-   session that follows no clock waits until it attaches to one. */
+   clock, the first event is the tick its serving node accepted last, when it has accepted one, and
+   nx_session_domain_clock reads the clock of its generation. A session that follows no clock waits
+   until it attaches to one. */
 nx_error *nx_session_next_clock_event(nx_session *session, const nx_cancel *cancel,
                                       nx_clock_event **out);
 
@@ -400,6 +415,76 @@ nx_error *nx_clock_event_end_reason(const nx_clock_event *event, nx_clock_end_re
    released once with nx_clock_event_release; the event is freed with the last one. */
 nx_clock_event *nx_clock_event_retain(nx_clock_event *event);
 void nx_clock_event_release(nx_clock_event *event);
+
+/* Reads the clock of `domain` as the session last received it. It never blocks. After
+   `ATTACH DOMAIN CLOCK;` completes it is the clock the attach reply carried: the domain's START
+   generation and its installation on the serving node, so a host that attaches to a running clock
+   knows its committed mapping before it uses a tick. It reflects every clock and tick the session
+   has received since, including those of every event nx_session_next_clock_event has already
+   returned about the domain, so it is never older than an event a host consumed, and it comes with
+   the newest tick the session accepted for its generation. Once the session holding the
+   attachment ends, which an NX_CLOCK_EVENT_INTERRUPTED event reports, it is the clock that session
+   reported last, without a tick, until the restored attachment reports the clock again. `out` is
+   set to NULL when the session follows no clock of the domain: before it attaches, when the server
+   refused every attach, once a detach completes, and once the server ends the attachment, which an
+   NX_CLOCK_EVENT_ENDED event reports. A domain name that is not valid fails with
+   NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_session_domain_clock(const nx_session *session, const uint8_t *domain,
+                                  size_t domain_len, nx_domain_clock **out);
+
+/* A domain clock is one read of the session: it never changes, and a host reads the session again
+   for a newer one. It stays valid after the session is freed. */
+
+/* The domain whose clock was read. */
+void nx_domain_clock_domain(const nx_domain_clock *clock, const uint8_t **domain,
+                            size_t *domain_len);
+/* The START generation: the number of STARTs the domain has committed, zero before its first. */
+uint64_t nx_domain_clock_generation(const nx_domain_clock *clock);
+/* The installation state of the generation on the serving node. */
+nx_clock_state nx_domain_clock_state(const nx_domain_clock *clock);
+/* The committed clock of a PACED clock, with nx_clock_event_paced's fields and units. Any other
+   state fails with NX_ERROR_TYPE. Any out-parameter may be NULL. */
+nx_error *nx_domain_clock_paced(const nx_domain_clock *clock, uint64_t *period_nanos,
+                                uint64_t *skew_nanos, int64_t *logical_origin,
+                                int64_t *utc_anchor, double *time_rate);
+/* Whether the session holds an accepted tick of the clock's generation, and that tick, with
+   nx_clock_event_tick's fields and units, when it does. Any out-parameter may be NULL. */
+bool nx_domain_clock_tick(const nx_domain_clock *clock, uint64_t *tick_id,
+                          int64_t *logical_boundary, int64_t *authority_utc,
+                          int64_t *serving_logical);
+
+/* The projections below are the ones the Rust client's attached clock answers with the arithmetic
+   the ingestor admits by, so a host computes no mapping itself. They hold for the host's UTC: a host
+   whose UTC is offset from the cluster's reads answers shifted by that offset times the rate.
+   Instants are signed nanoseconds since the Unix epoch. A STOPPED or UNINSTALLED clock has no
+   logical time, and every projection of it fails with NX_ERROR_TYPE; arithmetic that leaves the
+   range of 64-bit nanoseconds fails with NX_ERROR_INVALID_ARGUMENT. */
+
+/* The domain's logical time at the UTC instant `utc`: the committed mapping's projection of a
+   PACED clock, rounded down to the nanosecond and never before the logical origin, and `utc`
+   itself for an UNPACED one. */
+nx_error *nx_domain_clock_logical_time_at(const nx_domain_clock *clock, int64_t utc,
+                                          int64_t *logical);
+/* How many nanoseconds after the UTC instant `utc` the domain's logical time reaches `target`:
+   rounded up, so a host that waits it never arrives early, and zero once it has. */
+nx_error *nx_domain_clock_wall_duration_until(const nx_domain_clock *clock, int64_t utc,
+                                              int64_t target, uint64_t *wait_nanos);
+/* The tick centers a `TIMESTAMP AT` ingestor of the domain admits events around at the UTC
+   instant `utc`, reconstructed as the ingestor reconstructs them: one period apart, from the
+   oldest it retains to the newest it has reached. An event is admitted within the skew of one of
+   them. `has_window` is false for an UNPACED clock, whose ingestors admit every timestamp, and the
+   centers are written only when it is true. Either center may be NULL. */
+nx_error *nx_domain_clock_admission_window(const nx_domain_clock *clock, int64_t utc,
+                                           bool *has_window, int64_t *earliest_center,
+                                           int64_t *latest_center);
+/* Whether a `TIMESTAMP AT` ingestor of the domain admits an event at `event` at the UTC instant
+   `utc`. An UNPACED clock admits every event. */
+nx_error *nx_domain_clock_admits(const nx_domain_clock *clock, int64_t utc, int64_t event,
+                                 bool *admitted);
+/* Adds a reference. Every reference, including the one nx_session_domain_clock returned, is
+   released once with nx_domain_clock_release; the clock is freed with the last one. */
+nx_domain_clock *nx_domain_clock_retain(nx_domain_clock *clock);
+void nx_domain_clock_release(nx_domain_clock *clock);
 
 #ifdef __cplusplus
 }

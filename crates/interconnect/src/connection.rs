@@ -19,7 +19,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use dashmap::mapref::entry::Entry;
 use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
 use h2::{Ping, PingPong, Reason, RecvStream, SendStream, client, server};
@@ -28,18 +27,22 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::ConnectionBudget;
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
-    sync::{ArcSwap, CancellationToken, DashMap},
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use strum::EnumCount as _;
-use tokio::{
-    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
-    time::{Instant, sleep, sleep_until, timeout},
+use nervix_primitives::{
+    collections::{DashMap, dash_map::Entry},
+    publication::ArcSwap,
+    sync::{
+        CancellationToken, Notify, OwnedSemaphorePermit, Semaphore,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc,
+    },
+    task::TaskTracker,
 };
-use tokio_util::task::TaskTracker;
+use strum::EnumCount as _;
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -342,7 +345,9 @@ struct RelayGrant {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RelayAdmissionKey {
     peer_node_id: ClusterNodeName,
-    ack_id: u64,
+    /// The whole registration, whose registrar run keeps an admission that an earlier run of the
+    /// same node numbered alike from naming this one.
+    registration: RemoteAckRegistration,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -469,7 +474,7 @@ struct RelayAdmissionRecord {
     admission_key: RelayAdmissionKey,
     body_bytes: u64,
     metadata: wire::RelayMetadata,
-    state: parking_lot::Mutex<RelayAdmissionState>,
+    state: nervix_primitives::sync::blocking::Mutex<RelayAdmissionState>,
     cancellation: CancellationToken,
     /// When the receiver accepted this attempt's reservation. Progress and admission latency are
     /// both measured from here, because that is when the sender's wait begins.
@@ -1069,7 +1074,7 @@ impl TransportState {
                 .acquire_connection_permits(PoolClass::Management, &cancel)
                 .await
                 .ok_or(TransportError::ShuttingDown)?;
-            let _handshake_permit = tokio::select! {
+            let _handshake_permit = nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => {
                     return Err(Report::new(TransportError::ShuttingDown));
                 }
@@ -1193,7 +1198,7 @@ impl TransportState {
     async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
         let mut backoff = self.options.reconnect_backoff;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if slot_cancel.is_cancelled() || self.admission_closed.is_cancelled() {
                 break;
             }
@@ -1204,7 +1209,7 @@ impl TransportState {
                 Some(permits) => permits,
                 None => break,
             };
-            let connected = tokio::select! {
+            let connected = nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
                 connected = self.connect(&key, &slot_cancel) => connected,
@@ -1215,7 +1220,7 @@ impl TransportState {
                     match self.register_connection(connection.clone()) {
                         Ok(()) => {
                             self.observations.connection_established(key.class);
-                            tokio::select! {
+                            nervix_primitives::select! {
                                 _ = slot_cancel.cancelled() => {}
                                 _ = self.admission_closed.cancelled() => {}
                                 _ = connection.closed.cancelled() => {}
@@ -1255,7 +1260,7 @@ impl TransportState {
                 }
             }
             drop(permits);
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
                 _ = sleep(backoff) => {}
@@ -1272,7 +1277,7 @@ impl TransportState {
     /// timeout. Both ends monitor it, so a stale inbound class slot also releases its capacity.
     async fn monitor_http2_connection(mut ping_pong: PingPong) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             sleep(HTTP2_PING_INTERVAL).await;
             match timeout(HTTP2_PING_TIMEOUT, ping_pong.ping(Ping::opaque())).await {
                 Ok(Ok(_)) => {}
@@ -1296,7 +1301,7 @@ impl TransportState {
         let non_management = if class == PoolClass::Management {
             None
         } else {
-            let acquired = tokio::select! {
+            let acquired = nervix_primitives::select! {
                 _ = cancel.cancelled() => return None,
                 _ = self.admission_closed.cancelled() => return None,
                 acquired = StdArc::clone(&self.non_management_connection_permits).acquire_owned() => acquired,
@@ -1309,7 +1314,7 @@ impl TransportState {
         let non_preconnected = if class.is_preconnected() {
             None
         } else {
-            let acquired = tokio::select! {
+            let acquired = nervix_primitives::select! {
                 _ = cancel.cancelled() => return None,
                 _ = self.admission_closed.cancelled() => return None,
                 acquired = StdArc::clone(&self.non_preconnected_connection_permits).acquire_owned() => acquired,
@@ -1319,7 +1324,7 @@ impl TransportState {
                 Err(_) => return None,
             }
         };
-        let acquired = tokio::select! {
+        let acquired = nervix_primitives::select! {
             _ = cancel.cancelled() => return None,
             _ = self.admission_closed.cancelled() => return None,
             acquired = StdArc::clone(&self.connection_permits).acquire_owned() => acquired,
@@ -1377,7 +1382,7 @@ impl TransportState {
             return;
         }
         let drained = connection.stream_slots.drain();
-        tokio::select! {
+        nervix_primitives::select! {
             _ = self.force_close.cancelled() => {}
             _ = sleep(self.options.shutdown_drain_timeout) => {}
             _ = drained => {}
@@ -1426,7 +1431,7 @@ impl TransportState {
             let driver_closed = closed.clone();
             let force_close = self.force_close.clone();
             self.tasks.spawn(async move {
-                tokio::select! {
+                nervix_primitives::select! {
                     result = connection => {
                         if let Err(error) = result {
                             debug!(?error, "outbound HTTP/2 connection closed");
@@ -1529,7 +1534,7 @@ impl TransportState {
         deadline: Instant,
     ) -> Result<StreamLease, Report<TransportError>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.admission_closed.is_cancelled() {
                 return Err(Report::new(TransportError::ShuttingDown));
             }
@@ -1545,7 +1550,7 @@ impl TransportState {
                 return Ok(lease);
             }
 
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => {
                     return Err(Report::new(TransportError::ShuttingDown));
                 }
@@ -1619,7 +1624,7 @@ impl TransportState {
             } else {
                 let key = RelayAdmissionKey {
                     peer_node_id: node_id.clone(),
-                    ack_id: ack.ack_id,
+                    registration: ack.registration.clone(),
                 };
                 let record = self
                     .relay_admissions
@@ -1796,7 +1801,7 @@ impl TransportState {
         decoded: Option<Reservation>,
     ) -> Result<(), Report<TransportError>> {
         let received = ReceivedEnvelope::new(peer_addr, peer_node_id, envelope, decoded);
-        tokio::select! {
+        nervix_primitives::select! {
             _ = self.admission_closed.cancelled() => Err(Report::new(TransportError::ShuttingDown)),
             result = self.incoming_tx.send(received) => {
                 result.map_err(|_| Report::new(TransportError::ShuttingDown))
@@ -1806,8 +1811,8 @@ impl TransportState {
 
     async fn accept_loop(self, listener: TcpListener) {
         loop {
-            tokio::task::consume_budget().await;
-            let accepted = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let accepted = nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => break,
                 accepted = listener.accept() => accepted,
             };
@@ -1836,7 +1841,7 @@ impl TransportState {
                 };
             let state = self.clone();
             self.tasks.spawn(async move {
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = state.admission_closed.cancelled() => {}
                     _ = state.force_close.cancelled() => {}
                     result = state.clone().accept_connection(
@@ -2027,7 +2032,7 @@ impl TransportState {
         let connection_closed = poll_fn(|context| connection.poll_closed(context));
         tokio::pin!(binding);
         tokio::pin!(connection_closed);
-        tokio::select! {
+        nervix_primitives::select! {
             result = &mut binding => result,
             result = &mut connection_closed => {
                 result.map_err(TransportError::from)?;
@@ -2059,11 +2064,11 @@ impl TransportState {
         let mut draining = false;
         let mut drain_deadline = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let accepted = if draining {
                 let deadline = drain_deadline
                     .verified("entering drain always records its force-close deadline");
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = self.force_close.cancelled() => break,
                     () = &mut health_probe => break,
                     _ = sleep_until(deadline) => break,
@@ -2085,7 +2090,7 @@ impl TransportState {
                     );
                     continue;
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = self.admission_closed.cancelled() => {
                         connection.graceful_shutdown();
                         draining = true;
@@ -2141,7 +2146,7 @@ impl TransportState {
             self.tasks.spawn(async move {
                 let _stream_slot = stream_slot;
                 let handled = state.clone().handle_stream(peer.clone(), request, response);
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = stream_force_close.cancelled() => {}
                     _ = transport_force_close.cancelled() => {}
                     result = handled => {
@@ -2233,7 +2238,7 @@ impl TransportState {
             } else {
                 Some(RelayAdmissionKey {
                     peer_node_id: peer.node_id.clone(),
-                    ack_id: ack.ack_id,
+                    registration: ack.registration.clone(),
                 })
             };
             if ack.outcome.is_progress() {
@@ -2369,7 +2374,7 @@ impl TransportState {
         }
 
         if let ControlEnvelope::Request(request) = control {
-            let response = tokio::select! {
+            let response = nervix_primitives::select! {
                 response = self.requests.handle(
                     &self.executor,
                     peer.node_id,
@@ -2798,7 +2803,7 @@ async fn send_body(
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
     while offset < body.len() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = body
             .len()
             .checked_sub(offset)
@@ -2881,7 +2886,7 @@ async fn send_static_error(
         let body = Bytes::copy_from_slice(message.as_bytes());
         let mut offset = 0;
         while offset < body.len() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let remaining = body
                 .len()
                 .checked_sub(offset)
@@ -2945,7 +2950,7 @@ async fn read_body_into(
     mut body: RecvStream,
 ) -> Result<(), Report<TransportError>> {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let chunk = timeout(progress_timeout, body.data()).await.map_err(|_| {
             TransportError::ProgressTimeout {
                 timeout: progress_timeout,

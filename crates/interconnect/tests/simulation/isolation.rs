@@ -23,9 +23,11 @@ use nervix_interconnect::{
     StreamingResponse, TransferDirection, TransportSnapshot,
 };
 use nervix_models::{RemoteAckOutcome, RemoteAckResolution};
-use parking_lot::Mutex;
+use nervix_primitives::{
+    sync::{blocking::Mutex, oneshot},
+    task::JoinHandle,
+};
 use strum::{EnumCount as _, IntoEnumIterator as _};
-use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::*;
 
@@ -445,7 +447,7 @@ impl PeerHost {
 
     async fn serve(mut self, mut commands: mpsc::Receiver<PeerCommand>) -> Result<(), io::Error> {
         while let Some(command) = commands.recv().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match command {
                 PeerCommand::Connect(reply) => {
                     self.connect().await;
@@ -531,11 +533,10 @@ impl PeerHost {
         assert_eq!(batch.rows, 3);
         let payload = self.next_relay();
         let delivery = payload.delivery;
-        let ack_id = payload
+        let registration = payload
             .admission
-            .as_ref()
-            .assured("fixture relays register an admission")
-            .ack_id;
+            .clone()
+            .assured("fixture relays register an admission");
         self.transport
             .send(&self.hub, Envelope::RelayPayload(payload))
             .await
@@ -548,13 +549,13 @@ impl PeerHost {
                     .await
                     .assured("the peer's incoming queue stays open");
                 let Envelope::Ack(RemoteAckResolution {
-                    ack_id: resolved,
+                    registration: resolved,
                     outcome,
                 }) = received.envelope
                 else {
                     panic!("only relay outcomes reach a peer's application queue");
                 };
-                assert_eq!(resolved, ack_id);
+                assert_eq!(resolved, registration);
                 // The hub reports progress while admission is unresolved; it changes no outcome.
                 if let RemoteAckOutcome::Alive = outcome {
                     continue;
@@ -584,7 +585,7 @@ impl PeerHost {
             .await
             .assured("the healthy peer reads the whole stream")
         {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let length = u64::try_from(chunk.len()).assured("chunk lengths fit in u64");
             received = received
                 .checked_add(length)
@@ -655,7 +656,7 @@ impl PeerHost {
         let mut received = 0_u64;
         for mut stream in self.streams.drain(..) {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match stream.next_chunk().await {
                     Ok(Some(chunk)) => {
                         let length = u64::try_from(chunk.len()).assured("chunk lengths fit in u64");
@@ -719,10 +720,7 @@ impl PeerHost {
             batch_ipc,
             metadata: Vec::new(),
             acks: Vec::new(),
-            admission: Some(RemoteAckRegistration {
-                ack_id,
-                reply_node_id: self.transport.node_id().clone(),
-            }),
+            admission: Some(fixture_registration(ack_id, &self.transport)),
         }
     }
 
@@ -733,7 +731,7 @@ impl PeerHost {
             .checked_sub(started)
             .assured("simulated time does not run backwards");
         while self.incoming.try_recv().is_ok() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
         }
         let observation = self.observe();
         observation.assert_released(self.name);
@@ -780,11 +778,10 @@ impl RelayIngress {
             panic!("next_from returns relay batches only");
         };
         let delivery = body.delivery;
-        let ack_id = body
+        let registration = body
             .admission
-            .as_ref()
-            .assured("fixture relays register an admission")
-            .ack_id;
+            .clone()
+            .assured("fixture relays register an admission");
         assert_eq!(
             received
                 .relay_admission
@@ -797,10 +794,7 @@ impl RelayIngress {
         self.transport
             .send(
                 peer,
-                Envelope::Ack(RemoteAckResolution {
-                    ack_id,
-                    outcome: RemoteAckOutcome::Ack,
-                }),
+                Envelope::Ack(registration.resolution(RemoteAckOutcome::Ack)),
             )
             .await
             .assured("the terminal outcome reaches the sender over reserved capacity");
@@ -875,7 +869,7 @@ impl HubHost {
     ) -> Observation {
         let waited = tokio::time::timeout(HOST_DEADLINE, async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let observation = self.observe();
                 if condition(&observation) {
                     return observation;
@@ -947,10 +941,10 @@ impl HubHost {
     /// reserved streams on that same connection and every pool to the other peer stay usable.
     async fn saturate_stalled_management(&mut self) {
         for sequence in 1..=MANAGEMENT_SHARED_STREAMS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let transport = self.transport.clone();
             let peer = self.stalled.node.clone();
-            self.held.push(tokio::spawn(async move {
+            self.held.push(nervix_primitives::task::spawn(async move {
                 transport.request(&peer, StalledOperation).await
             }));
             wait_for_count(&mut self.handlers.started, sequence).await;
@@ -1395,7 +1389,7 @@ impl HubHost {
         let started = turmoil::elapsed();
         self.transport.replace_live_nodes(&live(&[HUB, HEALTHY]));
         for request in self.held.drain(..) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = request.await.assured("held request tasks join");
             let Err(error) = result else {
                 panic!("the stalled peer never answers");
@@ -1492,7 +1486,7 @@ impl HubHost {
         assert!(took < TransportOptions::default().shutdown_drain_timeout);
         self.transport.shutdown().await;
         while self.ingress.incoming.try_recv().is_ok() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
         }
         let stopped = self.observe();
         stopped.assert_released(HUB);
@@ -1769,7 +1763,7 @@ fn stalled_peer_plan(run: ScenarioRun) -> Result<(), SimulationError> {
             let mut finished = finished_rx;
             tokio::time::timeout(Duration::from_secs(110), async {
                 while *finished.borrow() < 3 {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     finished
                         .changed()
                         .await

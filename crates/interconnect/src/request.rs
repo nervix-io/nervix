@@ -16,11 +16,12 @@ use ahash::HashMap;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, Executor, Reservation,
-    sync::{ArcSwap, ArcSwapOption},
-};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
+use nervix_primitives::{
+    publication::{ArcSwap, ArcSwapOption},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore},
+};
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::high::{HighDeserializer, HighSerializer},
@@ -29,10 +30,7 @@ use rkyv::{
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
-use tokio::{
-    sync::{Notify, OwnedSemaphorePermit, Semaphore},
-    time::{Instant, timeout},
-};
+use tokio::time::{Instant, timeout};
 use triomphe::Arc;
 
 use super::{
@@ -1322,7 +1320,7 @@ impl RequestState {
 
     async fn target_left(&self, node: &ClusterNodeName) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let changed = self.membership_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -1642,7 +1640,7 @@ impl Transport {
         };
         let shutdown = self.inner.shutdown_token();
         let submitted_at = Instant::now();
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             _ = shutdown.cancelled() => Err(Report::new(RequestError::ShuttingDown {
                 node: node.clone(),

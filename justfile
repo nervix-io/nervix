@@ -5,6 +5,69 @@ release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
 
+# Show the documented recipes, including the Bolero property and fuzz commands.
+help:
+    just --list
+
+# Install the qualified CLI version with only the libFuzzer engine.
+install-cargo-bolero:
+    cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
+
+# Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
+test-bolero filter="":
+    python3 scripts/bolero.py test {{ quote(filter) }}
+
+# List every compiled, registered Bolero target after checking the inventory.
+fuzz-list:
+    python3 scripts/bolero.py list
+
+# Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
+fuzz target duration="30":
+    python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
+
+# Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
+fuzz-all duration="30":
+    python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
+
+# Replay the exact saved input through its ordinary property assertion.
+fuzz-replay target failure:
+    python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
+
+# Minimize a saved failure with libFuzzer and verify the minimized input still fails.
+fuzz-reduce target failure:
+    python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
+
+# Compare the inventory, package declarations, test harness and compiled Bolero targets.
+validate-bolero:
+    python3 scripts/bolero.py validate
+
+# Check the dedicated PR and campaign workflow with the pinned Actions linter.
+validate-bolero-workflow:
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
+
+# Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
+qualify-bolero:
+    python3 scripts/bolero.py qualify
+
+# Exercise the inventory and runner's validation and failure paths.
+test-bolero-runner:
+    python3 -m unittest scripts.tests.test_bolero
+
+# Collect runner line coverage while exercising real libFuzzer and its failure qualification.
+# The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
+coverage-bolero duration="2":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" erase
+    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch -a scripts/bolero.py test
+    "${coverage[@]}" run --branch -a scripts/bolero.py fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    mkdir -p target/bolero
+    "${coverage[@]}" lcov -o target/bolero/python.lcov
+    "${coverage[@]}" report --fail-under=80
+
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format build-test-cli
@@ -57,6 +120,9 @@ test-scenarios *args: tests-deps
 test-admission-kernels *args:
     cargo test --package nervix-simd-kernels --lib -- {{ args }}
     cargo test --package nervix-models --lib -- {{ args }}
+
+bench-window-admission *args:
+    cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
 test-admission-runtime *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
@@ -143,12 +209,17 @@ test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
 # Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
-# atomic surface against its own backend and checks that it selected that backend, so an operation a
-# backend lacks or answers differently fails here. Every mode is its own build, because Cargo would
-# unify the features of one. The portable surface is also built for the browser target.
+# contract scripts of every family against its own backend and checks that it selected that backend,
+# so an operation a backend lacks or answers differently fails here. The Shuttle build also shows
+# that its adapters let the scheduler reach a publication between a read and a waiter's
+# registration, and the Loom build that it takes the ordinary libraries for the families Loom does
+# not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
+# is its own build, because Cargo would unify the features of one.
+# The portable surface is also built for the browser target.
 test-primitives:
     cargo test --package nervix-primitives --lib
     cargo test --package nervix-primitives --features native --lib
+    cargo test --package nervix-primitives --features native --doc
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
     cargo test --package nervix-primitives --features 'turmoil native' --lib
@@ -645,7 +716,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
         --package nervix-models --package nervix-client-wire --package nervix-nspl
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor; do
+    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor visual_create_processors; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
             --concurrency 1 --retry 0
@@ -679,6 +750,40 @@ coverage-scenarios-append output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.
+coverage-redis output="target/redis-dns.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --lib \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-redis
+    cargo llvm-cov --no-report --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-report --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/runtime/redis_dns_resolution.feature --name Redis --retry 0 --concurrency 1
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-report output="target/redis-dns.lcov":
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-server \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-redis
+
+coverage-redis-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-connector-redis
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-server-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-clean --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
+    just coverage-redis-report {{ quote(output) }}
+
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
 coverage-dns-clients output="target/dns-clients.lcov": tests-deps
@@ -698,6 +803,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
+        --package nervix-connector-redis \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -720,6 +826,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/tools/cli_session.feature 'CLI.rejects.a.TLS'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
+    run_scenario tests/features/runtime/redis_dns_resolution.feature 'Redis'
     run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
@@ -743,6 +850,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
+        --package nervix-connector-redis \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -1029,8 +1137,8 @@ cargo-clippy-all:
     export RUSTFLAGS="-Dwarnings {{ rustflags }}"
     # Execution-mode builds require their runner, Shuttle's deliberately omits Tokio's process and
     # runtime-builder APIs, and the modes cannot be enabled together. Lint the packages that own a
-    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary,
-    # the Loom models and the Turmoil targets.
+    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary
+    # and the Turmoil targets here, and the Loom builds in `cargo-clippy-loom`.
     mode_packages=(
         nervix-client-core
         'nervix-connector*'
@@ -1066,14 +1174,29 @@ cargo-clippy-all:
         --package nervix-server \
         --package nervix-wasm
     cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
-    cargo clippy --all-targets --features loom \
-        --package nervix-execution \
-        --package nervix-model-harness
-    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
     cargo clippy --all-targets --features turmoil \
         --package nervix-execution \
         --package nervix-interconnect
     cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
+
+# Lint every Loom build, each in its own invocation: the models and their harness, the primitive
+# boundary, and the server and consensus libraries as they ship and in test mode, where the Loom
+# models of their owners are built. Their integration tests and binaries never run a model, and
+# consensus unit tests build with `testing`, whose fault controls only the server's tests use.
+cargo-clippy-loom:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
+    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
+    cargo clippy --all-targets --features loom \
+        --package nervix-execution \
+        --package nervix-model-harness
+    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
+    cargo clippy --lib --features loom \
+        --package nervix-consensus \
+        --package nervix-server
+    cargo clippy --lib --profile test --features loom --package nervix-server
+    cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
 
 # Lint one workspace package and all of its targets with warnings denied, sharing the workspace
 # lint build directory. Extra arguments are forwarded to Cargo.
@@ -1097,7 +1220,7 @@ cargo-clippy-client-wire-wasm:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
 
 [parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
 lint-inner: cargo-clippy
@@ -1111,7 +1234,7 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1155,9 +1278,9 @@ validate-dns-dependencies:
             exit 1
         fi
     done
-    # Syslog and WebSocket client transports resolve through the node resolver before opening
-    # their own concrete-address sockets, even when built without the server's feature graph.
-    for package in nervix-connector-syslog nervix-connector-websockets; do
+    # Syslog, WebSocket and Redis transports resolve through the node resolver, even when each
+    # connector is built without the server's feature graph.
+    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis; do
         graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
         if ! rg -q '^nervix-dns v' <<< "${graph}" || \
             ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
@@ -1165,6 +1288,12 @@ validate-dns-dependencies:
             exit 1
         fi
     done
+    graph="$(cargo tree --package nervix-connector-redis --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^redis v1\.[0-9]+\.[0-9]+ .*tokio-rustls-comp' <<< "${graph}" || \
+        rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-redis lacks Redis's AWS-LC TLS path" >&2
+        exit 1
+    fi
     # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector
     # and Smithy's HTTP client, even when built without the server's feature graph, and complete
     # TLS with AWS-LC alone.
@@ -1194,13 +1323,14 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
-# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, an
-# unmodeled atomic without its permission, a stale permission, a `loom` dependency outside its owner
-# and harness, and a mode feature that is not forwarded. The check's own tests run first, so a rule
-# that stopped rejecting its bypass fails here too.
+# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a
+# selected atomic held by a static or constructed in a const context, an unmodeled atomic without
+# its permission, a stale permission, a `loom` dependency outside its owner and harness, and a mode
+# feature that is not forwarded. The check's own tests run first, so a rule that stopped rejecting
+# its bypass fails here too.
 validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
@@ -1660,7 +1790,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.0}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

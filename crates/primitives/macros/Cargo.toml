@@ -1,0 +1,12 @@
+[package]
+description = "The runtime attributes of nervix-primitives, which build the async runtime of the build's execution mode"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-primitives-macros"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true

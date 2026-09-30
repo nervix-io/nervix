@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** One bounded physical HTTP/1.1 exchange at a time, exact prepared request bytes,
-//!   TLS and DNS transport, response header validation, one outcome for each request, and the
-//!   retry delay a retryable response asks for.
+//!   TLS and DNS transport, response header validation, one outcome for each request, the retry
+//!   delay a retryable response asks for, and the description of a failed attempt, which names
+//!   its cause and never an evaluated target, header value or body.
 //! - **Depends on.** The connector contract and its actual-UTC read, shared client TLS settings,
 //!   node DNS resolver, vocabulary request fields, Tokio I/O, rustls and the HTTP/1.1 response
 //!   parser.
@@ -116,6 +117,9 @@ impl HttpSink {
     }
 
     /// DNS, connection, TLS, request send and complete final headers share one physical timeout.
+    ///
+    /// Each failure keeps its cause beneath the attempt's own: the resolver's lookup failure, or the
+    /// socket or TLS error. They describe the connection, never the request.
     async fn exchange(&self, request: &SinkHttpRequest) -> HttpAttemptResult<FinalResponse> {
         let url = request.target.url();
         let mut stream = self.connect(url).await?;
@@ -123,17 +127,17 @@ impl HttpSink {
         stream
             .write_all(&head)
             .await
-            .map_err(|_| Report::new(HttpAttemptError::Send))?;
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
         if let Some(body) = &request.body {
             stream
                 .write_all(body)
                 .await
-                .map_err(|_| Report::new(HttpAttemptError::Send))?;
+                .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
         }
         stream
             .flush()
             .await
-            .map_err(|_| Report::new(HttpAttemptError::Send))?;
+            .map_err(|error| Report::new(error).change_context(HttpAttemptError::Send))?;
         read_final_headers(&mut *stream)
             .await
             .change_context(HttpAttemptError::Response)
@@ -150,23 +154,34 @@ impl HttpSink {
             .dns
             .resolve(host, port, self.timeout)
             .await
-            .map_err(|_| Report::new(HttpAttemptError::Dns))?;
+            .change_context(HttpAttemptError::Dns)?;
         let mut connected = None;
+        let mut last_failure = None;
         for address in addresses {
-            tokio::task::consume_budget().await;
-            if let Ok(stream) = Self::connect_address(address).await {
-                connected = Some(stream);
-                break;
+            nervix_primitives::task::consume_budget().await;
+            match Self::connect_address(address).await {
+                Ok(stream) => {
+                    connected = Some(stream);
+                    break;
+                }
+                Err(error) => last_failure = Some(error),
             }
         }
-        let stream = connected.ok_or_else(|| Report::new(HttpAttemptError::Connection))?;
+        let Some(stream) = connected else {
+            // No address accepted a connection; the failure of the last one tried describes it.
+            let failure = match last_failure {
+                Some(error) => Report::new(error).change_context(HttpAttemptError::Connection),
+                None => Report::new(HttpAttemptError::Connection),
+            };
+            return Err(failure);
+        };
         let stream: Box<dyn HttpStream> = if url.scheme() == "https" {
             let server_name = Self::server_name(url)?;
             let connector = TlsConnector::from(self.tls.clone());
             let tls = connector
                 .connect(server_name, stream)
                 .await
-                .map_err(|_| Report::new(HttpAttemptError::Tls))?;
+                .map_err(|error| Report::new(error).change_context(HttpAttemptError::Tls))?;
             Box::new(tls)
         } else {
             Box::new(stream)
@@ -220,8 +235,18 @@ impl HttpSink {
         head
     }
 
+    /// The failure of an attempt, described by the attempt's own error and every cause beneath
+    /// it, such as `HTTP endpoint answered with retryable status 503` or
+    /// `HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`.
+    ///
+    /// The emitter reports the description as its transient error while the request stays
+    /// pending. Neither the attempt's errors nor their causes carry the evaluated target, a header
+    /// value or a body, so the description names none of them.
     fn publish_error(error: Report<HttpAttemptError>) -> Report<SinkPublishError> {
-        error.change_context(SinkPublishError::Publish { sink: HTTP_SINK })
+        let description = format!("{error:#}");
+        error
+            .change_context(SinkPublishError::Publish { sink: HTTP_SINK })
+            .attach_printable(description)
     }
 
     /// The failure of an attempt whose endpoint answered with a status to retry, carrying the
@@ -241,14 +266,21 @@ impl HttpSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for HttpSink {}
+impl SinkLifecycle for HttpSink {
+    /// The sink holds no connection or staged work between attempts, so keeping it loses
+    /// nothing, and the emitter's retry sends the pending request without reopening a sink whose
+    /// successful reopening would clear the failure the request is still waiting out.
+    fn keeps_client_on_publish_failure(&self) -> bool {
+        true
+    }
+}
 
 #[async_trait]
 impl HttpRequestSink for HttpSink {
     async fn publish(&mut self, requests: Vec<SinkHttpRequest>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(requests.len());
         for request in requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let response = match self.send(&request).await {
                 Ok(response) => response,
                 Err(error) => {
@@ -290,13 +322,14 @@ impl HttpRequestSink for HttpSink {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use error_stack::{AttachmentKind, FrameKind};
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod,
         HttpOrigin, Timestamp,
     };
 
-    use super::*;
+    use super::{response::ResponseHeadError, *};
 
     fn prepared(method: &str, body: Option<Vec<u8>>) -> SinkHttpRequest {
         let origin = HttpOrigin::parse("https://api.example.com:8443")
@@ -371,7 +404,7 @@ mod tests {
 
     async fn final_response(head: &'static [u8]) -> FinalResponse {
         let (mut client, mut server) = tokio::io::duplex(1024);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
             server
                 .write_all(head)
@@ -383,7 +416,7 @@ mod tests {
             .assured("the fixture response head is complete and valid")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retryable_status_carries_only_the_delay_its_retry_after_asks_for() {
         let limited = final_response(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n",
@@ -421,5 +454,112 @@ mod tests {
         let name = HttpSink::server_name(target.url())
             .assured("a parsed HTTP target has a TLS server name");
         assert_eq!(name, ServerName::from(std::net::Ipv4Addr::LOCALHOST));
+    }
+
+    /// The description a failed attempt carries, which the emitter reports as its transient error.
+    fn description(error: &Report<SinkPublishError>) -> Option<String> {
+        for frame in error.frames() {
+            if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+                return Some(attachment.to_string());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_failed_attempt_describes_its_status_or_every_cause_beneath_it() {
+        let status = HttpSink::publish_error(Report::new(HttpAttemptError::RetryableStatus {
+            status: 503,
+        }));
+        assert_eq!(
+            *status.current_context(),
+            SinkPublishError::Publish { sink: HTTP_SINK }
+        );
+        assert_eq!(
+            description(&status).as_deref(),
+            Some("HTTP endpoint answered with retryable status 503")
+        );
+
+        let handshake = HttpSink::publish_error(
+            Report::new(std::io::Error::other(
+                "invalid peer certificate: UnknownIssuer",
+            ))
+            .change_context(HttpAttemptError::Tls),
+        );
+        assert_eq!(
+            description(&handshake).as_deref(),
+            Some("HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer")
+        );
+
+        let headers = HttpSink::publish_error(
+            Report::new(ResponseHeadError::Excessive).change_context(HttpAttemptError::Response),
+        );
+        assert_eq!(
+            description(&headers).as_deref(),
+            Some(
+                "HTTP response header exchange failed: HTTP response headers exceed 128 fields or \
+                 64 KiB"
+            )
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_refused_connection_keeps_its_cause_and_the_sink_keeps_its_client() {
+        let unused = std::net::TcpListener::bind("127.0.0.1:0")
+            .assured("the test host has a free loopback port");
+        let port = unused
+            .local_addr()
+            .assured("a bound listener has a local address")
+            .port();
+        drop(unused);
+        let origin = HttpOrigin::parse(&format!("http://127.0.0.1:{port}"))
+            .assured("a loopback address and port form an HTTP origin");
+        let mut headers = HttpApplicationHeaders::default();
+        headers
+            .insert(
+                HttpHeaderName::parse("Authorization")
+                    .assured("Authorization is a valid application header name"),
+                HttpHeaderValue::parse("Bearer s3cr3t")
+                    .assured("a bearer token is a valid header value"),
+            )
+            .assured("one short header fits the application envelope");
+        let request = SinkHttpRequest {
+            id: SinkRecordId::new(0),
+            method: HttpMethod::parse("POST", HttpBodyMode::WithoutBody)
+                .assured("POST is a valid HTTP token"),
+            target: origin
+                .target("/events/secret-7")
+                .assured("the test target is origin-relative"),
+            headers,
+            body: None,
+            occurred_at: Timestamp::from_unix_nanos(1),
+        };
+        let mut sink = HttpSink {
+            dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
+                .await
+                .assured("the host resolver configuration loads in tests"),
+            tls: RustlsClientConfigSource::new(&[])
+                .build_with_default_roots()
+                .assured("the platform's default roots load in tests"),
+            timeout: Duration::from_secs(5),
+        };
+        assert!(
+            sink.keeps_client_on_publish_failure(),
+            "a retry sends the pending request through the same sink"
+        );
+
+        let outcome = sink.publish(vec![request]).await.into_parts();
+
+        assert!(outcome.delivered.is_empty());
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .assured("a refused connection leaves its request unresolved");
+        let described = description(&failure).assured("a failed attempt is always described");
+        assert!(
+            described.starts_with("HTTP connection failed: ") && !described.contains("secret"),
+            "the refusal's own cause follows, and neither the target nor a header value: \
+             {described}"
+        );
     }
 }

@@ -326,7 +326,7 @@ impl BrokerSourceConnector for RabbitMqSource {
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let settled = position
                 .acker
                 .ack(BasicAckOptions::default())
@@ -355,7 +355,7 @@ impl BrokerSourceConnector for RabbitMqSource {
     /// again rather than holding it against the prefetch window forever.
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let settled = position
                 .acker
                 .nack(BasicNackOptions {
@@ -409,7 +409,7 @@ mod tests {
         (files, dns)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn failed_connections_keep_their_typed_cause_and_leave_the_source_to_resume() {
         let (_files, dns) = literal_address_resolver().await;
         let refusing = tokio::net::TcpListener::bind("127.0.0.1:0")

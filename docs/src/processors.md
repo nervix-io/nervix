@@ -333,6 +333,12 @@ Published branch snapshots share the retained Arrow input and argument columns, 
 sections, and rebuild the same sketches from those columns when ownership moves or a node recovers.
 Histogram delayed removals travel in bounded typed sections beside the columns.
 
+Admission reads each consecutive run of retained rows as typed Arrow value slices with their
+validity bits. Counts and integer sums are exact across run boundaries. Floating-point sums and
+statistics merge each run's compensated or centered result into the branch-local window, so their
+last rounded digits can depend on the run and lane grouping. Stepping refolds surviving runs;
+restoring a snapshot re-admits its retained rows.
+
 In a window route, `COUNT`, `SUM`, `FIRST`, `LAST`, `MIN`, and `MAX` always name window aggregates.
 The [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same
 names apply to one `ARRAY` or `VEC` value everywhere else.

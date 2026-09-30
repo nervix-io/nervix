@@ -7,7 +7,8 @@
 //!   returned.
 
 use nervix_client_wire::{
-    CancellationStage, ClientRequest, ReplyBody, RequestRejection, WireDecodeError, WireEncodeError,
+    CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
+    WireDecodeError, WireEncodeError,
 };
 use nervix_dns::DnsConfigurationError;
 use nervix_models::{
@@ -53,6 +54,14 @@ pub enum RequestKind {
     SubmitBatch,
     #[strum(serialize = "close ingestor")]
     CloseIngestor,
+    #[strum(serialize = "open emitter")]
+    OpenEmitter,
+    #[strum(serialize = "read emitter batch")]
+    ReadEmitterBatch,
+    #[strum(serialize = "settle emitter batch")]
+    SettleEmitterBatch,
+    #[strum(serialize = "close emitter")]
+    CloseEmitter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -81,6 +90,10 @@ impl From<&ClientRequest> for RequestKind {
             ClientRequest::OpenIngestor(_) => Self::OpenIngestor,
             ClientRequest::SubmitBatch(_) => Self::SubmitBatch,
             ClientRequest::CloseIngestor(_) => Self::CloseIngestor,
+            ClientRequest::OpenEmitter(_) => Self::OpenEmitter,
+            ClientRequest::ReadEmitterBatch(_) => Self::ReadEmitterBatch,
+            ClientRequest::SettleEmitterBatch(_) => Self::SettleEmitterBatch,
+            ClientRequest::CloseEmitter(_) => Self::CloseEmitter,
         }
     }
 }
@@ -114,7 +127,7 @@ pub enum ClientError {
     #[error("session exchange closed")]
     SessionClosed,
     #[error("a subscription operation task stopped before completing")]
-    SubscriptionTask(#[source] tokio::task::JoinError),
+    SubscriptionTask(#[source] nervix_primitives::task::JoinError),
     #[error("subscription operation failed")]
     SubscriptionOperation(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("session exchange failed: {0}")]
@@ -201,6 +214,11 @@ pub enum ClientError {
     #[error("the server refused to open the producer ({refusal:?}): {message}")]
     ProducerRefused {
         refusal: ClientProducerRefusal,
+        message: String,
+    },
+    #[error("the server refused to open the emitter consumer ({refusal:?}): {message}")]
+    ConsumerRefused {
+        refusal: EmitterOpenRefusal,
         message: String,
     },
     /// The archive a restore names could not be read on this machine.
@@ -324,7 +342,11 @@ impl ClientError {
             | ReplyBody::DomainClockDetach(_)
             | ReplyBody::OpenIngestor(_)
             | ReplyBody::Submission(_)
-            | ReplyBody::CloseIngestor(_) => Self::UnexpectedReply { request },
+            | ReplyBody::CloseIngestor(_)
+            | ReplyBody::OpenEmitter(_)
+            | ReplyBody::ReadEmitterBatch(_)
+            | ReplyBody::SettleEmitterBatch(_)
+            | ReplyBody::CloseEmitter(_) => Self::UnexpectedReply { request },
         }
     }
 }

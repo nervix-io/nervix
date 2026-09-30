@@ -112,13 +112,13 @@ pub(super) struct BranchExecutionRuntime {
     pub(super) checkpoints:
         mpsc::Sender<oneshot::Sender<OwnershipHandoffResult<PersistedRuntimeStateEntry>>>,
     pub(super) shutdown: watch::Sender<bool>,
-    pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
 }
 
 pub(super) struct IngestorRouteRuntime {
     pub(super) sender: mpsc::Sender<BranchedEntrypointInput>,
     pub(super) shutdown: watch::Sender<bool>,
-    pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
     pub(super) branch_runtime: Arc<BranchExecutionRuntime>,
 }
 
@@ -151,7 +151,7 @@ pub(super) struct BranchExecutionDispatchContext<'a> {
 struct BranchDispatchCompletion {
     key: Option<BranchKey>,
     acks: Vec<AckSet>,
-    result: Result<Option<Timestamp>, tokio::task::JoinError>,
+    result: Result<Option<Timestamp>, nervix_primitives::task::JoinError>,
 }
 
 type PendingBranchDispatch = BoxFuture<'static, BranchDispatchCompletion>;
@@ -666,7 +666,7 @@ impl BranchRuntime {
             );
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
         for processor_id in processor_ids {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
@@ -766,7 +766,7 @@ impl IngestorRouteTask {
         };
         let mut batch_builds = FuturesUnordered::new();
         for selection in branch_plan {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             batch_builds.push(branched_branch_filter_blocking(
                 input_batch.clone(),
                 selection,
@@ -775,7 +775,7 @@ impl IngestorRouteTask {
         }
         let mut prepared = Vec::new();
         while let Some(batch_result) = futures_util::StreamExt::next(&mut batch_builds).await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match batch_result {
                 Ok((_, batch)) => prepared.push(batch),
                 Err(failure) => self.handle_general_error(
@@ -837,7 +837,7 @@ impl IngestorRouteTask {
         domain_clock: &DomainClock,
     ) {
         for batch in self.prepare_input(input).await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = batch.key.clone();
             let estimated_bytes = batch.estimated_bytes();
             if !self.pending.contains_key(&key) {
@@ -914,7 +914,7 @@ impl IngestorRouteTask {
             }
         }
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
         Ok(())
@@ -923,7 +923,7 @@ impl IngestorRouteTask {
     pub(super) async fn flush_all(&mut self) {
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
     }
@@ -942,7 +942,7 @@ impl IngestorRouteTask {
     ) {
         let ready = input.len();
         for _ in 0..ready {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Ok(message) = input.try_recv() else {
                 break;
             };
@@ -963,7 +963,7 @@ impl IngestorRouteTask {
     ) {
         input.close();
         while let Some(message) = input.recv().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.accept(message, domain_clock).await;
         }
         self.flush_all().await;
@@ -1010,12 +1010,12 @@ impl IngestorRouteTask {
         let ownership_freeze =
             OwnershipHandoffFreezeWatch::new(&self.runtime_handle, ownership_entity);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let freeze = ownership_freeze.observe();
             let ownership_frozen = freeze.is_frozen();
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
                 // arm drains and finishes either way, so the outcome carries nothing to read.
@@ -1100,7 +1100,7 @@ impl IngestorRouteRuntime {
         let runtime = Arc::new(Self {
             sender,
             shutdown,
-            task: parking_lot::Mutex::new(None),
+            task: nervix_primitives::sync::blocking::Mutex::new(None),
             branch_runtime: branch_runtime.clone(),
         });
         // The obligation is registered before the task starts, so a generation requested between
@@ -1113,7 +1113,7 @@ impl IngestorRouteRuntime {
             ),
         ));
         let force_flush = runtime_handle.force_flush_participant(&domain, quiesce.counters());
-        let task = tokio::spawn(
+        let task = nervix_primitives::task::spawn(
             IngestorRouteTask {
                 runtime_handle,
                 domain,
@@ -1188,7 +1188,7 @@ impl BranchExecutionRuntime {
         };
 
         for message in inputs {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = message.key.clone();
             let instance = if let Some(state) = instances.touch(&key, accepted_at) {
                 GetOrCreateBranchInstance {
@@ -1261,7 +1261,7 @@ impl BranchExecutionRuntime {
             let dispatch_key = key.clone();
             let dispatch_acks = message.acks.clone();
             let (started, started_rx) = oneshot::channel();
-            let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+            let handle = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
                 let mut branch = state.lock().await;
                 started
                     .send(())
@@ -1416,7 +1416,7 @@ impl BranchExecutionRuntime {
         .await;
         let mut next_deadline = None;
         while let Some(completion) = lanes.pending.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             Self::finish_dispatch(
                 BranchExecutionDispatchContext {
                     runtime_handle,
@@ -1452,11 +1452,11 @@ impl BranchExecutionRuntime {
             sender,
             checkpoints,
             shutdown,
-            task: parking_lot::Mutex::new(None),
+            task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
         runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
 
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
                 Ok(clock) => clock,
                 Err(error) => {
@@ -1529,7 +1529,7 @@ impl BranchExecutionRuntime {
             let ownership_freeze =
                 OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity);
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let freeze = ownership_freeze.observe();
                 let ownership_frozen = freeze.is_frozen();
                 let snapshot = match domain_clock.snapshot() {
@@ -1617,7 +1617,7 @@ impl BranchExecutionRuntime {
                 } else {
                     next_branch_deadline.map(|deadline| domain_clock.deadline_at(deadline))
                 };
-                tokio::select! {
+                nervix_primitives::select! {
                     biased;
                     checkpoint = checkpoint_requests.recv(), if checkpoint_requests_open && lanes.is_empty() => {
                         let Some(checkpoint) = checkpoint else {
@@ -1659,7 +1659,7 @@ impl BranchExecutionRuntime {
                     message = input.recv(), if !ownership_frozen => {
                         let Some(message) = message else {
                             while let Some(completion) = lanes.pending.next().await {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 Self::finish_dispatch(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1695,7 +1695,7 @@ impl BranchExecutionRuntime {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             input.close();
                             while let Some(message) = input.recv().await {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 Self::enqueue_prepared_inputs(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1711,7 +1711,7 @@ impl BranchExecutionRuntime {
                                 .await;
                             }
                             while let Some(completion) = lanes.pending.next().await {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 Self::finish_dispatch(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1958,7 +1958,7 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     };
     let entries = decode_branch_lru_snapshot(&snapshot.payload)?;
     for (entry, restored) in entries.into_iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let key = restored.key;
         let last_ingestion = restored.last_ingestion;
         let incarnation = restored.incarnation;
@@ -2121,7 +2121,7 @@ mod tests {
         runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2212,7 +2212,7 @@ mod tests {
         assert_eq!(counters.outstanding_work(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_pending_materialized_batch_nacks_its_ack_root() {
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -2280,7 +2280,7 @@ mod tests {
 
     /// A domain force flush releases route buffers that a long logical cadence still holds, and
     /// the route's obligation clears only after its output has been published.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_releases_held_ingestor_route_buffers() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2322,7 +2322,8 @@ mod tests {
             pending: HashMap::default(),
             quiesce: OutputBufferQuiesceGauge::new(counters.clone()),
         };
-        let task = tokio::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+        let task =
+            nervix_primitives::task::spawn(route_task.run(route_input, shutdown_rx, force_flush));
 
         route_sender
             .send(
@@ -2338,8 +2339,8 @@ mod tests {
             .expect("the route task should accept input");
         timeout(Duration::from_secs(1), async {
             while counters.admitted_work() != 1 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -2368,7 +2369,7 @@ mod tests {
         );
         timeout(Duration::from_secs(1), async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let pending = runtime
                     .inner
                     .force_flush_by_domain
@@ -2378,7 +2379,7 @@ mod tests {
                 if pending == 0 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

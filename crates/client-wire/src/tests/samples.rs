@@ -7,16 +7,16 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
-    CanonicalImpactSet, ClientAttachmentId, ClientEndpointContract, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
-    ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition, DomainClockObservation,
-    DomainClockObservedState, DomainClockPeriod, DomainClockSkew, DomainClockState,
-    DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate, ExecutionStepImpactReport,
-    ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
-    ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge,
-    ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
+    CanonicalImpactSet, ClientAttachmentId, ClientConsumerLimits, ClientEndpointContract,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerGrant, ClientProducerLimits,
+    ClientProducerPolicy, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
+    DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
+    DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
+    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
     PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
     RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
     SchemaField, StatePurge, StateResetImpact, Timestamp, TransactionImpactReport,
@@ -30,12 +30,14 @@ use super::fixtures::{name, non_zero, operation, reference, request};
 use crate::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, CellWriter,
     ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
-    CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
-    DetachDomainClockRequest, Diagnostic, EncodedFrame, InspectTransactionRequest, LeaderEndpoints,
-    LeaderRedirect, OpenIngestorRequest, OutcomeOrigin, ProducerId, RowBranch, RowSchema,
-    SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan, StatementDisposition,
-    StatementOutcome, SubmitBatchRequest, SubscribeRequest, SubscriptionHandle,
-    SubscriptionRowsEncoder, SubscriptionType, SuggestRequest, UnsubscribeRequest, WireEncodeError,
+    CloseEmitterRequest, CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
+    ConsumerId, DetachDomainClockRequest, Diagnostic, EmitterBatchDecision, EncodedFrame,
+    InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
+    OpenIngestorRequest, OutcomeOrigin, ProducerId, ReadEmitterBatchRequest, RowBranch, RowSchema,
+    SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest, SourceSpan,
+    StatementDisposition, StatementOutcome, SubmitBatchRequest, SubscribeRequest,
+    SubscriptionHandle, SubscriptionRowsEncoder, SubscriptionType, SuggestRequest,
+    UnsubscribeRequest, WireEncodeError,
 };
 
 pub(crate) fn leader() -> LeaderEndpoints {
@@ -204,6 +206,26 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
         }),
         ClientRequest::CloseIngestor(CloseIngestorRequest {
             producer: producer(),
+        }),
+        ClientRequest::OpenEmitter(OpenEmitterRequest {
+            domain: name("tenant"),
+            emitter: name("app_output"),
+            expected_fields: producer_fields(),
+            limits: ClientConsumerLimits {
+                batches: NonZeroU32::new(8).assured("literal nonzero"),
+                bytes: non_zero(4 * 1024 * 1024),
+            },
+        }),
+        ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
+            consumer: ConsumerId::opened_by(request(22)),
+        }),
+        ClientRequest::SettleEmitterBatch(SettleEmitterBatchRequest {
+            consumer: ConsumerId::opened_by(request(22)),
+            reference: uuid::Uuid::from_bytes([0xB4; 16]),
+            decision: EmitterBatchDecision::Ack,
+        }),
+        ClientRequest::CloseEmitter(CloseEmitterRequest {
+            consumer: ConsumerId::opened_by(request(22)),
         }),
     ];
     requests

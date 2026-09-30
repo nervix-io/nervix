@@ -1082,7 +1082,7 @@ mod tests {
         assert!(finalized_partial_output(&finalized.batch, 2).is_none());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dlq_dispatch_requires_the_installed_route_plan() {
         let runtime = Runtime::new();
         let domain = domain("default");
@@ -1141,7 +1141,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
         let source = test_runtime_row([("input_id".to_string(), RuntimeValue::U32(7))]);
         let message = RelayMessage {
@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(digest.len(), 32);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn message_error_record_construction_failure_is_distinct_from_the_original_error() {
         let output_schema = test_optional_schema(&[OptionalTestField {
             name: "result",

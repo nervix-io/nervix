@@ -10,11 +10,8 @@
 //!   lifecycle signal.
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use tokio::{
-    sync::watch,
-    time::{Duration, Instant},
-};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::{CancellationToken, watch};
+use tokio::time::{Duration, Instant};
 use tracing::info;
 use triomphe::Arc;
 
@@ -307,7 +304,7 @@ impl ShutdownCoordinator {
     pub async fn completion(&self) -> ShutdownOutcome {
         let mut state = self.inner.state.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = state.borrow().outcome();
             if let Some(outcome) = outcome {
                 return outcome;
@@ -429,7 +426,7 @@ mod tests {
             .deadline()
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn repeated_stop_requests_keep_the_first_deadline() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
         let ShutdownRequestOutcome::Accepted(first) = coordinator.request_stop() else {
@@ -454,7 +451,7 @@ mod tests {
         assert!(first.deadline().has_passed());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn work_still_running_at_the_deadline_is_cut_off_there() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
         coordinator.request_stop();
@@ -467,7 +464,7 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(5));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn work_that_finishes_before_the_deadline_reports_its_output() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
         coordinator.request_stop();
@@ -504,7 +501,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_phase_that_finishes_after_the_deadline_is_forced() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
         coordinator.request_stop();
@@ -527,7 +524,7 @@ mod tests {
         assert!(outcome.deadline_expired());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn drain_support_stays_live_until_terminal_teardown() {
         let coordinator = ShutdownCoordinator::default();
         let admission = coordinator.admission_token();
@@ -561,7 +558,8 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
-    use shuttle::{future::block_on, thread};
+    use nervix_primitives::thread;
+    use shuttle::future::block_on;
 
     use super::*;
     use crate::{

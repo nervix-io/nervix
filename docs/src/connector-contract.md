@@ -6,6 +6,11 @@ defines who owns the work after validation: the shared connector contract, each 
 transport, and the host that drives it. [Data Plane](./data-plane.md) describes what happens to
 the resulting Arrow batches inside the graph.
 
+[Execution Plans](./execution-plans.md) describes how one committed revision supplies those typed
+source and sink plans to the host.
+[HTTP Emitter Architecture](./http-emitter-architecture.md) follows this boundary for one
+outbound request, from Arrow preparation to response and recovery.
+
 ## Ownership and dependency direction
 
 | Layer | Responsibility |
@@ -88,6 +93,36 @@ a later connection delivers it. A connection that fails before its AMQP handshak
 Lapin thread, and a failed handshake ends that thread and closes the socket. An established
 connection is not closed because its host's answer changed or expired; the next connection uses
 the new answer.
+
+### DNS for Redis
+
+Composition gives the node resolver to the shared Redis command pool and to each Pub/Sub source
+plan. Redis 1.7.1 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
+connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
+pool bounds, health checks and lease ownership remain with the existing pool and host. A pooled
+socket may remain open past an answer's TTL. A replacement socket resolves the host again.
+
+The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
+resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
+initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
+addresses in order inside a 30-second budget shared by DNS, TCP, TLS, Redis setup, and subscribe.
+It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
+still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
+a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
+command connection.
+
+For `rediss://`, the configured hostname remains the TLS server name after an address is chosen.
+The source's TLS configuration keeps the same optional client certificate and key as the command
+client. Without a CA file both paths use native roots; a configured `tls_ca_file` replaces those
+roots in both paths. The shared TLS configuration helper exposes that replacement policy
+explicitly because other connectors add a configured CA to their default roots.
+
+The Redis hook gives a lookup at most 30 seconds, and the driver's connection timeout can cancel
+it sooner. Pub/Sub connection attempts have one 30-second budget. Missing names, empty answers,
+silence and transport failures are connection outcomes. They do not reject a record or confirm a
+publish; the host resumes the source and retries failed sink work according to its existing
+policy. A Pub/Sub connection broken by the broker or network is dropped and reopened with a new
+lookup, while an established connection is not interrupted solely because its answer expires.
 
 ### DNS for ClickHouse and SQS
 
@@ -232,10 +267,13 @@ timeout. The host waits for every accepted message's ACK outcome before acknowle
 transport positions. A failed or timed-out ACK rejects the positions and retries according to the
 source's delivery policy. If rejection itself fails, the host retains those positions, suspends
 the source, and reestablishes its assignment. It retries the same rejection before polling any
-later batch or committing a later position. A transport without an acknowledged delivery mode has
-no redelivery guarantee from Nervix. The sequence below shows an acknowledged broker policy. The
-precise source-specific effects and NSPL modes are in
-[Ingestors](./ingestors.md) and [Shutdown And Recovery](./shutdown.md#connector-contracts).
+later batch or committing a later position, so a retried rejection must not depend on a poll. The
+[Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a
+consumer-group rebalance has moved away, because only a poll can assign that partition again. A
+transport without an acknowledged delivery mode has no redelivery guarantee from Nervix. The
+sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
+modes are in [Ingestors](./ingestors.md) and
+[Shutdown And Recovery](./shutdown.md#connector-contracts).
 
 ```mermaid
 sequenceDiagram
@@ -266,6 +304,16 @@ reassignment and an entity swap use that same plan. A swap publishes new source 
 consumer edges from the new plan; it does not reconstruct the emitter from a Model in the host.
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
 when it starts the task. A retry reopens the sink with the same typed configuration.
+
+A `TO CLIENT SCHEMA` emitter is a native sink plan, not an external connector plan. Its typed
+plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
+retry pacing, with no client object or codec. The host constructs Arrow IPC from the projected
+columns, retains each payload's bytes and source member positions through the common prepared
+payload contract, and resolves every member only after the application ACK or route-level message
+error. A failed or interrupted attempt retains the prepared payload for the host's next publish.
+The node's client emitter endpoint owns competing consumer attempts and physical retry; the host
+continues to own flush, branch routing, quiesce, source ACK propagation and message errors. No
+connector crate reads the native output or chooses its graph semantics.
 
 The host prepares one write for one of four sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
@@ -326,13 +374,17 @@ attempt's failure, can extend, but cannot shorten, the host's retry backoff; the
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
 represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
 queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
-publish failure when reopening it would discard staged work or a persistent session.
+publish failure when reopening it would discard staged work or a persistent session, or, as the
+HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
+transient failure its pending work is still waiting out.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
-outcome transition: success clears retry state and records sent metrics, a retryable failure defers
-the owned work and decides whether to reconnect, and a terminal failure routes every still-owned
-source batch through the emitter's message error policy. Stop requests retain their separate
+outcome transition: success clears retry state and records in the sent metrics the rows the sink
+delivered, each once however many attempts that took and never a rejected one, a retryable failure
+defers the owned work and decides whether to reconnect, and a terminal failure records the rows
+delivered before it and routes every other still-owned source row through the emitter's message
+error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
@@ -511,6 +563,15 @@ Other `3xx`/`4xx` and `101` reject their one request with a structured external 
 then publication continues with the next request. The host applies delivered and rejected
 members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
 
+A failed attempt keeps its cause beneath the attempt's own error: the resolver's lookup failure,
+or the socket or TLS error. The connector attaches the description of that chain to the attempt's
+publish failure, and the host reports it as the emitter's transient error and runtime event. It
+names the status or the transport cause and never the evaluated target, a header value or a body.
+The connector keeps its client after a failed attempt, so the host's retry sends the pending
+request without reopening it, and the failure stays reported until the request resolves. The
+host's sent metrics count a delivered request's codec record as payload, or nothing for a request
+without a body; the method, target and headers are request metadata.
+
 When the final head of a retryable or authentication status carries exactly one `Retry-After`
 field, the connector reads it as RFC 9110 `delay-seconds`, whole digits only, or as an HTTP date
 in IMF-fixdate, RFC 850 or asctime form. It compares a date with actual UTC, read through the
@@ -551,6 +612,11 @@ sequenceDiagram
 ## Integration-specific boundaries
 
 - **Kafka source.** The driver inspects topic partitions and reads or commits Kafka offsets.
+  A rejection seeks each rejected partition the consumer is still assigned back to its earliest
+  unacknowledged record. A consumer-group rebalance can move a partition to another group member
+  while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.
+  That partition needs no seek: whichever member is assigned it next, this consumer included,
+  resumes it from the committed offset, which never passes an unacknowledged record.
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains

@@ -25,13 +25,12 @@ use nervix_client_wire::{
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
 use nervix_models::RelayName;
-use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
-use parking_lot::Mutex as SyncMutex;
-use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
+use nervix_primitives::{
+    stream::{Stream, StreamExt as _, wrappers::ReceiverStream},
+    sync::{Mutex, blocking::Mutex as SyncMutex, mpsc, oneshot, watch},
     task::JoinHandle,
 };
-use tokio_stream::{Stream, StreamExt as _, wrappers::ReceiverStream};
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use tonic::{Request, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 use triomphe::Arc;
 
@@ -364,7 +363,7 @@ impl<T> EventQueue<T> {
         let mut changed = self.inner.changed.subscribe();
         let generation = self.inner.state.lock().generation.clone();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             {
                 let mut state = self.inner.state.lock();
                 if !Arc::ptr_eq(&state.generation, &generation) {
@@ -395,7 +394,7 @@ impl<T> EventQueue<T> {
     pub(crate) async fn resumed(&self) {
         let mut changed = self.inner.changed.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.inner.state.lock().condition != QueueCondition::Closed {
                 return;
             }
@@ -416,6 +415,12 @@ impl<T> EventQueue<T> {
     pub(crate) fn close_current(&self) {
         let generation = self.inner.state.lock().generation.clone();
         self.close(&generation);
+    }
+
+    /// Whether the generation the queue belongs to has ended.
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.state.lock().condition == QueueCondition::Closed
     }
 }
 
@@ -579,7 +584,7 @@ impl Exchange {
         let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
         let generation = sinks.begin_generation();
         let reader = ExchangeReader::new(pending.clone(), sinks.clone(), generation.clone());
-        let reader = tokio::spawn(reader.run(response.into_inner()));
+        let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
         Ok(Self {
             requests: Arc::new(ExchangeRequests {
                 frames,
@@ -743,7 +748,7 @@ impl ExchangeReader {
     {
         let mut failure = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let received = frames.next().await;
             let frame = match received {
                 Some(Ok(frame)) => frame,
@@ -894,6 +899,10 @@ impl ExchangeReader {
                 if !self.subscriptions.close(&ended.subscription) {
                     return ReaderFlow::Continue;
                 }
+                // The end is applied before its event is queued, so no caller reads an end the
+                // client does not hold, and a session lost before the end is read cannot restore
+                // the generation it ended.
+                self.sinks.desired.end(&ended, &self.generation);
                 self.forward(SubscriptionEvent::Ended(ended))
             }
             wire::ServerEvent::DomainClockObserved(observed) => {

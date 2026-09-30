@@ -25,13 +25,16 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true, optional = true }
 url = { workspace = true }
+uuid = { workspace = true }
 
 [build-dependencies]
 flatc-rust = { workspace = true }
 meticulous = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 futures-util = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
@@ -40,7 +43,6 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
-tokio-stream = { workspace = true, features = ["net"] }
 tokio-tungstenite = { workspace = true }
 
 [[test]]

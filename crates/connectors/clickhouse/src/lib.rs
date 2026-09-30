@@ -375,7 +375,7 @@ impl RowSink for ClickHouseSink {
             );
         }
         for request in requests.requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write {
                     members: written, ..
@@ -408,7 +408,7 @@ impl RowSink for ClickHouseSink {
                 // policy.
                 Err(error) if error.is_record_error() && written.len() > 1 => {
                     for index in written {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let member = members[index];
                         let alone = index
                             .checked_add(1)
@@ -657,7 +657,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
         let error = match ClickHouseSink::client_from_config(
@@ -674,7 +674,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_parses_the_request_timeout() {
         let fixture = Fixture::start().await;
         let (_, request_timeout) = ClickHouseSink::client_from_config(
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(request_timeout, Some(Duration::from_millis(275)));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn configured_timeout_bounds_clickhouse_insert_completion() {
         let fixture = Fixture::start().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -721,7 +721,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn clickhouse_client_config_validates_tls_ca_file() {
         let fixture = Fixture::start().await;
         let error = match ClickHouseSink::client_from_config(

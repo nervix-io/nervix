@@ -7,16 +7,18 @@
 //!   cancellation requests proceed beside them, deciding each cancellation against its request's
 //!   admission, refusing what a session cannot serve with typed rejections, encoding replies and
 //!   transferring the ones larger than a frame, the unsolicited events a session receives, the
-//!   domain clocks it follows, and the producers it holds open.
+//!   domain clocks it follows, the producers it holds open, and the emitter consumers it serves.
 //! - **Depends on.** The client wire contract, the command pipeline and the control-plane use
 //!   cases behind it, and the execution classes large replies are encoded under.
 //! - **Must not know.** How a transport frames, authenticates or closes a session.
 //!
 //! A request is served on one of two lanes. Commands, transaction and domain clock attachments,
-//! subscription changes and producer opens all change the session, so they run one at a time in
+//! subscription changes, producer opens and consumer opens all change the session, so they run one at a time in
 //! the order the client wrote them. Everything else only reads it, from the view the ordered lane
 //! last published, and runs beside them, so a long command never delays a completion, an
-//! inspection, a domain request or a cancellation. A submitted batch and a producer close are
+//! inspection, a domain request or a cancellation. Consumer reads, settlement and close also
+//! run beside the ordered lane, so a command waiting on graph drain cannot delay an application
+//! ACK. A submitted batch and a producer close are
 //! handed to their producer without waiting on either lane: the receive loop never waits for a
 //! batch's outcome.
 //!
@@ -28,6 +30,7 @@
 
 pub(in crate::application) mod admission;
 mod clock_attachments;
+mod consumers;
 #[cfg(test)]
 pub(crate) use clock_attachments::{ClockDeliveryOrder, NextClockFrame};
 mod download;
@@ -51,12 +54,13 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
-    CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
+    CloseEmitterRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
     DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    MAX_IN_FLIGHT_REQUESTS, OpenIngestorRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled,
-    RequestId, RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame,
-    SessionEndReason, SessionEnding, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+    MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest,
+    Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId, RequestRejected,
+    RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding,
+    SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome,
     SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
     UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
@@ -67,9 +71,11 @@ use nervix_models::{
 use nervix_nspl::client_statement::{
     ClientStatement, ParsedClientStatement, parse_client_statement_sources,
 };
-use parking_lot::{Mutex, RwLock};
-use tokio::{
-    sync::{mpsc, watch},
+use nervix_primitives::{
+    sync::{
+        blocking::{Mutex, RwLock},
+        mpsc, watch,
+    },
     task::AbortHandle,
 };
 use tracing::{debug, warn};
@@ -78,6 +84,7 @@ use triomphe::Arc;
 use self::{
     admission::{CancelledBeforeAdmission, CancelledStage, RequestAdmission},
     clock_attachments::ClockAttachments,
+    consumers::SessionConsumers,
     outbound::{LaneClosed, SessionOutbound},
     outcome::{attach_outcome, command_outcome, leader_redirect, wire_diagnostics},
     producers::SessionProducers,
@@ -117,6 +124,7 @@ enum OrderedRequest {
     AttachDomainClock(AttachDomainClockRequest),
     DetachDomainClock(DetachDomainClockRequest),
     OpenIngestor(OpenIngestorRequest),
+    OpenEmitter(OpenEmitterRequest),
 }
 
 /// Why a session refuses a session-local request while it holds an active transaction. Such a
@@ -132,6 +140,9 @@ enum ConcurrentRequest {
     ListDomains,
     SelectDomain(SelectDomainRequest),
     Inspect(InspectTransactionRequest),
+    ReadEmitterBatch(ReadEmitterBatchRequest),
+    SettleEmitterBatch(SettleEmitterBatchRequest),
+    CloseEmitter(CloseEmitterRequest),
 }
 
 /// The lane a request is served on.
@@ -255,6 +266,7 @@ pub(super) struct SessionShared {
     /// The domain whose observations the session receives.
     selection: watch::Sender<Option<DomainName>>,
     producers: SessionProducers,
+    consumers: SessionConsumers,
 }
 
 impl SessionShared {
@@ -323,7 +335,7 @@ impl SessionShared {
             }
             ReplyDelivery::Transfer(parts) => {
                 for part in parts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     if self.send_frame(part).await.is_err() {
                         debug!(%request_id, "the session ended during a reply transfer");
                         return QueuedReply::Nothing;
@@ -583,6 +595,7 @@ impl SessionServiceImpl {
             view: RwLock::new(subscriptions.view()),
             selection,
             producers: SessionProducers::default(),
+            consumers: SessionConsumers::default(),
         });
         // Every queued request is registered in flight first, so the queue holds at most
         // `MAX_IN_FLIGHT_REQUESTS` requests even though the channel itself is unbounded.
@@ -599,8 +612,8 @@ impl SessionServiceImpl {
 
         let mut closed_cleanly = false;
         loop {
-            tokio::task::consume_budget().await;
-            let item = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let item = nervix_primitives::select! {
                 biased;
                 _ = shared.ended() => break,
                 _ = self.inner.admission_shutdown.cancelled() => {
@@ -614,7 +627,7 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
-                    let accepted = tokio::select! {
+                    let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
                         _ = self.inner.admission_shutdown.cancelled() => {
@@ -701,6 +714,18 @@ async fn accept_frame(
         ClientRequest::OpenIngestor(open) => {
             RoutedRequest::Ordered(OrderedRequest::OpenIngestor(open))
         }
+        ClientRequest::OpenEmitter(open) => {
+            RoutedRequest::Ordered(OrderedRequest::OpenEmitter(open))
+        }
+        ClientRequest::ReadEmitterBatch(read) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::ReadEmitterBatch(read))
+        }
+        ClientRequest::SettleEmitterBatch(settle) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::SettleEmitterBatch(settle))
+        }
+        ClientRequest::CloseEmitter(close) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::CloseEmitter(close))
+        }
         ClientRequest::Command(command) => RoutedRequest::Ordered(OrderedRequest::Command(command)),
         ClientRequest::AttachTransaction(attach) => {
             RoutedRequest::Ordered(OrderedRequest::Attach(attach))
@@ -756,6 +781,7 @@ async fn accept_frame(
             let task = shared.service.inner.service_tasks.spawn(serve_concurrent(
                 shared.clone(),
                 request_id,
+                admission,
                 request,
             ));
             shared.attach_task(request_id, task.abort_handle());
@@ -768,6 +794,7 @@ async fn accept_frame(
 async fn serve_concurrent(
     shared: Arc<SessionShared>,
     request_id: RequestId,
+    admission: Arc<RequestAdmission>,
     request: ConcurrentRequest,
 ) {
     let service = &shared.service;
@@ -792,6 +819,21 @@ async fn serve_concurrent(
         ConcurrentRequest::Inspect(inspect) => {
             let outcome = inspect_transaction(&shared, inspect).await;
             ReplyBody::Inspection(outcome)
+        }
+        ConcurrentRequest::ReadEmitterBatch(read) => {
+            ReplyBody::ReadEmitterBatch(shared.consumers.read(read).await)
+        }
+        ConcurrentRequest::SettleEmitterBatch(settle) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            ReplyBody::SettleEmitterBatch(shared.consumers.settle(settle).await)
+        }
+        ConcurrentRequest::CloseEmitter(close) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            ReplyBody::CloseEmitter(shared.consumers.close(close))
         }
     };
     shared.finish_with(request_id, body).await;
@@ -845,7 +887,7 @@ async fn run_ordered_lane(
 ) -> SessionSubscriptions {
     let mut clock_attachments = ClockAttachments::default();
     while let Some(item) = work.recv().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // A request cancelled while it waited was already answered by its cancellation.
         if item.admission.is_cancelled() {
             continue;
@@ -948,6 +990,15 @@ async fn serve_ordered(
                 .open(shared, request_id, open, in_transaction)
                 .await;
         }
+        OrderedRequest::OpenEmitter(open) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            shared
+                .consumers
+                .open(shared, request_id, open, subscriptions.transaction_active())
+                .await;
+        }
         OrderedRequest::DetachDomainClock(detach) => {
             if admission.admit().is_err() {
                 return;
@@ -982,7 +1033,7 @@ async fn serve_command(
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
-    let processed = tokio::select! {
+    let processed = nervix_primitives::select! {
         biased;
         processed = processing => processed,
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),

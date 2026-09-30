@@ -317,7 +317,7 @@ pub(crate) struct RuntimeRecordBatchBuilder {
 // Counted per thread so a test observes only the batches it built itself, while the rest of the
 // suite exercises the same builders in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(crate) static RECORD_BUILDER_SETS_OPENED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(crate) static RECORD_COLUMN_SETS_BUILT: std::cell::Cell<usize> =
@@ -511,6 +511,19 @@ pub enum CodecError {
 impl CompiledSchema {
     pub(crate) fn fields(&self) -> &[CompiledSchemaField] {
         &self.fields
+    }
+
+    pub(crate) fn declared_fields(&self) -> Vec<nervix_models::SchemaField> {
+        self.fields
+            .iter()
+            .map(|field| nervix_models::SchemaField {
+                name: nervix_models::FieldName::parse(&field.name)
+                    .assured("compiled schema fields came from validated field names"),
+                ty: field.ty.clone(),
+                optional: field.optional,
+                sensitive: field.sensitive,
+            })
+            .collect()
     }
 
     pub fn arrow_schema(&self) -> StdArc<ArrowSchema> {

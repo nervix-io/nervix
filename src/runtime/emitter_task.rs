@@ -552,6 +552,7 @@ struct EmitterTaskLoop<'a> {
     interaction: RelayInteraction<EmitterTaskCommand>,
     plan: &'a EmitterStartPlan,
     input_schema: &'a CompiledSchema,
+    output_schema: &'a Arc<CompiledSchema>,
     codec: Option<&'a Arc<CompiledCodec>>,
     input_metrics: &'a HashMap<RelayName, NodeInputMetricsHandle>,
     fault_injection: &'a ConfiguredFaultInjection,
@@ -607,10 +608,7 @@ impl EmitterTask {
                     ),
                 })?;
         }
-        let output_compiled_schema = match codec.as_ref() {
-            Some(codec) => codec.schema(),
-            None => input_schema.clone(),
-        };
+        let output_compiled_schema = emitter.output_schema.clone();
         let udfs = runtime.udf_executor(domain);
         let compile_context = RuntimeVmCompileContext {
             available_materialized_streams: &materialized_stream_specs,
@@ -805,7 +803,7 @@ impl EmitterTask {
         let (stop_signal, mut stop_rx) = watch::channel(None);
         let task_stop_signal = stop_signal.clone();
 
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let shared_routing = match runtime
                 .wait_for_domain_routing(&task_domain, &routing_relay)
                 .await
@@ -834,14 +832,15 @@ impl EmitterTask {
                     return;
                 }
             };
-            let work_cancel_forwarder = AbortOnDropHandle::new(tokio::spawn(async move {
-                if *domain_work_cancel_rx.borrow()
-                    || domain_work_cancel_rx.changed().await.is_err()
-                    || *domain_work_cancel_rx.borrow()
-                {
-                    task_work_cancel.send_replace(true);
-                }
-            }));
+            let work_cancel_forwarder =
+                AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+                    if *domain_work_cancel_rx.borrow()
+                        || domain_work_cancel_rx.changed().await.is_err()
+                        || *domain_work_cancel_rx.borrow()
+                    {
+                        task_work_cancel.send_replace(true);
+                    }
+                }));
             let mut interaction_inputs = Vec::with_capacity(inputs.len());
             for (relay, receiver) in inputs {
                 let input = match input_collect_policy {
@@ -881,6 +880,7 @@ impl EmitterTask {
                 &plan,
                 &context,
                 &input_schema,
+                &output_compiled_schema,
                 codec.as_ref(),
                 &mut work_cancel_rx,
             )
@@ -909,6 +909,7 @@ impl EmitterTask {
                 interaction,
                 plan: &plan,
                 input_schema: &input_schema,
+                output_schema: &output_compiled_schema,
                 codec: codec.as_ref(),
                 input_metrics: &task_input_metrics,
                 fault_injection: &fault_injection,
@@ -922,7 +923,7 @@ impl EmitterTask {
             // inside an external publish attempt when terminal teardown begins. Dropping the
             // task at that boundary releases its volatile prepared requests and unresolved ACK
             // guards without reporting them as delivered or waiting for the attempt timeout.
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 _ = super::emitter_publishing::wait_for_emitter_work_cancel(&mut terminal_shutdown_rx) => {}
                 _ = task_loop.run() => {}
@@ -940,7 +941,7 @@ impl EmitterTask {
 impl EmitterTaskLoop<'_> {
     async fn run(&mut self) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let wake = self.state.wake(self.context);
             let receive_input = self
                 .state
@@ -1259,6 +1260,7 @@ impl EmitterTaskLoop<'_> {
                             self.plan,
                             self.context,
                             self.input_schema,
+                            self.output_schema,
                             self.codec,
                             &mut *self.work_cancel_rx,
                         )
@@ -1490,6 +1492,11 @@ impl EmitterBatchContext<'_> {
         reason: String,
         operation: MessageErrorOperation,
     ) {
+        // The rows an earlier attempt delivered are sent, and this is the last time the emitter
+        // holds them, so they are counted before the rest follow the error policy.
+        if let Some(report) = batch.delivered_report() {
+            self.observe_sent(&report);
+        }
         let execution_now = batch.execution_now();
         let resolved = batch.resolved_rows();
         let messages = match batch.into_relay_batch().try_into_messages() {
@@ -2012,7 +2019,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn publish_success_clears_retry_state_and_releases_the_caller_batch() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2065,7 +2072,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn retryable_caller_failure_retains_the_batch_and_defers_one_retry() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2119,7 +2126,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn terminal_buffer_failure_drains_and_routes_every_owned_batch() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2173,7 +2180,81 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn a_terminal_failure_counts_the_rows_delivered_before_it_as_sent() {
+        let context = sink_context();
+        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+        let mut routing = DomainRoutingCache::new(routing.shared());
+        let output_metrics = output_metrics(&context);
+        let node = ModelName::from(&context.emitter);
+        let source_filters = HashMap::default();
+        let materialized_state = Vec::new();
+        let batch_context = batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &materialized_state,
+        );
+        let mut state = task_state(&context);
+        let mut messages = Vec::with_capacity(2);
+        for value in [1, 2] {
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
+                acks: AckSet::empty(),
+            });
+        }
+        let two_rows = RelayRecordBatch::from_messages(
+            crate::runtime::test_fixtures::input_schema(),
+            messages,
+        )
+        .expect("the test records match the emitter input schema");
+        let mut batch = EmitterPublishBatch::from_batch(two_rows, Timestamp::from_unix_nanos(100));
+        batch
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .expect("an earlier attempt delivered the first row");
+        state
+            .buffer
+            .push(&context, batch)
+            .expect("test batch must buffer");
+        let failure = EmitterPublishFailure::buffer(
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable("test encoding failed"),
+        );
+        let mut pending_batch = None;
+
+        state
+            .handle_publish_result(
+                Err(failure),
+                &mut pending_batch,
+                &context,
+                &batch_context,
+                EmitterPublishOutcomeContext {
+                    sink_label: "test",
+                    codec_route: true,
+                    error_report: EmitterPublishErrorReport::Flush,
+                },
+            )
+            .await;
+
+        let sent = context.runtime.inner.metrics.dataflow_edge_statistics(
+            &context.domain,
+            &nervix_dataflow_graph::DataflowMetricRef::new(
+                "EMITTER",
+                context.emitter.as_str(),
+                "sent",
+                None::<String>,
+            ),
+        );
+        assert_eq!(
+            sent.messages_total, 1,
+            "the delivered row is sent, and the row the failure routes is not"
+        );
+        assert!(state.buffer.is_empty());
+    }
+
+    #[nervix_primitives::test]
     async fn sink_context_reports_configuration_and_publish_failures() {
         let context = sink_context();
         let mut events = context.runtime.events().subscribe();
@@ -2195,7 +2276,7 @@ mod tests {
 
         let mut messages = Vec::with_capacity(4);
         for _ in 0..4 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RuntimeEvent::Error(message) =
                 events.recv().await.expect("error event must be emitted");
             messages.push(message);
@@ -2206,7 +2287,7 @@ mod tests {
         assert!(messages[3].contains("invalid flush_each 'not-a-duration'"));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sink_host_delegates_runtime_services_and_general_error_policy() {
         let context = sink_context();
         let host = context.sink_host();
@@ -2270,7 +2351,7 @@ mod tests {
         assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sink_acknowledgement_handle_preserves_ack_lifecycle() {
         let (acks, mut completion) = AckSet::root();
         let acks = SinkAcknowledgements::new(acks);

@@ -20,7 +20,6 @@ use nervix_client_wire::{
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
@@ -36,19 +35,20 @@ use nervix_nspl::{
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{CancellationToken, Mutex as AsyncMutex, broadcast},
+};
 use nervix_recovery::Discarded;
 use nervix_vm::program::FunctionName;
-use tokio::{
-    sync::{Mutex as AsyncMutex, broadcast},
-    time::Duration,
-};
-use tokio_util::sync::CancellationToken;
+use tokio::time::Duration;
 use tracing::{debug, warn};
 use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
     backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
+    client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
     command_execution::{
         CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
@@ -71,6 +71,7 @@ use super::{
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
     subscription::{
         SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
+        SubscriptionSampler,
     },
     tls::HttpsListenerCertificates,
     transaction::TransactionRecovery,
@@ -167,10 +168,14 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) events: SessionEvents,
     /// Also held by every subscription delivery, whose interest lease releases into it.
     pub(in crate::application) subscription_interests: SubscriptionInterests,
+    /// The draws every subscription on this node samples its rows with.
+    pub(in crate::application) subscription_sampler: SubscriptionSampler,
     pub(in crate::application) interconnect: Transport,
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.
     pub(in crate::application) client_producers: ClientProducerRouter,
+    /// Routes each client emitter consumer to its current execution owner.
+    pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
@@ -250,7 +255,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
     Box::pin(async move {
         let local_node_id = consensus.local_node_id();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(installation) = admission.begin_installation(shutdown).await else {
                 return Ok(());
             };
@@ -335,7 +340,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             tokio::pin!(preparation);
             let supersession = consensus.wait_for_runtime_revision_after(state.revision);
             tokio::pin!(supersession);
-            let preparation_result = tokio::select! {
+            let preparation_result = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return Ok(()),
                 newer_revision = &mut supersession => {
@@ -408,7 +413,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             tokio::pin!(readiness);
             let supersession = consensus.wait_for_runtime_revision_after(state.revision);
             tokio::pin!(supersession);
-            let readiness_result = tokio::select! {
+            let readiness_result = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return Ok(()),
                 newer_revision = &mut supersession => {
@@ -842,6 +847,9 @@ impl ChoicePageBasis {
             ChoiceTarget::IngestUnbranchedRelay => 29,
             ChoiceTarget::IngestBranchedRelay => 30,
             ChoiceTarget::BranchField => 31,
+            ChoiceTarget::ProcessorCompatibleInputRelay => 32,
+            ChoiceTarget::ProcessorInputBranchRelay => 33,
+            ChoiceTarget::ProcessorMaterializedRelay => 34,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1089,7 +1097,10 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestCodec
         | ChoiceTarget::IngestUnbranchedRelay
         | ChoiceTarget::IngestBranchedRelay
-        | ChoiceTarget::BranchField => {
+        | ChoiceTarget::BranchField
+        | ChoiceTarget::ProcessorCompatibleInputRelay
+        | ChoiceTarget::ProcessorInputBranchRelay
+        | ChoiceTarget::ProcessorMaterializedRelay => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1331,7 +1342,12 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestCodec
             | ChoiceTarget::IngestUnbranchedRelay
             | ChoiceTarget::IngestBranchedRelay
-            | ChoiceTarget::BranchField => self.configured_choices_for(&request, session).await,
+            | ChoiceTarget::BranchField
+            | ChoiceTarget::ProcessorCompatibleInputRelay
+            | ChoiceTarget::ProcessorInputBranchRelay
+            | ChoiceTarget::ProcessorMaterializedRelay => {
+                self.configured_choices_for(&request, session).await
+            }
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,
@@ -2199,7 +2215,7 @@ mod tests {
         assert_eq!(response.diagnostics[0].span, Some(42..43));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn placement_member_completion_expands_all_schedulable_runtime_names() {
         let TestService {
             service,
@@ -2259,7 +2275,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_offers_models_queued_in_the_open_transaction() {
         let TestService {
             service,
@@ -2284,7 +2300,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn schema_field_completion_uses_ordered_queued_alterations() {
         let TestService {
             service,
@@ -2367,7 +2383,7 @@ mod tests {
             .discarded("the temporary test fixture is already isolated from the next test");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn route_expression_completion_resolves_queued_relay_fields_and_vm_builtins() {
         let TestService {
             service,
@@ -2444,7 +2460,7 @@ mod tests {
             .discarded("the temporary test fixture is already isolated from the next test");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_reports_stale_context_when_an_attached_transaction_loses_its_domain() {
         let TestService { service, path, .. } = build_test_service(true).await;
         let mut subscriptions = SessionSubscriptions::new();
@@ -2466,7 +2482,7 @@ mod tests {
             .discarded("the temporary test fixture is already isolated from the next test");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_hides_models_dropped_in_the_open_transaction() {
         let TestService {
             service,
@@ -2515,7 +2531,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_keeps_queued_models_out_of_other_sessions() {
         let TestService {
             service,
@@ -2547,7 +2563,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_drops_queued_models_until_a_detached_transaction_is_attached() {
         let TestService {
             service,
@@ -2602,7 +2618,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_moves_queued_models_to_the_session_that_takes_the_transaction_over() {
         let TestService {
             service,
@@ -2646,7 +2662,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn placement_member_completion_expands_queued_runtime_names() {
         let TestService {
             service,

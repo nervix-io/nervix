@@ -10,25 +10,30 @@ use std::{
     net::SocketAddr,
     ptr, slice,
     task::{Context, Poll},
-    thread,
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
-    DomainClockAttachmentEnded, DomainClockEvent, DomainClockInterruption, DomainClockObservation,
-    DomainClockObserved, DomainClockObservedState, DomainClockRestorationFailure,
-    DomainClockTickObservation, DomainClockTicked, DomainName, PacedDomainClock, Timestamp,
+    DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
+    DomainClockEvent, DomainClockInterruption, DomainClockObservation, DomainClockObserved,
+    DomainClockObservedState, DomainClockRestorationFailure, DomainClockTickObservation,
+    DomainClockTicked, DomainName, PacedDomainClock, Timestamp,
     wire::{
         ClientFrame, ClientMessage, ClientRequest, EncodedFrame, Reply, ReplyBody, ReplyDelivery,
-        ServerFrame, SessionLimits, VerifiedFrame,
+        RequestId, ServerFrame, SessionLimits, VerifiedFrame,
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     },
 };
 use nervix_models::{DomainClockPeriod, DomainClockSkew, DomainClockState, DomainTimeRate};
-use tokio::{net::TcpListener, runtime::Runtime, sync::mpsc};
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use nervix_primitives::{
+    runtime::Runtime,
+    stream::wrappers::{ReceiverStream, TcpListenerStream},
+    sync::mpsc,
+    thread,
+};
+use tokio::net::TcpListener;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -54,12 +59,12 @@ const DEADLINE: Duration = Duration::from_secs(30);
 /// The same bound, as the milliseconds a binding token takes.
 const DEADLINE_MILLIS: u64 = 30_000;
 
-fn domain(name: &str) -> DomainName {
+pub(super) fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain name is valid")
 }
 
 /// A paced clock whose every field differs from the others, so a swapped field shows.
-fn paced() -> PacedDomainClock {
+pub(super) fn paced() -> PacedDomainClock {
     PacedDomainClock {
         period: DomainClockPeriod::try_from(Duration::from_millis(100))
             .assured("one hundred milliseconds is a valid period"),
@@ -81,7 +86,7 @@ fn observed(generation: u64, state: DomainClockObservedState) -> DomainClockEven
 }
 
 /// The third tick of the paced clock's generation, whose every instant differs from the others.
-fn third_tick(generation: u64) -> DomainClockTicked {
+pub(super) fn third_tick(generation: u64) -> DomainClockTicked {
     DomainClockTicked {
         domain: domain("sim"),
         tick: DomainClockTickObservation {
@@ -95,14 +100,14 @@ fn third_tick(generation: u64) -> DomainClockTicked {
 }
 
 /// A clock event handed out as a host's first reference, released when dropped.
-struct SharedClock(*mut ClockEvent);
+pub(super) struct SharedClock(*mut ClockEvent);
 
 impl SharedClock {
     fn new(event: DomainClockEvent) -> Self {
         Self(ClockEvent::new(event).into_shared())
     }
 
-    fn kind(&self) -> ClockEventKind {
+    pub(super) fn kind(&self) -> ClockEventKind {
         // SAFETY: the reference is live.
         unsafe { nx_clock_event_kind_of(self.0) }
     }
@@ -118,14 +123,14 @@ impl SharedClock {
         }
     }
 
-    fn generation(&self) -> u64 {
+    pub(super) fn generation(&self) -> u64 {
         let mut generation = 0;
         // SAFETY: the reference is live and `generation` is writable.
         succeeded(unsafe { nx_clock_event_generation(self.0, &mut generation) });
         generation
     }
 
-    fn state(&self) -> ClockState {
+    pub(super) fn state(&self) -> ClockState {
         let mut state = ClockState::Stopped;
         // SAFETY: the reference is live and `state` is writable.
         succeeded(unsafe { nx_clock_event_state(self.0, &mut state) });
@@ -203,24 +208,24 @@ impl Drop for SharedClock {
 
 /// The committed mapping a paced state event reports, as the header's out-parameters carry it.
 #[derive(Debug, PartialEq)]
-struct PacedFields {
-    period_nanos: u64,
-    skew_nanos: u64,
-    logical_origin: i64,
-    utc_anchor: i64,
-    time_rate: f64,
+pub(super) struct PacedFields {
+    pub(super) period_nanos: u64,
+    pub(super) skew_nanos: u64,
+    pub(super) logical_origin: i64,
+    pub(super) utc_anchor: i64,
+    pub(super) time_rate: f64,
 }
 
 /// The progress a tick event reports, as the header's out-parameters carry it.
 #[derive(Debug, PartialEq)]
-struct TickFields {
-    tick_id: u64,
-    logical_boundary: i64,
-    authority_utc: i64,
-    serving_logical: i64,
+pub(super) struct TickFields {
+    pub(super) tick_id: u64,
+    pub(super) logical_boundary: i64,
+    pub(super) authority_utc: i64,
+    pub(super) serving_logical: i64,
 }
 
-fn tick_fields(event: &SharedClock) -> TickFields {
+pub(super) fn tick_fields(event: &SharedClock) -> TickFields {
     let mut fields = TickFields {
         tick_id: 0,
         logical_boundary: 0,
@@ -462,13 +467,13 @@ fn a_retained_clock_event_outlives_a_reference_released_on_another_thread() {
 }
 
 /// The server's side of one exchange a session opened.
-struct ServerExchange {
+pub(super) struct ServerExchange {
     requests: Streaming<VerifiedFrame<ClientFrame>>,
     frames: mpsc::Sender<Result<EncodedFrame<ServerFrame>, Status>>,
 }
 
 impl ServerExchange {
-    async fn send(&self, frame: EncodedFrame<ServerFrame>) {
+    pub(super) async fn send(&self, frame: EncodedFrame<ServerFrame>) {
         self.frames
             .send(Ok(frame))
             .await
@@ -476,32 +481,85 @@ impl ServerExchange {
     }
 
     /// Reads the request attaching the session to the clock of `sim` and attaches it to `clock`.
-    async fn attach(&mut self, clock: DomainClockObservation) {
+    pub(super) async fn attach(&mut self, clock: DomainClockObservation) {
+        let sim = domain("sim");
+        let attached = DomainClockAttachDisposition::Attached {
+            domain: sim.clone(),
+            clock,
+        };
+        self.answer_attach(&sim, attached).await;
+    }
+
+    /// Reads the request attaching the session to the clock of `expected` and answers it with
+    /// `disposition`.
+    pub(super) async fn answer_attach(
+        &mut self,
+        expected: &DomainName,
+        disposition: DomainClockAttachDisposition,
+    ) {
+        let request_id = self.read_attach(expected).await;
+        self.reply_to_attach(request_id, disposition).await;
+    }
+
+    /// Reads the request attaching the session to the clock of `expected`, leaving it unanswered.
+    pub(super) async fn read_attach(&mut self, expected: &DomainName) -> RequestId {
+        let request = self.next_request().await;
+        let ClientRequest::AttachDomainClock(attach) = request.request else {
+            panic!("the session sends an attach request");
+        };
+        assert_eq!(&attach.domain, expected);
+        request.request_id
+    }
+
+    /// Answers the attach request `request_id` with `disposition`.
+    pub(super) async fn reply_to_attach(
+        &self,
+        request_id: RequestId,
+        disposition: DomainClockAttachDisposition,
+    ) {
+        self.reply(Reply {
+            request_id,
+            body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+                disposition,
+                message: String::new(),
+            }),
+        })
+        .await;
+    }
+
+    /// Reads the request detaching the session from the clock of `expected` and detaches it.
+    pub(super) async fn detach(&mut self, expected: &DomainName) {
+        let request = self.next_request().await;
+        let ClientRequest::DetachDomainClock(detach) = request.request else {
+            panic!("the session sends a detach request");
+        };
+        assert_eq!(&detach.domain, expected);
+        self.reply(Reply {
+            request_id: request.request_id,
+            body: ReplyBody::DomainClockDetach(DomainClockDetachOutcome {
+                disposition: DomainClockDetachDisposition::Detached(detach.domain),
+                message: String::new(),
+            }),
+        })
+        .await;
+    }
+
+    /// The next request the session sends on this exchange.
+    async fn next_request(&mut self) -> ClientMessage {
         let frame = tokio::time::timeout(DEADLINE, self.requests.message())
             .await
             .assured("the session sends its request within the test deadline")
             .assured("the exchange stays open")
             .assured("the session sends a request");
-        let request = ClientMessage::decode(&frame).assured("a request the client encoded decodes");
-        let ClientRequest::AttachDomainClock(attach) = request.request else {
-            panic!("the session sends an attach request");
-        };
-        assert_eq!(attach.domain, domain("sim"));
-        let reply = Reply {
-            request_id: request.request_id,
-            body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
-                disposition: DomainClockAttachDisposition::Attached {
-                    domain: attach.domain,
-                    clock,
-                },
-                message: String::new(),
-            }),
-        };
+        ClientMessage::decode(&frame).assured("a request the client encoded decodes")
+    }
+
+    async fn reply(&self, reply: Reply) {
         let delivery = reply
             .encode(&SessionLimits::DEFAULT)
-            .assured("an attach reply fits the default limits");
+            .assured("a domain clock reply fits the default limits");
         let ReplyDelivery::Frame(frame) = delivery else {
-            panic!("an attach reply fits one frame");
+            panic!("a domain clock reply fits one frame");
         };
         self.send(frame).await;
     }
@@ -565,15 +623,15 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
 
 /// An in-process session server, run by its own runtime while the test thread blocks in the
 /// binding.
-struct TestServer {
-    runtime: Runtime,
-    address: SocketAddr,
+pub(super) struct TestServer {
+    pub(super) runtime: Runtime,
+    pub(super) address: SocketAddr,
     exchanges: mpsc::Receiver<ServerExchange>,
 }
 
 impl TestServer {
-    fn start() -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+    pub(super) fn start() -> Self {
+        let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
@@ -587,7 +645,7 @@ impl TestServer {
                 .local_addr()
                 .assured("a bound listener has an address");
             let service = SessionService { exchanges: sender };
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 Server::builder()
                     .add_service(service)
                     .serve_with_incoming(TcpListenerStream::new(listener))
@@ -603,7 +661,7 @@ impl TestServer {
         }
     }
 
-    fn next_exchange(&mut self) -> ServerExchange {
+    pub(super) fn next_exchange(&mut self) -> ServerExchange {
         let exchanges = &mut self.exchanges;
         self.runtime.block_on(async {
             tokio::time::timeout(DEADLINE, exchanges.recv())
@@ -616,13 +674,13 @@ impl TestServer {
 
 /// A session shared with the threads that block in it, as the binding allows.
 #[derive(Clone, Copy)]
-struct SharedSession(*mut Session);
+pub(super) struct SharedSession(pub(super) *mut Session);
 
 // SAFETY: the binding allows a session to be used from several threads at once.
 unsafe impl Send for SharedSession {}
 
 impl SharedSession {
-    fn connect(address: SocketAddr) -> Self {
+    pub(super) fn connect(address: SocketAddr) -> Self {
         let server = format!("http://{address}");
         let domain = "sim";
         let mut session = ptr::null_mut();
@@ -646,7 +704,7 @@ impl SharedSession {
     }
 
     /// Runs one statement and returns its disposition.
-    fn execute(self, query: &str) -> Disposition {
+    pub(super) fn execute(self, query: &str) -> Disposition {
         let mut execution = ptr::null_mut();
         let mut outcome = ptr::null_mut();
         // SAFETY: the session is live, the query addresses its length, the out-parameters are
@@ -673,7 +731,7 @@ impl SharedSession {
     }
 
     /// The next clock event, which must arrive within the test deadline.
-    fn next_clock_event(self) -> SharedClock {
+    pub(super) fn next_clock_event(self) -> SharedClock {
         let mut deadline = ptr::null_mut();
         let mut event = ptr::null_mut();
         // SAFETY: the session and the token are live, the out-parameters are writable, and the
@@ -705,7 +763,7 @@ impl SharedSession {
         kind
     }
 
-    fn free(self) {
+    pub(super) fn free(self) {
         // SAFETY: the session is live, no thread uses it any more, and it is freed once, here.
         unsafe { nx_session_free(self.0) };
     }

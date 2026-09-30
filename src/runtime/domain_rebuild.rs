@@ -484,7 +484,7 @@ impl Runtime {
         let mut kafka_offset_states = HashMap::new();
         let mut materialized_states = HashMap::new();
         for node in revision.nodes.values() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let state = PlacedNodeState::of(node, &revision);
             if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
                 let state_placement = self

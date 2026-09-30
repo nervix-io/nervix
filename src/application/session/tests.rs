@@ -32,9 +32,11 @@ use nervix_models::{
     DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, PacedDomainClock,
     PlacementPolicy, Timestamp, TransactionPosition, UserName,
 };
-use tokio::{sync::mpsc, task::JoinHandle};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::{
+    stream::wrappers::UnboundedReceiverStream,
+    sync::{CancellationToken, mpsc},
+    task::JoinHandle,
+};
 
 use super::{
     InFlightKind, InFlightRequests, InboundFrame, MAX_IN_FLIGHT_REQUESTS, SessionShared,
@@ -81,7 +83,7 @@ impl SessionUnderTest {
         let (inbound, inbound_rx) = mpsc::unbounded_channel();
         let (outbound_tx, outbound) = outbound::channel(CancellationToken::new());
         let service = service.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             service
                 .run_session(
                     named::<UserName>("default"),
@@ -127,7 +129,7 @@ impl SessionUnderTest {
         let mut assembly = None;
         let mut frames = 0_usize;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
                 .await
                 .assured("the session answers within the deadline")
@@ -191,7 +193,7 @@ fn describe_two_operation_transaction(session: &SessionUnderTest) {
     session.command(4, "DESCRIBE TRANSACTION FORMAT JSON;", Some(2));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reply_larger_than_a_frame_arrives_whole_in_transfer_parts() {
     let TestService {
         service,
@@ -223,7 +225,7 @@ async fn a_reply_larger_than_a_frame_arrives_whole_in_transfer_parts() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reply_larger_than_the_transfer_limit_is_refused_whole() {
     let TestService {
         service,
@@ -245,7 +247,7 @@ async fn a_reply_larger_than_the_transfer_limit_is_refused_whole() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn cancelling_a_request_that_is_not_in_flight_says_so() {
     let TestService {
         service,
@@ -275,7 +277,7 @@ async fn cancelling_a_request_that_is_not_in_flight_says_so() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     let TestService {
         service,
@@ -284,7 +286,7 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     } = build_test_service(true).await;
     let (outbound, _frames) = outbound::channel(CancellationToken::new());
     let subscriptions = SessionSubscriptions::for_user(named::<UserName>("default"));
-    let (selection, _) = tokio::sync::watch::channel(None);
+    let (selection, _) = nervix_primitives::sync::watch::channel(None);
     let shared = SessionShared {
         service: service.clone(),
         transport: SessionTransport::Grpc,
@@ -292,10 +294,11 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
             outbound,
             limits: SessionLimits::DEFAULT,
         },
-        in_flight: parking_lot::Mutex::new(InFlightRequests::default()),
-        view: parking_lot::RwLock::new(subscriptions.view()),
+        in_flight: nervix_primitives::sync::blocking::Mutex::new(InFlightRequests::default()),
+        view: nervix_primitives::sync::blocking::RwLock::new(subscriptions.view()),
         selection,
         producers: SessionProducers::default(),
+        consumers: super::consumers::SessionConsumers::default(),
     };
 
     shared
@@ -347,7 +350,7 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_redirect_while_no_leader_is_known_names_none() {
     let TestService {
         service,
@@ -385,7 +388,7 @@ async fn a_redirect_while_no_leader_is_known_names_none() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_token() {
     let TestService {
         service,
@@ -455,7 +458,7 @@ impl SessionUnderTest {
     /// The next reply or clock frame the session sends, skipping every other event.
     async fn next_clock_message(&mut self) -> ClockMessage {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
                 .await
                 .assured("the session sends within the deadline")
@@ -554,7 +557,7 @@ fn install(service: &SessionServiceImpl, states: &[DomainState]) {
     service.inner.runtime.sync_domains(&domains);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_session_follows_a_domain_clock_until_it_detaches_or_the_domain_leaves_the_node() {
     let TestService {
         service,
@@ -666,7 +669,7 @@ async fn a_session_follows_a_domain_clock_until_it_detaches_or_the_domain_leaves
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_attach_answers_once_its_node_has_installed_the_committed_domains() {
     let TestService {
         service,
@@ -698,7 +701,7 @@ async fn an_attach_answers_once_its_node_has_installed_the_committed_domains() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_attach_waiting_for_the_committed_domains_ends_with_its_session() {
     let TestService {
         service,
@@ -717,7 +720,7 @@ async fn an_attach_waiting_for_the_committed_domains_ends_with_its_session() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_session_holding_a_transaction_refuses_domain_clock_requests() {
     let TestService {
         service,
@@ -749,7 +752,7 @@ async fn a_session_holding_a_transaction_refuses_domain_clock_requests() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_domain_clock_statement_sent_as_a_command_is_refused_in_favour_of_its_request() {
     let TestService {
         service,

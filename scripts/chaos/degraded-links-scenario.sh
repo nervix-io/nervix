@@ -7,7 +7,6 @@ source "${script_dir}/partition-scenario.sh"
 degradation_root="${artifact_dir}/degraded"
 degradation_sample_number=0
 degradation_injector_id=""
-degradation_event_recorder_pid=""
 
 degradation_fail() {
     failure_category="$1"
@@ -27,8 +26,8 @@ degradation_action() {
 degradation_sample() {
     local stage="$1"
     local profile="$2"
-    kill -0 "${degradation_event_recorder_pid}" 2>/dev/null \
-        || degradation_fail observation 'Docker event recorder stopped before the run ended'
+    docker_event_recorder_running \
+        || degradation_fail controller 'the live Docker event recorder exited before the run ended'
     degradation_sample_number=$((degradation_sample_number + 1))
     local sample_dir
     sample_dir="${degradation_root}/samples/$(printf '%04d' "${degradation_sample_number}")"
@@ -382,9 +381,6 @@ run_degraded_links() {
         | jq '{name:.Name,server_version:.ServerVersion,cpus:.NCPU,memory_bytes:.MemTotal,
                operating_system:.OperatingSystem,kernel:.KernelVersion,driver:.Driver,architecture:.Architecture}' \
         >"${degradation_root}/worker.json"
-    docker events --filter "label=io.nervix.chaos.run=${run_id}" \
-        --format '{{json .}}' >"${degradation_root}/docker-events.ndjson" 2>&1 &
-    degradation_event_recorder_pid=$!
     jq -n --argjson max_backlog "${max_backlog}" \
         --argjson max_recovery_backlog "${max_recovery_backlog}" \
         --argjson max_memory_bytes "${max_memory_bytes}" \
@@ -488,9 +484,4 @@ run_degraded_links() {
            tcp_retransmission_delta:($samples[-1].tcp_retransmissions_total-$samples[0].tcp_retransmissions_total),
            relay_attempt_resolution_delta:($samples[-1].relay_attempt_resolutions_total-$samples[0].relay_attempt_resolutions_total)}' \
         "${degradation_root}/samples.ndjson" >"${artifact_dir}/results/degraded-progress.json"
-    kill "${degradation_event_recorder_pid}" 2>/dev/null || true
-    wait "${degradation_event_recorder_pid}" 2>/dev/null || true
-    degradation_event_recorder_pid=""
-    [[ -s "${degradation_root}/docker-events.ndjson" ]] \
-        || degradation_fail observation 'Docker event recorder retained no events'
 }

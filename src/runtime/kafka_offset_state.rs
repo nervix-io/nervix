@@ -7,13 +7,18 @@ use error_stack::Report;
 #[cfg(test)]
 use meticulous::OptionExt as _;
 use nervix_connector_kafka::KafkaOffsetPosition;
-use nervix_execution::sync::{ArcSwap, DashMap};
 use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;
-use nervix_primitives::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    publication::ArcSwap,
+    sync::{
+        Notify,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    },
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
 use triomphe::Arc;
 
 #[cfg(test)]
@@ -616,13 +621,13 @@ mod tests {
     use ahash::HashMap;
     use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
-    use tokio::sync::oneshot;
+    use nervix_primitives::sync::oneshot;
     use triomphe::Arc;
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn delayed_replica_snapshot_cannot_overwrite_promoted_state() {
         let topic = "events";
         let partition = 0;
@@ -663,7 +668,7 @@ mod tests {
         let delayed_payload = payload(3);
         let (response_received_tx, response_received_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        let delayed_install = tokio::spawn(async move {
+        let delayed_install = nervix_primitives::task::spawn(async move {
             let _ = response_received_tx.send(());
             release_rx
                 .await
@@ -716,7 +721,7 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
-        use shuttle::{sync::mpsc, thread};
+        use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
         use crate::shuttle_test::check_interleavings;

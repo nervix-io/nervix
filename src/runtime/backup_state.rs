@@ -90,7 +90,7 @@ impl Runtime {
         drop(execution);
 
         for entity in entities {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let snapshot = if entity.kind.is_processor() {
                 let commands = {
                     let execution = self.inner.executions.get(domain).ok_or_else(|| {

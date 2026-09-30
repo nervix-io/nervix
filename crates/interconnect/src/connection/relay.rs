@@ -41,7 +41,7 @@ impl TransportState {
             .assured("the fixed relay cancellation retry window fits the monotonic clock");
         let mut backoff = self.options.reconnect_backoff;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.cancel_relay(&node_id, delivery).await {
                 Ok(
                     RelayAdmissionStatus::Admitted
@@ -76,7 +76,7 @@ impl TransportState {
                 .checked_add(backoff)
                 .assured("a configured relay retry delay fits the monotonic clock")
                 .min(deadline);
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => return,
                 _ = sleep_until(retry_at) => {}
             }
@@ -237,7 +237,7 @@ impl TransportState {
         })?;
         let admission_key = RelayAdmissionKey {
             peer_node_id: node_id.clone(),
-            ack_id: admission.ack_id,
+            registration: admission.clone(),
         };
         match self.outbound_relay_admissions.entry(admission_key.clone()) {
             Entry::Occupied(entry) => {
@@ -283,10 +283,7 @@ impl TransportState {
                 self.deliver_terminal_incoming(
                     management.connection.peer_addr,
                     node_id.clone(),
-                    Envelope::Ack(nervix_models::RemoteAckResolution {
-                        ack_id: admission.ack_id,
-                        outcome: RemoteAckOutcome::Ack,
-                    }),
+                    Envelope::Ack(admission.resolution(RemoteAckOutcome::Ack)),
                     None,
                 )
                 .await?;
@@ -338,8 +335,8 @@ impl TransportState {
         let mut interval = tokio::time::interval(RELAY_PROGRESS_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => break,
                 _ = interval.tick() => {}
             }
@@ -353,19 +350,16 @@ impl TransportState {
                 .collect::<BTreeSet<_>>();
             let mut reports = FuturesUnordered::new();
             for registration in registrations {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let state = self.clone();
                 reports.push(async move {
-                    let target = registration.reply_node_id.clone();
+                    let target = registration.registrar.node_id().clone();
                     let ack_id = registration.ack_id;
                     let result = timeout(
                         RELAY_PROGRESS_SEND_TIMEOUT,
                         state.send(
                             &target,
-                            Envelope::Ack(nervix_models::RemoteAckResolution {
-                                ack_id,
-                                outcome: RemoteAckOutcome::Alive,
-                            }),
+                            Envelope::Ack(registration.resolution(RemoteAckOutcome::Alive)),
                         ),
                     )
                     .await;
@@ -384,8 +378,8 @@ impl TransportState {
                 });
             }
             while !reports.is_empty() {
-                tokio::task::consume_budget().await;
-                let completed = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let completed = nervix_primitives::select! {
                     _ = self.admission_closed.cancelled() => return,
                     completed = reports.next() => completed,
                 };
@@ -408,8 +402,8 @@ impl TransportState {
         let mut interval = tokio::time::interval(RELAY_CHANNEL_SWEEP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => break,
                 _ = interval.tick() => {}
             }
@@ -613,7 +607,7 @@ impl TransportState {
             .await?;
             return Ok(());
         };
-        if admission.reply_node_id != peer_node_id {
+        if admission.registrar.node_id() != &peer_node_id {
             send_response(
                 respond,
                 StatusCode::FORBIDDEN,
@@ -625,7 +619,7 @@ impl TransportState {
         }
         let admission_key = RelayAdmissionKey {
             peer_node_id: peer_node_id.clone(),
-            ack_id: admission.ack_id,
+            registration: admission.clone(),
         };
         let attempt = self.relay_attempt_key(peer_node_id, peer_epoch, grant.delivery);
         if let Some(status) = self.retired_relay_status(&attempt) {
@@ -778,7 +772,9 @@ impl TransportState {
             admission_key: admission_key.clone(),
             body_bytes: grant.body_bytes,
             metadata: grant.metadata.clone(),
-            state: parking_lot::Mutex::new(RelayAdmissionState::Reserved { grant_id }),
+            state: nervix_primitives::sync::blocking::Mutex::new(RelayAdmissionState::Reserved {
+                grant_id,
+            }),
             cancellation: CancellationToken::new(),
             reserved_at: Instant::now(),
             observations: Arc::clone(&self.observations),
@@ -865,7 +861,7 @@ impl TransportState {
         }
         let grants = self.clone();
         self.tasks.spawn(async move {
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = expiry.cancelled() => {}
                 _ = sleep(RELAY_GRANT_LIFETIME) => {
                     let expired = grants
@@ -1094,7 +1090,7 @@ impl TransportState {
                 request.into_body(),
             );
             tokio::pin!(reading);
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = grant.admission.cancellation.cancelled() => {
                     respond.send_reset(Reason::CANCEL);
                     return Ok(());

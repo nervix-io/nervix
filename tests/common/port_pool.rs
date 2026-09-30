@@ -23,11 +23,10 @@ use std::{
     collections::BTreeSet,
     io,
     net::{IpAddr, Ipv4Addr, TcpListener},
-    sync::LazyLock,
 };
 
 use meticulous::OptionExt as _;
-use parking_lot::Mutex;
+use nervix_primitives::sync::blocking::{LazyLock, Mutex};
 use thiserror::Error;
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);

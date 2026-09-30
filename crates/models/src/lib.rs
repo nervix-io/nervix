@@ -19,6 +19,7 @@
 mod arrow_types;
 mod backup;
 mod canonical;
+mod client_consumer;
 mod client_producer;
 mod cluster_node;
 mod command;
@@ -57,6 +58,10 @@ pub use canonical::{
     CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
     canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl,
+};
+pub use client_consumer::{
+    CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,
+    MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 pub use client_producer::{
     CLIENT_PRODUCER_NODE_BYTES, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId,

@@ -139,7 +139,7 @@ impl From<GrpcAuthenticationError> for Status {
 }
 
 async fn hash_password(password: String) -> error_stack::Result<String, PasswordHashError> {
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         let mut rng = OsRng;
         let salt = SaltString::generate(&mut rng);
         password_argon2()
@@ -155,7 +155,7 @@ pub(in crate::application) async fn verify_password_hash(
     password_hash: String,
     password: String,
 ) -> bool {
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         let Ok(parsed_hash) = PasswordHash::new(&password_hash) else {
             return false;
         };
@@ -302,9 +302,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create user '{}': {error}", create.name.as_str()),
+                    format!("failed to create user '{}'", create.name.as_str()),
                 )
                 .await
             }
@@ -351,9 +351,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create user '{}': {error}", name.as_str()),
+                    format!("failed to create user '{}'", name.as_str()),
                 )
                 .await
             }
@@ -363,12 +363,49 @@ impl SessionServiceImpl {
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{CreateStatement, CreateUser, UserName};
 
     use super::*;
+    #[cfg(feature = "testing")]
+    use crate::application::test_fixtures::build_test_service_with_probe;
     use crate::application::test_fixtures::{TestService, build_test_service};
 
-    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn user_creation_storage_failure_keeps_user_absent() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(false, probe.clone()).await;
+        let user = UserName::parse("report_user").expect("valid test user name");
+        probe.storage_fault().fail_next(
+            "create-user:report_user".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let result = service
+            .create_user(CreateStatement::new(
+                CreateUser {
+                    name: user.clone(),
+                    password: "secret-password".to_string(),
+                },
+                false,
+            ))
+            .await;
+        assert!(!result.succeeded(), "{result:?}");
+        assert!(result.message.contains("consensus storage"), "{result:?}");
+        assert!(service.inner.consensus.current_user(&user).await.is_none());
+
+        drop(service);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[nervix_primitives::test]
     async fn testing_feature_hashes_passwords_with_lean_argon2_params() {
         let password_hash = hash_password("secret".to_string())
             .await
@@ -400,7 +437,7 @@ mod tests {
         assert!(verify_password_hash(password_hash, "secret".to_string()).await);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn user_creation_retries_preserve_the_admitted_credentials() {
         let TestService {
             service,

@@ -1,6 +1,7 @@
 # Emitters
 
-Emitters publish relay records to external systems.
+Emitters publish relay records to external systems or to application consumers through a client
+session.
 
 A typical emitter:
 
@@ -144,8 +145,48 @@ discard a record.
 | ClickHouse, Postgres, MySQL, MongoDB | `ACK` | Successful insert/write result |
 | Iceberg | `ACK` | Successful catalog commit |
 | HTTP | `ACK` | Complete successful response headers |
+| Client | `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | A current consumer attempt's explicit application ACK |
+
+### Client emitters
+
+`TO CLIENT SCHEMA <output_schema>` constructs native Arrow output for applications. It has no
+connector `CLIENT` object, codec, header operations, or direct `VALUES` form. The emitter still
+uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
+`INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
+boundary. A client sink requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
+`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
+ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
+
+The declared output schema is exact. Construction starts empty; only explicitly inherited or set
+fields are exported. A sensitive input cannot be copied into output without explicit
+`leak_sensitive(...)`. Branch fields do not become expression values. Every prepared Arrow IPC
+stream contains rows from one source relay and one concrete branch, within both declared row and
+encoded byte limits. One row larger than the limit follows `ON MESSAGE ERROR`; it does not weaken
+the batch bound. A delivery carries an opaque branch fingerprint, not the branch key's values.
+
+Consumers of one emitter compete for its output. `ACK SEQUENTIAL` permits one outstanding batch
+per source relay and concrete branch; `ACK PARALLEL MAX <n>` permits at most `n` across all
+workers of that source and branch. The application may `ack`, `retry`, or `reject` a live attempt.
+Only `ack` confirms the batch. A retry keeps the original IPC bytes, member positions, identity,
+and execution snapshot and waits on physical backoff before a fresh attempt. A timeout or lost
+consumer revokes its ACK reference before reassignment. A later ACK for that reference is stale;
+repeating a confirmed ACK is idempotent while its bounded result is retained. `reject` applies the
+route's message error policy to every batch member with a bounded, non-sensitive reason. An
+`ATTACHED` emitter keeps its source acknowledgement waiting for the application ACK; a `DETACHED`
+emitter keeps its existing earlier source boundary. There is no durable consumer cursor or
+delivery history: an owner loss can require upstream replay, and a lost ACK can duplicate an
+application effect.
+
+`DESCRIBE EMITTER` reports active consumers, forwarded consumers and their granted credit,
+retained batches and IPC bytes, the forwarded subset of that retained work, assigned batches still
+awaiting application processing, retries, application ACKs, and application rejections. Retained
+work and forwarding counts describe the executing node's current owner generation; outcome
+counters remain on that node across emitter restarts.
 
 ### HTTP request configuration
+
+The [HTTP Emitter Architecture](./http-emitter-architecture.md) chapter follows the validated
+request through host preparation, the connector, retry, lifecycle and qualification evidence.
 
 An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
 selection in this order:
@@ -177,13 +218,14 @@ in any request field or body require explicit leakage. Branch fields and source-
 reads are unavailable. A literal invalid method, target or header rejects configuration; the same
 rules are checked per record for computed values before publication.
 
-Methods are ASCII HTTP tokens of at most 64 bytes. `CONNECT` and `TRACE` are unavailable, and
-`GET` and `HEAD` require `WITHOUT BODY`. `PATH` begins with exactly one `/` and is parsed against
-the client origin. It cannot include a fragment, backslash, invalid percent escape, whitespace or
-control character; normalization must keep it on that origin and must not produce a leading `//`.
-The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field names and
-UTF-8 values without control characters or leading/trailing whitespace in a nonempty value.
-Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+Methods are ASCII HTTP tokens of at most 64 bytes. `CONNECT` and `TRACE` are unavailable, and `GET`
+and `HEAD` require `WITHOUT BODY`; both rules apply to every ASCII case variant, while any other
+method is sent with exactly the spelling it evaluated to. `PATH` begins with exactly one `/` and is
+parsed against the client origin. It cannot include a fragment, backslash, invalid percent escape,
+whitespace or control character; normalization must keep it on that origin and must not produce a
+leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
+names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
+value. Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
 application headers and 32 KiB of name/value bytes are allowed.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
@@ -191,6 +233,44 @@ absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or 
 emitters publish one request per eligible source record, so they do not accept the optional
 `BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
 selection.
+
+For example, the first emitter below sends each record of `outgoing` with its own method, path and
+tenant header and a JSON body of two of its fields, and the second deletes without a body.
+`api.example.com` stands for an endpoint the operator has already provisioned.
+
+```nspl
+CREATE CLIENT api TYPE HTTP CONFIG {
+  'endpoint' = 'https://api.example.com',
+  'timeout_ms' = 5000
+};
+
+CREATE ATTACHED EMITTER deliver_event
+  FROM outgoing
+  TO HTTP api
+    METHOD input.request_method
+    PATH input.request_path
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING event_body_codec
+  INHERIT event_id, payload
+  INVOKE write_header('Content-Type', 'application/json'),
+         write_header('X-Tenant', input.tenant),
+         write_header('Idempotency-Key', input.event_id)
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE EMITTER delete_event
+  FROM outgoing WHERE input.request_method = 'DELETE'
+  TO HTTP api
+    METHOD 'DELETE'
+    PATH input.request_path
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    WITHOUT BODY
+  INVOKE write_header('Idempotency-Key', input.event_id)
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
 
 #### HTTP requests
 
@@ -327,6 +407,55 @@ relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how 
 flush; `MODE` controls when each record in that flush counts as published. `ATTACHED` and
 `DETACHED` are orthogonal: a detached emitter acknowledges upstream immediately but still performs
 its declared confirmations and retries for error visibility and backpressure.
+
+#### HTTP inspection and metrics
+
+`SHOW CREATE EMITTER` and canonical formatting render the method and path expressions, the header
+invocations and the construction in canonical NSPL, with the explicit body selection. A configured
+expression is rendered as NSPL under the ordinary sensitivity rules, so an explicitly leaked field
+appears as its `leak_sensitive(...)` call and never as a value. `DESCRIBE EMITTER`
+reports the request contract of the `deliver_event` example above in these lines:
+
+```text
+codec: event_body_codec
+body: codec
+sink: HTTP client=api method=input.request_method path=input.request_path
+batch: none
+flush: FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+```
+
+`body` reads `codec` for `ENCODE USING`, and `without body`, with `codec: none`, for `WITHOUT BODY`.
+Header invocations appear in `SHOW CREATE EMITTER` rather than in `DESCRIBE`.
+
+While a request is pending after a failed attempt — waiting out its backoff or `Retry-After`,
+or sent again and not yet answered — `DESCRIBE EMITTER` reports that failure as its
+`transient error`, with the `reconnect backoff` the retry waited and the `reconnect wait` still
+left, and the node reports it as a runtime event. It clears once the pending request is delivered.
+The failure names its cause and, for a response, its status, such as
+`HTTP endpoint answered with retryable status 503`,
+`HTTP endpoint answered with authentication or authorization status 401`,
+`HTTP request timed out before complete final response headers`, or
+`HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`. A DNS, connection, TLS, send
+or response-header failure keeps the cause beneath it, such as the resolver's
+`resolving 'api.example.com' failed: the name does not exist`. `ON GENERAL ERROR` has no say over a
+response: a retryable failure stays pending and keeps attached acknowledgements alive, and a
+refusal follows `ON MESSAGE ERROR`, even with `ON GENERAL ERROR IGNORE`.
+
+A record's message error names the operation that rejected it and where applicable the request
+field or invocation: `publish` with the field `method` or `path`, `invoke` with the zero-based
+position of the header write, `encode` for a body the codec cannot produce, and, for a refused
+request, the code `external` with the operation `publish` and a message carrying the numeric status,
+such as `HTTP endpoint answered with status 404`. Message errors, emitter status, runtime events,
+logs and metric labels never carry an evaluated target, a header value, a credential, a request body
+or a response body.
+
+The emitter's `sent` counters count each record once, when its request is delivered, however many
+attempts that took, and never a record the endpoint refused. `messages_total` counts delivered
+records, not attempts. `bytes_total` counts a codec body's record with the ordinary emitter payload
+accounting, the logical Arrow data of the finalized record, while a request without a body adds
+no payload bytes. A request's method, target and headers and the response add nothing to either
+counter, and the counters carry only the ordinary graph labels, never a request value.
 
 ## Batching
 
@@ -876,6 +1005,10 @@ Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` r
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
 failures retry the undelivered work. A `TYPE REDIS` client declares its connection-pool bounds; see
 [Database Client Connection Pools](database-client-pools.md).
+Each physical pooled command connection resolves the `addr` hostname through the node's
+asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
+an established connection stays open until Redis or the network closes it. For `rediss://`, TLS
+still verifies the configured hostname and uses its configured CA and optional client identity.
 
 ### MQTT
 

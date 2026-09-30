@@ -566,11 +566,11 @@ impl SessionServiceImpl {
         mut release: PendingClusterEntityGateRelease,
     ) {
         while !release.nodes.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let nodes = release.nodes.clone();
             for node in nodes {
-                tokio::task::consume_budget().await;
-                let result = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let result = nervix_primitives::select! {
                     _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.release_entity_gate_on_node(
                         &node,
@@ -596,7 +596,7 @@ impl SessionServiceImpl {
             if release.nodes.is_empty() {
                 return;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
@@ -666,7 +666,7 @@ impl SessionServiceImpl {
         };
         let mut engaged_node = false;
         for node in &nodes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             gate.record_attempt(node.clone());
             let engagement = self
                 .engage_entity_gate_on_node(
@@ -741,7 +741,7 @@ impl SessionServiceImpl {
         polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_status = None::<(ClusterNodeName, EntityDrainStatusEnvelope)>;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             polling.tick().await;
             #[cfg(feature = "testing")]
             let force_timeout = self.inner.runtime.take_forced_entity_drain_timeout(domain);
@@ -768,7 +768,7 @@ impl SessionServiceImpl {
             }
             let mut all_drained = true;
             for node in &gate.nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self
                     .entity_drain_status_on_node(
                         node,
@@ -852,7 +852,7 @@ impl SessionServiceImpl {
     ) -> bool {
         let domain = gate.domain.clone();
         for node in gate.nodes.clone() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self
                 .release_entity_gate_on_node(&node, &gate.coordination, &domain)
                 .await
@@ -901,7 +901,7 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<bool, EntityGateControlError> {
         let mut every_release_confirmed = true;
         while !gate.nodes.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let available_nodes = self
                 .available_node_ids()
                 .await
@@ -909,7 +909,7 @@ impl SessionServiceImpl {
                 .collect::<BTreeSet<_>>();
             let nodes = gate.nodes.clone();
             for node in nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if node != *self.inner.consensus.local_node_id() && !available_nodes.contains(&node)
                 {
                     every_release_confirmed = false;
@@ -928,7 +928,7 @@ impl SessionServiceImpl {
                 gate.release_owner = None;
                 return Ok(every_release_confirmed);
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => {
                     return Err(Report::new(EntityGateControlError::ReleaseInterrupted {
                         domain: gate.domain.clone(),
@@ -986,7 +986,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn unavailable_gate_participants_preserve_request_context() {
         use super::super::test_fixtures::named;
 
@@ -1049,7 +1049,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn gate_release_rejects_the_wrong_domain_without_losing_the_runtime_cause() {
         use super::super::test_fixtures::named;
 
@@ -1149,7 +1149,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
         let TestService {
             service,
@@ -1195,8 +1195,8 @@ mod tests {
                 .runtime
                 .entity_gate_operation_is_held(&coordination)
             {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

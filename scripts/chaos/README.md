@@ -74,9 +74,10 @@ observed leader and placement rather than assuming that those settings alone pre
 The long cases require peer-visible leader/placement failover and sink progress before unpause.
 
 Each case verifies that Pumba's dry run selected the exact observed container and that Docker
-inspection showed it paused and then running without a process restart. Docker pause and unpause
-events supply the actual interval; a short pause outside 0.8–2 seconds or a long pause outside
-15–100 seconds fails the experiment. Independent broker load, listener observation, peer-side
+inspection showed it paused and then running without a process restart. The target's pause and
+unpause events in the run's live Docker event recording supply the actual interval; a short pause
+outside 0.8–2 seconds or a long pause outside 15–100 seconds fails the experiment. From the pause
+through recovery, the recorded node events must be exactly that pause and unpause. Independent broker load, listener observation, peer-side
 public status and control canaries continue around the fault. Short pauses may end before the
 listener observer samples the outage; the runner records that limit and still requires the
 observed leader and owners to stay stable and every listener to recover. Recovery time is measured
@@ -85,13 +86,21 @@ every accepted record with the correct content and branch, reporting identical r
 separately. The run retains per-case Docker, public, broker, observer and Pumba evidence under
 `pauses/` plus `results/pause-progress.json`.
 
+Immediately before each crash or pause, after the control canary and Pumba dry run, the runner
+waits up to 30 seconds for a settled public role read. The read requires the nodes to agree on
+leader, Raft term and last log index, then confirms that the selected role still belongs to the
+same node. A timeout reports the unmet settled-role condition as an injection failure. If the
+settled read shows that the selected leader or owner moved, the run also fails as an injection
+failure before the fault.
+
 The follower and execution-owner variants require three nodes. `--outage-seconds N` holds the
 selected node down for at least 5–120 seconds (default 8). The controller reads the leader and
 ingestor/emitter owners through the packaged CLI, selects the corresponding exact Compose node,
 and checks its image, labels, restart policy and persistent volume through Docker inspection. It
 rechecks the public role immediately before invoking digest-pinned Pumba with `kill --signal
-SIGKILL`. A dry run must resolve only that container. The real kill must yield a Docker signal-9
-event, a die event with exit code 137, and a stopped container throughout the declared outage.
+SIGKILL`. A dry run must resolve only that container. The real kill must yield a signal-9 kill
+event and a die event with exit code 137 in the run's live Docker event recording, and a stopped
+container throughout the declared outage.
 The controller then starts the same container ID explicitly and verifies its original image and
 volume. It checks the final process start time against that explicit restart so a second crash
 cannot be mistaken for recovery. Automatic restarts are disabled in Compose.
@@ -108,7 +117,9 @@ through `DESCRIBE RESOURCE`. A canary attempted during the outage records its CL
 acknowledged or uncertain and its observed final effect. The input ledger is reconstructed from
 Kafka after load stops. The exact-record verifier accepts identical replay duplicates in crash
 cases, reports their count separately, and still fails on missing, unexpected, corrupt or
-wrong-branch records. Unexpected node exits and failures to converge also fail the command.
+wrong-branch records. From the kill through recovery, the recorded node events must be exactly the
+target's kill, its exit and the explicit start, so an unexpected node exit fails the command, as
+does a failure to converge.
 Crash runs default to 1,000 paced input records; a smaller `--records` value can exhaust the load
 before fault verification and then fails as a setup limit. When output remains short of accepted
 input after the recovery bound, the controller still saves the available output and runs the exact
@@ -212,11 +223,12 @@ run at once after recording every node's own status.
 After healing, all nodes must agree on a caught-up leader with every peer connected and no warnings
 within 150 seconds. Kafka membership must converge on the scheduled ingestor owner within 90
 seconds, and output must advance within 90 seconds. A canary through the rejoined node must be
-acknowledged, and no node may stop or restart outside the planned fault. The run ends with the
-exact ledger verifier, which reports identical replay duplicates separately. Each case keeps its
-plan, recorded rules, link matrices, injector commands and logs, status samples, canaries, consumer
-group snapshots, node events and timings under `partitions/`, and `results/partition-progress.json`
-summarizes them. A failed run retains `results/finding.json` with its failure category and a
+acknowledged, and the node events recorded from the start of the case through recovery must be
+none at all, or exactly the planned SIGKILL, exit and restart of the isolated follower. The run ends
+with the exact ledger verifier, which reports identical replay duplicates separately. Each case
+keeps its plan, recorded rules, link matrices, injector commands and logs, status samples,
+canaries, consumer group snapshots, node events and timings under `partitions/`, and
+`results/partition-progress.json` summarizes them. A failed run retains `results/finding.json` with its failure category and a
 reproduction command naming the pinned image, the case and the partition window. A run that exits
 or is interrupted heals every run-owned fault before it captures diagnostics, including with
 `--keep`, and `just chaos cleanup` also removes Pumba sidecars left joined to run-owned containers.
@@ -306,6 +318,19 @@ that overlaps no existing Docker network or host route. Nodes take the fixed add
 `.13` and every other container an address from the upper half. The manifest records the network
 and the node addresses.
 
+Every tool image a run starts is pinned by a registry-qualified digest in `tool-images.sh`: Apache
+Kafka 3.9.1 for the broker and topic administration, kcat 1.7.1 for traffic, Alpine 3.22.6 for
+probes, observers and event markers, and Pumba 1.2.1 with its nettools helper for faults. Kafka,
+Alpine, Pumba and nettools are pinned by multi-architecture index digest; kcat 1.7.1 is published
+for linux/amd64 only. The Compose file has no fallback tags. In preflight, before it resolves the
+Nervix image and before the run creates any container, the controller makes each tool image the
+scenario uses local, pulling a missing one once within a bound, and records its reference and image
+ID under `tool_images` in `manifest.json`. Result files and `results/finding.json` carry the same
+map. A pinned image that cannot be pulled fails the run in preflight with exit status 2: the setup
+error names the image on the console and in the manifest's `setup_error`, and Docker's pull output
+is kept in `diagnostics/tool-image-pull-<tool>.txt`. Moving a tool to another release means
+replacing its digest in `tool-images.sh` and requalifying the scenarios that start it.
+
 The host needs Bash, Docker with Compose, GNU `timeout`, OpenSSL, and jq. Kafka administration,
 traffic, listener probes, metrics probes, and Nervix administration run in prebuilt containers.
 The baseline provisions its Kafka topics explicitly, installs the checked-in NSPL graph with the
@@ -313,23 +338,43 @@ image's packaged `nervix-cli`, and reconstructs the accepted-input ledger from K
 checks the ingestor consumer-group boundary and compares the output ledger by event ID and exact
 content. Duplicate, missing, unexpected, and corrupt records are reported independently.
 
-Each run writes bounded evidence under `target/chaos/<run-id>/`: the immutable image identity,
-rendered Compose configuration, phase ledger, public cluster and placement output, listener and
-metrics probes, broker offsets, accepted and observed traffic, verifier reports, logs, Docker events,
-and container inspection. The default baseline fixture has 24 records and accepts at most 1,000
-with `--records`.
+Each run writes bounded evidence under `target/chaos/<run-id>/`: the immutable Nervix and tool
+image identities, rendered Compose configuration, phase ledger, public cluster and placement
+output, listener and metrics probes, broker offsets, accepted and observed traffic, verifier
+reports, logs, Docker events, and container inspection. The default baseline fixture has 24
+records and accepts at most 1,000 with `--records`.
 Rolling runs additionally retain a Pumba command and version, each target's before/stop/start
 inspection, stop and observer logs, measured stop and recovery times, per-restart public status and
 metrics, and per-restart offset results. A failed identity, stop, exit, deadline, listener, or
 recovery check leaves the manifest and available evidence under that run directory.
+
+Docker events come from one live recording per run, `diagnostics/docker-events.ndjson`. A replay
+through `docker events --since` returns only what remains of the daemon's buffer of its most recent
+256 events, which every container on the host shares, so no verdict reads one. Before the run
+creates its first container, the controller starts a `docker events` subscriber filtered to the
+run's label and places a labeled marker container. The recording starts when the marker's creation
+appears in it, which proves the subscriber live and the daemon stamping events on the controller's
+clock. Each Docker-event check closes its window with another marker and reads that window from the
+recording: the crash kill and the node events from the fault through recovery, the pause interval
+and the node events around it, and each partition case's node events and restart kill. A window is
+accepted only when recorded markers bracket it, and its bounds are kept beside it in a
+`.recording.json` file. A recording that is missing, starts after a window opens, or ends before it
+closes, including one whose subscriber exited, fails the run as a controller failure with those
+bounds as evidence. When diagnostics are captured, after every heal, a final marker closes the
+recording. It must then cover the whole run within 64 MiB, and its bounds are kept in
+`diagnostics/docker-events.recording.json`. Because the closed recording holds the creation of
+every run-owned container, `results/container-images.json` then attributes each one, markers
+included, to the resolved Nervix image or to a tool image the manifest records. A container
+created from any other image fails a run that otherwise passed as a controller failure.
 
 All owned containers, networks, and volumes carry `io.nervix.chaos.run=<run-id>`. This label also
 gives Pumba scenarios an exact target selector; Nervix nodes additionally carry
 `io.nervix.chaos.target=true`. Normal exit, failure, timeout, and catchable signals preserve
 diagnostics and remove the labeled resources. Pause cleanup first unpauses every run-owned paused
 container, including when Pumba fails or the controller receives a supported signal. Partition
-runs first stop their injectors and remove any Pumba-owned qdisc or INPUT rule left on a node. If a
-controller is killed before its trap runs, use:
+runs first stop their injectors and remove any Pumba-owned qdisc or INPUT rule left on a node. A
+controller killed before its trap runs leaves its event subscriber to exit on its own 15 minutes
+after the run's timeout. To remove the run's resources in that case, use:
 
 ```bash
 just chaos cleanup --run-id <run-id>
@@ -337,7 +382,7 @@ just chaos cleanup --run-id <run-id>
 
 `--keep` retains resources for interactive diagnosis and prints the same cleanup command.
 
-Run the external verifier and Compose contract checks directly with:
+Run the external verifier, pinned tool image and Compose contract checks directly with:
 
 ```bash
 just chaos self-test

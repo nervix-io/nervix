@@ -6,9 +6,10 @@
 //!   materialized state; evaluating that program for the rows the route kept, with the execution
 //!   time and state snapshot the rest of the batch used; validating each row's method, then its
 //!   path on the client's origin, then each header write in written order; the message error that
-//!   rejects a row at the first field that failed; and what the message error of an admitted
+//!   rejects a row at the first field that failed; what the message error of an admitted
 //!   request rejected later reads: its original source record, the materialized state its batch
-//!   was admitted with, and its attempted codec record.
+//!   was admitted with, and its attempted codec record; and which part of a delivered request is
+//!   payload: its codec record, never its method, target or headers.
 //! - **Depends on.** The emitter's HTTP sink plan, the VM's compile and execute API, the
 //!   vocabulary's HTTP request fields, and the node's planned message errors.
 //! - **Must not know.** Which connector sends the requests, how their bodies are encoded, or when
@@ -249,6 +250,24 @@ impl AdmittedHttpRequests {
         }
     }
 
+    /// Requests whose rows are the finalized codec records of rows `rows` of `source`, one for
+    /// each published row in order, admitted without materialized state.
+    #[cfg(test)]
+    pub(in crate::runtime) fn encoded(
+        fields: Vec<HttpRequestFields>,
+        source: &RelayRecordBatch,
+        rows: Vec<usize>,
+    ) -> Self {
+        Self {
+            fields,
+            sources: HttpRequestInput::Source {
+                records: SourceRecords::of(source),
+                rows,
+            },
+            materialized_state: HashMap::default(),
+        }
+    }
+
     pub(in crate::runtime) fn request_count(&self) -> usize {
         self.fields.len()
     }
@@ -256,6 +275,20 @@ impl AdmittedHttpRequests {
     /// The request row `row` was admitted with.
     pub(in crate::runtime) fn request(&self, row: usize) -> Option<&HttpRequestFields> {
         self.fields.get(row)
+    }
+
+    /// The payload bytes the requests of `delivered`, distinct rows of `published` in row order,
+    /// carried: the Arrow data of the codec records their bodies encode, or nothing for requests
+    /// without a body. A request's method, target and headers are request metadata, never payload.
+    pub(in crate::runtime) fn body_bytes(
+        &self,
+        published: &RelayRecordBatch,
+        delivered: &[usize],
+    ) -> error_stack::Result<u64, RuntimeSchemaError> {
+        match &self.sources {
+            HttpRequestInput::Published => Ok(0),
+            HttpRequestInput::Source { .. } => published.payload_bytes_of_rows(delivered),
+        }
     }
 
     /// The bytes the request fields hold, which the emitter's buffer counts with their batch.
@@ -1096,7 +1129,7 @@ mod tests {
         fields: Vec<&'a str>,
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn each_row_is_rejected_at_its_first_failed_field_and_the_rest_keep_their_requests() {
         let compiled = compile(
             &sink(
@@ -1294,7 +1327,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_codec_request_reads_its_source_row_and_its_finalized_record() {
         let output = test_schema(&[
             ("id", ParseAsType::String),

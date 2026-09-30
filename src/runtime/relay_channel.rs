@@ -16,16 +16,18 @@ use std::{
     task::{Context, Poll},
 };
 
-use concurrent_queue::{ConcurrentQueue, PopError, PushError};
 use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::sync::{ArcSwap, Guard};
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use parking_lot::Mutex;
-use tokio::{
-    sync::Notify,
-    time::{Instant, timeout_at},
+use nervix_primitives::{
+    collections::{ConcurrentQueue, PopError, PushError},
+    publication::{ArcSwap, Guard},
+    sync::{
+        Notify,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        blocking::Mutex,
+    },
 };
+use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 use triomphe::Arc;
 
@@ -152,6 +154,21 @@ impl RelayDispatchGate {
         RelayDispatchPermit { gate: self }
     }
 
+    /// A buffered owner batch cannot wait behind a schedule swap: the swap's drain includes that
+    /// batch, so waiting would hold the drain open. Reject it and let its source retry instead.
+    pub(in crate::runtime) fn try_acquire_dispatch(&self) -> Option<RelayDispatchPermit<'_>> {
+        if self.try_enter() {
+            Some(RelayDispatchPermit { gate: self })
+        } else {
+            self.clear_if_expired();
+            if self.try_enter() {
+                Some(RelayDispatchPermit { gate: self })
+            } else {
+                None
+            }
+        }
+    }
+
     pub(in crate::runtime) async fn acquire_owned(gate: &Arc<Self>) -> OwnedRelayDispatchPermit {
         gate.acquire().await;
         OwnedRelayDispatchPermit { gate: gate.clone() }
@@ -159,12 +176,10 @@ impl RelayDispatchGate {
 
     async fn acquire(&self) {
         loop {
-            tokio::task::consume_budget().await;
-            self.increment_in_flight_dispatches();
-            if !self.closed.load(Ordering::SeqCst) {
+            nervix_primitives::task::consume_budget().await;
+            if self.try_enter() {
                 return;
             }
-            self.decrement_in_flight_dispatches();
 
             self.clear_if_expired();
             let changed = self.changed.notified();
@@ -192,6 +207,15 @@ impl RelayDispatchGate {
         }
     }
 
+    fn try_enter(&self) -> bool {
+        self.increment_in_flight_dispatches();
+        if !self.closed.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.decrement_in_flight_dispatches();
+        false
+    }
+
     /// Whether an ownership or lifecycle operation currently fences this relay.
     pub(in crate::runtime) fn is_engaged(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
@@ -203,7 +227,7 @@ impl RelayDispatchGate {
     /// completed. Callers must not tear down relay consumers when the fence did not complete.
     async fn wait_quiescent(&self, generation: u64) -> bool {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.clear_if_expired();
             let changed = self.changed.notified();
             let drained = self.drained.notified();
@@ -234,7 +258,7 @@ impl RelayDispatchGate {
                 }
             };
             let woken = async {
-                tokio::select! {
+                nervix_primitives::select! {
                     () = changed.as_mut() => {}
                     () = drained.as_mut() => {}
                 }
@@ -255,7 +279,7 @@ impl RelayDispatchGate {
             return;
         }
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let changed = self.changed.notified();
             let (is_open, deadline) = {
                 let state = self.state.lock();
@@ -286,7 +310,7 @@ impl RelayDispatchGate {
 
     pub(in crate::runtime) async fn wait_closed(&self) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.is_closed() {
                 return;
             }
@@ -430,7 +454,7 @@ mod gate_tests {
         RelayDispatchGateLease::engage(gate.clone(), deadline, reason)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn relay_dispatch_gate_releases_waiters_explicitly() {
         let gate = Arc::new(RelayDispatchGate::new());
         let lease = engage(&gate, Instant::now() + Duration::from_secs(1), "node swap");
@@ -442,7 +466,7 @@ mod gate_tests {
         assert!(!gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn relay_dispatch_gate_self_clears_at_its_deadline() {
         let gate = Arc::new(RelayDispatchGate::new());
         let _lease = engage(
@@ -455,7 +479,7 @@ mod gate_tests {
         assert!(!gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn stale_gate_hold_cannot_release_a_new_engagement() {
         let gate = Arc::new(RelayDispatchGate::new());
         let stale = engage(&gate, Instant::now() + Duration::from_secs(1), "first");
@@ -468,7 +492,7 @@ mod gate_tests {
         assert!(!gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn expired_engagement_does_not_report_a_completed_fence() {
         let gate = Arc::new(RelayDispatchGate::new());
         let _permit = gate.acquire_dispatch().await;
@@ -482,7 +506,7 @@ mod gate_tests {
         assert!(!gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn acquired_gate_lease_outlives_its_fence_deadline() {
         let gate = Arc::new(RelayDispatchGate::new());
         let deadline = Instant::now() + Duration::from_millis(10);
@@ -492,13 +516,13 @@ mod gate_tests {
         tokio::time::sleep_until(deadline + Duration::from_millis(10)).await;
         assert!(gate.is_closed());
 
-        let dispatch = tokio::spawn({
+        let dispatch = nervix_primitives::task::spawn({
             let gate = gate.clone();
             async move {
                 let _permit = gate.acquire_dispatch().await;
             }
         });
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         assert!(
             !dispatch.is_finished(),
             "the acquisition deadline must not reopen an owned gate lease"
@@ -718,7 +742,7 @@ impl<T> RelayFanout<T> {
     async fn admit(&self, consumer: &RelayConsumerQueue<T>) -> bool {
         let _wait = RelayAdmissionWait::begin(self);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let admission = self.admission.notified();
             tokio::pin!(admission);
             admission.as_mut().enable();
@@ -980,7 +1004,7 @@ mod tests {
         NonZeroUsize::new(value).expect("test capacities are nonzero")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn every_consumer_receives_each_batch_in_publish_order() {
         let channel = RelayBroadcast::with_capacity(capacity(3));
         let mut first = channel.new_receiver();
@@ -1009,7 +1033,7 @@ mod tests {
         assert_eq!(channel.len(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_receiver_only_receives_batches_published_after_it_joins() {
         let channel = RelayBroadcast::with_capacity(capacity(2));
         let mut early = channel.new_receiver();
@@ -1029,7 +1053,7 @@ mod tests {
         assert_eq!(late.try_recv(), RelayTryRecv::Empty);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn publishing_without_consumers_returns_the_batch() {
         let channel = RelayBroadcast::with_capacity(capacity(1));
         let returned = channel
@@ -1047,7 +1071,7 @@ mod tests {
         assert_eq!(returned.batch, 8);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_the_fanout_closes_receivers_after_they_drain() {
         let channel = RelayBroadcast::with_capacity(capacity(2));
         let mut receiver = channel.new_receiver();
@@ -1059,7 +1083,7 @@ mod tests {
         assert_eq!(receiver.try_recv(), RelayTryRecv::Closed);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closing_receivers_ends_them_after_they_drain_and_releases_their_publisher() {
         let channel = RelayBroadcast::with_capacity(capacity(1));
         let mut closed = channel.new_receiver();
@@ -1090,7 +1114,7 @@ mod tests {
         assert_eq!(closed.try_recv(), RelayTryRecv::Closed);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn shrinking_capacity_preserves_buffered_batches() {
         let channel = RelayBroadcast::with_capacity(capacity(3));
         let mut receiver = channel.new_receiver();

@@ -9,9 +9,6 @@
 //! cargo test -p nervix-wasm --test geo_guest_smoke -- --ignored --nocapture
 //! ```
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{sync::Arc, time::Duration};
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
@@ -155,7 +152,7 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
     ipc
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 #[ignore = "needs `just wasm-datalake-geo-guest`"]
 async fn the_geo_guest_enriches_every_declared_route() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
@@ -290,7 +287,7 @@ async fn the_geo_guest_enriches_every_declared_route() {
     assert!(number(9) > 0.0, "the distance to the hub must be positive");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 #[ignore = "needs `just wasm-datalake-geo-guest`"]
 async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {

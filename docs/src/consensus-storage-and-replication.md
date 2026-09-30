@@ -57,6 +57,21 @@ A storage failure marks that node's consensus store failed. Later writes return
 after the device completed the write, so a failed or disconnected request is an uncertain outcome,
 not proof that the command was absent. Recovery reads the durable state to decide.
 
+Consensus startup, proposal, and membership operations carry contextual error reports locally.
+Database open failures retain their I/O cause; Raft configuration, startup, and handler
+registration failures retain the failure beneath the startup context. A rejected proposal keeps
+its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
+storage, and other Raft write failures separately. A state-machine refusal remains a typed
+conflict, distinct from a storage or leadership failure. These classifications determine whether
+the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
+message to decide.
+
+Transaction mutation checks also create local reports. Raft's applied response retains its
+existing serialized `TransactionMutationError` outcome, so report frames are local to the state
+machine evaluation. The proposer creates a new report from the exact typed outcome received over
+Raft and adds transaction context when the control plane takes ownership. The response encoding,
+client acknowledgement boundary, and recovery rules in this chapter are unchanged.
+
 ### Applied Ranges And Client Replies
 
 Committed entries are applied in order. Entries already available together share an atomic write
@@ -179,9 +194,16 @@ learner caught up; the membership change has its own ten-second bound. A timeout
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
 
+When discovery reports a different interconnect endpoint for an existing member, reconciliation
+replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
+re-added as a learner. Once the committed membership contains the advertised address, subsequent
+reconciliation passes propose no further address change. The stored address supplies recovery
+contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
+
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft promote voters`, and `raft membership updated` transitions. `SHOW CLUSTER STATUS` reports the
-local `raft.last_log_index`, `raft.last_applied`, and each member's learner or voter role.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
+learner or voter role and recorded address.
 
 ## Bounded Log Reading
 
@@ -263,6 +285,13 @@ One complete snapshot transfer has a 30-second deadline. The sender reads one se
 sends it in 64 KiB chunks through the Bulk pool. The receiver holds at most one section in memory,
 validates its declared size and offsets, and synchronizes each completed section into a newly claimed
 generation. A restarted transfer abandons the earlier staged generation.
+
+The receiver stages at most one transfer from each sending node, and a new transfer from that node
+supersedes it. Every transfer carries an identity its sender allocates, and the receiver refuses a
+chunk or a finish whose identity is not that of the transfer it is staging, so a late chunk of a
+superseded transfer never lands in its successor. Because the receiver only compares identities
+from one sender, an identity is unique among the transfers one node sends: every Raft connection of
+the node draws from the node's own sequence, which starts again when the node starts.
 
 After every declared section arrives, Raft revalidates the vote and whether the snapshot still
 applies. Installation then synchronizes the new manifest together with an installation marker. That

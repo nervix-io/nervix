@@ -750,6 +750,95 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 			}
 			return []string{fmt.Sprintf("REPLY %d INGESTOR_CLOSE %s message=%s", id, disposition,
 				text(outcome.Message()))}, nil
+		case session.ReplyBodyOpenEmitterOutcome:
+			outcome := new(session.OpenEmitterOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			switch outcome.DispositionType() {
+			case session.OpenEmitterDispositionEmitterOpened:
+				opened := new(session.EmitterOpened)
+				if err := union(outcome.Disposition, opened); err != nil {
+					return nil, err
+				}
+				window := "sequential"
+				if opened.WindowType() == session.ConsumerWindowParallelConsumerWindow {
+					parallel := new(session.ParallelConsumerWindow)
+					if err := union(opened.Window, parallel); err != nil {
+						return nil, err
+					}
+					window = fmt.Sprintf("parallel:%d", parallel.Max())
+				}
+				lines := []string{fmt.Sprintf("REPLY %d EMITTER_OPENED domain=%s emitter=%s window=%s ack_timeout=%d retry=%d/%d granted=%d/%d max_batch=%d/%d message=%s",
+					id, opened.Domain(), opened.Emitter(), window, opened.AckTimeoutNanos(), opened.RetryBackoffNanos(),
+					opened.RetryMaxBackoffNanos(), opened.GrantedBatches(), opened.GrantedBytes(), opened.MaxBatchBytes(),
+					opened.MaxBatchRows(), text(outcome.Message()))}
+				for index := 0; index < opened.FieldsLength(); index++ {
+					row := new(session.RowField)
+					opened.Fields(row, index)
+					parsed, err := readField(row)
+					if err != nil {
+						return nil, err
+					}
+					lines = append(lines, parsed.line("FIELD"))
+				}
+				return lines, nil
+			case session.OpenEmitterDispositionEmitterRefused:
+				refused := new(session.EmitterRefused)
+				if err := union(outcome.Disposition, refused); err != nil {
+					return nil, err
+				}
+				refusal := refused.Refusal()
+				if refusal == nil {
+					return nil, errors.New("emitter refusal is absent")
+				}
+				return []string{fmt.Sprintf("REPLY %d EMITTER_REFUSED refusal=%s message=%s", id,
+					session.EnumNamesEmitterOpenRefusal[*refusal], text(outcome.Message()))}, nil
+			}
+		case session.ReplyBodyReadEmitterBatchOutcome:
+			outcome := new(session.ReadEmitterBatchOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			switch outcome.DispositionType() {
+			case session.ReadEmitterDispositionEmitterBatchReceived:
+				batch := new(session.EmitterBatchReceived)
+				if err := union(outcome.Disposition, batch); err != nil {
+					return nil, err
+				}
+				branch := "none"
+				if bytes := batch.BranchFingerprintBytes(); bytes != nil {
+					branch = hex.EncodeToString(bytes)
+				}
+				return []string{fmt.Sprintf("REPLY %d EMITTER_BATCH identity=%s reference=%s source=%s branch=%s body=%s members=%d now=%d",
+					id, hex.EncodeToString(batch.IdentityBytes()), hex.EncodeToString(batch.ReferenceBytes()),
+					batch.SourceRelay(), branch, hex.EncodeToString(batch.BatchBytes()), batch.Members(),
+					batch.ExecutionNowUnixNanos())}, nil
+			case session.ReadEmitterDispositionEmitterConsumerEnded:
+				return []string{fmt.Sprintf("REPLY %d EMITTER_ENDED message=%s", id, text(outcome.Message()))}, nil
+			}
+		case session.ReplyBodySettleEmitterBatchOutcome:
+			outcome := new(session.SettleEmitterBatchOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			disposition := outcome.Disposition()
+			if disposition == nil {
+				return nil, errors.New("emitter settlement is absent")
+			}
+			return []string{fmt.Sprintf("REPLY %d EMITTER_SETTLED disposition=%s message=%s", id,
+				session.EnumNamesEmitterSettlement[*disposition], text(outcome.Message()))}, nil
+		case session.ReplyBodyCloseEmitterOutcome:
+			outcome := new(session.CloseEmitterOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			disposition := outcome.Disposition()
+			if disposition == nil {
+				return nil, errors.New("emitter close disposition is absent")
+			}
+			return []string{fmt.Sprintf("REPLY %d EMITTER_CLOSE disposition=%s message=%s", id,
+				session.EnumNamesEmitterCloseDisposition[*disposition], text(outcome.Message()))}, nil
 		}
 		return nil, fmt.Errorf("the corpus holds no %s reply", value.BodyType())
 	case session.ServerBodySubscriptionRows:
@@ -963,6 +1052,43 @@ func clientLines(frame []byte) ([]string, error) {
 		closing := new(session.CloseIngestorRequest)
 		closing.Init(table.Bytes, table.Pos)
 		return []string{fmt.Sprintf("REQUEST %d CLOSE_INGESTOR producer=%d", id, closing.Producer())}, nil
+	case session.ClientRequestOpenEmitterRequest:
+		open := new(session.OpenEmitterRequest)
+		open.Init(table.Bytes, table.Pos)
+		lines := []string{fmt.Sprintf("REQUEST %d OPEN_EMITTER domain=%s emitter=%s batches=%d bytes=%d",
+			id, open.Domain(), open.Emitter(), open.MaxOutstandingBatches(), open.MaxOutstandingBytes())}
+		for index := 0; index < open.ExpectedFieldsLength(); index++ {
+			row := new(session.RowField)
+			open.ExpectedFields(row, index)
+			parsed, err := readField(row)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, parsed.line("FIELD"))
+		}
+		return lines, nil
+	case session.ClientRequestReadEmitterBatchRequest:
+		read := new(session.ReadEmitterBatchRequest)
+		read.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf("REQUEST %d READ_EMITTER_BATCH consumer=%d", id, read.Consumer())}, nil
+	case session.ClientRequestSettleEmitterBatchRequest:
+		settle := new(session.SettleEmitterBatchRequest)
+		settle.Init(table.Bytes, table.Pos)
+		decision := "ack"
+		if selected := settle.Decision(); selected != nil {
+			switch *selected {
+			case session.EmitterBatchDecisionRetry:
+				decision = "retry"
+			case session.EmitterBatchDecisionReject:
+				decision = "reject:" + text(settle.Reason())
+			}
+		}
+		return []string{fmt.Sprintf("REQUEST %d SETTLE_EMITTER_BATCH consumer=%d reference=%s decision=%s",
+			id, settle.Consumer(), hex.EncodeToString(settle.ReferenceBytes()), decision)}, nil
+	case session.ClientRequestCloseEmitterRequest:
+		close := new(session.CloseEmitterRequest)
+		close.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf("REQUEST %d CLOSE_EMITTER consumer=%d", id, close.Consumer())}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s request", message.RequestType())
 }

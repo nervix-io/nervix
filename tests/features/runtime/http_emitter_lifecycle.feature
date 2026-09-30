@@ -256,7 +256,55 @@ Feature: HTTP emitter lifecycle
       | emitter  | clause                      |
       | set_body | ENCODE USING required_codec |
       | scoped   | ENCODE USING optional_codec |
+    # A transactional replacement is validated whole before anything activates: a commit whose
+    # replacement cannot support its request fields or its construction fails, and the active
+    # emitter keeps delivering as it was.
     Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      DROP EMITTER published;
+      CREATE ATTACHED EMITTER published FROM outgoing
+        TO HTTP api_client METHOD 'GET' PATH '/refused'
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
+        INHERIT id
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then client "owner" transaction id is saved as placeholder "refused_request_transaction"
+    When client "owner" attempts to commit its transaction
+    Then the last command error contains
+      """
+      GET and HEAD require WITHOUT BODY
+      """
+    And transaction "{{refused_request_transaction}}" eventually has state "FAILED"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      DROP EMITTER published;
+      CREATE ATTACHED EMITTER published FROM outgoing
+        TO HTTP api_client METHOD 'DELETE' PATH '/refused'
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then client "owner" transaction id is saved as placeholder "refused_construction_transaction"
+    When client "owner" attempts to commit its transaction
+    Then the last command error contains
+      """
+      remains uninitialized
+      """
+    And transaction "{{refused_construction_transaction}}" eventually has state "FAILED"
+    When http payload is posted to host "http-body-{{test_id}}.example.com" path "/events"
+      """
+      [{"id":"kept"}]
+      """
+    Then HTTP receiver "api" eventually receives at least 2 requests
+    And HTTP receiver "api" request 2 is
+      """
+      POST /coded
+      X-Mode: coded
+
+      {"id":"kept"}
+      """
     When client "owner" executes these NSPL commands
       """
       BEGIN;
@@ -291,13 +339,13 @@ Feature: HTTP emitter lifecycle
       """
       [{"id":"2"}]
       """
-    Then HTTP receiver "api" eventually receives at least 2 requests
-    And HTTP receiver "api" request 2 is
+    Then HTTP receiver "api" eventually receives at least 3 requests
+    And HTTP receiver "api" request 3 is
       """
       DELETE /empty
       X-Mode: replacement
       """
-    And HTTP receiver "api" has captured exactly 2 requests
+    And HTTP receiver "api" has captured exactly 3 requests
 
     Examples:
       | cluster_size |
@@ -459,6 +507,8 @@ Feature: HTTP emitter lifecycle
     And HTTP receiver "api" request 2 repeats request 1
     When node "node-1" is gracefully stopped
     Then the last cluster operation completes within "20s"
+    # The forced ending closes the retried request's connection rather than leaving it open.
+    And HTTP receiver "api" eventually sees the client abandon at least 1 unfinished response
     And within "2s" Kafka consumer group "http_recovery_group_{{test_id}}" next offset for topic "http_recovery_{{test_id}}" partition 0 is "below 1"
     When node "node-1" is started
     Then HTTP receiver "api" eventually receives at least 3 requests
@@ -525,3 +575,90 @@ Feature: HTTP emitter lifecycle
       | cluster_size | cordon                                  |
       | 1            |                                         |
       | 3            | CORDON NODE node-2; CORDON NODE node-3; |
+
+  @http_emitter_stop_recovery
+  Scenario Outline: Stopping a domain whose HTTP request cannot drain releases it for the source to redeliver to the reconfigured destination
+    Given Kafka is running
+    And HTTP receiver "first" is running
+    And HTTP receiver "first" answers unscripted requests with "hold response until released"
+    And HTTP receiver "second" is running
+    And HTTP receiver "second" answers unscripted requests with "respond 204"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And Kafka topic "http_stop_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event (id STRING);
+      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR source
+        FROM KAFKA kafka_main TOPIC http_stop_{{test_id}}
+          OFFSET BY CONSUMER GROUP http_stop_group_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLIENT first_api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
+      };
+      CREATE CLIENT second_api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
+      };
+      CREATE ATTACHED EMITTER published FROM outgoing
+        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then Kafka consumer group "http_stop_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "http_stop_{{test_id}}"
+      """
+      [{"id":"1"}]
+      """
+    Then HTTP receiver "first" eventually receives at least 1 request
+    # The first destination never answers, so a live alteration cannot drain the admitted request.
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
+    When these NSPL commands fail with "timed out draining domain"
+      """
+      ALTER EMITTER published SET TO HTTP second_api
+        METHOD 'PUT' PATH concat('/second/', input.id)
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
+      """
+    # Stopping the domain ends the request instead: its connection is released and its record stays
+    # unacknowledged at the attached source.
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
+      """
+    Then HTTP receiver "first" eventually sees the client abandon at least 1 unfinished response
+    And within "2s" Kafka consumer group "http_stop_group_{{test_id}}" next offset for topic "http_stop_{{test_id}}" partition 0 is "below 1"
+    # While the domain is stopped, the replacement needs no drain, and the restarted source
+    # redelivers the record, which the replacement sends to the second destination.
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER EMITTER published SET TO HTTP second_api
+        METHOD 'PUT' PATH concat('/second/', input.id)
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
+      START;
+      """
+    Then HTTP receiver "second" eventually receives at least 1 request
+    And HTTP receiver "second" request 1 is
+      """
+      PUT /second/1
+      """
+    And within "30s" Kafka consumer group "http_stop_group_{{test_id}}" next offset for topic "http_stop_{{test_id}}" partition 0 is "at least 1"
+    And HTTP receiver "first" has captured exactly 1 request
+    And HTTP receiver "second" has captured exactly 1 request
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

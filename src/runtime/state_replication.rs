@@ -168,7 +168,7 @@ impl Runtime {
             .pending_state_replica_syncs
             .entry(placement.clone())
         {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            nervix_primitives::collections::dash_map::Entry::Occupied(mut entry) => {
                 let pending = entry.get_mut();
                 if pending.source != source {
                     pending.source = source;
@@ -178,7 +178,7 @@ impl Runtime {
                 }
                 false
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                 entry.insert(PendingStateReplicaSync { source, target_lsm });
                 true
             }
@@ -193,7 +193,7 @@ impl Runtime {
 
     async fn reconcile_passive_state_replica(&self, placement: RuntimeStatePlacement) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(pending) = self
                 .inner
                 .pending_state_replica_syncs
@@ -417,12 +417,12 @@ impl Runtime {
                 .passive_runtime_state_snapshots
                 .entry(placement.clone())
             {
-                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                nervix_primitives::collections::dash_map::Entry::Occupied(mut entry) => {
                     if entry.get().lsm < snapshot.lsm {
                         entry.insert(snapshot.clone());
                     }
                 }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                     entry.insert(snapshot.clone());
                 }
             }
@@ -570,7 +570,7 @@ impl Runtime {
         };
         let source = source.clone();
         let placement = placement.to_remote();
-        drop(tokio::spawn(async move {
+        drop(nervix_primitives::task::spawn(async move {
             if let Err(error) = dispatcher
                 .dispatch(
                     &source,
@@ -591,12 +591,12 @@ impl Runtime {
             .pending_state_checkpoint_announcements
             .entry(placement.clone())
         {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            nervix_primitives::collections::dash_map::Entry::Occupied(mut entry) => {
                 let pending = entry.get_mut();
                 pending.target_lsm = pending.target_lsm.max(lsm);
                 false
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                 entry.insert(PendingStateCheckpointAnnouncement {
                     target_lsm: lsm,
                     replica_progress: BTreeMap::new(),
@@ -620,7 +620,7 @@ impl Runtime {
         placement: RuntimeStatePlacement,
     ) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let pending = match self
                 .inner
                 .pending_state_checkpoint_announcements
@@ -696,7 +696,7 @@ impl Runtime {
                 lsm: pending.target_lsm,
             };
             for replica in lagging_replicas {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if let Err(error) = dispatcher
                     .dispatch(
                         &replica,
@@ -730,14 +730,14 @@ impl Runtime {
             return true;
         }
         if self.inner.fault_injection.state_replica_polling_is_paused() {
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown_rx.changed() => {
                     changed.is_ok() && !*shutdown_rx.borrow()
                 }
                 _ = notification.notified() => true,
             }
         } else {
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown_rx.changed() => {
                     changed.is_ok() && !*shutdown_rx.borrow()
                 }
@@ -858,7 +858,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for (placement, state) in materialized {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let sealed = state
                 .seal_after(&self.inner.executor, None)
                 .await
@@ -877,7 +877,7 @@ impl Runtime {
             }
         }
         for (placement, state) in windows {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let snapshot = state
                 .latest_snapshot(&self.inner.executor)
                 .await
@@ -1147,7 +1147,7 @@ impl Runtime {
         };
 
         for (component, state) in Self::global_recovery_state_components(&scheduled) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let placement = self
                 .state_placement(
                     domain,
@@ -1179,7 +1179,7 @@ impl Runtime {
             && let Some((component, state)) = Self::branch_recovery_state_component(&scheduled)
         {
             for entry in entries {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let placement = self
                     .state_placement(
                         domain,
@@ -1367,14 +1367,14 @@ impl Runtime {
 
         let mut requests = FuturesUnordered::new();
         for source in recovery_sources {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
             requests.push(self.request_state_sync_with_timeout(source, placement, None, remaining));
         }
         while let Some(response) = requests.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let snapshot = match response {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) | Err(_) => continue,
@@ -1494,7 +1494,7 @@ impl Runtime {
         }
         let mut snapshots = Vec::with_capacity(runtimes.len());
         for runtime in runtimes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             snapshots.push(runtime.checkpoint().await?);
         }
         if snapshots.len() == 1 {
@@ -1783,7 +1783,7 @@ impl Runtime {
             .prepared_runtime_state_handoffs
             .entry(entity_ref.clone())
         {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            nervix_primitives::collections::dash_map::Entry::Occupied(mut entry) => {
                 let existing = entry.get();
                 let same_preparation = existing.coordination == replacement.coordination
                     && existing.operation_id == replacement.operation_id
@@ -1848,7 +1848,7 @@ impl Runtime {
                 }
                 entry.insert(replacement);
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                 if let Some(store) = self.inner.state_store.as_ref() {
                     let transition = RuntimeStateHandoffTransition {
                         coordination: &replacement.coordination,
@@ -2597,7 +2597,7 @@ impl Runtime {
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if state.replica_quorum_satisfied(lsm) {
                 return Ok(());
             }
@@ -2609,7 +2609,7 @@ impl Runtime {
                     required_acks: state.required_replica_acks(),
                 }));
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = state.wait_for_replication_progress() => {}
                 _ = sleep_until(deadline) => {}
             }
@@ -2696,7 +2696,7 @@ impl Runtime {
         let mut changed = false;
         let mut outcome = Ok(());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match state.update_last_by_timestamp(key, record) {
                 Ok(Some(_)) => changed = true,
                 Ok(None) => {}

@@ -253,7 +253,9 @@ Three identities serve different purposes:
 
 - The certificate node identifier is the stable authenticated identity of a node.
 - The discovery incarnation and endpoint generation identify the current cluster presence and
-  advertised address of that node.
+  advertised address of that node. The incarnation also names the run of a node that registered a
+  relay admission or record acknowledgement, as
+  [Acknowledgement Registrations](#acknowledgement-registrations) describes.
 - The process epoch identifies one running interconnect process and fences in-memory delivery state
   across restarts. It is drawn from the transport's entropy when the transport binds, which in
   production is the operating system's secure random source.
@@ -599,6 +601,30 @@ own attached share in sequence order, so a domain drain excludes a parked chain 
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.
 
+### Acknowledgement Registrations
+
+The sender correlates the runtime admission of a delivery and every attached record acknowledgement
+it waits on through a registration it places in the delivery. A registration names the waiting
+entry by a number and names the run of the sending node that registered it: the node and the
+discovery incarnation of that run. Every process numbers its registrations from one, so the number
+alone repeats across restarts of a node, and the run is what keeps the registrations of different
+runs apart.
+
+The receiver returns every progress event and terminal outcome to the node the registration names,
+carrying the whole registration back with it. The sending node resolves an entry only when the
+registration names its current run. A receiver can still be resolving what an earlier run
+registered after that run ended: a record acknowledgement whose downstream work completes after the
+sending node restarted is the common case. Such an outcome is rejected and logged at `debug`. It
+never resolves the admission or record acknowledgement the current run holds under the same number,
+so a success reported for an earlier run can never acknowledge a record, and so commit it at its
+source, before its own delivery completed. The earlier run's entries ended with its process, and
+its sources redeliver the records they had not committed.
+
+A receiver issues a grant only when the admission registration names the authenticated sending
+node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
+terminal outcome addressed to an earlier run neither completes nor retires the admission a later
+run registered under the same number.
+
 ### Ordering, Retry, And Reconciliation
 
 A delivery identity combines the sender process epoch, receiver process epoch, channel incarnation,
@@ -644,6 +670,17 @@ reserved work. If the branch appears again, it uses a fresh channel incarnation 
 keeps a previous branch lifetime from being confused with the new runtime instance.
 
 ### Consumers That Leave The Receiver
+
+The relay owner also fences the start of each buffered batch's fan-out against its local schedule
+swap. It acquires a dispatch permit before reading the local and remote consumer sets, and keeps
+that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
+share. A swap closes the gate
+and waits for existing permits before changing those sets. If the gate is already closed when a
+buffered batch starts fan-out, the owner fails its record acknowledgements and the source retries
+after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
+swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
+an attached sibling on the old destination cannot acknowledge a batch while another attached
+consumer moves to a new destination before the owner selected routes for that batch.
 
 The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
 it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
@@ -691,9 +728,11 @@ Admission to consensus membership requires an available interconnect endpoint. A
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
-with either of them unavailable. Membership follows a replaced endpoint by refreshing the learner
-at its new address before promotion, and a node removed from membership stays out until it returns
-with a newer incarnation.
+with either of them unavailable. Membership replaces the recorded address of an existing member
+when its advertised endpoint changes. A returning voter remains a voter, while a learner still
+waits to catch up before promotion. The recorded address is a startup contact hint; live Raft
+traffic uses authenticated discovery by node identity. A node removed from membership stays out
+until it returns with a newer incarnation.
 
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
@@ -910,26 +949,66 @@ not the peer it authenticated. Each forwarded producer then has a key the servin
 never reuses within its process, so a late frame about an ended producer can never reach a later
 one. The serving node sends `Open` with the domain, ingestor, expected fields, credit, and the
 largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
-bytes of each batch, and finally `Close` or `Detach`. The owning node answers with `Opened` and the
-producer's description or `Refused` with its refusal, then the producer's `Outcome` and `Admission`
-frames, and finally `Ended` with a reason or `Closed`. Frames of one producer keep their order in
-both directions, so its open precedes its batches and its outcomes, admission changes, and end
-follow the answer to its open. A batch travels at most once over the link, and the frames are
-validated and charged to the relay memory class like every other relay-pool operation.
+bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
+with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
+`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`.
+Frames of one producer keep their order in both directions, so its open precedes its batches and
+its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
+over the link, and the frames are validated and charged to the relay memory class like every other
+relay-pool operation.
+
+The owning node queues a forwarded batch like any other, but admits it only once the serving node
+has cleared it. When the batch's turn in the ingestor's window comes, the owning node takes a slot
+of the window for it and sends `Admitting` naming the batch. The serving node records that the
+batch may now be admitted, answers `Clear`, and from then on counts the batch as possibly admitted;
+only on that `Clear` does the owning node hand the batch to its admission worker. The serving node
+clears only a batch it forwarded and holds no outcome for, and it answers in the order it was asked,
+so clearances return in the order the owning node requested them. Admitting a forwarded batch
+therefore costs one more round trip of the link. A batch awaiting its clearance holds its slot of
+the window, so a serving node that stops answering holds at most the slots it was asked to clear,
+until the silence limit ends its link.
 
 The serving node waits at most 20 seconds for the owning node to answer a forwarded open, including
 opening the link. Both ends send a heartbeat after two seconds without other frames and treat ten
 seconds without hearing anything as a lost link; the owning node skips a heartbeat rather than queue
 it behind 64 unsent answers. When a link ends for any reason, the serving node refuses the opens it
 has not heard back about as `EndpointUnavailable` and ends every producer the link carried as
-`OwnerLost`, whose batches without outcomes become `OutcomeUnknown` with cause `OwnerLost`. The
-owning node detaches the link's producers: their admitted batches continue through the graph with
-nobody left to answer them. A later producer opens a new link.
+`OwnerLost`. Before that end, it answers each batch of the producer that it never cleared — whether
+it sent the batch or the link ended before it could — as `NotAdmitted` with `ProducerEnded`: the
+owning node admits nothing without a clearance, so none of those batches entered the graph. Only
+the batches it cleared become `OutcomeUnknown` with cause `OwnerLost`. A crashed owning node closes
+its connections and ends the link at once; one that stops answering without closing them ends it
+when the silence limit passes. The owning node detaches the link's producers: their admitted
+batches continue through the graph with nobody left to answer them, and the batches it queued or
+was clearing are dropped unadmitted, releasing their slots of the window. A later producer opens a
+new link.
 
 Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
 for the batches its session holds, and the owning node again for the batches it retains for another
 node. The link adds no reservation of its own beyond the transport's per-frame charge.
 [Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+
+## Client Consumer Streams
+
+When a session opens a consumer of a `TO CLIENT` emitter executing on another node, the serving
+node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
+shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
+schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
+own 128 MiB consumer budget and attaches to its local emitter endpoint before replying `Opened`
+with the endpoint description or `Refused` with a typed cause. The serving node has already
+reserved the same grant against its session and node budgets.
+
+The owner sends each attempt's identity, fresh ACK reference, source relay, opaque branch
+fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes.
+It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool.
+The serving node checks the announced length against the grant and reassembles one delivery before
+answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
+one typed result for each; an independent writer keeps settlement and heartbeat sends from
+blocking response reads. Both ends send two-second heartbeats and end the attachment after ten
+seconds of peer silence. A lost stream detaches the owner's consumer, revokes its attempts and
+allows the retained batches to be reassigned. Output and ACK state stay volatile, so an owner
+loss can require upstream replay. [Client Session
+Protocol](./client-session-protocol.md#emitter-consumers) owns what clients observe.
 
 ## Domain Clock Progress
 
@@ -1118,8 +1197,9 @@ wire; a local report's cause chain is not serialized into an HTTP/2 response.
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and
 selected runtime state remains in its owning snapshot or replication mechanism. This boundary is
-why process epochs are part of relay delivery identities and why an unresolved result across a
-receiver restart is reported as indeterminate.
+why process epochs are part of relay delivery identities, why an unresolved result across a
+receiver restart is reported as indeterminate, and why an acknowledgement registration names the
+run of the node that registered it.
 
 An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
 lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an

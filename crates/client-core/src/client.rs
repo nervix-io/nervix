@@ -25,10 +25,8 @@ use nervix_models::{
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
-use tokio::{
-    sync::Mutex,
-    time::{Instant, sleep},
-};
+use nervix_primitives::sync::Mutex;
+use tokio::time::{Instant, sleep};
 use tonic::transport::Channel;
 use triomphe::Arc;
 use url::Url;
@@ -281,7 +279,7 @@ impl Client {
         let mut last_error = None;
         let deadline = Instant::now() + connector.retry_timeout();
         for candidate in servers.reconnect_candidates() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let attempt = async {
                 let channel = connector.connect(&candidate).await?;
                 Exchange::open(channel, &connector, events.sinks.clone()).await
@@ -626,7 +624,7 @@ impl Client {
         let inspected = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             let _command_guard = self.inner.command_lock.lock().await;
             for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
                     target: target.clone(),
                     operation,
@@ -683,7 +681,7 @@ impl Client {
         execution: &ExecutionHandle,
     ) -> Result<CommandOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = match self.execute_once(execution).await {
                 Ok(outcome) => outcome,
                 Err(error) if error.retryable_session_failure() => {
@@ -804,7 +802,7 @@ impl Client {
                 let client = self.clone();
                 let statement = statement.clone();
                 let offset = *offset;
-                let result = tokio::spawn(async move {
+                let result = nervix_primitives::task::spawn(async move {
                     client
                         .create_subscription(attempt, requests, statement, offset)
                         .await
@@ -834,15 +832,17 @@ impl Client {
                     Cancellation::Closed => {
                         return Ok(Self::held_by_no_session(subscription));
                     }
+                    Cancellation::Ended => {
+                        return Ok(Self::ended_by_the_server(subscription));
+                    }
                     Cancellation::Delete(attempt) => attempt,
                 };
                 let client = self.clone();
-                let result =
-                    tokio::spawn(
-                        async move { client.delete_subscription(attempt, requests).await },
-                    )
-                    .await
-                    .map_err(ClientError::SubscriptionTask)?;
+                let result = nervix_primitives::task::spawn(async move {
+                    client.delete_subscription(attempt, requests).await
+                })
+                .await
+                .map_err(ClientError::SubscriptionTask)?;
                 result.map_err(ClientError::subscription_operation)
             }
             StatementRoute::Restore(restore) => {
@@ -877,6 +877,14 @@ impl Client {
     fn held_by_no_session(subscription: &SubscriptionName) -> CommandOutcome {
         CommandOutcome::completed_locally(format!(
             "subscription '{}' deleted; no open session held it",
+            subscription.as_str()
+        ))
+    }
+
+    /// The outcome of deleting a subscription whose generation the server ended.
+    fn ended_by_the_server(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' deleted; the server had already ended it",
             subscription.as_str()
         ))
     }
@@ -941,7 +949,7 @@ impl Client {
         let desired = &self.inner.events.sinks.desired;
         let mut changed = desired.watch();
         while desired.deletion_waits(&attempt) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             changed
                 .changed()
                 .await
@@ -993,7 +1001,7 @@ impl Client {
         transaction_id: &str,
     ) -> Result<nervix_client_wire::AttachOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::AttachTransaction(AttachTransactionRequest {
                 transaction_id: transaction_id.to_string(),
             });
@@ -1067,7 +1075,7 @@ impl Client {
         );
         let deadline = Instant::now() + self.inner.connector.retry_timeout();
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let exchange = match &captured {
                 Some(exchange) => exchange.clone(),
                 None => self.inner.exchange.lock().await.requests(),
@@ -1155,7 +1163,9 @@ impl Client {
             .await
     }
 
-    /// The lifecycle currently retained for a desired subscription name.
+    /// The lifecycle currently retained for a desired subscription name. A subscription the server
+    /// ended reads [`SubscriptionLifecycle::Ended`] until it is subscribed again under its name or
+    /// deleted.
     pub fn subscription_lifecycle(&self, name: &SubscriptionName) -> Option<SubscriptionLifecycle> {
         self.inner.events.sinks.desired.lifecycle(name)
     }
@@ -1163,23 +1173,25 @@ impl Client {
     /// Waits for the next event of a subscription the client holds.
     ///
     /// The stream outlives the session. When the session ends, it reports
-    /// [`SubscriptionEvent::Interrupted`] for every subscription the session held, opens a new
-    /// session, and opens each of them again as a new generation. An opening that session refuses
-    /// or leaves unanswered is reported as [`SubscriptionEvent::RestorationFailed`] and sent again
-    /// after a growing wait. With nothing to restore it waits
-    /// for the next session the client opens, and delivers the events of the subscriptions opened
-    /// there. A failure to open a session is returned, and the next call tries again;
-    /// [`ClientError::SessionClosed`] means the session ended and the client knows no server to
-    /// open another on.
+    /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
+    /// had not ended, opens a new session, and opens each of them again as a new generation. An
+    /// opening that session refuses or leaves unanswered is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
+    /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
+    /// once, after the events before it, even when its session ended before it was read. With
+    /// nothing to restore it waits for the next session the client opens, and delivers the events
+    /// of the subscriptions opened there. A failure to open a session is returned, and the next
+    /// call tries again; [`ClientError::SessionClosed`] means the session ended and the client
+    /// knows no server to open another on.
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.inner.events.sinks.desired.take_event() {
                 return Ok(event);
             }
             let desired = &self.inner.events.sinks.desired;
             let mut desired_changed = desired.watch();
-            let result = tokio::select! {
+            let result = nervix_primitives::select! {
                 result = self.inner.events.sinks.subscriptions.next() => result,
                 changed = desired_changed.changed() => {
                     changed.assured(
@@ -1191,13 +1203,7 @@ impl Client {
             match result {
                 Ok(event) => {
                     let generation = self.inner.exchange.lock().await.generation.clone();
-                    if self
-                        .inner
-                        .events
-                        .sinks
-                        .desired
-                        .can_deliver(event.subscription(), &generation)
-                    {
+                    if self.inner.events.sinks.desired.admit(&event, &generation) {
                         return Ok(event);
                     }
                 }
@@ -1223,7 +1229,7 @@ impl Client {
                     if !self.can_reconnect().await {
                         return Err(ClientError::SessionClosed);
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         () = self.inner.events.sinks.subscriptions.resumed() => {}
                         changed = desired_changed.changed() => {
                             changed.assured(
@@ -1248,7 +1254,7 @@ impl Client {
     pub async fn next_server_event(&self) -> Result<ServerEvent, ClientError> {
         let notices = &self.inner.events.sinks.notices;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match notices.next().await {
                 Ok(event) => return Ok(event),
                 Err(error) if *error.current_context() == EventQueueError::Overflow => {
@@ -1327,7 +1333,7 @@ impl Client {
     ) -> error_stack::Result<DomainClockEvent, ClientError> {
         let clocks = &self.inner.events.sinks.clocks;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut changed = clocks.watch();
             if let Some(event) = clocks.take_event() {
                 return Ok(event);
@@ -1361,7 +1367,7 @@ impl Client {
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let answered = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self.request(request.clone(), None).await {
                     Ok(body) => return Ok(body),
                     Err(error) if error.retryable_session_failure() => {
@@ -1388,7 +1394,7 @@ impl Client {
     pub async fn next_domain_list(&self) -> Result<Vec<DomainInfo>, ClientError> {
         let mut observed = self.inner.events.domains.lock().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if observed.changed().await.is_err() {
                 return Err(ClientError::SessionClosed);
             }
@@ -1543,13 +1549,13 @@ impl Client {
             let mut delay = Self::LEADER_ELECTION_RETRY_DELAY;
             let mut last_error = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let candidates = self.inner.servers.lock().await.reconnect_candidates();
                 if candidates.is_empty() {
                     break 'recovery SessionRecovery::Unavailable;
                 }
                 for server in candidates {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     match tokio::time::timeout_at(deadline, self.reconnect_unlocked(&server)).await
                     {
                         Ok(Ok(())) => break 'recovery SessionRecovery::Ready,

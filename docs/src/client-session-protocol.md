@@ -70,7 +70,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, and retained domain clock events. |
+| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, and retained reads of the clock of each followed domain with its projections. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -336,8 +336,15 @@ offers endpoints. Its decoding-codec target offers codecs that can decode. An un
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
 with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
 takes a domain and branch reference. Ingestor decoded and output fields use the existing
-codec-field and relay-field targets. The typed target and dependencies remain part of the cursor
-identity. A completed-version value
+codec-field and relay-field targets. A junction or reingestor asks for another input relay with a
+domain and the first relay reference; candidates have that relay's exact named schema and branch.
+The same dependencies with the output-relay target select the input branch, and with the
+materialized-relay target select only relays with materialized state in that branch. Route
+construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
+and record fields use the branch-field and relay-field targets. These processor targets resolve
+against the attached transaction prefix, and their page digests include the selected input
+definition. The typed target and dependencies remain part of the cursor identity. A
+completed-version value
 is either an explicit number or `LATEST`, not a label to parse. Resource catalogs include resources
 staged earlier in the attached transaction, while version choices include completed uploads only.
 The cursor binds the selected candidate set and its definitions; a changed context returns
@@ -438,6 +445,12 @@ describing statement produced, and the summary of a backup's archive or the repo
 
 The disposition is the one field a client decides from; the message is for a person. Each
 disposition belongs to one phase of the command and makes one statement about its effect:
+
+Consensus proposal failures reach the session with typed leadership, conflict, storage, and
+transaction-mutation causes in local reports. The session selects its disposition from those
+causes and the command's admission phase, while the display message retains the underlying Raft
+or I/O reason. Report carriage does not change request correlation, the durable acknowledgement
+boundary, or the stored transaction response.
 
 | Disposition | Phase | What it establishes | What a client does |
 | --- | --- | --- | --- |
@@ -1022,7 +1035,7 @@ protocol reports the losses the server knows of and states which ones it cannot 
 | A batch with a row too large for a frame | `SubscriptionRowsSkipped` with `EncodingFailed` for every selected row of the batch |
 | Batches published while the subscription was opening | Not reported; they precede the subscription |
 | Batches lost in transit while relay ownership moves or a node-to-node delivery fails | Not reported; the nodes log them |
-| The session itself | Not reported by the server, whose session is gone; the Rust client reports an interruption |
+| The session itself | Not reported by the server, whose session is gone; the Rust client reports an interruption of each subscription the server had not ended |
 | A restoration the new session refused | Not a server event; the Rust client reports each refused attempt, and the gap lasts until an attempt succeeds |
 
 ### Restoration And Bounded Consumers
@@ -1030,21 +1043,35 @@ protocol reports the losses the server knows of and states which ones it cannot 
 Nothing on the server restores a subscription. A client that wants one to outlive its session opens
 it again on the next session, which is a new generation with a new schema announcement, and must
 treat the time between as a gap. The Rust client does this for every subscription it holds that the
-server acknowledged, and fences its restoration by generation: a late reply for an attempt the
-caller has since cancelled is followed by a deletion before the name can be reused, and rows of a
-generation the client no longer holds are ignored. A restoration the new session refuses is reported
-as a restoration failure and sent again on that session after a growing wait, as [Reconnecting A
-Session](#reconnecting-a-session) describes.
+server acknowledged and did not end, and fences its restoration by generation: a late reply for an
+attempt the caller has since cancelled is followed by a deletion before the name can be reused, and
+rows of a generation the client no longer holds are ignored. A restoration the new session refuses
+is reported as a restoration failure and sent again on that session after a growing wait, as
+[Reconnecting A Session](#reconnecting-a-session) describes.
+
+A generation the server ended is never restored, because a new session would not change why it
+ended: its relay was redefined, so the announced schema no longer describes its rows, or the relay
+no longer exists. The Rust client applies `SubscriptionEnded` as the frame arrives, before it queues
+the end for its caller, so the subscription reads `Ended` from then on, even to a caller that has
+not read the end yet. It stays `Ended` across later sessions until its caller subscribes again under
+the same name, which opens a new generation that announces the relay's current definition, or
+deletes it. The end reaches the caller exactly once, after the generation's other events: when the
+session ends before the caller reads it, the client discards that session's unread events as it
+does for every subscription, reports no interruption, and reports the end itself. The one exception
+is a subscription whose events overflowed the client's queue, for which the consumer overflow stays
+the last event of its generation.
 
 A deletion asks the server only while an open session may hold the subscription. A subscription
 whose session ended, including one whose delivery had already failed, is deleted without a request,
 and so is an interrupted subscription the current session refused to open again: no session holds
-either, so the client simply stops wanting it and releases the name. A deletion whose session ends
+either, so the client simply stops wanting it and releases the name. A subscription the server ended
+is deleted without a request too: the server keeps an ended name only until it is reused or its
+session ends, and nothing of the ended generation remains to release. A deletion whose session ends
 before it is answered is complete, because the subscription ended with that session. A deletion that
 waited for an opening or a restoration still in flight asks the server only if that request opened
 the subscription. Only a name the client never held is always asked about, on a new session if the
 current one ended, and a refusal leaves that name free. Each subscription moves through `Creating`,
-`Active`, `Interrupted`, `Restoring`, `DeliveryFailed`, `Closing`, and `DeletionFailed`:
+`Active`, `Interrupted`, `Restoring`, `DeliveryFailed`, `Ended`, `Closing`, and `DeletionFailed`:
 
 ```mermaid
 stateDiagram-v2
@@ -1058,12 +1085,16 @@ stateDiagram-v2
     Restoring --> Interrupted: refused; reported, then retried on the same session
     Restoring --> Interrupted: session lost; retried on the next session
     Active --> DeliveryFailed: the client's event queue overflowed
+    Active --> Ended: SubscriptionEnded
+    DeliveryFailed --> Ended: SubscriptionEnded
+    Ended --> Creating: subscribe under the same name
     Active --> Closing: unsubscribe
     Creating --> Closing: unsubscribe
     Restoring --> Closing: unsubscribe
     DeliveryFailed --> Closing: unsubscribe while its session is open
     Interrupted --> [*]: unsubscribe, which no session is left to answer
     DeliveryFailed --> [*]: unsubscribe after its session ended
+    Ended --> [*]: unsubscribe, which needs no request
     Closing --> [*]: deleted, the session ended, or the opening it waited for was refused
     Closing --> DeletionFailed: deletion refused
     DeletionFailed --> Closing: unsubscribe again
@@ -1146,7 +1177,9 @@ the gap as an interruption. An attach that session refuses or leaves unanswered 
 restoration failure and sent again on the same session after a growing wait, and a reply that the
 session already follows the clock moves the attachment to that session, whose frames then report
 the clock and its ticks. The shared binding exposes this event stream through
-`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
+`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle, and the clock the
+client holds for each followed domain, starting with the one the attach reply carried, through
+`nx_session_domain_clock` and a retained `nx_domain_clock` handle. The web console
 attaches the selected domain clock once per session, detaches it on selection changes, and restores
 it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
 These requests enter the console's bounded session hand-off; a local refusal is shown to the
@@ -1252,17 +1285,61 @@ ingestor, it opens a producer link to the node that does over the interconnect, 
 producer's bytes in its own budget, and relays the batches, outcomes, admission changes, and end;
 the executing node reserves the same bytes again for the batches it retains. [Cluster
 Interconnect](./interconnect.md#client-producer-links) owns the link. The client sees the same
-protocol either way. When the link is lost, the producer ends as `OwnerLost` and its unresolved
-batches have an `OutcomeUnknown` with cause `OwnerLost`.
+protocol either way. The executing node admits a forwarded batch only after the serving node cleared
+it, so when the link is lost, whether the executing node crashed or stopped answering, the serving
+node still knows which batches may have entered the graph. Every batch it never cleared is answered
+`NotAdmitted` with `ProducerEnded`, which the client may submit again on a new producer without
+duplicating its effects; every batch it cleared has an `OutcomeUnknown` with cause `OwnerLost`; and
+the producer then ends as `OwnerLost`. When the serving node itself is lost, its sessions end with
+it, as [When The Session Ends](#when-the-session-ends) describes.
 
 ### When The Session Ends
 
-When the session ends, its producers detach: the executing node stops accepting their batches,
-answers nobody, and lets admitted batches finish in the graph. Nothing about a producer survives the
-session. The Rust client reports every batch that was sent without an outcome as of unknown outcome
-with `SessionLost` and ends the producer as `SessionLost`; it does not reopen producers on its next
-session, so the application opens another one. The shared binding and the web console do not open
-producers.
+When the session ends, including because the node that serves it crashed, its producers detach:
+the executing node stops accepting their batches, drops the ones it held queued or awaiting their
+clearance without admitting them, answers nobody, and lets admitted batches finish in the graph.
+Nothing about a producer survives the session. The Rust client reports every batch that was sent
+without an outcome as of unknown outcome with `SessionLost` and ends the producer as `SessionLost`;
+it does not reopen producers on its next session, so the application opens another one. The shared
+binding and the web console do not open producers.
+
+## Emitter Consumers
+
+`OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested
+outstanding batch and byte limits. The serving node validates the committed schedule and schema,
+reserves the requested bytes against the session's 32 MiB and node's separate 128 MiB consumer
+budgets, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
+refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 consumer handles
+belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
+FlatBuffers shape are identical over native gRPC and the console WebSocket.
+
+`ReadEmitterBatchRequest` is a concurrent, potentially long read. It occupies one of the 64
+ordinary in-flight request places but does not hold the ordered lane or receive loop. Its reply
+is a `ReadEmitterBatchOutcome`: `Batch` carries one canonical Arrow IPC stream, a stable delivery
+identity, a fresh attempt reference, source relay, opaque branch fingerprint, member count and
+execution-time snapshot; `Ended` says the attachment is gone. A large reply uses the normal
+bounded transfer parts. Reading the reply never acknowledges it.
+
+`SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or
+`Reject` with a bounded non-sensitive reason. It runs beside the ordered lane and answers with
+`Confirmed`, `StaleReference`, `WrongConsumer`, `InvalidReason`, or `ConsumerEnded`. An ACK waits
+for that confirmation. ACK is idempotent while its bounded result remains; a reference revoked by
+retry, timeout, detach, or reassignment cannot settle a newer attempt. The emitter's physical
+backoff controls retry. `CloseEmitterRequest` detaches and answers `Closed` or `NotOpen`.
+
+Consumer and producer operations can share one session. A read awaiting output runs beside
+commands, producer submissions and their outcomes, clock observations, and consumer settlement.
+Each consumer is bound to its session exchange; the Rust client does not restore it after a
+reconnect. The serving node forwards remote consumers on an authenticated relay-class duplex
+stream and reserves their granted bytes on both the serving and executing nodes. Loss of the
+stream or either endpoint revokes outstanding attempts. There is no durable cursor or consumer
+result history across an owner loss; upstream replay may be needed. [Emitters](./emitters.md#client-emitters)
+owns the source acknowledgement guarantee and [Cluster
+Interconnect](./interconnect.md#client-consumer-streams) owns the forwarding form.
+
+The executing node exports active consumer and forwarding credit gauges, retained IPC work
+gauges, and retry, application ACK, and rejection counters. `DESCRIBE EMITTER` reads those values
+from the scheduled owner, including when the command enters through another node.
 
 ## Resource Uploads
 
@@ -1525,6 +1602,14 @@ The binding's lifecycle follows from that choice:
   generation, state, paced mapping, tick and end-reason accessors expose the fields each event
   carries. An accessor for a field its event lacks returns `NX_ERROR_TYPE`. Retain and release
   preserve the event and its borrowed domain name across threads until the last reference ends.
+- **Attached clocks.** `nx_session_domain_clock` reads, without blocking, the clock the Rust client
+  holds for a followed domain, or NULL for a domain it does not follow. After an attach completes
+  it is the clock the attach reply carried, so a host reads the generation and committed mapping of
+  a running clock before its first tick, and every later observation and tick replaces it in the
+  order the session received them, so it is never older than an event the host has taken. Its
+  accessors expose the domain, generation, state, paced mapping and newest tick, and its
+  projections answer logical time, physical waits and admission with the Rust client's arithmetic.
+  A read never changes; retain and release share it across threads.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
   a failed connection, a failed session, an uncertain outcome that carries the execution reference,
   a server refusal, a deadline, a cancellation, a protocol violation, a type mismatch, and a session
@@ -1532,13 +1617,14 @@ The binding's lifecycle follows from that choice:
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
-commands, completion, subscriptions and their events, domain clock events, and bulk row access,
-but not the typed transaction status, inspection, choice lookups, notices, or leadership. A host
-can execute `ATTACH DOMAIN CLOCK;`; the Rust client restores the attachment after reconnect and
-the host reads later observations and ticks through the clock-event wait. The binding does not
-expose the initial clock carried by the attach reply as a typed outcome. Its column accessors
-cover scalar, string, and bytes fields; a list field reports whether it is fixed-length or
-variable, and its values are read from the borrowed frame with generated code.
+commands, completion, subscriptions and their events, domain clock events and attached clocks,
+and bulk row access, but not the typed transaction status, inspection, choice lookups, notices, or
+leadership. A host executes `ATTACH DOMAIN CLOCK;`, reads the clock the reply carried with
+`nx_session_domain_clock`, and reads later observations and ticks through the clock-event wait; the
+Rust client restores the attachment after reconnect. An attach reports a refusal as a failed
+disposition carrying the server's reason, not as a typed refusal. Its column accessors cover
+scalar, string, and bytes fields; a list field reports whether it is fixed-length or variable, and
+its values are read from the borrowed frame with generated code.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
@@ -1684,14 +1770,16 @@ The protocol makes a client's view of its own work explicit rather than inferred
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
-  an interruption of each subscription and clock, and each refused attempt to restore one as a
-  restoration failure with the server's message. The web console shows each tab's state on the
-  tab: pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports
-  `nervix_session_subscriptions`, the number of subscription leases it holds per relay, and
+  an interruption of each clock and of each subscription the server had not ended, and each refused
+  attempt to restore one as a restoration failure with the server's message.
+  `Client::subscription_lifecycle` reads each subscription's state, including `Ended` for one the
+  server ended. The web console shows each tab's state on the tab: pending, active, interrupted,
+  restoring, ended, resubscribing, or closing. Each node exports `nervix_session_subscriptions`, the
+  number of subscription leases it holds per relay, and
   `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
-  both labeled by `domain` and `relay`; see
-  [Metrics And Observability](./metrics-and-observability.md#raw-metrics). Skipped rows are reported
-  only to the client.
+  both labeled by `domain` and `relay`; see [Metrics And
+  Observability](./metrics-and-observability.md#raw-metrics). Skipped rows are reported only to the
+  client.
 - **Leadership.** `LeadershipObserved` tells every session which node leads and where to reach it,
   and `SHOW CLUSTER STATUS` shows each node's availability.
 - **Producers.** A client learns every batch's outcome and every admission change and end of its

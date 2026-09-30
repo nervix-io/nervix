@@ -1368,6 +1368,14 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
 fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
     match (base, candidate) {
         (
+            EmitSink::Client {
+                schema: base_schema,
+            },
+            EmitSink::Client {
+                schema: candidate_schema,
+            },
+        ) => base_schema == candidate_schema,
+        (
             EmitSink::Http {
                 method: base_method,
                 path: base_path,
@@ -1575,7 +1583,8 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 && base_max_commit_size == candidate_max_commit_size
         }
         (
-            EmitSink::Http { .. }
+            EmitSink::Client { .. }
+            | EmitSink::Http { .. }
             | EmitSink::Kafka { .. }
             | EmitSink::Pulsar { .. }
             | EmitSink::RabbitMq { .. }

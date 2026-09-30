@@ -10,12 +10,17 @@
 
 mod admission;
 mod elapsed;
-
-use std::sync::OnceLock;
+mod window;
 
 use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
+use nervix_primitives::unmodeled::sync::OnceLock;
 use thiserror::Error;
+pub use window::{
+    RunCoMoments, RunMoments, RunSum, RunValidity, bucket_indices, co_moments, compensated_sum,
+    count_booleans, min_max, moments, non_finite_f32, non_finite_f64, reverse_values, sum_i64,
+    sum_integer, sum_u64,
+};
 
 pub use crate::{
     admission::AdmissionKernel,

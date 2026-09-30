@@ -85,7 +85,7 @@ fn publish(flag: &AtomicBool) {
 PERMISSION = """
 [[permission]]
 path = "crates/engine/src/runner.rs"
-items = ["AtomicUsize", "Ordering"]
+items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 owner = "The engine's model runner."
 reason = "The statistic spans model executions."
 limit = "Runner bookkeeping only."
@@ -271,6 +271,126 @@ class BoundaryTests(CheckTestCase):
         )
 
 
+class StaticTests(CheckTestCase):
+    def test_a_static_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::{AtomicU64, Ordering};\n"
+            "static NEXT: AtomicU64 = AtomicU64::new(1);\n",
+            "crates/engine/src/lib.rs:2",
+            "static `NEXT` holds a selected atomic, which outlives every model execution",
+            "nervix_primitives::unmodeled::sync::atomic",
+        )
+
+    def test_a_static_behind_a_wrapper_or_an_array_fails(self) -> None:
+        self.assert_rejected(
+            "use std::sync::LazyLock;\n"
+            "use nervix_primitives::sync::atomic::AtomicUsize;\n"
+            "static COUNTS: LazyLock<[AtomicUsize; 4]> = LazyLock::new(Default::default);\n",
+            "static `COUNTS` holds a selected atomic",
+        )
+
+    def test_a_static_named_through_a_module_path_fails(self) -> None:
+        report = self.assert_rejected(
+            "use nervix_primitives::sync::atomic as atomics;\n"
+            "static FLAG: atomics::AtomicBool = atomics::AtomicBool::new(false);\n"
+            "static SEEN: &nervix_primitives::sync::atomic::AtomicU8 = &LATEST;\n",
+            "static `FLAG` holds a selected atomic",
+            "static `SEEN` holds a selected atomic",
+        )
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+
+    def test_a_renamed_or_aliased_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::{AtomicU32, AtomicU64 as Sequence};\n"
+            "type Counter = AtomicU32;\n"
+            "type Counters = [Counter; 2];\n"
+            "static NEXT: Sequence = Sequence::new(0);\n"
+            "static COUNTS: Counters = [Counter::new(0), Counter::new(0)];\n",
+            "static `NEXT` holds a selected atomic",
+            "static `COUNTS` holds a selected atomic",
+        )
+
+    def test_a_bare_name_the_file_does_not_import_counts_as_selected(self) -> None:
+        self.assert_rejected(
+            "use super::*;\nstatic mut NEXT: AtomicI16 = AtomicI16::new(0);\n",
+            "static `NEXT` holds a selected atomic",
+        )
+
+    def test_a_thread_local_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicIsize;\n"
+            "nervix_primitives::thread_local! {\n"
+            "    static SEEN: AtomicIsize = const { AtomicIsize::new(0) };\n"
+            "}\n",
+            "crates/engine/src/lib.rs:3",
+            "static `SEEN` holds a selected atomic",
+        )
+
+    def test_a_static_initializer_that_constructs_a_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicBool;\n"
+            "struct Gate { open: AtomicBool }\n"
+            "static GATE: Gate = Gate { open: AtomicBool::new(false) };\n",
+            "static `GATE` constructs a selected atomic",
+        )
+
+    def test_a_const_fn_that_constructs_a_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicI64;\n"
+            "struct Watermark { unix_nanos: AtomicI64 }\n"
+            "impl Watermark {\n"
+            "    const fn new() -> Self {\n"
+            "        Self { unix_nanos: AtomicI64::new(i64::MIN) }\n"
+            "    }\n"
+            "}\n",
+            "crates/engine/src/lib.rs:4",
+            "const fn `new` constructs a selected atomic",
+            "make the function non-const",
+        )
+
+    def test_a_const_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicPtr;\n"
+            "const EMPTY: AtomicPtr<u8> = AtomicPtr::<u8>::new(std::ptr::null_mut());\n"
+            "fn f() { let _ = const { nervix_primitives::sync::atomic::AtomicU8::new(0) }; }\n",
+            "const `EMPTY` makes a selected atomic in a const context",
+            "a const block constructs a selected atomic",
+        )
+
+    def test_a_static_real_atomic_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/runner.rs": RUNNER
+                + "static RUNS: AtomicUsize = AtomicUsize::new(0);\n"
+                + "static LAST: nervix_primitives::unmodeled::sync::atomic::AtomicUsize =\n"
+                + "    nervix_primitives::unmodeled::sync::atomic::AtomicUsize::new(0);\n"
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_statics_and_const_items_without_a_selected_atomic_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "use std::cell::Cell;\n"
+                    "use nervix_primitives::sync::atomic::{AtomicU64, Ordering};\n"
+                    "static NAME: &'static str = \"AtomicU64::new\";\n"
+                    "nervix_primitives::thread_local! {\n"
+                    "    static SEEN: Cell<usize> = const { Cell::new(0) };\n"
+                    "}\n"
+                    "struct Ring<const N: usize> { slots: [u64; N] }\n"
+                    "struct Counter { value: AtomicU64 }\n"
+                    "impl Counter {\n"
+                    "    fn new() -> Self { Self { value: AtomicU64::new(0) } }\n"
+                    "    const fn width() -> usize { 8 }\n"
+                    "    fn read(counter: &'static AtomicU64) -> u64 { counter.load(Ordering::Relaxed) }\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+
 class PermissionTests(CheckTestCase):
     def test_a_permitted_unmodeled_use_passes(self) -> None:
         status, report = self.check({})
@@ -282,7 +402,7 @@ class PermissionTests(CheckTestCase):
         )
         self.assertEqual(status, 1)
         self.assertIn("crates/engine/src/lib.rs:1", report)
-        self.assertIn("unmodeled atomics need a permission", report)
+        self.assertIn("unmodeled items need a permission", report)
 
     def test_an_item_the_permission_does_not_list_fails(self) -> None:
         status, report = self.check(
@@ -292,14 +412,14 @@ class PermissionTests(CheckTestCase):
             }
         )
         self.assertEqual(status, 1)
-        self.assertIn("does not list unmodeled `AtomicBool`", report)
+        self.assertIn("does not list unmodeled `sync::atomic::AtomicBool`", report)
 
     def test_an_unused_permission_is_stale(self) -> None:
         status, report = self.check(
             {"crates/engine/src/runner.rs": "fn count() {}\n"},
         )
         self.assertEqual(status, 1)
-        self.assertIn("stale permission: crates/engine/src/runner.rs uses no unmodeled atomic", report)
+        self.assertIn("stale permission: crates/engine/src/runner.rs uses no unmodeled item", report)
 
     def test_an_unused_permitted_item_is_stale(self) -> None:
         status, report = self.check(
@@ -310,7 +430,7 @@ class PermissionTests(CheckTestCase):
             }
         )
         self.assertEqual(status, 1)
-        self.assertIn("does not use unmodeled `Ordering`", report)
+        self.assertIn("does not use unmodeled `sync::atomic::Ordering`", report)
 
     def test_a_permission_without_a_reason_fails(self) -> None:
         status, report = self.check({}, permissions=PERMISSION.replace('reason = "The statistic spans model executions."\n', ""))
@@ -322,7 +442,7 @@ class PermissionTests(CheckTestCase):
             {"crates/engine/src/lib.rs": "use nervix_primitives::unmodeled::sync::atomic;\n"}
         )
         self.assertEqual(status, 1)
-        self.assertIn("import unmodeled atomics by name", report)
+        self.assertIn("import unmodeled items by name", report)
 
 
 class ManifestTests(CheckTestCase):
@@ -383,6 +503,284 @@ class ManifestTests(CheckTestCase):
         )
         self.assertEqual(status, 1)
         self.assertIn("does not forward `nervix-vocabulary/shuttle`", report)
+
+
+class FamilyTests(CheckTestCase):
+    """The families beyond atomics: async and thread-blocking synchronization, tasks, the runtime
+    and its macros, streams, publication, concurrent collections, threads and model backends."""
+
+    def test_approved_family_paths_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "use std::sync::Arc;\n"
+                    "use nervix_primitives::{sync::{Notify, blocking::Mutex, watch}, task};\n"
+                    "#[cfg(feature = \"shuttle\")]\nextern crate shuttle_tokio as tokio;\n"
+                    "nervix_primitives::thread_local! { static SEEN: u8 = const { 0 }; }\n"
+                    "#[nervix_primitives::test]\n"
+                    "async fn waits() {\n"
+                    "    task::consume_budget().await;\n"
+                    "    nervix_primitives::select! { () = tokio::time::sleep(DURATION) => {} }\n"
+                    "    tokio::pin!(future);\n"
+                    "    let _pair = shuttle::future::block_on(async {});\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_async_synchronization_fails_outside_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use tokio::sync::{Notify, mpsc};\nuse tokio_util::sync::CancellationToken;\n",
+            "`tokio::sync::Notify` bypasses the boundary; use `nervix_primitives::sync::Notify`",
+            "`tokio::sync::mpsc` bypasses the boundary; use `nervix_primitives::sync::mpsc`",
+            "`tokio_util::sync::CancellationToken` bypasses the boundary; use "
+            "`nervix_primitives::sync::CancellationToken`",
+        )
+
+    def test_a_grouped_tokio_import_fails_only_for_the_governed_items(self) -> None:
+        report = self.assert_rejected(
+            "use tokio::{sync::watch, time::sleep};\n",
+            "`tokio::sync::watch` bypasses the boundary",
+        )
+        self.assertNotIn("tokio::time", report)
+
+    def test_tasks_and_their_macros_fail_outside_the_boundary(self) -> None:
+        self.assert_rejected(
+            "#[tokio::test(flavor = \"multi_thread\")]\n"
+            "async fn f() {\n"
+            "    let handle = tokio::spawn(async {});\n"
+            "    tokio::task::consume_budget().await;\n"
+            "    tokio::select! { _ = handle => {} }\n"
+            "}\n"
+            "tokio::task_local! { static NOW: u8; }\n",
+            "`tokio::test` bypasses the boundary; use `nervix_primitives::test`",
+            "`tokio::spawn` bypasses the boundary; use `nervix_primitives::task::spawn`",
+            "`tokio::task::consume_budget` bypasses the boundary; use "
+            "`nervix_primitives::task::consume_budget`",
+            "`tokio::select` bypasses the boundary; use `nervix_primitives::select`",
+            "`tokio::task_local` bypasses the boundary; use "
+            "`nervix_primitives::unmodeled::task_local`",
+        )
+
+    def test_blocking_synchronization_fails_outside_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use parking_lot::Mutex;\n"
+            "use std::sync::{Arc, OnceLock, mpsc};\n"
+            "fn f() { let _lock = std::sync::Mutex::new(0); }\n",
+            "`parking_lot::Mutex` bypasses the boundary; use "
+            "`nervix_primitives::sync::blocking::Mutex`",
+            "`std::sync::OnceLock` bypasses the boundary; use "
+            "`nervix_primitives::sync::blocking::OnceLock`",
+            "`std::sync::mpsc` bypasses the boundary; use `nervix_primitives::sync::blocking::mpsc`",
+            "`std::sync::Mutex::new` bypasses the boundary",
+        )
+
+    def test_an_imported_sync_module_fails_where_it_reaches_blocking_synchronization(self) -> None:
+        report = self.assert_rejected(
+            "use std::sync;\nfn f() -> sync::Mutex<u8> { todo() }\nfn g() -> sync::Arc<u8> { todo() }\n",
+            "`sync::Mutex` reaches thread-blocking synchronization through an imported `sync` module",
+        )
+        self.assertNotIn("sync::Arc", report)
+
+    def test_threads_and_thread_locals_fail_outside_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use std::thread;\n"
+            "fn f() { std::thread::spawn(|| {}); }\n"
+            "thread_local! { static SEEN: u8 = const { 0 }; }\n",
+            "`std::thread` bypasses the boundary; use `nervix_primitives::thread`",
+            "`std::thread::spawn` bypasses the boundary; use `nervix_primitives::thread::spawn`",
+            "`thread_local!` is the standard library's; use `nervix_primitives::thread_local!`",
+        )
+
+    def test_publication_collections_and_streams_fail_outside_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use arc_swap::ArcSwap;\n"
+            "use dashmap::{DashMap, mapref::entry::Entry};\n"
+            "use concurrent_queue::ConcurrentQueue;\n"
+            "use tokio_stream::wrappers::ReceiverStream;\n",
+            "`arc_swap::ArcSwap` bypasses the boundary; use `nervix_primitives::publication::ArcSwap`",
+            "`dashmap::DashMap` bypasses the boundary; use `nervix_primitives::collections::DashMap`",
+            "`dashmap::mapref::entry::Entry` bypasses the boundary; use "
+            "`nervix_primitives::collections::dash_map::Entry`",
+            "`concurrent_queue::ConcurrentQueue` bypasses the boundary",
+            "`tokio_stream::wrappers::ReceiverStream` bypasses the boundary; use "
+            "`nervix_primitives::stream::wrappers::ReceiverStream`",
+        )
+
+    def test_modeled_primitives_fail_outside_the_boundary_while_runner_apis_pass(self) -> None:
+        report = self.assert_rejected(
+            "use shuttle::{sync::mpsc, thread};\n"
+            "fn f() {\n"
+            "    shuttle::future::spawn(async {});\n"
+            "    shuttle::check_random(|| {}, 1);\n"
+            "    let _switches = shuttle::current::context_switches();\n"
+            "}\n",
+            "`shuttle::sync::mpsc` bypasses the boundary; use `nervix_primitives::sync::blocking::mpsc`",
+            "`shuttle::thread` bypasses the boundary; use `nervix_primitives::thread`",
+            "`shuttle::future::spawn` bypasses the boundary; use `nervix_primitives::task::spawn`",
+        )
+        self.assertNotIn("check_random", report)
+        self.assertNotIn("context_switches", report)
+
+    def test_a_backend_alias_fails_and_the_timer_alias_passes(self) -> None:
+        report = self.assert_rejected(
+            '#[cfg(feature = "shuttle")]\nextern crate shuttle_parking_lot as parking_lot;\n'
+            '#[cfg(feature = "shuttle")]\nextern crate shuttle_tokio as tokio;\n'
+            "extern crate tokio as tokio_real;\n",
+            "`extern crate shuttle_parking_lot as parking_lot` selects a backend outside the boundary",
+            "`extern crate tokio as tokio_real` selects a backend outside the boundary",
+        )
+        self.assertNotIn("shuttle_tokio as tokio`", report)
+
+    def test_a_renamed_governed_crate_fails(self) -> None:
+        self.assert_rejected(
+            "use tokio as chitchat_tokio;\nfn f() -> chitchat_tokio::sync::Notify { todo() }\n",
+            "`tokio` is renamed to `chitchat_tokio`, which hides the governed primitives below it",
+        )
+
+    def test_a_glob_over_a_governed_crate_fails(self) -> None:
+        self.assert_rejected(
+            "use tokio::*;\nuse parking_lot::*;\n",
+            "`use tokio::*` brings governed primitives into scope",
+            "`parking_lot::*` bypasses the boundary",
+        )
+
+    def test_a_governed_path_in_a_macro_body_fails(self) -> None:
+        self.assert_rejected(
+            "macro_rules! notify {\n    () => { tokio::sync::Notify::new() };\n}\n",
+            "`tokio::sync::Notify::new` bypasses the boundary",
+        )
+
+    def test_an_inactive_cfg_branch_is_checked(self) -> None:
+        self.assert_rejected(
+            '#[cfg(any())]\nfn never() { let _lock = parking_lot::RwLock::new(0); }\n',
+            "`parking_lot::RwLock::new` bypasses the boundary",
+        )
+
+
+class UnmodeledItemTests(CheckTestCase):
+    def test_a_permitted_unmodeled_runtime_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/binding.rs": (
+                    "use nervix_primitives::unmodeled::runtime::Runtime;\n"
+                    "fn start() -> Runtime {\n"
+                    "    nervix_primitives::unmodeled::runtime::Builder::new_multi_thread()\n"
+                    "        .build()\n"
+                    "}\n"
+                )
+            },
+            permissions=PERMISSION
+            + """
+[[permission]]
+path = "crates/engine/src/binding.rs"
+items = ["runtime::Builder", "runtime::Runtime"]
+owner = "The engine's binding."
+reason = "Its host enters the runtime."
+limit = "The binding runs in no model."
+""",
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_an_unmodeled_module_import_fails(self) -> None:
+        status, report = self.check(
+            {"crates/engine/src/lib.rs": "use nervix_primitives::unmodeled::runtime;\n"}
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("import unmodeled items by name", report)
+
+    def test_an_unknown_unmodeled_path_fails(self) -> None:
+        status, report = self.check(
+            {"crates/engine/src/lib.rs": "fn f() { nervix_primitives::unmodeled::nothing(); }\n"}
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("name an unmodeled item by its path", report)
+
+
+class OwnerOnlyManifestTests(CheckTestCase):
+    def test_a_selected_library_outside_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY
+                + "parking_lot = { workspace = true }\n"
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("only nervix-primitives depends on `parking_lot`", report)
+
+    def test_a_renamed_shuttle_wrapper_outside_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "Cargo.toml": WORKSPACE
+                + 'shuttle-parking-lot = { package = "shuttle-parking_lot", version = "0.12" }\n',
+                "crates/engine/Cargo.toml": ENGINE
+                + "shuttle-parking-lot = { workspace = true, optional = true }\n",
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("only nervix-primitives depends on `shuttle-parking_lot`", report)
+
+
+class LoomModelTests(CheckTestCase):
+    """Loom models only atomics, its threads and thread-local storage; in a Loom build every other
+    family is the ordinary library, so Loom model code may not name one."""
+
+    def test_a_model_of_atomics_and_threads_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(all(test, feature = "loom"))]\n'
+                    "mod loom_models {\n"
+                    "    use nervix_primitives::{sync::atomic::{AtomicUsize, Ordering}, thread};\n"
+                    "    fn model() {\n"
+                    "        let handle = thread::spawn(|| AtomicUsize::new(0));\n"
+                    "        thread::yield_now();\n"
+                    "        nervix_primitives::thread::park();\n"
+                    "    }\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_an_unmodeled_family_in_a_model_fails(self) -> None:
+        self.assert_rejected(
+            '#[cfg(all(test, feature = "loom"))]\n'
+            "mod loom_models {\n"
+            "    use nervix_primitives::sync::Notify;\n"
+            "    fn model() {\n"
+            "        let map = nervix_primitives::collections::DashMap::<u8, u8>::new();\n"
+            "    }\n"
+            "}\n",
+            "Loom model code names `nervix_primitives::sync::Notify`",
+            "Loom model code names `nervix_primitives::collections::DashMap`",
+        )
+
+    def test_a_thread_operation_loom_does_not_model_fails_through_an_alias(self) -> None:
+        self.assert_rejected(
+            '#[cfg(feature = "loom")]\n'
+            "mod loom_models {\n"
+            "    use nervix_primitives::thread;\n"
+            "    fn model() { thread::sleep(DELAY); }\n"
+            "}\n",
+            "Loom model code names `nervix_primitives::thread::sleep`",
+        )
+
+    def test_a_module_compiled_without_loom_is_not_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(all(test, not(feature = "loom")))]\n'
+                    "mod tests {\n"
+                    "    use nervix_primitives::sync::Notify;\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
 
 
 if __name__ == "__main__":

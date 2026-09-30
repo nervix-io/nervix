@@ -182,6 +182,27 @@ impl OrderingGroups {
             Self::Evaluated(groups) => groups.groups.values().len().arch_into(),
         }
     }
+
+    /// The bytes the groups of `rows` hold beyond the batch they describe, as
+    /// [`Self::estimated_bytes`] measures them for every row.
+    pub(super) fn estimated_bytes_of_rows(&self, rows: &[usize]) -> u64 {
+        let Self::Evaluated(groups) = self else {
+            // The branch key is the one the batch already carries.
+            return 0;
+        };
+        let mut bytes = 0_u64;
+        for row in rows {
+            // A row without a group holds only the reason it has none.
+            let Some(Ok(group)) = groups.group(*row) else {
+                continue;
+            };
+            let group_bytes: u64 = group.len().arch_into();
+            bytes = bytes
+                .checked_add(group_bytes)
+                .assured("every term counts bytes of a group this node already holds in memory");
+        }
+        bytes
+    }
 }
 
 /// Each row's own ordering group, as one Arrow column beside the batch.
@@ -448,7 +469,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_expression_group_is_evaluated_per_source_row_in_order() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -479,7 +500,7 @@ mod tests {
         assert_eq!(groups.estimated_bytes(), group_bytes);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_expression_group_fails_only_the_row_whose_evaluation_failed() {
         let input_schema =
             test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);
@@ -518,7 +539,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_branch_group_is_the_batch_key_and_an_unbranched_batch_has_none() {
         let input_schema = test_schema(&[("tenant", ParseAsType::String)]);
         let unbranched = unbranched_batch(

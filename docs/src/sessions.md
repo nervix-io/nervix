@@ -220,8 +220,36 @@ producers it opens. A producer is not a statement: clients open, feed, and close
 - The session tells the client when a producer's admission is suspended or open again, and when the
   server ends a producer, which is the last frame about it. Closing a producer refuses its queued
   batches, waits for its admitted ones, and is answered once every batch has its outcome.
+- When the session's node forwards a producer to the node that executes its ingestor and loses that
+  node, whether it crashed or stopped answering, the producer ends as `owner lost`. Before the end,
+  every batch that node could not have admitted is refused as `producer ended`, because the session's
+  node clears each forwarded batch before it may be admitted; only the cleared batches are reported
+  as of unknown outcome.
 - When the session ends, its producers detach. Admitted batches continue through the graph with
   nobody left to answer them, so a client reports them as of unknown outcome.
+
+## Suggestions
+
+## Emitter consumers
+
+An application opens a consumer of a `TO CLIENT` emitter by naming its domain, emitter, and the
+exact output fields, including order, optionality, and sensitivity. The open reserves room for
+one maximum-sized Arrow delivery before reporting success. A session holds at most 32 consumers
+and 32 MiB of consumer credit; the serving node reserves at most 128 MiB for this direction,
+independently of its producer budget. Thus one session's producer and consumer ceilings total
+64 MiB and a node's total 256 MiB. No consumer means retained output fills the bounded node
+budget and backpressures the graph.
+
+`OpenEmitter`, `ReadEmitterBatch`, `SettleEmitterBatch`, and `CloseEmitter` are session operations,
+not relay subscriptions. A read is concurrent with the session's ordered control lane; the
+receive loop can keep processing producer submissions, ACKs, commands, and clock observations
+while that read waits. A returned batch is still unacknowledged. Its current reference must be
+confirmed with `ACK`, retried, or rejected; close and session loss revoke unresolved attempts.
+The consumer belongs to its session exchange and is reopened explicitly after that exchange is
+lost. The server does not persist a consumer position. A session may attach through a different
+node from the emitter; that node forwards output and settlement over the authenticated
+interconnect. [Client Session Protocol](./client-session-protocol.md#emitter-consumers) defines
+the frames, and [Emitters](./emitters.md#client-emitters) defines their graph ACK boundary.
 
 ## Suggestions
 

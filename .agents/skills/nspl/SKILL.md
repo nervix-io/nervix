@@ -17,9 +17,9 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors for all supported source families, and session subscriptions; use the same
-web-console chapter for their typed fields, resource versions, program editors, reference lookup,
-and transaction behavior.
+Roto UDFs, ingestors for all supported source families, junctions, reingestors, and session
+subscriptions; use the same web-console chapter for their typed fields, resource versions, program
+editors, reference lookup, and transaction behavior.
 
 ## Gather the configuration contract
 
@@ -310,6 +310,18 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- When an application receives constructed graph output, use `TO CLIENT SCHEMA <output_schema>
+  MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
+  Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
+  explicit `FLUSH` policy. The output schema is exact, and every sensitive value copied into a
+  non-sensitive output field needs `leak_sensitive(...)`. Do not create a `CLIENT` model, codec,
+  header operation, or direct `VALUES` body for this sink. An application opens a competing
+  consumer with the Rust client's `subscribe_emitter` or the session protocol, receives native
+  Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
+  until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
+  and delivery identity but use a fresh reference. Consumers are volatile across owner and
+  session loss; design application effects for duplicates. Read `Emitters` → `Client emitters`,
+  `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
@@ -335,10 +347,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `Retry-After`, in whole seconds or as an HTTP date, can lengthen the physical wait beyond `MAX`.
   A lost response can repeat a request the endpoint applied, so give the endpoint a stable key
   such as `write_header('Idempotency-Key', input.event_id)`; see
-  [HTTP retries](../../../docs/src/emitters.md#http-retries-and-acknowledgements).
+  [HTTP retries](../../../docs/src/emitters.md#http-retries-and-acknowledgements). While a request
+  is pending after a failed attempt, `DESCRIBE EMITTER` shows that failure's status or transport
+  cause as its transient error until the request is delivered. Sent counters count each delivered
+  record once and never a refused one, and a `WITHOUT BODY` emitter sends zero payload bytes; see
+  [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
-  sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
-  MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  sink clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
+  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database sinks, the clause bounds each insert

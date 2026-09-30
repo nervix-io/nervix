@@ -12,9 +12,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{ops::Range, path::PathBuf};
 
 use ahash::HashMap;
@@ -244,7 +241,7 @@ impl MongoDbSink {
             );
         }
         for request in requests.requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write { members, .. } => members,
                 RowRequest::Oversize { member, oversize } => {
@@ -322,7 +319,7 @@ impl MongoDbSink {
             );
         }
         for request in requests.requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write { members, .. } => members,
                 RowRequest::Oversize { member, oversize } => {

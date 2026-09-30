@@ -109,12 +109,18 @@ concrete branch key as `key=<object> payload=<object>` on a branched relay; a se
 `"<masked>"`. The other subscription events report rows a dropping subscription could not deliver,
 rows it skipped, and the end of the subscription with its reason: `RelayChanged` when the relay was
 redefined, so the announced schema no longer describes its rows, or `RelayRemoved` when the relay
-or its domain no longer exists. The end is the last event of that subscription; subscribe again to
-keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
+or its domain no longer exists. The end is the last event of that subscription, and the client never
+opens it again on its own, because a new session would not change why it ended.
+`Client::subscription_lifecycle(&name)` reads it as `Ended` from the moment the end arrives until
+you subscribe again under the same name, which opens a new generation that announces the relay's
+current schema, or unsubscribe, which completes without a request and releases the name. An end
+whose session ended before you read it is still reported, once, after the events that session left
+unread are dropped; a subscription whose events overflowed reports the overflow as its last event
+instead. See [Sessions](sessions.md#subscription-lifecycle).
 
-A subscription the server acknowledged outlives its session. When the session ends,
-`next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and the
-client opens it again as a new generation on its next session. When that session refuses it, for
+A subscription the server acknowledged, and did not end, outlives its session. When the session
+ends, `next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and
+the client opens it again as a new generation on its next session. When that session refuses it, for
 example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
 the server's message and the wait before the next attempt; the client keeps trying on that session,
 after a wait that starts at one second and doubles up to thirty seconds, until the subscription
@@ -246,12 +252,12 @@ closed session when a followed clock waits for it. A detach, or an end, stops fo
 
 ### Through The Shared C Binding
 
-The shared C binding reads the same events for C, C++, Python, JVM and Ruby hosts; its header is
-`crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` run
-through `nx_session_prepare` and `nx_session_execute` like any statement, for the session's selected
-domain. `nx_session_next_clock_event` waits for the next event, bounded by the same `nx_cancel`
-tokens and deadlines as every blocking call, and hands out an `nx_clock_event` reference. The events
-are the Rust client's, coalesced the same way:
+The shared C binding reads the same events and attached clocks for C, C++, Python, JVM and Ruby
+hosts; its header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
+`DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any
+statement, for the session's selected domain. `nx_session_next_clock_event` waits for the next
+event, bounded by the same `nx_cancel` tokens and deadlines as every blocking call, and hands out an
+`nx_clock_event` reference. The events are the Rust client's, coalesced the same way:
 
 - `nx_clock_event_kind_of` tells an `NX_CLOCK_EVENT_STATE`, `NX_CLOCK_EVENT_TICK`,
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
@@ -270,10 +276,37 @@ are the Rust client's, coalesced the same way:
 - `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
   and `nx_event_release` do, and a reference may be released on any thread.
 
-The binding exposes the events, not `AttachedDomainClock`: a host projects logical time, physical
-waits and admission windows from the paced fields itself. The outcome of an attach carries its
-disposition and message, not the clock, so a host that attaches to a running clock paces on the
-ticks' logical readings until the next state event reports the committed mapping.
+`nx_session_domain_clock` reads `domain_clock` for a domain the session follows as an
+`nx_domain_clock` reference, and writes NULL for a domain whose clock the session does not follow.
+It never blocks. Right after `ATTACH DOMAIN CLOCK;` completes it is the clock the attach reply
+carried, so a host that attaches to a running paced clock reads its `START` generation and
+committed mapping before it uses the first tick. Every later observation and accepted tick replaces
+it in the order the session received them, so a read is never older than an event the host has
+already taken. Once the session holding the attachment ends, which `NX_CLOCK_EVENT_INTERRUPTED`
+reports, it keeps the clock that session reported last, without a tick, until the restored
+attachment reports the clock again. A read never
+changes once taken, stays valid after the session is freed, and is counted with
+`nx_domain_clock_retain` and `nx_domain_clock_release` like an event:
+
+- `nx_domain_clock_domain`, `nx_domain_clock_generation` and `nx_domain_clock_state` read the
+  domain, the generation and the installation state. `nx_domain_clock_paced` reads the period,
+  skew, logical origin, UTC anchor and time rate of a paced clock and fails with `NX_ERROR_TYPE` for
+  any other state, and `nx_domain_clock_tick` says whether the session holds an accepted tick of the
+  clock's generation and reads it when it does.
+- `nx_domain_clock_logical_time_at`, `nx_domain_clock_wall_duration_until`,
+  `nx_domain_clock_admission_window` and `nx_domain_clock_admits` answer with the arithmetic of
+  `AttachedDomainClock`: the logical time at a UTC instant, rounded down; the physical wait until a
+  logical target, rounded up; the oldest and newest tick centers a `TIMESTAMP AT` ingestor admits
+  events around; and whether it admits a given event time. An unpaced clock reads UTC and admits
+  every timestamp. A stopped or uninstalled clock fails with `NX_ERROR_TYPE`, and a result outside
+  the timestamp range with `NX_ERROR_INVALID_ARGUMENT`.
+
+An attach the server refuses completes as failed with the server's reason, and
+`nx_session_domain_clock` still reads the earlier attachment's clock when the refusal is that the
+session already follows it. An attach whose session was lost is sent again on the next session the
+client opens. An attach cancelled or expired after its request was sent can still attach the
+session: executing the same prepared execution again is answered after the earlier attempt, and
+`nx_session_domain_clock` then tells whether the session follows the clock.
 
 ## Events Across Reconnects
 
@@ -281,9 +314,9 @@ ticks' logical readings until the next state event reports the committed mapping
 belong to the client rather than to one session, so a reader keeps calling them across reconnects:
 
 - When a session ends, `next_subscription()` reports `Interrupted` for every subscription that
-  session held, reopens a session, and opens each of them again as a new generation. With nothing
-  to restore it waits for the next session the client opens, for example for its next command, and
-  delivers the events of subscriptions opened there.
+  session held and the server had not ended, reopens a session, and opens each of them again as a
+  new generation. With nothing to restore it waits for the next session the client opens, for
+  example for its next command, and delivers the events of subscriptions opened there.
 - `next_domain_clock_event()` reopens a session while a followed clock waits to be attached again,
   as described above.
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
@@ -363,6 +396,44 @@ admitted now and `Producer::end()` how the producer ended: `Closed`, `Ended` wit
 reason, or `SessionLost`. This release restores no producer across a reconnect; the application
 opens another one, and `open_ingestor` reopens a lost session before it sends the open. Dropping a
 producer closes it without waiting.
+
+## Emitter Consumers
+
+`Client::subscribe_emitter(domain, emitter, expected_fields, limits)` opens a competing consumer
+of a native `TO CLIENT` emitter on the current session. The field list is exact, including order,
+optionality and sensitivity. The open reserves its requested credit before it succeeds. The
+returned `EmitterConsumer::description()` reports the schema, emitter ACK window, timeout and
+retry pacing, maximum batch rows and bytes, and granted credit. A refusal is
+`ClientError::ConsumerRefused` with a typed reason.
+
+```rust
+use std::num::{NonZeroU32, NonZeroU64};
+use nervix_client_core::{ClientConsumerLimits, DomainName, EmitterName, EmitterSettlement};
+
+let consumer = client.subscribe_emitter(
+    DomainName::parse("shop")?,
+    EmitterName::parse("app_output")?,
+    expected_output_fields,
+    ClientConsumerLimits {
+        batches: NonZeroU32::try_from(8)?,
+        bytes: NonZeroU64::try_from(8 * 1024 * 1024)?,
+    },
+).await?;
+while let Some(delivery) = consumer.next_batch().await? {
+    let batch = delivery.record_batch()?; // `arrow` feature
+    process(batch).await?;
+    assert_eq!(delivery.ack().await?, EmitterSettlement::Confirmed);
+}
+consumer.close().await?;
+```
+
+`delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
+backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
+emitter's message error policy for all members. Each reassignment carries a new reference; a
+stale reference reports `StaleReference`. Reading, receiving, or decoding the batch is never an
+ACK. A consumer ends when its session or endpoint ends; it is not restored across reconnects.
+The application explicitly opens another one. The Rust client's exchange reader continues to
+route producer outcomes and command or clock replies while application processing awaits ACK.
 
 ## Transaction Handles And Attach
 

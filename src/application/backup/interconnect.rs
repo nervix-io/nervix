@@ -23,7 +23,7 @@ use nervix_interconnect::{
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
 use nervix_models::DomainName;
-use tokio::sync::Mutex as AsyncMutex;
+use nervix_primitives::sync::Mutex as AsyncMutex;
 
 use super::{
     CaptureSectionKey, CapturedSectionStage, PlannedContent, state_sections::plan_state_sections,

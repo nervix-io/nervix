@@ -277,7 +277,7 @@ impl Storage for DnsStorage {
     async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
         let mut deleters = HashMap::<String, opendal::Deleter>::default();
         while let Some(path) = paths.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let url = Url::parse(&path).map_err(|error| {
                 Error::new(ErrorKind::DataInvalid, "invalid Iceberg object URL").with_source(error)
             })?;
@@ -304,7 +304,7 @@ impl Storage for DnsStorage {
             }
         }
         for (_, mut deleter) in deleters {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             deleter.close().await.map_err(from_opendal_error)?;
         }
         Ok(())
@@ -681,7 +681,7 @@ mod tests {
         assert!(serde_json::to_string(&storage).is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn opendal_credential_sender_uses_the_node_dns_client() {
         const NAME: &str = "credential.nervix.test";
         let authority = DnsAuthority::start_on_loopback()
@@ -717,7 +717,7 @@ mod tests {
             .local_addr()
             .expect("the token endpoint has an address")
             .port();
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("the token request connects");
             let mut request = [0_u8; 2048];
             let bytes_read = stream

@@ -14,7 +14,8 @@
 //! the owning node on behalf of this one, which counts the producer's granted bytes against the
 //! owning node's budget as well as this node's. Either way the session sees the same handle and
 //! the same events: one outcome per batch, admission changes, and at most one end, after which the
-//! events close. Losing a link ends every producer forwarded over it with `OwnerLost`.
+//! events close. Losing a link ends every producer forwarded over it with `OwnerLost`, after its
+//! batches the owning node cannot have admitted are answered as not admitted.
 
 mod link;
 
@@ -60,11 +61,24 @@ pub(in crate::application) enum ProducerRoute {
     Forwarded(ForwardedProducer),
 }
 
+/// A route that took no batch: the link to the node that executes the ingestor already ended, so
+/// the batch never left this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application) struct RouteEnded;
+
 impl ProducerRoute {
-    /// Hands one batch to the endpoint, which answers it with exactly one outcome.
-    pub(in crate::application) fn submit(&self, submission: ClientSubmissionId, batch: Bytes) {
+    /// Hands one batch to the endpoint, which answers it with exactly one outcome once it took the
+    /// batch.
+    pub(in crate::application) fn submit(
+        &self,
+        submission: ClientSubmissionId,
+        batch: Bytes,
+    ) -> Result<(), RouteEnded> {
         match self {
-            Self::Local(handle) => handle.submit(submission, batch),
+            Self::Local(handle) => {
+                handle.submit(submission, batch);
+                Ok(())
+            }
             Self::Forwarded(forwarded) => forwarded.submit(submission, batch),
         }
     }

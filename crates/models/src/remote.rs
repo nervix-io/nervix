@@ -1,8 +1,15 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{ClusterNodeName, Timestamp};
+use crate::{ClusterNodeIdentity, Timestamp};
 
+/// An acknowledgement or relay admission that one node process registered and waits to have
+/// resolved by the node it sent the registration to.
+///
+/// Every process numbers its registrations from one, so the number alone repeats across the runs
+/// of a node. The registration therefore also names the run that registered it, and every
+/// resolution carries its registration back: a resolution addressed to an earlier run of a node
+/// never resolves the entry a later run holds under the same number.
 #[derive(
     Debug,
     Clone,
@@ -10,6 +17,7 @@ use crate::{ClusterNodeName, Timestamp};
     Eq,
     PartialOrd,
     Ord,
+    Hash,
     Serialize,
     Deserialize,
     Archive,
@@ -18,14 +26,26 @@ use crate::{ClusterNodeName, Timestamp};
 )]
 pub struct RemoteAckRegistration {
     pub ack_id: u64,
-    pub reply_node_id: ClusterNodeName,
+    /// The run of the node that registered `ack_id`, which every resolution is sent back to.
+    pub registrar: ClusterNodeIdentity,
+}
+
+impl RemoteAckRegistration {
+    /// The resolution of this registration with `outcome`, addressed to the run that registered it.
+    pub fn resolution(&self, outcome: RemoteAckOutcome) -> RemoteAckResolution {
+        RemoteAckResolution {
+            registration: self.clone(),
+            outcome,
+        }
+    }
 }
 
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RemoteAckResolution {
-    pub ack_id: u64,
+    /// The registration this resolves, which names the run it is addressed to.
+    pub registration: RemoteAckRegistration,
     pub outcome: RemoteAckOutcome,
 }
 

@@ -37,10 +37,9 @@ use nervix_models::{
     ClientProducerLimits, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
     IngestorName, SchemaField,
 };
+use nervix_primitives::sync::{blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex as SyncMutex;
 use thiserror::Error;
-use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 
 use crate::{
@@ -379,7 +378,7 @@ impl Client {
         });
         let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let attempt = self
                     .open_on_current_exchange(request.clone(), &domain, &ingestor)
                     .await;
@@ -422,7 +421,7 @@ impl Client {
         let (answer, answered) = oneshot::channel();
         // The open runs in a task of its own, so a caller that stops waiting leaves behind a task
         // that closes a producer the server opens anyway.
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let sent = request_on_exchange(&exchange, request, RequestKind::OpenIngestor).await;
             let opened = match sent {
                 Ok(sent) => {
@@ -442,14 +441,14 @@ impl Client {
 }
 
 /// A reply and the identity of the request it answers.
-struct Answered {
-    request_id: RequestId,
-    body: ReplyBody,
+pub(crate) struct Answered {
+    pub(crate) request_id: RequestId,
+    pub(crate) body: ReplyBody,
 }
 
 /// Sends one request on `exchange` and waits for its reply without a deadline of its own, and
 /// without closing the exchange when the caller stops waiting.
-async fn request_on_exchange(
+pub(crate) async fn request_on_exchange(
     exchange: &ExchangeRequests,
     request: ClientRequest,
     kind: RequestKind,
@@ -546,14 +545,14 @@ impl ProducerInner {
         let mut admission = self.signals.admission.subscribe();
         let mut end = self.signals.end.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(ended) = end.borrow_and_update().clone() {
                 return Err(ended);
             }
             if let ClientProducerAdmission::Open = *admission.borrow_and_update() {
                 return Ok(());
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = admission.changed() => changed.assured("the producer holds the sender of its admission"),
                 changed = end.changed() => changed.assured("the producer holds the sender of its end"),
             }
@@ -604,7 +603,7 @@ impl ProducerInner {
         let policy = self.description.policy;
         let mut backoff = policy.retry_backoff;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(ended) = self.admitting().await {
                 return ProducerOutcome::not_sent(format!("the producer ended: {ended:?}"));
             }
@@ -632,7 +631,7 @@ impl ProducerInner {
             if end.borrow_and_update().is_some() {
                 return outcome;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 () = tokio::time::sleep(backoff) => {}
                 _ = end.changed() => return outcome,
             }
@@ -719,7 +718,7 @@ impl Producer {
         );
         let credit = {
             let mut end = self.inner.signals.end.subscribe();
-            tokio::select! {
+            nervix_primitives::select! {
                 acquired = self.inner.slots.credit(bytes) => {
                     let Some(credit) = acquired else {
                         let ended = self.inner.end().unwrap_or(ProducerEnd::Closed);
@@ -736,7 +735,7 @@ impl Producer {
         };
         let id = self.inner.slots.hold();
         let inner = self.inner.clone();
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let outcome = inner.deliver(ipc).await;
             inner.slots.resolve(id, outcome, credit);
         });
@@ -800,7 +799,7 @@ impl Drop for Producer {
             return;
         }
         self.inner.stop();
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let Ok(runtime) = nervix_primitives::runtime::Handle::try_current() else {
             return;
         };
         let inner = self.inner.clone();

@@ -7,27 +7,26 @@
 //! - **Depends on.** The transport and its test certificates.
 //! - **Must not know.** The runtime or control plane that uses the transport.
 
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    process::Command,
-    sync::{Arc as StdArc, OnceLock},
-};
+use std::{collections::BTreeSet, path::PathBuf, process::Command, sync::Arc as StdArc};
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::RemoteAckOutcome;
-use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
+use nervix_primitives::{
+    sync::{
+        Notify,
+        atomic::{AtomicUsize, Ordering},
+        watch,
+    },
+    unmodeled::sync::OnceLock,
+};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
 use tempfile::{TempDir, tempdir};
-use tokio::{
-    sync::{Notify, watch},
-    time::{Instant, timeout, timeout_at},
-};
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::*;
 
@@ -39,6 +38,26 @@ fn tls_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tls/dev")
         .join(name)
+}
+
+/// The admission or acknowledgement the first run of `registrar` hands out under `ack_id`.
+fn registration(ack_id: u64, registrar: &ClusterNodeName) -> RemoteAckRegistration {
+    registration_of_run(ack_id, registrar, 1)
+}
+
+/// The admission or acknowledgement run `incarnation` of `registrar` hands out under `ack_id`.
+fn registration_of_run(
+    ack_id: u64,
+    registrar: &ClusterNodeName,
+    incarnation: u64,
+) -> RemoteAckRegistration {
+    RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            registrar.clone(),
+            ClusterNodeIncarnation::new(incarnation),
+        ),
+    }
 }
 
 pub(crate) fn test_tls() -> TlsConfigBundle {
@@ -390,7 +409,7 @@ async fn bound_transports_with_options(options: TransportOptions) -> ConnectedTr
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn send_waits_for_a_target_registered_after_the_operation_starts() {
     let ConnectedTransports {
         transport_a,
@@ -497,7 +516,7 @@ fn invalid_transport_options_report_the_failed_contract() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn peer_quota_refuses_a_new_target_but_retains_the_registered_peer() {
     let options = TransportOptions {
         max_peers: 1,
@@ -529,7 +548,7 @@ async fn peer_quota_refuses_a_new_target_but_retains_the_registered_peer() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
     let options = TransportOptions {
         max_peers: 1,
@@ -575,7 +594,7 @@ async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
     transport_c.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn one_way_control_send_refuses_a_typed_request() {
     let ConnectedTransports {
         transport_a,
@@ -606,15 +625,13 @@ async fn one_way_control_send_refuses_a_typed_request() {
 
 #[test]
 fn relay_acknowledgements_use_the_management_pool() {
-    let envelope = Envelope::Ack(RemoteAckResolution {
-        ack_id: 1,
-        outcome: RemoteAckOutcome::Ack,
-    });
+    let registrar = ClusterNodeName::parse("node-a").assured("the fixture node name is valid");
+    let envelope = Envelope::Ack(registration(1, &registrar).resolution(RemoteAckOutcome::Ack));
 
     assert_eq!(envelope.pool_class(), PoolClass::Management);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn connection_binding_drives_response_flow_control() {
     let options = TransportOptions {
         initial_stream_window_bytes: 1,
@@ -629,11 +646,11 @@ async fn connection_binding_drives_response_flow_control() {
 
     timeout(Duration::from_secs(2), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if transport_a.is_connected_to(&node_b) {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -658,7 +675,7 @@ fn certificate_binds_cluster_node_and_endpoint() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
     let ConnectedTransports {
         _authority: authority,
@@ -703,7 +720,7 @@ use resolver::{localhost_identity, test_resolver};
 
 mod lease;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
     let ConnectedTransports {
         transport_a,
@@ -756,8 +773,8 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
         .expect("snapshot stream handler should register");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -813,7 +830,7 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
     let options = TransportOptions {
         progress_timeout: Duration::from_millis(50),
@@ -835,8 +852,8 @@ async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
         .expect("resource stream handler should register");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -859,7 +876,7 @@ async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn streamed_response_reports_a_producer_failure_to_the_reader() {
     let ConnectedTransports {
         transport_a,
@@ -905,7 +922,7 @@ async fn streamed_response_reports_a_producer_failure_to_the_reader() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn rejected_stream_opening_retains_the_transport_cause() {
     let ConnectedTransports {
         transport_a,
@@ -922,8 +939,8 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
         .expect("resource stream handler should register");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -945,7 +962,7 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn stream_slot_queueing_consumes_the_request_deadline() {
     let ConnectedTransports {
         transport_a,
@@ -966,8 +983,8 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
         .assured("the deadline stream handler has a unique test name");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -985,7 +1002,7 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
 
     let queued_transport = transport_a.clone();
     let queued_node = node_b.clone();
-    let queued = tokio::spawn(async move {
+    let queued = nervix_primitives::task::spawn(async move {
         queued_transport
             .request_stream(
                 &queued_node,
@@ -1014,7 +1031,7 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     let ConnectedTransports {
         transport_a,
@@ -1043,11 +1060,11 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
         .expect("replication handler should register");
     timeout(Duration::from_secs(5), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if transport_a.is_connected_to(&node_b) {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1055,7 +1072,7 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
 
     let first_requester = transport_a.clone();
     let first_target = node_b.clone();
-    let first = tokio::spawn(async move {
+    let first = nervix_primitives::task::spawn(async move {
         first_requester
             .request(&first_target, ReplicationRequest { wait: true })
             .await
@@ -1068,14 +1085,14 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     let second_target = node_b.clone();
     let second_started = StdArc::new(Notify::new());
     let second_started_in_task = StdArc::clone(&second_started);
-    let second = tokio::spawn(async move {
+    let second = nervix_primitives::task::spawn(async move {
         second_started_in_task.notify_one();
         second_requester
             .request(&second_target, ReplicationRequest { wait: false })
             .await
     });
     second_started.notified().await;
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     release.notify_one();
 
     timeout(Duration::from_secs(2), async {
@@ -1095,7 +1112,7 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bulk_work_does_not_block_the_management_pool() {
     let ConnectedTransports {
         transport_a,
@@ -1128,8 +1145,9 @@ async fn bulk_work_does_not_block_the_management_pool() {
 
     let requester = transport_a.clone();
     let bulk_target = node_b.clone();
-    let bulk =
-        tokio::spawn(async move { requester.request(&bulk_target, BlockingBulkRequest).await });
+    let bulk = nervix_primitives::task::spawn(async move {
+        requester.request(&bulk_target, BlockingBulkRequest).await
+    });
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("bulk handler should start");
@@ -1153,7 +1171,7 @@ async fn bulk_work_does_not_block_the_management_pool() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn slow_management_work_cannot_consume_cancellation_streams() {
     let ConnectedTransports {
         transport_a,
@@ -1191,19 +1209,19 @@ async fn slow_management_work_cannot_consume_cancellation_streams() {
     for _ in 0..connection::stream_slots::MANAGEMENT_SHARED_STREAMS {
         let requester = transport_a.clone();
         let target = node_b.clone();
-        blocked.push(tokio::spawn(async move {
+        blocked.push(nervix_primitives::task::spawn(async move {
             requester.request(&target, BlockingManagementRequest).await
         }));
     }
     timeout(Duration::from_secs(2), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if started.load(Ordering::Acquire)
                 == connection::stream_slots::MANAGEMENT_SHARED_STREAMS
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1235,7 +1253,7 @@ mod duplex;
 
 mod progress;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn discovery_subquota_cannot_crowd_out_management_requests() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
@@ -1290,8 +1308,9 @@ async fn discovery_subquota_cannot_crowd_out_management_requests() {
 
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let discovery =
-        tokio::spawn(async move { requester.request(&target, BlockingDiscoveryRequest).await });
+    let discovery = nervix_primitives::task::spawn(async move {
+        requester.request(&target, BlockingDiscoveryRequest).await
+    });
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("the first discovery handler should start");
@@ -1349,7 +1368,7 @@ async fn discovery_subquota_cannot_crowd_out_management_requests() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
@@ -1370,7 +1389,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
             NodeEndpoint::new("localhost", transport_a.local_addr().port()),
         )
         .expect("the response target should register");
-    let payload = |ack_id, sequence, reply_node_id| RelayPayload {
+    let payload = |ack_id, sequence, registrar| RelayPayload {
         delivery: RelayDelivery {
             channel_incarnation: [1; 16],
             sequence,
@@ -1384,10 +1403,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id,
-            reply_node_id,
-        }),
+        admission: Some(registration(ack_id, &registrar)),
     };
 
     let error = transport_a
@@ -1429,10 +1445,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     transport_b
         .send(
             &node_a,
-            Envelope::Ack(RemoteAckResolution {
-                ack_id: 1,
-                outcome: RemoteAckOutcome::Ack,
-            }),
+            Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack)),
         )
         .await
         .expect("the first relay terminal outcome should be sent");
@@ -1456,7 +1469,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     .expect("redeemed grant expiry work should not delay transport shutdown");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
@@ -1499,10 +1512,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 52,
-                    reply_node_id: node_a.clone(),
-                }),
+                admission: Some(registration(52, &node_a)),
             }),
         )
         .await
@@ -1521,15 +1531,10 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
 
     let outcome_sender = transport_b.clone();
     let outcome_target = node_a.clone();
-    let mut outcome_task = tokio::spawn(async move {
+    let terminal = registration(52, &node_a).resolution(RemoteAckOutcome::Ack);
+    let mut outcome_task = nervix_primitives::task::spawn(async move {
         outcome_sender
-            .send(
-                &outcome_target,
-                Envelope::Ack(RemoteAckResolution {
-                    ack_id: 52,
-                    outcome: RemoteAckOutcome::Ack,
-                }),
-            )
+            .send(&outcome_target, Envelope::Ack(terminal))
             .await
     });
     assert!(
@@ -1554,19 +1559,16 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
         .recv()
         .await
         .expect("the terminal outcome must remain queued for the application");
-    assert!(matches!(
+    assert_eq!(
         outcome.envelope,
-        Envelope::Ack(RemoteAckResolution {
-            ack_id: 52,
-            outcome: RemoteAckOutcome::Ack,
-        })
-    ));
+        Envelope::Ack(registration(52, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
     let ConnectedTransports {
         transport_a,
@@ -1604,10 +1606,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 40,
-                    reply_node_id: node_a,
-                }),
+                admission: Some(registration(40, &node_a)),
             }),
         )
         .await
@@ -1627,7 +1626,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn cancelled_relay_admission_can_never_reach_runtime() {
     let ConnectedTransports {
         transport_a,
@@ -1653,10 +1652,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 41,
-            reply_node_id: node_a.clone(),
-        }),
+        admission: Some(registration(41, &node_a)),
     };
 
     transport_a
@@ -1731,10 +1727,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 42,
-            reply_node_id: node_a.clone(),
-        }),
+        admission: Some(registration(42, &node_a)),
     };
     transport_a
         .send(&node_b, Envelope::RelayPayload(next_payload))
@@ -1773,10 +1766,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 43,
-            reply_node_id: node_a.clone(),
-        }),
+        admission: Some(registration(43, &node_a)),
     };
     let error = transport_a
         .send(&node_b, Envelope::RelayPayload(retired_payload.clone()))
@@ -1797,7 +1787,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
     let ConnectedTransports {
         transport_a,
@@ -1823,10 +1813,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 44,
-            reply_node_id: node_a,
-        }),
+        admission: Some(registration(44, &node_a)),
     };
 
     transport_a
@@ -1859,19 +1846,133 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         .await
         .expect("the reconciled admission should return its terminal outcome")
         .expect("the sender application queue should remain open");
-    assert!(matches!(
+    assert_eq!(
         outcome.envelope,
-        Envelope::Ack(RemoteAckResolution {
-            ack_id: 44,
-            outcome: RemoteAckOutcome::Ack,
-        })
-    ));
+        Envelope::Ack(registration(44, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+/// The next envelope other than admission progress, which the receiver reports while it holds a
+/// reserved admission.
+async fn next_non_progress_envelope(incoming: &mut mpsc::Receiver<ReceivedEnvelope>) -> Envelope {
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let received = timeout(Duration::from_secs(2), incoming.recv())
+            .await
+            .expect("the next envelope should arrive")
+            .expect("the application queue should remain open");
+        if let Envelope::Ack(resolution) = &received.envelope
+            && resolution.outcome == RemoteAckOutcome::Alive
+        {
+            continue;
+        }
+        return received.envelope;
+    }
+}
+
+#[nervix_primitives::test]
+async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_admission_pending() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        _incoming_a: mut incoming_a,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    transport_b
+        .register_outbound_target(
+            node_a.clone(),
+            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+        )
+        .expect("the response target should register");
+    let delivery = RelayDelivery {
+        channel_incarnation: [12; 16],
+        sequence: 0,
+    };
+    let current = registration_of_run(53, &node_a, 2);
+    transport_a
+        .send(
+            &node_b,
+            Envelope::RelayPayload(RelayPayload {
+                delivery,
+                kind: RelayPayloadKind::Routed,
+                domain: DomainName::parse("test").expect("test domain should be valid"),
+                relay: RelayName::parse("relay").expect("test relay should be valid"),
+                key: None,
+                batch_ipc: Executor::default()
+                    .try_charge_owned(MemoryClass::Relay, vec![1])
+                    .expect("the test relay body should fit its budget"),
+                metadata: Vec::new(),
+                acks: Vec::new(),
+                admission: Some(current.clone()),
+            }),
+        )
+        .await
+        .expect("the relay body should reach the receiver admission queue");
+    let received = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the relay body should enter the application queue")
+        .expect("the application queue should remain open");
+
+    // An earlier run of the sending node registered an admission under the same number.
+    let earlier = registration_of_run(53, &node_a, 1);
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(earlier.resolution(RemoteAckOutcome::Ack)),
+        )
+        .await
+        .expect("the earlier run's outcome is still addressed to the node");
+    assert_eq!(
+        next_non_progress_envelope(&mut incoming_a).await,
+        Envelope::Ack(earlier.resolution(RemoteAckOutcome::Ack)),
+        "the outcome reaches the application with the run it names"
+    );
+    assert_eq!(
+        transport_a
+            .relay_admission_status(&node_b, delivery)
+            .await
+            .expect("relay status should be answered"),
+        RelayAdmissionStatus::BodyReceived,
+        "an outcome addressed to an earlier run must not resolve this run's admission"
+    );
+
+    assert_eq!(
+        received
+            .relay_admission
+            .expect("a relay body must carry its reserved admission")
+            .admit(),
+        RelayAdmissionDecision::Admitted
+    );
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(current.resolution(RemoteAckOutcome::Ack)),
+        )
+        .await
+        .expect("this run's terminal outcome should be sent");
+    assert_eq!(
+        next_non_progress_envelope(&mut incoming_a).await,
+        Envelope::Ack(current.resolution(RemoteAckOutcome::Ack))
+    );
+    assert_eq!(
+        transport_a
+            .relay_admission_status(&node_b, delivery)
+            .await
+            .expect("relay status should be answered"),
+        RelayAdmissionStatus::Admitted
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[nervix_primitives::test]
 async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
     let ConnectedTransports {
         _authority: authority,
@@ -1901,10 +2002,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 45,
-                    reply_node_id: node_a.clone(),
-                }),
+                admission: Some(registration(45, &node_a)),
             }),
         )
         .await
@@ -1949,7 +2047,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
     replacement_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn reserved_relay_work_reports_progress_before_runtime_admission() {
     let ConnectedTransports {
         transport_a,
@@ -1983,10 +2081,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 51,
-                    reply_node_id: node_a.clone(),
-                }),
+                admission: Some(registration(51, &node_a)),
             }),
         )
         .await
@@ -2000,19 +2095,16 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
         .await
         .expect("reserved relay work should report queue-time progress")
         .expect("the sender application queue should remain open");
-    assert!(matches!(
+    assert_eq!(
         progress.envelope,
-        Envelope::Ack(RemoteAckResolution {
-            ack_id: 51,
-            outcome: RemoteAckOutcome::Alive,
-        })
-    ));
+        Envelope::Ack(registration(51, &node_a).resolution(RemoteAckOutcome::Alive))
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bootstrap_rejects_a_certificate_from_another_cluster() {
     let authority = TestCertificateAuthority::new();
     let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
@@ -2051,7 +2143,7 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
     let authority = TestCertificateAuthority::new();
     let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
@@ -2093,7 +2185,7 @@ async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
     transport_a.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
     let ConnectedTransports {
         transport_a,
@@ -2112,7 +2204,7 @@ async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn invalid_rkyv_is_rejected_before_dispatch() {
     let executor = Executor::default();
     let bytes = executor
@@ -2142,7 +2234,7 @@ fn stream_handler_failure_keeps_its_producer_cause() {
     assert!(error.contains::<io::Error>());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn membership_removal_cancels_an_active_request() {
     let ConnectedTransports {
         transport_a,
@@ -2166,7 +2258,10 @@ async fn membership_removal_cancels_an_active_request() {
         .expect("hanging handler should register");
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+    let request =
+        nervix_primitives::task::spawn(
+            async move { requester.request(&target, HangingRequest).await },
+        );
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("hanging request should reach its handler");
@@ -2187,7 +2282,7 @@ async fn membership_removal_cancels_an_active_request() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn shutdown_cancels_an_active_request() {
     let ConnectedTransports {
         transport_a,
@@ -2210,7 +2305,10 @@ async fn shutdown_cancels_an_active_request() {
         .expect("hanging handler should register");
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+    let request =
+        nervix_primitives::task::spawn(
+            async move { requester.request(&target, HangingRequest).await },
+        );
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("hanging request should reach its handler");

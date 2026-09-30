@@ -63,7 +63,7 @@ impl Runtime {
             return Ok(());
         }
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let awaiting = match self
                 .inner
                 .pending_state_checkpoint_announcements
@@ -201,7 +201,7 @@ impl Runtime {
             .change_context_lazy(restore)?;
         let pinned = ResourceId::new(domain.clone(), resource.clone(), *resource_version);
         for (placement, snapshot) in checkpoints {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if placement.state.kind() != RuntimeStateKind::WasmProcessor {
                 continue;
             }
@@ -336,7 +336,7 @@ impl Runtime {
         };
         let mut replicas = captured_replicas;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let progressed = state.replica_progress_signal().notified();
             tokio::pin!(progressed);
             progressed.as_mut().enable();
@@ -365,7 +365,7 @@ impl Runtime {
                 .checked_add(WASM_CHECKPOINT_REPLAN_INTERVAL)
                 .assured("a recheck interval of a fraction of a second stays within Instant")
                 .min(deadline);
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = &mut progressed => {}
                 _ = sleep_until(recheck) => {}
             }
