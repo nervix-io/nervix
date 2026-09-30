@@ -14,6 +14,7 @@ use super::{
     ChoiceControl, ChoiceControlSignals, ChoiceLoad, CodecFormatDraft, CreateSignals,
     RequestSender, event_target_value,
     ingestor_route_draft::{AssignmentDraft, MessageErrorDraft},
+    processor_draft::StatePolicyDraft,
     request_choices,
 };
 
@@ -279,6 +280,67 @@ pub(super) fn selected_choice(
                 })
             })
         }
+        (ChoiceControl::ProcessorInputRelay, ChoiceValue::Model(node)) => {
+            signals.active_processor().is_some_and(|signal| {
+                signal.get().active_input().is_some_and(|input| {
+                    input
+                        .relay
+                        .as_ref()
+                        .is_some_and(|selected| selected.selects(ModelKind::Relay, node))
+                })
+            })
+        }
+        (ChoiceControl::ProcessorBranch, ChoiceValue::Model(node)) => {
+            signals.active_processor().is_some_and(|signal| {
+                signal
+                    .get()
+                    .branching
+                    .current_branch()
+                    .is_some_and(|branch| {
+                        node.kind == ModelKind::Branch
+                            && branch.as_str() == node.identifier.as_str()
+                    })
+            })
+        }
+        (ChoiceControl::ProcessorStateRelay, ChoiceValue::Model(node)) => {
+            signals.active_processor().is_some_and(|signal| {
+                signal.get().active_state().is_some_and(|state| {
+                    state
+                        .relay
+                        .as_ref()
+                        .is_some_and(|selected| selected.selects(ModelKind::Relay, node))
+                })
+            })
+        }
+        (ChoiceControl::ProcessorRouteBranch, ChoiceValue::Model(node)) => {
+            signals.active_processor().is_some_and(|signal| {
+                signal.get().active_route().is_some_and(|route| {
+                    route.branch.current_branch().is_some_and(|branch| {
+                        node.kind == ModelKind::Branch
+                            && branch.as_str() == node.identifier.as_str()
+                    })
+                })
+            })
+        }
+        (ChoiceControl::ProcessorRouteRelay, ChoiceValue::Model(node)) => {
+            signals.active_processor().is_some_and(|signal| {
+                signal.get().active_route().is_some_and(|route| {
+                    route
+                        .relay
+                        .as_ref()
+                        .is_some_and(|selected| selected.selects(ModelKind::Relay, node))
+                })
+            })
+        }
+        (ChoiceControl::ProcessorErrorRelay, ChoiceValue::Model(node)) => {
+            signals.active_processor().is_some_and(|signal| {
+                signal.get().active_route().is_some_and(|route| {
+                    route.message_error.current_relay().is_some_and(|relay| {
+                        node.kind == ModelKind::Relay && relay.as_str() == node.identifier.as_str()
+                    })
+                })
+            })
+        }
         // A field reference is inserted into the filter rather than held as a selection.
         _ => false,
     }
@@ -457,6 +519,108 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                     assignments.push(AssignmentDraft::selected(field));
                 }
             });
+        }
+        (ChoiceControl::ProcessorInputRelay, ChoiceValue::Model(node)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| draft.select_input(&node));
+            }
+        }
+        (ChoiceControl::ProcessorBranch, ChoiceValue::Model(node)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| draft.select_branch(&node));
+            }
+        }
+        (ChoiceControl::ProcessorStateRelay, ChoiceValue::Model(node)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(state) = draft.active_state_mut() {
+                        state.select_relay(&node);
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorStateField, ChoiceValue::Field(field)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(state) = draft.active_state_mut()
+                        && let StatePolicyDraft::Default(assignments) = &mut state.policy
+                    {
+                        assignments.push(AssignmentDraft::selected(field));
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorRouteBranch, ChoiceValue::Model(node)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut() {
+                        let previous = route.branch.current_branch().cloned();
+                        route.branch.select_branch(&node);
+                        if route.branch.current_branch() != previous.as_ref()
+                            && let Some(relay) = &mut route.relay
+                        {
+                            relay.invalidate();
+                        }
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorRouteRelay, ChoiceValue::Model(node)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut() {
+                        route.select_relay(&node);
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorInputField, ChoiceValue::Field(field)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut() {
+                        route.inherit.add_field(field);
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorOutputField, ChoiceValue::Field(field)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut() {
+                        route.add_assignment(field);
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorBranchField, ChoiceValue::Field(field)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut() {
+                        route.branch.add_assignment(field);
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorErrorRelay, ChoiceValue::Model(node)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut() {
+                        route.message_error.select_relay(&node);
+                    }
+                });
+            }
+        }
+        (ChoiceControl::ProcessorErrorField, ChoiceValue::Field(field)) => {
+            if let Some(signal) = signals.active_processor() {
+                signal.update(|draft| {
+                    if let Some(route) = draft.active_route_mut()
+                        && let MessageErrorDraft::SendTo { assignments, .. } =
+                            &mut route.message_error
+                    {
+                        assignments.push(AssignmentDraft::selected(field));
+                    }
+                });
+            }
         }
         _ => {}
     }

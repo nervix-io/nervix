@@ -1408,51 +1408,51 @@ impl DomainState {
                         validate_emitter_batch_container(domain, identifier, emitter, codec_model)?;
                     }
 
-                    let client_name = emitter.sink.client();
-                    let client = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        client_name,
-                        ModelKind::Client,
-                    )?;
-                    let client_model = models
-                        .get(&NodeRef::new(ModelKind::Client, client_name.clone()))
-                        .verified(
-                            "expect_kind above resolved this client reference against the same \
-                             model set",
-                        );
-                    if !emitter.sink.accepts_client(client_model) {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: format!(
-                                "{} emitter requires a {} client, found {} client '{}'",
-                                emitter.sink.transport_label(),
-                                emitter.sink.expected_client_type(),
-                                client_model.client_type_label().verified(
-                                    "this model was resolved as a client above, and every client \
-                                     model carries a type label"
-                                ),
-                                client_name.as_str(),
-                            ),
-                        }));
-                    }
-                    let http_origin = if let (
-                        nervix_models::EmitSink::Http { .. },
-                        Model::ClientHttp(http_client),
-                    ) = (emitter.sink.as_ref(), client_model)
-                    {
-                        Some(validate_http_emitter_client(
+                    let mut http_origin = None;
+                    if let Some(client_name) = emitter.sink.client() {
+                        let client = expect_kind(
                             domain,
                             identifier,
-                            http_client,
-                        )?)
-                    } else {
-                        None
-                    };
-                    graph.add_edge(client, source, EdgeKind::RequiredBy);
+                            models,
+                            &indices,
+                            client_name,
+                            ModelKind::Client,
+                        )?;
+                        let client_model = models
+                            .get(&NodeRef::new(ModelKind::Client, client_name.clone()))
+                            .verified(
+                                "expect_kind above resolved this client reference against the \
+                                 same model set",
+                            );
+                        if !emitter.sink.accepts_client(client_model) {
+                            return Err(Report::new(RegistryError::InvalidModel {
+                                domain: domain.as_str().to_string(),
+                                identifier: identifier.as_str().to_string(),
+                                reason: format!(
+                                    "{} emitter requires a {} client, found {} client '{}'",
+                                    emitter.sink.transport_label(),
+                                    emitter.sink.expected_client_type(),
+                                    client_model.client_type_label().verified(
+                                        "this model was resolved as a client above, and every \
+                                         client model carries a type label"
+                                    ),
+                                    client_name.as_str(),
+                                ),
+                            }));
+                        }
+                        if let (
+                            nervix_models::EmitSink::Http { .. },
+                            Model::ClientHttp(http_client),
+                        ) = (emitter.sink.as_ref(), client_model)
+                        {
+                            http_origin = Some(validate_http_emitter_client(
+                                domain,
+                                identifier,
+                                http_client,
+                            )?);
+                        }
+                        graph.add_edge(client, source, EdgeKind::RequiredBy);
+                    }
 
                     if let Some(catalog_client_name) = emitter.sink.catalog_client() {
                         let catalog_client = expect_kind(
@@ -1491,10 +1491,36 @@ impl DomainState {
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
-                    let output_schema = if let Some(codec_name) = emitter.body.codec() {
-                        schema_for_codec_model(domain, identifier, models, codec_name)?
-                    } else {
-                        producer_schema
+                    let output_schema = match emitter.sink.as_ref() {
+                        nervix_models::EmitSink::Client { schema } => {
+                            let schema_node = expect_kind(
+                                domain,
+                                identifier,
+                                models,
+                                &indices,
+                                schema,
+                                ModelKind::Schema,
+                            )?;
+                            graph.add_edge(schema_node, source, EdgeKind::RequiredBy);
+                            let model = models
+                                .get(&NodeRef::new(ModelKind::Schema, schema.clone()))
+                                .verified("the schema reference was resolved immediately above");
+                            let Model::Schema(schema) = model else {
+                                return Err(Report::new(RegistryError::InvalidModel {
+                                    domain: domain.as_str().to_string(),
+                                    identifier: identifier.as_str().to_string(),
+                                    reason: "CLIENT emitter output does not resolve to a schema"
+                                        .to_string(),
+                                }));
+                            };
+                            schema
+                        }
+                        _ => match emitter.body.codec() {
+                            Some(codec_name) => {
+                                schema_for_codec_model(domain, identifier, models, codec_name)?
+                            }
+                            None => producer_schema,
+                        },
                     };
                     validate_http_request_expressions(
                         domain,

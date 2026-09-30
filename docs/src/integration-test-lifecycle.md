@@ -697,7 +697,18 @@ own timeout or the receiver's stop ends it sooner, so a scenario can observe sta
 while a request is unresolved without betting on how long a scripted delay lasts. A request for a
 target the scenario answered by target takes that answer instead of the next scripted response,
 which gives each request of independent branches or source relays its own outcome whatever order
-they arrive in.
+they arrive in. Answering the same target again replaces its answer, so an endpoint that kept
+failing one request can recover while the scenario watches the retries.
+
+The receiver also records two facts about how its clients treat their answers, each read once the
+requests it concerns have arrived. It keeps the most requests that were ever awaiting a response at
+once: a request awaits from its capture until the receiver begins writing its final head, or until
+its connection ends without one, so a client that sends each request only after reading the previous
+final head never has two. And it counts the responses its clients abandoned: a held response, a
+stalled body, or a body still being written whose connection the client closed first. A response
+body can be generated at a scripted size and is written chunk by chunk, so a body many times the
+socket buffers of a loopback connection proves that a client which stopped at the final head never
+read it. A stop of the receiver itself abandons nothing, and an abandoned response is not a fault.
 
 Everything a receiver holds is bounded, and exceeding a bound is recorded as a fault, not captured.
 
@@ -709,6 +720,7 @@ Everything a receiver holds is bounded, and exceeding a bound is recorded as a f
 | Kept faults | 256 per receiver; later faults are counted but not kept |
 | One generated response header value | 128 KiB, enough to test both sides of the emitter's 64 KiB header limit |
 | Generated response headers per block | 512, enough to test both sides of the emitter's 128-field limit |
+| One generated response body | 64 MiB, written in 16 KiB chunks and never held in memory |
 | A scripted `Retry-After` date | One day ahead, far beyond any scenario's wait |
 
 Every await a receiver connection makes also waits for the receiver's stop, so a held response or
@@ -1057,7 +1069,7 @@ clock. The `tests` job runs them beside the separate scenario job.
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
-| An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
+| An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 

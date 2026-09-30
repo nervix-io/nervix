@@ -2551,6 +2551,150 @@ async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_tra
         .assured("the session recovers");
 }
 
+/// The frame that ends `handle` because its relay was redefined.
+fn relay_changed(handle: SubscriptionHandle) -> EncodedFrame<ServerFrame> {
+    SubscriptionEnded {
+        subscription: handle,
+        reason: SubscriptionEndReason::RelayChanged,
+        message: "session subscription 'live' ended because relay 'orders' was redefined"
+            .to_string(),
+    }
+    .encode(&limits())
+    .assured("a subscription end fits a frame")
+}
+
+/// Subscribes `live` to `orders` on `exchange`, which opens it as `generation`.
+async fn subscribe_live(client: &Client, exchange: &mut ServerExchange, generation: u64) {
+    let subscribing = client.clone();
+    let subscribe = nervix_primitives::task::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    let ClientRequest::Subscribe(sent) = request.request else {
+        panic!("a subscription is requested with a subscribe request");
+    };
+    assert_eq!(sent.statement, "CREATE SUBSCRIPTION live TO orders;");
+    exchange
+        .reply(request.request_id, opened(generation), &limits())
+        .await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription is answered");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_the_server_ended_is_not_opened_again_on_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    subscribe_live(&client, &mut exchange, 1).await;
+    exchange.send(relay_changed(subscription(1))).await;
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the end of the subscription is delivered");
+    let SubscriptionEvent::Ended(ended) = event else {
+        panic!("the server's end is the subscription's next event, not {event:?}");
+    };
+    assert_eq!(ended.subscription, subscription(1));
+    let live = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1)))
+    );
+
+    drop(exchange);
+    session_closed(&client).await;
+    let listing_client = client.clone();
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
+    let mut reopened = server.next_exchange().await;
+    let first = reopened.next_request().await;
+    assert!(
+        matches!(first.request, ClientRequest::ListDomains),
+        "nothing is restored on the new session, so its first request is the caller's: {:?}",
+        first.request
+    );
+    reopened
+        .reply(
+            first.request_id,
+            ReplyBody::DomainList(DomainList {
+                domains: tenant_domains(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(listing)
+        .await
+        .assured("the listing task finishes")
+        .assured("the listing succeeds on the new session");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1))),
+        "a new session leaves an ended subscription ended"
+    );
+
+    subscribe_live(&client, &mut reopened, 2).await;
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Active(subscription(2))),
+        "subscribing under the ended name opens a new generation"
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_end_its_session_lost_before_it_was_read_is_still_reported() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    subscribe_live(&client, &mut exchange, 1).await;
+    exchange
+        .send(rows_frame(subscription(1), &[(1, "before the end")]))
+        .await;
+    exchange.send(relay_changed(subscription(1))).await;
+    drop(exchange);
+    within_deadline(async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if client.inner.events.sinks.subscriptions.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the end is reported after its session ended");
+    let SubscriptionEvent::Ended(ended) = event else {
+        panic!(
+            "the rows ended with their session, and the subscription's end is reported, not \
+             {event:?}"
+        );
+    };
+    assert_eq!(ended.subscription, subscription(1));
+    assert_eq!(ended.reason, SubscriptionEndReason::RelayChanged);
+    let live = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1)))
+    );
+
+    let outcome = within_deadline(client.unsubscribe("live"))
+        .await
+        .assured("deleting an ended subscription needs no session");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(
+        outcome.message,
+        "subscription 'live' deleted; the server had already ended it"
+    );
+    assert_eq!(client.subscription_lifecycle(&live), None);
+}
+
 #[nervix_primitives::test]
 async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
     let mut server = TestServer::start().await;

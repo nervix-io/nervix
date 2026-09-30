@@ -38,6 +38,11 @@ jobs:
         with:
           tool: just,toml-cli
 
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       - name: Install LLVM 23
         run: |
           wget https://apt.llvm.org/llvm.sh
@@ -107,6 +112,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: just,toml-cli
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
 
       - name: Setup uv for runner coverage
         uses: astral-sh/setup-uv@v6

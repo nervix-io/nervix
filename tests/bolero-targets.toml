@@ -9,6 +9,20 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/__fuzz__/tests__consumers__bolero_native_emitter_frames_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-emitter-wire"
+invariant = "Every valid native emitter request and reply variant decodes from its frame to the complete original value."
+max_input_bytes = 128
+package = "nervix-client-wire"
+random_iterations = 256
+source = "crates/client-wire/src/tests/consumers.rs"
+test = "tests::consumers::bolero_native_emitter_frames_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/statement__tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
 domain_version = 1
 features = []
@@ -24,7 +38,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/statement__tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "nspl-model"
 invariant = "Canonical NSPL reparses to the complete generated current Create Model."
@@ -38,7 +52,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "nspl-archive-model"
 invariant = "An archived canonical Model document reparses to the complete ordered generated Model sequence."
@@ -61,6 +75,20 @@ package = "nervix-backup"
 random_iterations = 256
 source = "crates/backup/src/tests.rs"
 test = "tests::bolero_domain_records_and_manifests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-wire/src/tests/__fuzz__/tests__requests__bolero_processor_choice_request_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-processor-choice-request"
+invariant = "Processor choice requests with a current target, relay context, search, page and identity decode to the complete original message."
+max_input_bytes = 32
+package = "nervix-client-wire"
+random_iterations = 128
+source = "crates/client-wire/src/tests/requests.rs"
+test = "tests::requests::bolero_processor_choice_request_round_trip"
 test_target = "lib"
 
 [[target]]

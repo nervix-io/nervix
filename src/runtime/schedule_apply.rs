@@ -1153,6 +1153,13 @@ impl Runtime {
                         .emitter_tasks
                         .insert(entity.clone(), task);
                 }
+                #[cfg(feature = "testing")]
+                if had_old_task && !executes_locally {
+                    self.inner
+                        .fault_injection
+                        .pause_emitter_swap_after_detach_if_armed(domain, &emitter_name)
+                        .await;
+                }
                 continue;
             }
             if entity.kind == ModelKind::Reingestor {

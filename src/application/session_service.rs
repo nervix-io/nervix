@@ -48,6 +48,7 @@ use triomphe::Arc;
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
     backup::ServerRetainedBackups,
+    client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
     command_execution::{
         CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
@@ -173,6 +174,8 @@ pub(in crate::application) struct SessionServiceInner {
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.
     pub(in crate::application) client_producers: ClientProducerRouter,
+    /// Routes each client emitter consumer to its current execution owner.
+    pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
@@ -835,6 +838,9 @@ impl ChoicePageBasis {
             ChoiceTarget::IngestUnbranchedRelay => 29,
             ChoiceTarget::IngestBranchedRelay => 30,
             ChoiceTarget::BranchField => 31,
+            ChoiceTarget::ProcessorCompatibleInputRelay => 32,
+            ChoiceTarget::ProcessorInputBranchRelay => 33,
+            ChoiceTarget::ProcessorMaterializedRelay => 34,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1082,7 +1088,10 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestCodec
         | ChoiceTarget::IngestUnbranchedRelay
         | ChoiceTarget::IngestBranchedRelay
-        | ChoiceTarget::BranchField => {
+        | ChoiceTarget::BranchField
+        | ChoiceTarget::ProcessorCompatibleInputRelay
+        | ChoiceTarget::ProcessorInputBranchRelay
+        | ChoiceTarget::ProcessorMaterializedRelay => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1324,7 +1333,12 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestCodec
             | ChoiceTarget::IngestUnbranchedRelay
             | ChoiceTarget::IngestBranchedRelay
-            | ChoiceTarget::BranchField => self.configured_choices_for(&request, session).await,
+            | ChoiceTarget::BranchField
+            | ChoiceTarget::ProcessorCompatibleInputRelay
+            | ChoiceTarget::ProcessorInputBranchRelay
+            | ChoiceTarget::ProcessorMaterializedRelay => {
+                self.configured_choices_for(&request, session).await
+            }
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,

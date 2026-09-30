@@ -18,6 +18,7 @@ extern crate shuttle_tokio as tokio;
 mod backup;
 mod client;
 mod connection;
+mod consumer;
 mod domain_clock;
 mod error;
 mod events;
@@ -34,6 +35,7 @@ mod upload;
 pub use backup::BackupDownloadError;
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectDns, ConnectOptions, TlsRequirement};
+pub use consumer::{EmitterConsumer, EmitterDelivery};
 pub use domain_clock::{
     AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,
     DomainClockRestorationFailure,
@@ -50,26 +52,27 @@ pub use nervix_client_wire::{
     ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
-    DomainInfo, DomainPaceChoice, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect,
-    Leadership, NoticeLevel, OutcomeOrigin, ProducerId, RestoreUploadFailure, RowConformanceError,
-    RowSchema, SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryLost,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRows,
-    SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause,
-    UploadFailure,
+    DomainInfo, DomainPaceChoice, EmitterSettlement, ExecutionReferenceConflict, LeaderEndpoints,
+    LeaderRedirect, Leadership, NoticeLevel, OutcomeOrigin, ProducerId, RestoreUploadFailure,
+    RowConformanceError, RowSchema, SourceSpan, StatementDisposition, StatementOutcome,
+    SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
+    SubscriptionRows, SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit,
+    UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
     AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
-    ClientAttachmentId, ClientBatchDefect, ClientEndpointContract, ClientProcessingFailure,
-    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
-    ClientSubmissionRefusal, CommandExecutionReference, DomainAdmissionWindow,
-    DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, DomainName,
-    ExistingUserPolicy, ImpactPlanningBasis, IngestorName, PacedDomainClock,
-    ResourceUploadIdentity, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
-    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField,
-    SubscriptionDeliveryBehavior, Timestamp, TransactionImpactReport, TransactionInspection,
-    TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
-    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    ClientAttachmentId, ClientBatchDefect, ClientConsumerLimits, ClientEndpointContract,
+    ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
+    ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
+    ClientProducerRefusal, ClientSubmissionRefusal, CommandExecutionReference,
+    DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
+    DomainClockTickObservation, DomainName, EmitterName, ExistingUserPolicy, ImpactPlanningBasis,
+    IngestorName, PacedDomainClock, ResourceUploadIdentity, Restore, RestoreArchive, RestoreMode,
+    RestoreReport, RestoreScope, RestoreStep, RestoreStepOutcome, RestoreStepReport,
+    RestoredDomain, RestoredUsers, SchemaField, SubscriptionDeliveryBehavior, Timestamp,
+    TransactionImpactReport, TransactionInspection, TransactionLifecycle,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
 pub use producer::{

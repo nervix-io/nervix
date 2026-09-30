@@ -125,6 +125,7 @@ use crate::common::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    kafka_group_member::ExternalKafkaGroupMember,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
@@ -146,6 +147,7 @@ use crate::common::{
 };
 
 mod backup;
+mod client_consumers;
 mod client_producers;
 mod common;
 mod database_batches;
@@ -346,6 +348,8 @@ struct ScenarioWorld {
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
     broker_observer: Option<BrokerObserver>,
+    /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
+    external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
     clickhouse_table: Option<String>,
@@ -429,6 +433,8 @@ struct ScenarioWorld {
     client_probe: Option<ClientProbe>,
     /// The producers a scenario opened on client ingestors, and the batches they submitted.
     producers: client_producers::ScenarioProducers,
+    /// Native and console consumers and the Arrow attempts they received.
+    consumers: client_consumers::ScenarioConsumers,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -1124,8 +1130,10 @@ async fn given_http_receiver_answers_unscripted_requests_with(
 
 /// Gives every request for one exact target, its path and query, its own answer, which it takes
 /// instead of the script. Requests of independent branches or source relays have no order between
-/// them, so a scenario answers each of them by its target rather than by its position.
+/// them, so a scenario answers each of them by its target rather than by its position. Given again
+/// later, the answer replaces the earlier one, so an endpoint that kept failing a target recovers.
 #[given(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
+#[when(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
 async fn given_http_receiver_answers_requests_for_target(
     world: &mut ScenarioWorld,
     name: String,
@@ -1213,7 +1221,31 @@ impl ExpectedHttpRequest {
     /// Whether `request` has this request line, which is how a step finds the one captured request
     /// a docstring describes when the order requests arrive in is not part of the contract.
     fn has_request_line_of(&self, request: &CapturedRequest) -> bool {
-        self.request_line == format!("{} {}", request.method, request.target)
+        self.request_line == request.request_line()
+    }
+
+    /// Asserts that exactly one of the `captured` requests has this request line, and that it is
+    /// the request this docstring describes.
+    fn assert_one_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        let mut matching = Vec::new();
+        for request in captured {
+            if self.has_request_line_of(request) {
+                matching.push(request);
+            }
+        }
+        let [request] = matching.as_slice() else {
+            panic!(
+                "HTTP receiver '{receiver}' captured {} request(s) with the request line '{}', \
+                 not exactly one, among {} captured request(s)",
+                matching.len(),
+                self.request_line,
+                captured.len()
+            );
+        };
+        self.assert_matches(
+            &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+            request,
+        );
     }
 
     /// Asserts that `request`, which `described` names in a failure, is the request this
@@ -1283,29 +1315,70 @@ async fn then_http_receiver_captured_one_request_that_is(
 ) {
     let expected = ExpectedHttpRequest::from_step(world, step);
     let captured = http_receiver(world, &name).captured();
-    let mut matching = Vec::new();
-    for request in &captured {
-        if expected.has_request_line_of(request) {
-            matching.push(request);
-        }
-    }
-    let [request] = matching.as_slice() else {
-        panic!(
-            "HTTP receiver '{name}' captured {} request(s) with the request line '{}', not \
-             exactly one, among {} captured request(s)",
-            matching.len(),
-            expected.request_line,
-            captured.len()
-        );
+    expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// the one such request with the request the docstring describes. A scenario uses it for a request
+/// that follows others whose number it cannot name, such as the attempts of a retried request.
+#[then(expr = "HTTP receiver {string} eventually captures one request that is")]
+async fn then_http_receiver_eventually_captures_one_request_that_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
     };
-    expected.assert_matches(
-        &format!("HTTP receiver '{name}' request '{}'", expected.request_line),
-        request,
+    expected.assert_one_captured(&name, &captured);
+}
+
+/// Asserts the most requests the receiver ever held awaiting their final head at once. A request
+/// awaits from its capture until the receiver begins writing its final head, or until its
+/// connection ends without one, so a sender that waits for each final head never has two.
+#[then(expr = "HTTP receiver {string} never had more than {int} request(s) awaiting a response")]
+async fn then_http_receiver_never_had_more_awaiting_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    most: usize,
+) {
+    let observed = http_receiver(world, &name).most_awaiting_responses();
+    assert!(
+        observed <= most,
+        "HTTP receiver '{name}' held {observed} requests awaiting a response at once, more than \
+         {most}"
     );
 }
 
+/// Waits until clients have abandoned at least `expected` responses the receiver had not finished:
+/// a held response, a body it was still writing or had stalled, closed from the client's side. A
+/// stop of the receiver itself abandons nothing.
+#[then(
+    expr = "HTTP receiver {string} eventually sees the client abandon at least {int} unfinished \
+            response(s)"
+)]
+async fn then_http_receiver_sees_abandoned_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let waited = http_receiver(world, &name)
+        .wait_for_abandoned_responses(expected, HTTP_RECEIVER_WAIT)
+        .await;
+    if let Err(error) = waited {
+        panic!("HTTP receiver '{name}': {error}");
+    }
+}
+
 /// Asserts that no captured request has `request_line`. A scenario uses it for a request that must
-/// never be sent at all, once later requests that it would have preceded have arrived.
+/// never be sent at all, once later requests that it would have preceded have arrived, or for one
+/// that cannot have been sent yet because the request ahead of it keeps failing and holds back all
+/// later work of its emitter.
 #[then(expr = "HTTP receiver {string} captured no request with request line {string}")]
 async fn then_http_receiver_captured_no_request_with_request_line(
     world: &mut ScenarioWorld,
@@ -1315,7 +1388,7 @@ async fn then_http_receiver_captured_no_request_with_request_line(
     let request_line = expand_placeholders(world, &request_line);
     let captured = http_receiver(world, &name).captured();
     for request in &captured {
-        let captured_line = format!("{} {}", request.method, request.target);
+        let captured_line = request.request_line();
         assert_ne!(
             captured_line, request_line,
             "HTTP receiver '{name}' captured a request that must never be sent:\n{request}"
@@ -10424,6 +10497,127 @@ async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld,
         .release_remote_relay_dispatch_pause(&domain);
 }
 
+#[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
+async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(
+    expr = "entity drain on node {string} reports no buffered relay batches in domain {string}"
+)]
+async fn given_stale_owner_buffer_drain_report(
+    world: &mut ScenarioWorld,
+    node: String,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .report_no_owner_buffered_batches_for_entity_drain(
+            nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+            crate::common::cluster::node_name(&node),
+        );
+}
+
+#[then(expr = "the relay owner fan-out pause for domain {string} is reached")]
+async fn then_owner_relay_fanout_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out pause for domain '{domain}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the relay owner fan-out pause for domain {string} is released")]
+async fn when_owner_relay_fanout_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_owner_relay_fanout_pause(&domain);
+}
+
+#[then(expr = "relay owner fan-out for domain {string} has finished")]
+async fn then_owner_relay_fanout_has_finished(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_completion(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out in domain '{domain}' did not finish: {error}")
+    });
+}
+
+fn emitter_swap_pause_key(
+    world: &ScenarioWorld,
+    domain: &str,
+    emitter: &str,
+) -> (nervix_models::DomainName, nervix_models::EmitterName) {
+    let domain = expand_placeholders(world, domain);
+    let emitter = expand_placeholders(world, emitter);
+    (
+        nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+        nervix_models::EmitterName::try_from(emitter.as_str()).expect("valid scenario emitter"),
+    )
+}
+
+#[given(expr = "emitter {string} in domain {string} pauses its swap after detaching")]
+async fn given_emitter_swap_after_detach_pause(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .pause_emitter_swap_after_detach(domain, emitter);
+}
+
+#[then(expr = "the swap of emitter {string} in domain {string} has detached it")]
+async fn then_emitter_swap_after_detach_pause_is_reached(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_emitter_swap_after_detach_pause(&domain, &emitter),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "swap of emitter '{}' in domain '{}' did not detach it: {error}",
+            emitter.as_str(),
+            domain.as_str()
+        )
+    });
+}
+
+#[when(expr = "the swap of emitter {string} in domain {string} is released")]
+async fn when_emitter_swap_after_detach_pause_is_released(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .release_emitter_swap_after_detach_pause(&domain, &emitter);
+}
+
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
 async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -10831,14 +11025,32 @@ async fn given_consensus_storage_failure(
     boundary: String,
     domain: String,
 ) {
+    fail_consensus_storage_on_leader(world, &boundary, format!("put-domain:{domain}")).await;
+}
+
+#[given(expr = "consensus storage on the leader fails {word} committing operation {string}")]
+async fn given_consensus_storage_operation_failure(
+    world: &mut ScenarioWorld,
+    boundary: String,
+    operation: String,
+) {
+    let operation = expand_placeholders(world, &operation);
+    fail_consensus_storage_on_leader(world, &boundary, operation).await;
+}
+
+async fn fail_consensus_storage_on_leader(
+    world: &mut ScenarioWorld,
+    boundary: &str,
+    operation: String,
+) {
     let leader = current_leader_node(world).await;
     world
         .placeholders
         .insert("storage_node".into(), leader.clone());
     world.fault_injection.fail_consensus_storage(
         &crate::common::cluster::node_name(&leader),
-        format!("put-domain:{domain}"),
-        match boundary.as_str() {
+        operation,
+        match boundary {
             "before" => nervix_consensus::StorageBoundary::BeforeCommit,
             "after" => nervix_consensus::StorageBoundary::AfterSync,
             _ => panic!("the fixture names a before or after storage boundary"),
@@ -11117,6 +11329,66 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+/// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
+/// Nervix's consumers and holds them, reading without committing, until it leaves.
+#[when(expr = "an external member joins Kafka consumer group {string} on topic {string}")]
+async fn when_an_external_member_joins_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+    topic: String,
+) {
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    assert!(
+        !world.external_kafka_members.contains_key(&group),
+        "an external member already belongs to Kafka consumer group '{group}'"
+    );
+    let member = world
+        .cluster()
+        .join_external_kafka_group_member(&group, &topic)
+        .expect("the external Kafka group member should join");
+    world.external_kafka_members.insert(group, member);
+}
+
+#[then(
+    expr = "within {string} the external member of Kafka consumer group {string} holds topic \
+            {string} partition {int}"
+)]
+async fn then_the_external_member_of_kafka_consumer_group_holds_partition(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .external_kafka_members
+        .get_mut(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .wait_until_assigned(&topic, partition, duration)
+        .await
+        .expect("the external Kafka group member was not assigned the partition");
+}
+
+#[when(expr = "the external member leaves Kafka consumer group {string}")]
+async fn when_the_external_member_leaves_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+) {
+    let group = expand_placeholders(world, &group);
+    world
+        .external_kafka_members
+        .remove(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .leave()
+        .await
+        .expect("the external Kafka group member should leave");
 }
 
 #[then(
@@ -12637,6 +12909,32 @@ async fn given_named_client_is_connected_to_endpoint_with_cluster_seeds(
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
     connect_named_client_to_node(world, name, leader, Vec::new(), false).await;
+}
+
+#[given(expr = "client {string} is connected to the server process")]
+async fn given_named_client_is_connected_to_server_process(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let grpc_uri = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a real server process")
+        .grpc_uri();
+    let options = client_connect_options(&grpc_uri).expect("server process client options");
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to the process: {error}")
+        });
+    assert!(
+        world
+            .transaction_clients
+            .insert(name.clone(), client)
+            .is_none(),
+        "client '{name}' is already connected"
+    );
 }
 
 #[given(
@@ -22198,6 +22496,121 @@ async fn then_named_client_subscription_is_interrupted(
              {lifecycle:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "within {string} client {string} observes subscription {string} ended with reason \
+            {string}"
+)]
+async fn then_named_client_observes_subscription_ended(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    reason: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the end deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected_reason = match reason.as_str() {
+        "RelayChanged" => nervix_client_core::wire::SubscriptionEndReason::RelayChanged,
+        "RelayRemoved" => nervix_client_core::wire::SubscriptionEndReason::RelayRemoved,
+        other => panic!("the scenario names an end reason the protocol does not have: {other}"),
+    };
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    // Rows the subscription delivered before its end precede it.
+    let ended = loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = tokio::time::timeout(remaining, client.next_subscription())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "client '{client_name}' did not report the end of subscription \
+                     '{subscription_name}' within {duration:?}"
+                )
+            })
+            .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        match event {
+            nervix_client_core::SubscriptionEvent::Ended(ended) => break ended,
+            nervix_client_core::SubscriptionEvent::Rows(_) => {}
+            other => panic!(
+                "client '{client_name}' reported {other:?} before the end of subscription \
+                 '{subscription_name}'"
+            ),
+        }
+    };
+    assert_eq!(ended.subscription.name.as_str(), subscription_name);
+    assert_eq!(
+        ended.reason, expected_reason,
+        "client '{client_name}' reported the end of subscription '{subscription_name}' as {:?}",
+        ended.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is ended")]
+async fn then_named_client_subscription_is_ended(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let lifecycle = client.subscription_lifecycle(&name);
+    let Some(nervix_client_core::SubscriptionLifecycle::Ended(ended)) = lifecycle else {
+        panic!(
+            "client '{client_name}' subscription '{subscription_name}' is not ended: {lifecycle:?}"
+        );
+    };
+    assert_eq!(ended.name.as_str(), subscription_name);
+}
+
+/// A subscription the server ended is never opened again, so nothing about it may arrive, and a
+/// longer window only strengthens the assertion.
+#[then(expr = "client {string} reports no event of subscription {string} within {string}")]
+async fn then_named_client_reports_no_subscription_event(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+    duration: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the silence window is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(read) = tokio::time::timeout(remaining, client.next_subscription()).await else {
+            return;
+        };
+        let event =
+            read.unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        assert_ne!(
+            event.subscription().name.as_str(),
+            subscription_name,
+            "client '{client_name}' reported an event of subscription '{subscription_name}': \
+             {event:?}"
+        );
     }
 }
 

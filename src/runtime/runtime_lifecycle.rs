@@ -117,6 +117,8 @@ impl Runtime {
                 state_identities: DashMap::default(),
                 client_ingestors: DashMap::default(),
                 client_producer_budget: client_ingestor::ClientProducerBudget::default(),
+                client_emitters: DashMap::default(),
+                client_emitter_budget: client_emitter::ClientEmitterBudget::default(),
                 endpoint_bindings: DashMap::default(),
                 routed_endpoints: DashMap::default(),
                 relay_boundary_fanouts: DashMap::default(),
