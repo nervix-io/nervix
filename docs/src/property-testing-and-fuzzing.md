@@ -128,7 +128,9 @@ recorded boundary, not a claim:
 
 Install the dated sanitizer nightly named in the inventory and the pinned CLI. Server properties
 also require the native server build dependencies, including `protoc` for the Pulsar driver;
-both ordinary and sanitizer CI jobs install the Protocol Buffers compiler.
+both ordinary and sanitizer CI jobs install the Protocol Buffers compiler, Trunk and the browser
+target. Every compiled Bolero recipe builds the embedded web console before discovering the server
+properties, using the same configured compiler wrapper as the product build.
 
 ```bash
 rustup toolchain install nightly-2026-09-17 --profile minimal

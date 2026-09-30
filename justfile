@@ -14,31 +14,31 @@ install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="":
+test-bolero filter="": build-web-console
     python3 scripts/bolero.py test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
-fuzz-list:
+fuzz-list: build-web-console
     python3 scripts/bolero.py list
 
 # Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
-fuzz target duration="30":
+fuzz target duration="30": build-web-console
     python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
 
 # Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
-fuzz-all duration="30":
+fuzz-all duration="30": build-web-console
     python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
 
 # Replay the exact saved input through its ordinary property assertion.
-fuzz-replay target failure:
+fuzz-replay target failure: build-web-console
     python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
-fuzz-reduce target failure:
+fuzz-reduce target failure: build-web-console
     python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
 
 # Compare the inventory, package declarations, test harness and compiled Bolero targets.
-validate-bolero:
+validate-bolero: build-web-console
     python3 scripts/bolero.py validate
 
 # Check the dedicated PR and campaign workflow with the pinned Actions linter.
@@ -55,7 +55,7 @@ test-bolero-runner:
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
-coverage-bolero duration="2":
+coverage-bolero duration="2": build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
@@ -69,7 +69,7 @@ coverage-bolero duration="2":
     "${coverage[@]}" report --fail-under=80
 
 # Qualify the restore installation properties while measuring the runner during focused iteration.
-coverage-bolero-restore duration="30":
+coverage-bolero-restore duration="30": build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
