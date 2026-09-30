@@ -659,7 +659,13 @@ overflowing_arithmetic!(
 );
 
 /// The operators whose lanes the SIMD kernels compute.
-const KERNEL_OPERATORS: [Arithmetic; 3] = [Arithmetic::Add, Arithmetic::Sub, Arithmetic::Mul];
+const KERNEL_OPERATORS: [Arithmetic; 5] = [
+    Arithmetic::Add,
+    Arithmetic::Sub,
+    Arithmetic::Mul,
+    Arithmetic::Div,
+    Arithmetic::Rem,
+];
 
 /// A column of every pair of `values` on the side `pick` chooses. Its lanes are null where
 /// `null_lane` says so, and a null lane keeps its pair's value in the buffer, so an operand that
@@ -794,6 +800,9 @@ where
         let null_left = operator.evaluate_integers(Operand::Scalar(&null), Operand::Column(&right));
         assert_eq!(null_left.column.null_count(), right.len(), "{operator:?}");
         assert!(failed_lanes(&null_left).is_empty(), "{operator:?}");
+        let null_right = operator.evaluate_integers(Operand::Column(&left), Operand::Scalar(&null));
+        assert_eq!(null_right.column.null_count(), left.len(), "{operator:?}");
+        assert!(failed_lanes(&null_right).is_empty(), "{operator:?}");
     }
 }
 
