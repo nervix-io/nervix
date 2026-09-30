@@ -1045,11 +1045,9 @@ pub fn duration_lit<'src>()
             .then(word_raw())
             .map(|(number, unit)| format!("{number}{unit}"))
             .try_map(|raw, span| {
-                humantime::parse_duration(&raw)
+                nervix_models::parse_duration_text(&raw)
                     .map(|_| raw.clone())
-                    .map_err(|error| {
-                        Rich::custom(span, format!("invalid duration '{raw}': {error}"))
-                    })
+                    .map_err(|report| Rich::custom(span, report.current_context().to_string()))
             }),
         unknown_word(),
     ))
@@ -1698,6 +1696,68 @@ fn nested_expression_tokens<'src>(
     .collect::<Vec<Vec<Token>>>()
     .map(|runs| runs.into_iter().flatten().collect())
     .boxed()
+}
+
+/// The tokens of one expression written as a value in a braced list, such as a sink's
+/// `VALUES { … }` or an inferencer's `INPUTS { … }`: every token up to a comma or the list's
+/// closing brace outside every parenthesized, bracketed or braced group.
+///
+/// Brackets group like parentheses, so an array literal's commas stay inside the value that holds
+/// them rather than separating it from the next entry.
+pub fn braced_list_value_tokens<'src>()
+-> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
+    let group = recursive(|element| {
+        let contents = element
+            .repeated()
+            .collect::<Vec<_>>()
+            .map(|parts: Vec<Vec<Token>>| parts.into_iter().flatten().collect::<Vec<_>>());
+        let parens = contents
+            .clone()
+            .delimited_by(tok(Token::LParen), tok(Token::RParen))
+            .map(|mut tokens| {
+                tokens.insert(0, Token::LParen);
+                tokens.push(Token::RParen);
+                tokens
+            });
+        let brackets = contents
+            .clone()
+            .delimited_by(tok(Token::LBracket), tok(Token::RBracket))
+            .map(|mut tokens| {
+                tokens.insert(0, Token::LBracket);
+                tokens.push(Token::RBracket);
+                tokens
+            });
+        let braces = contents
+            .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
+            .map(|mut tokens| {
+                tokens.insert(0, Token::LBrace);
+                tokens.push(Token::RBrace);
+                tokens
+            });
+        let leaf = any()
+            .filter(|token: &Token| {
+                !matches!(
+                    token,
+                    Token::LParen
+                        | Token::RParen
+                        | Token::LBracket
+                        | Token::RBracket
+                        | Token::LBrace
+                        | Token::RBrace
+                )
+            })
+            .map(|token| vec![token]);
+        // Naming the slot stops the raw delimiters leaking out as suggestions: a bare "(" offered
+        // here cannot be completed into anything the expression grammar accepts.
+        choice((parens, brackets, braces, leaf)).labelled("value_expression")
+    });
+    group
+        .filter(|tokens| !matches!(tokens.as_slice(), [Token::Comma]))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(|parts| parts.into_iter().flatten().collect())
+        .boxed()
 }
 
 pub fn expression_before_clause<'src>(

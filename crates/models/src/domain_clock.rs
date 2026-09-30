@@ -20,7 +20,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ClusterNodeIdentity, Timestamp};
+use crate::{ClusterNodeIdentity, Timestamp, parse_duration_text};
 
 mod admission;
 mod observation;
@@ -271,10 +271,9 @@ impl FromStr for DomainClockPeriod {
     type Err = DomainClockError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let duration =
-            humantime::parse_duration(value).map_err(|_| DomainClockError::InvalidPeriod {
-                value: value.to_string(),
-            })?;
+        let duration = parse_duration_text(value).map_err(|_| DomainClockError::InvalidPeriod {
+            value: value.to_string(),
+        })?;
         Self::try_from(duration).map_err(|_| DomainClockError::InvalidPeriod {
             value: value.to_string(),
         })
@@ -334,10 +333,9 @@ impl FromStr for DomainClockSkew {
     type Err = DomainClockError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let duration =
-            humantime::parse_duration(value).map_err(|_| DomainClockError::InvalidSkew {
-                value: value.to_string(),
-            })?;
+        let duration = parse_duration_text(value).map_err(|_| DomainClockError::InvalidSkew {
+            value: value.to_string(),
+        })?;
         Self::try_from(duration).map_err(|_| DomainClockError::InvalidSkew {
             value: value.to_string(),
         })
