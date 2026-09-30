@@ -1488,9 +1488,7 @@ validate-dns-dependencies:
         exit 1
     fi
 
-# `just validate` without formatting fixes and without `validate-bolero`: its compiled discovery builds
-# every Bolero target, and CI's `bolero-random` job runs the same discovery before the properties.
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
 # direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a

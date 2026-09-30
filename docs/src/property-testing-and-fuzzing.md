@@ -160,8 +160,7 @@ corpus paths different from Bolero's actual work directory. Discovery executes o
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
-`just validate` includes this gate. In CI the Bolero workflow's `bolero-random` job runs the same
-discovery before its properties, so the native checks job, `just validate-ci`, does not repeat it.
+`just validate` and `just validate-ci` include this gate.
 
 `just test-bolero` requires the configured randomized-case count and checked-in corpus
 replay for every selected property, checking Bolero's reported input counts. Fuzz runs use real
