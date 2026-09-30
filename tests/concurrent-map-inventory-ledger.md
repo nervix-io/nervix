@@ -144,7 +144,7 @@ replica's synchronization task, and it retires with the state, ending its announ
 | `RuntimeInner::executions` | `bind_domain_clock` per processor batch, per materialized relay state batch and per filtered subscription batch, bypassing the clock the task retains; per WASM checkpoint; per failed record | Typed Ratchet 11 |
 | `DomainForceFlush::state` mutex | `pending_completion` per participant loop iteration | Typed Ratchet 11 |
 | Prometheus `MetricVec` children | `with_label_values` per answered client batch, per quiesced payload, per dropped subscription frame | Typed Ratchet 11 |
-| `RuntimeInner::endpoint_bindings`, `routed_endpoints` | get, deep `Vec` clone and key allocations per HTTP request and per WebSocket message | Typed Ratchet 12 |
+| `RuntimeInner::endpoint_intake_routes` | one immutable publication; borrowed host/path resolution per HTTP request, retained route per WebSocket connection | completed publication: Typed Ratchet 12 |
 
 ## Inventory by owner
 
@@ -198,7 +198,7 @@ replica's synchronization task, and it retires with the state, ending its announ
 | `RuntimeInner::force_flush_by_domain` and `DomainForceFlush::state` | `entry` at participant start and per request; the state mutex per participant loop iteration | per batch (the mutex) | participants keep the coordinator | the request runs under the `entry` guard | map: retain: bounded protocol (single coordinator per domain); mutex: Typed Ratchet 11 |
 | `RuntimeInner::entity_gate_holds`, `active_domain_alters` | gate engagement and release; ALTER exclusion | lifecycle, control plane | coordination identity and pointer identity | the drain `Ref` spans the entity drain status | retain: lifecycle registry |
 | `RuntimeInner::frozen_ownership_handoff_entities` | engaged and released by handoff; read every task-loop iteration | per batch | the watch keeps the map and key but still takes the shard lock | freeze published before notification | Typed Ratchet 11 |
-| `RuntimeInner::endpoint_bindings`, `routed_endpoints` | bound at source start; read per request and message | per record | no handle retained | clones under the guard | Typed Ratchet 12 |
+| `RuntimeInner::endpoint_intake_routes` (`ArcSwap`) and each `EndpointBindingLifetime::intake` (`ArcSwapOption`) | definitions replaced at domain install/teardown; exact lifetimes bound at source start and ended before unbind | one table load per HTTP request or WebSocket upgrade; one borrowed intake lease per payload | request retains its route; WebSocket retains its route and signaling protocol; an admitted request retains its intake lease | whole-table RCU preserves unrelated writers; ended lifetimes refuse later intake through retained tables | retain: immutable publication, Typed Ratchet 12 |
 | `RuntimeInner::compiled_domain_udfs`, `compiled_wasm_modules`, `domain_instantiation_errors` | domain installation; observers | lifecycle, observer | content identity | short | retain: lifecycle registry |
 | `IngestorQuiesceControl::buffers` (`Mutex<HashMap>`) | locked only after the published decision selects buffering; replay | per record, only while quiesced | instance tasks and endpoints | `MAX SIZE` per instance | retain: bounded protocol (retained-payload buffer) |
 | `RelayConsumerQueue::batches` (`ConcurrentQueue`) | one push per batch per consumer; one receiver pops | per batch | receiver owns its queue | lock-free, bounded by admitted count | retain: bounded protocol (relay fan-out queue) |
@@ -289,3 +289,79 @@ epic, but tracing them found defects:
 - `relay_boundary_fanouts` and `domain_routings` are never removed with their domain.
 - The Shuttle `DashMap` adapter documentation claims it observes every shard acquisition; it models
   one lock over the whole map.
+
+## Endpoint intake publication evidence
+
+Typed Ratchet 12 publishes configured definitions and bound source lifetimes through
+`EndpointIntakeRoutes`. HTTP resolves a borrowed host/path once; an established WebSocket keeps its
+route and signaling protocol, including signaling data intake. The source lifetime's optional
+intake fences admission through retained routes before unbind or domain withdrawal publishes the
+replacement. A lease already admitted may finish; closing a preceding source removes only its
+exact allocation. Intakes need not implement `Clone`.
+
+Both endpoint DashMap mutation sites are gone. The current spelling-based ratchet also counts the
+replacement table's ordinary, privately owned `HashMap::entry` during cold publication, so its
+complete count falls from 161 to 160. That local entry is permitted and acquires no lock; Typed
+Ratchet 02's resolved synchronization detector owns correcting this classification.
+
+`endpoint_requests_reuse_bound_routes` dispatches real JSON requests and observes the prepared
+output-route reference count during header capture. It holds steady across requests. The registered
+`endpoint-route-table` Bolero target exercises bind, unbind, replace, domain withdrawal, and clear
+against an independent visible-route and retained-lifetime reference; its two committed corpus
+inputs and 256 randomized sequences passed. Unit regressions cover shared intake allocations,
+other-domain preservation, exact unbind identity, teardown, and retained signaling allocation.
+
+The production owner uses the existing opaque `ArcSwap` and `ArcSwapOption` boundary. Shuttle
+checks whole-domain publication, concurrent replacement and unbind with a retained request, and
+teardown with a retained table. Loom does not model those publication internals; this change adds
+no independent memory-ordering protocol. Listener ownership and network primitives retain their
+existing contracts, so Turmoil is outside this owner's scope. The endpoint Chaos workload remains
+owned by Typed Ratchet 10.
+
+Local verification passed 1,538 instrumented server unit tests and 83 public endpoint scenarios
+covering HTTP, WebSockets, signaling, codecs, virtual hosts, shared-domain withdrawal and retained
+connection lifetimes. The three new Shuttle checks passed their random, PCT and bounded DFS
+schedules and replay. `just validate`, `just book` and `just ratchet` passed. Combined LLVM and
+Python runner reports cover 329 of 339 executable changed lines (97.05%) before integration with
+the latest main branch.
+
+After integrating main's codec error-reporting, representation properties and checked arithmetic,
+all 1,589 instrumented server unit tests passed with the downloaded ONNX runtime configured. The
+merged runner passed 30 unit tests against the complete 26-target inventory, and `just book`
+passed its 282 Python checks and documentation build. Fresh server and Python reports cover
+301 of 331 executable patch lines (90.94%) against the merged main. Public endpoint scenarios and
+Shuttle evidence above were collected before this integration; unchanged endpoint HTTP edge
+paths are exercised by the full PR scenario gate as well.
+
+The final pre-push integration also preserves the subsequent NSPL repairs and Typed Ratchet 13's
+checkpoint-replication publication. Endpoint owner and HTTP edge code are unchanged by that merge;
+server Clippy across all targets with `testing`, formatting, the 30 runner tests and the debt
+ratchet passed. The inventory now has 27 Bolero targets, and the combined recurring-lock count is
+157 (main's 158 minus this delivery's one-site decrease).
+
+The full-server sanitizer compilation exceeded the existing 1,800-second local build limit under
+shared-host paging. Its failed and interrupted run evidence remains in `target/bolero/runs`.
+The server's fuzz package profile uses lighter optimization without debug output; assertions,
+AddressSanitizer, coverage feedback, target selection and case/input/campaign bounds are unchanged.
+The real sanitizer CI campaign remains a required merge gate; local compilation is not reported
+as completed fuzz execution.
+
+### Same-host routing measurement
+
+`just bench-endpoint-routing` ran before and after on the same Intel Core i9-14900HX host with
+Rust 1.98.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
+Each run used five samples of 10,000 operations against the same live endpoint ingestor, with
+per-thread jemalloc allocated-byte counters and the cooperative budget inside the loop. The request
+case measures endpoint selection and intake admission; the retained case measures intake admission
+without route resolution. Neither includes payload copying, codec work, or relay delivery. Timing
+is subject to other work on the host; byte averages below are whole bytes per operation.
+
+| Case | Median ns per operation | Range ns | Allocated bytes per operation after warm-up |
+| --- | ---: | ---: | ---: |
+| Request routing and admission, before | 6,268 | 4,930–7,979 | 424 |
+| Published request routing and admission | 1,552 | 1,542–1,838 | 0 |
+| Retained route admission | 331 | 330–334 | 0 |
+
+The request measurement is approximately 4.0 times faster on this host. The allocation result,
+non-Clone intake type, and prepared-route reference probe establish that endpoint routing shares
+its prepared state. They do not claim an end-to-end ingestion throughput improvement.

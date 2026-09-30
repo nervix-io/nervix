@@ -900,6 +900,14 @@ failure. A body `BUFFER` retained is unfolded when it drains after resume; if th
 cannot take it then, it is reported as an ingestor error and not delivered, like any other retained
 body that fails after its 202.
 
+A WebSocket connection retains the route and signaling protocol selected at upgrade. Stopping or
+replacing its endpoint source ends that intake lifetime, including signaling data intake. During
+payload ingestion after signaling, the next refused payload closes the connection with 1013,
+even if the source has already restarted. Open a new connection to use the replacement source.
+A request already admitted before source ending may finish. Stopping a domain
+withdraws only that domain's routes and intakes; another domain serving the same host and path
+continues receiving requests. A route whose configuration has been withdrawn returns HTTP 404.
+
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 
 TLS is configured on the VHOST itself:

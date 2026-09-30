@@ -563,11 +563,6 @@ impl RuntimeSourceHost {
     /// the host holds, on the request path rather than in the source loop.
     pub(super) fn request_intake(&self) -> EndpointIngestBinding {
         EndpointIngestBinding {
-            runtime_key: DomainNodeRef::node_in(
-                self.domain.clone(),
-                ModelKind::Ingestor,
-                self.ingestor.clone(),
-            ),
             quiesce: self.quiesce.clone(),
             domain: self.domain.clone(),
             ingestor: self.ingestor.clone(),
