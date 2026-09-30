@@ -53,6 +53,15 @@ qualify-bolero:
 test-bolero-runner:
     python3 -m unittest scripts.tests.test_bolero
 
+# Measure runner edits without launching unrelated product fuzz campaigns.
+coverage-bolero-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/bolero
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
+
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
 coverage-bolero duration="2":
@@ -136,6 +145,13 @@ bench-checked-lanes-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
 
 test-admission-runtime *args: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
+# Measure the endpoint's actual request routing and per-thread allocations on the same host.
+bench-endpoint-routing: build-web-console download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
+
+test-endpoint-intake *args: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 test-web-console:
