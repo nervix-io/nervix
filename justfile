@@ -91,7 +91,7 @@ coverage-bolero-runner:
     set -euo pipefail
     mkdir -p target/bolero
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
@@ -169,6 +169,13 @@ bench-window-admission *args:
 # run each. Extra arguments are forwarded to Criterion.
 bench-checked-lanes *args:
     cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
+
+# Compare constant division at every width with scalar reciprocal and checked lane loops.
+bench-constant-division *args:
+    cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
+
+bench-constant-division-x86-64-v3 *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
 
 # The same measurement built for the x86-64-v3 payload the Docker image ships, in its own target
 # directory: the lane loop compiles for AVX2 as the payload's does, and the kernels still select
@@ -1111,6 +1118,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
+    cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
@@ -1976,6 +1984,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
     fi
     : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
     : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
+    : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"
     : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}"
     : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
     docker buildx build \
@@ -1988,6 +1997,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         --build-arg LLVM_VERSION={{ llvm_version }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
         --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
+        --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
         ${cache_from_flag} \

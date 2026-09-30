@@ -120,6 +120,7 @@ class InventoryTests(unittest.TestCase):
             "consensus-archived-counts",
             "registry-archived-models",
             "runtime-window-archived-counts",
+            "simd-constant-division",
             "simd-checked-lanes",
             "replica-progress",
         })

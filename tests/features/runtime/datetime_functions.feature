@@ -22,6 +22,10 @@ Feature: Datetime functions
         iso_week I64,
         day_start DATETIME,
         week_start DATETIME,
+        offset_week_start DATETIME,
+        offset_day_start DATETIME,
+        offset_hour_start DATETIME,
+        offset_minute_start DATETIME,
         quarter_hour DATETIME,
         delayed DATETIME,
         elapsed_seconds I64,
@@ -66,6 +70,10 @@ Feature: Datetime functions
               iso_week = date_part('iso_week', input.occurred_at),
               day_start = date_trunc('day', input.occurred_at),
               week_start = date_trunc('week', input.occurred_at),
+              offset_week_start = date_trunc('week', input.occurred_at, '+05:30'),
+              offset_day_start = date_trunc('day', input.occurred_at, '+05:30'),
+              offset_hour_start = date_trunc('hour', input.occurred_at, '+05:30'),
+              offset_minute_start = date_trunc('minute', input.occurred_at, '+05:30'),
               quarter_hour = date_bin('minute', 15, input.occurred_at, input.origin),
               delayed = date_add('millisecond', input.delay_ms, input.occurred_at),
               elapsed_seconds = date_diff('second', input.origin, input.occurred_at),
@@ -88,8 +96,8 @@ Feature: Datetime functions
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "id":"leap-day" | "hour_of_day":23 | "day_of_year":60 | "iso_week":9 | "day_start":"2000-02-29T00:00:00+00:00" | "week_start":"2000-02-28T00:00:00+00:00" | "quarter_hour":"2000-02-29T23:50:00+00:00" | "delayed":"2000-03-01T00:00:00.250+00:00" | "elapsed_seconds":85650 | "unix_milliseconds":951868350250 | "from_epoch":"2000-03-01T00:00:00+00:00" | "execution_day":"2000-02-29T00:00:00+00:00" | "execution_day_of_year":60
-      "id":"before-epoch" | "hour_of_day":23 | "day_of_year":365 | "iso_week":1 | "day_start":"1969-12-31T00:00:00+00:00" | "week_start":"1969-12-29T00:00:00+00:00" | "quarter_hour":"1969-12-31T23:45:00+00:00" | "delayed":"1969-12-31T23:59:59.998999999+00:00" | "elapsed_seconds":0 | "unix_milliseconds":-1 | "from_epoch":"1969-12-31T23:59:59.999+00:00" | "execution_day":"2000-02-29T00:00:00+00:00" | "execution_day_of_year":60
+      "id":"leap-day" | "hour_of_day":23 | "day_of_year":60 | "iso_week":9 | "day_start":"2000-02-29T00:00:00+00:00" | "week_start":"2000-02-28T00:00:00+00:00" | "quarter_hour":"2000-02-29T23:50:00+00:00" | "delayed":"2000-03-01T00:00:00.250+00:00" | "elapsed_seconds":85650 | "unix_milliseconds":951868350250 | "from_epoch":"2000-03-01T00:00:00+00:00" | "execution_day":"2000-02-29T00:00:00+00:00" | "execution_day_of_year":60 | "offset_week_start":"2000-02-27T18:30:00+00:00" | "offset_day_start":"2000-02-29T18:30:00+00:00" | "offset_hour_start":"2000-02-29T23:30:00+00:00" | "offset_minute_start":"2000-02-29T23:52:00+00:00"
+      "id":"before-epoch" | "hour_of_day":23 | "day_of_year":365 | "iso_week":1 | "day_start":"1969-12-31T00:00:00+00:00" | "week_start":"1969-12-29T00:00:00+00:00" | "quarter_hour":"1969-12-31T23:45:00+00:00" | "delayed":"1969-12-31T23:59:59.998999999+00:00" | "elapsed_seconds":0 | "unix_milliseconds":-1 | "from_epoch":"1969-12-31T23:59:59.999+00:00" | "execution_day":"2000-02-29T00:00:00+00:00" | "execution_day_of_year":60 | "offset_week_start":"1969-12-28T18:30:00+00:00" | "offset_day_start":"1969-12-31T18:30:00+00:00" | "offset_hour_start":"1969-12-31T23:30:00+00:00" | "offset_minute_start":"1969-12-31T23:59:00+00:00"
       """
     When these NSPL commands are executed on the leader node
       """
@@ -134,7 +142,8 @@ Feature: Datetime functions
         hour_bin DATETIME,
         shifted DATETIME,
         converted DATETIME,
-        elapsed_nanoseconds I64
+        elapsed_nanoseconds I64,
+        elapsed_seconds I64
       );
       CREATE SCHEMA datetime_error (
         input_id STRING,
@@ -167,7 +176,8 @@ Feature: Datetime functions
               hour_bin = date_bin('hour', 1, input.occurred_at, input.origin),
               shifted = date_add('day', input.amount, input.occurred_at),
               converted = from_unix('second', input.count),
-              elapsed_nanoseconds = date_diff('nanosecond', input.origin, input.occurred_at)
+              elapsed_nanoseconds = date_diff('nanosecond', input.origin, input.occurred_at),
+              elapsed_seconds = date_diff('second', input.origin, input.occurred_at, 'America/New_York')
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO datetime_errors
           SET input_id = input.id,
@@ -182,7 +192,7 @@ Feature: Datetime functions
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "id":"ordinary" | "minute_start":"2024-02-29T12:40:00+00:00" | "hour_bin":"2024-02-29T12:30:00+00:00" | "shifted":"2024-03-01T12:40:00+00:00" | "converted":"1970-01-01T00:00:00+00:00" | "elapsed_nanoseconds":5141400000000000
+      "id":"ordinary" | "minute_start":"2024-02-29T12:40:00+00:00" | "hour_bin":"2024-02-29T12:30:00+00:00" | "shifted":"2024-03-01T12:40:00+00:00" | "converted":"1970-01-01T00:00:00+00:00" | "elapsed_nanoseconds":5141400000000000 | "elapsed_seconds":5141400
       "input_id":"minute-before-minimum" | overflow: date_trunc result is outside the DATETIME range
       "input_id":"hour-bin-before-minimum" | overflow: date_bin result is outside the DATETIME range
       "input_id":"shifted-past-maximum" | overflow: date_add result is outside the DATETIME range

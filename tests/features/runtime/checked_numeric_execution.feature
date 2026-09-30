@@ -17,7 +17,9 @@ Feature: Checked numeric execution
       CREATE SCHEMA computed (
         id STRING,
         sum I64,
-        remainder I64
+        remainder I64,
+        constant_quotient I64,
+        constant_remainder I64
       );
       CREATE SCHEMA numeric_error (
         input_id STRING,
@@ -47,7 +49,9 @@ Feature: Checked numeric execution
         TO computed_results
           SET id = input.id,
               sum = input.left + input.right,
-              remainder = input.left % input.divisor
+              remainder = input.left % input.divisor,
+              constant_quotient = input.left / 7,
+              constant_remainder = input.left % -7
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO numeric_errors
           SET input_id = input.id,
@@ -62,8 +66,8 @@ Feature: Checked numeric execution
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "id":"ordinary" | "sum":12 | "remainder":1
-      "id":"minimum-remainder" | "sum":-9223372036854775808 | "remainder":0
+      "id":"ordinary" | "sum":12 | "remainder":1 | "constant_quotient":1 | "constant_remainder":0
+      "id":"minimum-remainder" | "sum":-9223372036854775808 | "remainder":0 | "constant_quotient":-1317624576693539401 | "constant_remainder":-1
       "input_id":"zero-divisor" | division_by_zero: integer remainder by zero
       "input_id":"overflowing-sum" | overflow: integer addition overflowed
       """

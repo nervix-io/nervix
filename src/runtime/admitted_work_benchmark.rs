@@ -2,6 +2,11 @@
 //! preparing a branched entrypoint input, and encoding an emitter's rows through a codec
 //! transformation.
 //!
+//! Layer: test harness.
+//! - **Owns.** Opaque benchmark drivers and their initialized runtime contexts.
+//! - **Depends on.** Runtime execution and its typed codec inputs.
+//! - **Must not know.** Live graph placement or control-plane transaction ownership.
+//!
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
 
