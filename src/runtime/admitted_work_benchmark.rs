@@ -2,13 +2,15 @@
 //! preparing a branched entrypoint input, and encoding an emitter's rows through a codec
 //! transformation.
 //!
+//! Layer: test harness.
+//! - **Owns.** Opaque benchmark drivers and their initialized runtime contexts.
+//! - **Depends on.** Runtime execution and its typed codec inputs.
+//! - **Must not know.** Live graph placement or control-plane transaction ownership.
+//!
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
-//!
-//! Layer: test and benchmark harness.
-//! - **Owns.** Bounded-executor benchmark inputs and retained sink context dependencies.
-//! - **Depends on.** The production runtime, codec and batch preparation APIs.
-//! - **Must not know.** Graph scheduling or deployment decisions.
+
+use std::sync::Arc;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -17,12 +19,13 @@ use nervix_models::{
     DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
     PlacementPolicy, ResolvedCodecWireFormat, SchemaName, Timestamp,
 };
+use nervix_primitives::publication::ArcSwap;
 
 use super::{
-    ArcSwap, BranchInstanceAckBoundary, BranchKey, BranchMetricsMark, CompiledCodec,
-    DomainClockLifecycle, DomainRoutingSnapshot, EmitterPublishBatch, EmitterSinkContext, Executor,
-    RelayMessage, RelayRecordBatch, Runtime, StdArc,
-    emitter_encoding::encode_pending_broker_payloads, prepare_branched_entrypoint_input,
+    BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle, EmitterPublishBatch,
+    EmitterSinkContext, Executor, RelayMessage, RelayRecordBatch, Runtime,
+    domain_execution::DomainRoutingSnapshot, emitter_encoding::encode_pending_broker_payloads,
+    prepare_branched_entrypoint_input,
 };
 use crate::{
     runtime_ack::AckSet,
@@ -224,8 +227,8 @@ impl TransformedEncodingBenchmark {
         Self {
             runtime: benchmark_runtime(),
             context: EmitterSinkContext {
-                routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
-                metrics_dirty: BranchMetricsMark::default(),
+                routing: Arc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+                metrics_dirty: runtime.branch_metrics_mark(&domain, ModelKind::Emitter, &emitter),
                 status: runtime.emitter_status(&key),
                 confirmation_waits: runtime.emitter_confirmation_counter(&key),
                 runtime,

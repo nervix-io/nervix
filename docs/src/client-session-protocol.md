@@ -984,6 +984,9 @@ encodes its own frames, so two subscriptions to one relay never share a frame.
 
 Each row passes the subscription's predicate, then its sampling, then its delivery mode:
 
+The delivery owner supplies its node's bounded executor to predicate evaluation together with
+the batch's domain-time snapshot. The selector borrows that executor for the call.
+
 - **Predicate.** The `WHERE` expression is an ordinary `BOOL` expression over the relay record. A
   row is selected only where it is true, so a null result does not select it and is not reported.
   When a predicate is present, each relay batch takes one domain-time snapshot on the subscriber's

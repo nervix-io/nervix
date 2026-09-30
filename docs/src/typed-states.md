@@ -276,6 +276,14 @@ could add up to the most seconds a duration holds with a typed error; the gramma
 would panic on such text instead of failing, and Clippy rejects every other way of reaching that
 library's parser.
 
+Constant integer division prepares a `SignedDivisor` or `UnsignedDivisor` at the kernel boundary.
+Its unsigned magnitude is `NonZeroU64`, and its private reciprocal state distinguishes a power-of-two
+shift from a multiply-high reciprocal. A zero input produces no prepared divisor; the numeric
+kernel reports failed lanes with the existing failure mask. Datetime callers already hold validated
+positive strides, so they can assert that preparation succeeds. These per-call values are execution
+artifacts and are never persisted; [VM Functions](./vm-functions.md#checked-buffer-kernels) owns their
+arithmetic and failure contracts.
+
 One in-memory domain activation plan resolves each relay's compiled schema, branch retention and
 materialized-state presence; each codec's schema and wire definition; and each endpoint's VHOST and
 signaling reference. A missing reference is a typed planning failure before installation. The

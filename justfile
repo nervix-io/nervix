@@ -50,9 +50,9 @@ fuzz-reduce target failure: bolero-deps
 validate-bolero: bolero-deps
     python3 scripts/bolero.py validate
 
-# Check the dedicated PR and campaign workflow with the pinned Actions linter.
+# Check the property and validation workflows with the pinned Actions linter.
 validate-bolero-workflow:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml .github/workflows/check.yaml
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
 qualify-bolero: bolero-deps
@@ -146,6 +146,13 @@ bench-window-admission *args:
 # run each. Extra arguments are forwarded to Criterion.
 bench-checked-lanes *args:
     cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
+
+# Compare constant division at every width with scalar reciprocal and checked lane loops.
+bench-constant-division *args:
+    cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
+
+bench-constant-division-x86-64-v3 *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
 
 # The same measurement built for the x86-64-v3 payload the Docker image ships, in its own target
 # directory: the lane loop compiles for AVX2 as the payload's does, and the kernels still select
@@ -1049,6 +1056,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
+    cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:

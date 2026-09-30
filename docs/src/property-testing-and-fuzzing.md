@@ -219,8 +219,9 @@ limits; CI campaigns continue to use that bounded runner.
 
 PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
 libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
-manual campaigns. The sanitizer job prepares the server harness before campaigns with one Cargo
-build job and allows 90 minutes for PRs and six hours for scheduled or manual
+manual campaigns. The sanitizer job prepares both declared server harnesses, with the empty and
+`testing` feature sets, before campaigns with one Cargo build job. It allows three hours for PRs
+and six hours for scheduled or manual
 campaigns; the complete inventory's engine time must fit with compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.

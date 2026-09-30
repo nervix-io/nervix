@@ -101,7 +101,8 @@ jobs:
   bolero-fuzz:
     name: bolero-fuzz
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 360 }}
+    # Cold sanitizer builds precede the full per-target campaign and qualification.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 180 || 360 }}
     env:
       CARGO_BUILD_JOBS: "1"
     permissions:
@@ -185,8 +186,10 @@ jobs:
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
 
-      - name: Prepare the registered Arrow sanitizer harness
-        run: just prepare-bolero client-arrow-rows
+      - name: Prepare the registered server sanitizer harnesses
+        run: |
+          just prepare-bolero endpoint-route-table
+          just prepare-bolero client-arrow-rows
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |
