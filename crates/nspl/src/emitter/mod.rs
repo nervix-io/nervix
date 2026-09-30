@@ -1463,6 +1463,29 @@ mod tests {
     }
 
     #[test]
+    fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER send FROM source TO HTTP api METHOD input.method PATH (input.prefix + \
+             input.tenant) + input.path MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        )
+        .expect("PATH takes an expression, so the parenthesis after it opens that expression");
+
+        let EmitSink::Http { method, path, .. } = parsed.sink.as_ref() else {
+            panic!("the sink must be HTTP, got {:?}", parsed.sink);
+        };
+        assert_eq!(
+            method,
+            &crate::parse_expression("input.method").expect("valid expression")
+        );
+        assert_eq!(
+            path,
+            &crate::parse_expression("(input.prefix + input.tenant) + input.path")
+                .expect("valid expression")
+        );
+    }
+
+    #[test]
     fn http_emitter_requires_ordered_request_and_body_clauses() {
         for sink in [
             "HTTP api PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",

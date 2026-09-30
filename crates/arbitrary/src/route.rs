@@ -12,7 +12,7 @@ use nervix_models::{
     ProcessorOutputs, RelayName, RouteConstruction,
 };
 
-use crate::{Arbitrary, RegionEnds};
+use crate::Arbitrary;
 
 /// The most items a generated list of routes, inputs, assignments or dependencies holds.
 const ITEMS: usize = 3;
@@ -207,16 +207,6 @@ impl Arbitrary<'_> {
         assignments
     }
 
-    /// A processor's `FILTER WHERE` condition, or none.
-    pub fn filter_expression(&mut self) -> Option<Expression> {
-        self.within_region(RegionEnds::PROCESSOR_CLAUSE, Self::optional_expression)
-    }
-
-    /// A filter an operation requires, written where a processor clause is.
-    pub fn required_filter_expression(&mut self) -> Expression {
-        self.within_region(RegionEnds::PROCESSOR_CLAUSE, Self::expression)
-    }
-
     /// An expression, or none.
     pub fn optional_expression(&mut self) -> Option<Expression> {
         if self.entropy.flag() {
@@ -294,17 +284,11 @@ impl Arbitrary<'_> {
     pub fn processor_inputs(&mut self, collect: bool) -> ProcessorInputs {
         let from = self.distinct_names::<RelayName>(1, ITEMS);
         let mut conditions = Vec::new();
-        let region = if self.region == RegionEnds::LEFT_INPUTS {
-            RegionEnds::LEFT_INPUTS
-        } else {
-            RegionEnds::PROCESSOR_CLAUSE
-        };
         for relay in &from {
             if self.entropy.flag() {
-                let where_clause = self.within_region(region, Self::expression);
                 conditions.push(ProcessorInputWhere {
                     relay: relay.clone(),
-                    where_clause,
+                    where_clause: self.expression(),
                 });
             }
         }
