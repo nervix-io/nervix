@@ -1125,6 +1125,51 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
               throw new Error(`undeclared close disposition ${outcome.dispositionType()}`);
           }
         }
+        case wire.ReplyBody.OpenEmitterOutcome: {
+          const outcome = member(reply.body(new wire.OpenEmitterOutcome()) as wire.OpenEmitterOutcome | null);
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.OpenEmitterDisposition.EmitterOpened: {
+              const opened = member(outcome.disposition(new wire.EmitterOpened()) as wire.EmitterOpened | null);
+              const window = opened.windowType() === wire.ConsumerWindow.ParallelConsumerWindow
+                ? `parallel:${member(opened.window(new wire.ParallelConsumerWindow()) as wire.ParallelConsumerWindow | null).max()}`
+                : 'sequential';
+              const lines = [`REPLY ${id} EMITTER_OPENED domain=${opened.domain()} emitter=${opened.emitter()} window=${window} ack_timeout=${opened.ackTimeoutNanos()} retry=${opened.retryBackoffNanos()}/${opened.retryMaxBackoffNanos()} granted=${opened.grantedBatches()}/${opened.grantedBytes()} max_batch=${opened.maxBatchBytes()}/${opened.maxBatchRows()} message=${message}`];
+              for (let index = 0; index < opened.fieldsLength(); index += 1) {
+                lines.push(fieldLine('FIELD', readField(member(opened.fields(index)))));
+              }
+              return lines;
+            }
+            case wire.OpenEmitterDisposition.EmitterRefused: {
+              const refused = member(outcome.disposition(new wire.EmitterRefused()) as wire.EmitterRefused | null);
+              return [`REPLY ${id} EMITTER_REFUSED refusal=${wire.EmitterOpenRefusal[member(refused.refusal())]} message=${message}`];
+            }
+            default:
+              throw new Error(`undeclared emitter open disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.ReadEmitterBatchOutcome: {
+          const outcome = member(reply.body(new wire.ReadEmitterBatchOutcome()) as wire.ReadEmitterBatchOutcome | null);
+          switch (outcome.dispositionType()) {
+            case wire.ReadEmitterDisposition.EmitterBatchReceived: {
+              const batch = member(outcome.disposition(new wire.EmitterBatchReceived()) as wire.EmitterBatchReceived | null);
+              const branch = batch.branchFingerprintArray();
+              return [`REPLY ${id} EMITTER_BATCH identity=${hex(member(batch.identityArray()))} reference=${hex(member(batch.referenceArray()))} source=${batch.sourceRelay()} branch=${branch === null ? 'none' : hex(branch)} body=${hex(member(batch.batchArray()))} members=${batch.members()} now=${batch.executionNowUnixNanos()}`];
+            }
+            case wire.ReadEmitterDisposition.EmitterConsumerEnded:
+              return [`REPLY ${id} EMITTER_ENDED message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
+            default:
+              throw new Error(`undeclared emitter read disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.SettleEmitterBatchOutcome: {
+          const outcome = member(reply.body(new wire.SettleEmitterBatchOutcome()) as wire.SettleEmitterBatchOutcome | null);
+          return [`REPLY ${id} EMITTER_SETTLED disposition=${wire.EmitterSettlement[member(outcome.disposition())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
+        }
+        case wire.ReplyBody.CloseEmitterOutcome: {
+          const outcome = member(reply.body(new wire.CloseEmitterOutcome()) as wire.CloseEmitterOutcome | null);
+          return [`REPLY ${id} EMITTER_CLOSE disposition=${wire.EmitterCloseDisposition[member(outcome.disposition())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
+        }
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -1264,6 +1309,30 @@ function clientLines(frame: Uint8Array): string[] {
     case wire.ClientRequest.CloseIngestorRequest: {
       const close = member(message.request(new wire.CloseIngestorRequest()) as wire.CloseIngestorRequest | null);
       return [`REQUEST ${id} CLOSE_INGESTOR producer=${close.producer()}`];
+    }
+    case wire.ClientRequest.OpenEmitterRequest: {
+      const open = member(message.request(new wire.OpenEmitterRequest()) as wire.OpenEmitterRequest | null);
+      const lines = [`REQUEST ${id} OPEN_EMITTER domain=${open.domain()} emitter=${open.emitter()} batches=${open.maxOutstandingBatches()} bytes=${open.maxOutstandingBytes()}`];
+      for (let index = 0; index < open.expectedFieldsLength(); index += 1) {
+        lines.push(fieldLine('FIELD', readField(member(open.expectedFields(index)))));
+      }
+      return lines;
+    }
+    case wire.ClientRequest.ReadEmitterBatchRequest: {
+      const read = member(message.request(new wire.ReadEmitterBatchRequest()) as wire.ReadEmitterBatchRequest | null);
+      return [`REQUEST ${id} READ_EMITTER_BATCH consumer=${read.consumer()}`];
+    }
+    case wire.ClientRequest.SettleEmitterBatchRequest: {
+      const settle = member(message.request(new wire.SettleEmitterBatchRequest()) as wire.SettleEmitterBatchRequest | null);
+      const selected = member(settle.decision());
+      const decision = selected === wire.EmitterBatchDecision.Retry ? 'retry'
+        : selected === wire.EmitterBatchDecision.Reject ? `reject:${text(bytesOf((encoding) => settle.reason(encoding)))}`
+          : 'ack';
+      return [`REQUEST ${id} SETTLE_EMITTER_BATCH consumer=${settle.consumer()} reference=${hex(member(settle.referenceArray()))} decision=${decision}`];
+    }
+    case wire.ClientRequest.CloseEmitterRequest: {
+      const close = member(message.request(new wire.CloseEmitterRequest()) as wire.CloseEmitterRequest | null);
+      return [`REQUEST ${id} CLOSE_EMITTER consumer=${close.consumer()}`];
     }
     default:
       throw new Error(`the corpus holds no ${wire.ClientRequest[message.requestType()]} request`);

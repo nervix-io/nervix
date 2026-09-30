@@ -106,6 +106,14 @@ every producer attached once the step is applied, one that changes it ends them 
 `endpoint changed`, and a failed drain releases the hold and reopens admission with the previous
 execution and every producer still attached.
 
+A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
+emitter work. Force flush releases rows into that same wait; a read or network delivery does not
+finish the drain. A consumer settlement runs beside the session's ordered command lane, so an
+engaged transaction can receive the ACK that allows its own drain to finish. A flush-only ALTER
+changes only the running task's cadence. A contract-changing replacement or failed drain follows
+the same retained-work and rollback boundaries as other emitters: the previous execution remains
+the owner until the change commits, and a canceled attempt cannot resolve a new owner's ACK.
+
 The report keeps separate effect sets for configuration creation/change/drop, resource catalog and
 version bindings, domain lifecycle, ownership moves, activations and deactivations, rebuilds,
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore

@@ -109,12 +109,18 @@ concrete branch key as `key=<object> payload=<object>` on a branched relay; a se
 `"<masked>"`. The other subscription events report rows a dropping subscription could not deliver,
 rows it skipped, and the end of the subscription with its reason: `RelayChanged` when the relay was
 redefined, so the announced schema no longer describes its rows, or `RelayRemoved` when the relay
-or its domain no longer exists. The end is the last event of that subscription; subscribe again to
-keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
+or its domain no longer exists. The end is the last event of that subscription, and the client never
+opens it again on its own, because a new session would not change why it ended.
+`Client::subscription_lifecycle(&name)` reads it as `Ended` from the moment the end arrives until
+you subscribe again under the same name, which opens a new generation that announces the relay's
+current schema, or unsubscribe, which completes without a request and releases the name. An end
+whose session ended before you read it is still reported, once, after the events that session left
+unread are dropped; a subscription whose events overflowed reports the overflow as its last event
+instead. See [Sessions](sessions.md#subscription-lifecycle).
 
-A subscription the server acknowledged outlives its session. When the session ends,
-`next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and the
-client opens it again as a new generation on its next session. When that session refuses it, for
+A subscription the server acknowledged, and did not end, outlives its session. When the session
+ends, `next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and
+the client opens it again as a new generation on its next session. When that session refuses it, for
 example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
 the server's message and the wait before the next attempt; the client keeps trying on that session,
 after a wait that starts at one second and doubles up to thirty seconds, until the subscription
@@ -308,9 +314,9 @@ session: executing the same prepared execution again is answered after the earli
 belong to the client rather than to one session, so a reader keeps calling them across reconnects:
 
 - When a session ends, `next_subscription()` reports `Interrupted` for every subscription that
-  session held, reopens a session, and opens each of them again as a new generation. With nothing
-  to restore it waits for the next session the client opens, for example for its next command, and
-  delivers the events of subscriptions opened there.
+  session held and the server had not ended, reopens a session, and opens each of them again as a
+  new generation. With nothing to restore it waits for the next session the client opens, for
+  example for its next command, and delivers the events of subscriptions opened there.
 - `next_domain_clock_event()` reopens a session while a followed clock waits to be attached again,
   as described above.
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
@@ -390,6 +396,44 @@ admitted now and `Producer::end()` how the producer ended: `Closed`, `Ended` wit
 reason, or `SessionLost`. This release restores no producer across a reconnect; the application
 opens another one, and `open_ingestor` reopens a lost session before it sends the open. Dropping a
 producer closes it without waiting.
+
+## Emitter Consumers
+
+`Client::subscribe_emitter(domain, emitter, expected_fields, limits)` opens a competing consumer
+of a native `TO CLIENT` emitter on the current session. The field list is exact, including order,
+optionality and sensitivity. The open reserves its requested credit before it succeeds. The
+returned `EmitterConsumer::description()` reports the schema, emitter ACK window, timeout and
+retry pacing, maximum batch rows and bytes, and granted credit. A refusal is
+`ClientError::ConsumerRefused` with a typed reason.
+
+```rust
+use std::num::{NonZeroU32, NonZeroU64};
+use nervix_client_core::{ClientConsumerLimits, DomainName, EmitterName, EmitterSettlement};
+
+let consumer = client.subscribe_emitter(
+    DomainName::parse("shop")?,
+    EmitterName::parse("app_output")?,
+    expected_output_fields,
+    ClientConsumerLimits {
+        batches: NonZeroU32::try_from(8)?,
+        bytes: NonZeroU64::try_from(8 * 1024 * 1024)?,
+    },
+).await?;
+while let Some(delivery) = consumer.next_batch().await? {
+    let batch = delivery.record_batch()?; // `arrow` feature
+    process(batch).await?;
+    assert_eq!(delivery.ack().await?, EmitterSettlement::Confirmed);
+}
+consumer.close().await?;
+```
+
+`delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
+backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
+emitter's message error policy for all members. Each reassignment carries a new reference; a
+stale reference reports `StaleReference`. Reading, receiving, or decoding the batch is never an
+ACK. A consumer ends when its session or endpoint ends; it is not restored across reconnects.
+The application explicitly opens another one. The Rust client's exchange reader continues to
+route producer outcomes and command or clock replies while application processing awaits ACK.
 
 ## Transaction Handles And Attach
 

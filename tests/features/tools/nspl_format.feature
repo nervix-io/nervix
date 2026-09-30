@@ -125,6 +125,47 @@ Feature: NSPL file formatting
         };
       """
 
+  Scenario: HTTP emitters keep their attachment, request expressions and explicit body selection when formatted
+    Given an NSPL file "http_emitters.nspl" containing
+      """
+      create attached emitter deliver_event from outgoing to http api method input.request_method
+        path input.request_path mode ack retry policy backoff 250ms max 30s
+        encode using event_body_codec inherit event_id, payload
+        invoke write_header('Content-Type', 'application/json'), write_header('X-Tenant', input.tenant)
+        flush each 100ms max batch size 1MiB on message error log on general error log;
+      create detached emitter delete_event from outgoing where input.request_method = 'DELETE'
+        to http api method 'DELETE' path concat('/v1/events/', input.event_id)
+        mode ack retry policy backoff 250ms max 30s without body
+        invoke write_header('Idempotency-Key', input.event_id)
+        flush immediate on message error log on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "http_emitters.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "http_emitters.nspl" contains
+      """
+      CREATE ATTACHED EMITTER deliver_event
+        FROM outgoing
+        TO HTTP api METHOD input.request_method PATH input.request_path
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_body_codec
+        INHERIT event_id, payload
+        INVOKE write_header('Content-Type', 'application/json'), write_header('X-Tenant', input.tenant)
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE DETACHED EMITTER delete_event
+        FROM outgoing WHERE input.request_method = 'DELETE'
+        TO HTTP api METHOD 'DELETE' PATH concat('/v1/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          WITHOUT BODY
+        INVOKE write_header('Idempotency-Key', input.event_id)
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    When nervix-nspl-format checks the NSPL file "http_emitters.nspl"
+    Then the formatter exits with code 0
+
   Scenario: A directory is searched recursively for NSPL files
     Given an NSPL file "top.nspl" containing
       """

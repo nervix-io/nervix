@@ -58,6 +58,14 @@ buffered row is one of three states: pending, carried by a batch payload or prep
 emitter retains, or resolved. A retained payload's members are therefore neither packed or prepared
 again nor mistaken for resolved rows, which a delivered flag could not express.
 
+A client emitter's consumer, delivery identity and ACK attempt are separate typed identities.
+The optional concrete branch remains an internal `BranchKey`; the client sees only its opaque
+fingerprint, never its key values. An attempt is pending or assigned to one consumer with one
+reference and deadline. Retry, timeout or detach makes that reference stale before another
+attempt becomes live. Confirmed ACK, retry and rejection results have bounded retention for
+idempotence and expire independently of the delivery identity. An absent consumer is not encoded
+as an empty consumer id, and an unbranched batch has no synthetic branch fingerprint.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that
@@ -218,6 +226,14 @@ so a completed relay is never unbranched by omission; its materialized state is 
 `LAST BY TIMESTAMP` is chosen, because a relay without one is itself valid. A schema, branch, or
 relay selection retained after its captured domain changes is explicitly invalid until reselected;
 no empty name or fabricated Model stands for a missing selection.
+
+Junction and reingestor drafts use the same boundary. A junction's branch is unselected until the
+operator chooses unbranched execution or a named branch; a reingestor route separately chooses
+preserve, unbranched, or a named outgoing branch. A materialized dependency remains incomplete
+until its relay and absence policy are selected. Ordered input, dependency, assignment, and route
+drafts become the existing semantic Model only when every required choice and expression builds.
+Changing the captured domain or a dependent reference invalidates selected references while
+keeping the operator's draft text visible for correction.
 
 ## Validation And Failure Boundaries
 

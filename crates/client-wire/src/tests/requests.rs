@@ -44,14 +44,18 @@ fn every_request_variant_is_sampled() {
             ClientRequest::OpenIngestor(_) => 12,
             ClientRequest::SubmitBatch(_) => 13,
             ClientRequest::CloseIngestor(_) => 14,
+            ClientRequest::OpenEmitter(_) => 15,
+            ClientRequest::ReadEmitterBatch(_) => 16,
+            ClientRequest::SettleEmitterBatch(_) => 17,
+            ClientRequest::CloseEmitter(_) => 18,
         })
         .collect::<Vec<_>>();
     sampled.sort_unstable();
     sampled.dedup();
-    assert_eq!(sampled, (0..15).collect::<Vec<_>>());
+    assert_eq!(sampled, (0..19).collect::<Vec<_>>());
     assert_eq!(
         wire::ClientRequest::ENUM_VALUES.len(),
-        16,
+        20,
         "the schema declares NONE and one member per request variant"
     );
 }
@@ -97,6 +101,77 @@ fn a_codec_field_choice_round_trips_with_its_domain_and_codec() {
         )),
     };
     assert_eq!(round_trip_client(&message), message);
+}
+
+#[test]
+fn processor_relay_choices_round_trip_with_the_first_input_reference() {
+    for target in [
+        ChoiceTarget::ProcessorCompatibleInputRelay,
+        ChoiceTarget::ProcessorInputBranchRelay,
+        ChoiceTarget::ProcessorMaterializedRelay,
+    ] {
+        let message = ClientMessage {
+            request_id: request(3),
+            request: ClientRequest::Choice(ChoiceLookupRequest::new(
+                target,
+                vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(name("tenant")),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                            nervix_models::ModelKind::Relay,
+                            name::<nervix_models::ModelName>("incoming"),
+                        )),
+                    },
+                ],
+                "orders".to_string(),
+            )),
+        };
+        assert_eq!(round_trip_client(&message), message);
+    }
+}
+
+#[test]
+fn bolero_processor_choice_request_round_trip() {
+    bolero::check!()
+        .with_iterations(128)
+        .with_max_len(32)
+        .for_each(|bytes: &[u8]| {
+            let byte = |index| bytes.get(index).copied().unwrap_or(0);
+            let target = [
+                ChoiceTarget::ProcessorCompatibleInputRelay,
+                ChoiceTarget::ProcessorInputBranchRelay,
+                ChoiceTarget::ProcessorMaterializedRelay,
+            ][usize::from(byte(0)) % 3];
+            let domain = format!("d_{:02x}", byte(1));
+            let relay = format!("r_{:02x}", byte(2));
+            let search = format!("{:02x}{:02x}", byte(3), byte(4));
+            let page_size = u16::from(byte(5) % 100) + 1;
+            let page_cursor = (byte(6) & 1 != 0).then(|| format!("p_{:02x}", byte(7)));
+            let choice = ChoiceLookupRequest::new(
+                target,
+                vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(name(&domain)),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                            nervix_models::ModelKind::Relay,
+                            name::<nervix_models::ModelName>(&relay),
+                        )),
+                    },
+                ],
+                search,
+            )
+            .with_page(page_size, page_cursor)
+            .assured("generated page is valid");
+            let message = ClientMessage {
+                request_id: request(u64::from(byte(8)) + 1),
+                request: ClientRequest::Choice(choice),
+            };
+            assert_eq!(round_trip_client(&message), message);
+        });
 }
 
 #[test]
@@ -159,7 +234,7 @@ fn a_zero_request_identity_is_refused() {
 fn an_undeclared_request_variant_is_refused_with_its_request_identity() {
     for discriminant in [
         wire::ClientRequest::NONE,
-        wire::ClientRequest(16),
+        wire::ClientRequest(20),
         wire::ClientRequest(255),
     ] {
         let frame = raw_client(list_domains_frame(42, discriminant));

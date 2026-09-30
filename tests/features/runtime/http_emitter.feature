@@ -284,6 +284,36 @@ Feature: HTTP emitter
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
+    When these NSPL commands fail with "WITHOUT BODY"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'HEAD' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
+        INHERIT id
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "would store sensitive data in a non-sensitive output field"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH concat('/events/', input.secret)
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "would store sensitive data in a non-sensitive output field"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD input.secret PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "write_header name requires leak_sensitive(...)"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        INVOKE write_header(input.secret, 'value')
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
     When these NSPL commands are executed on the leader node
       """
       CREATE EMITTER allowed FROM outgoing TO HTTP api
@@ -511,7 +541,9 @@ Feature: HTTP emitter
           PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
-        INVOKE write_header('Idempotency-Key', input.event_id)
+        INVOKE write_header('Idempotency-Key', input.event_id),
+               write_header('X-Tenant', message.tenant),
+               write_header('X-Payload', payload)
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -521,11 +553,14 @@ Feature: HTTP emitter
       """
       {"event_id":"7","request_method":"DELETE","request_path":"/v1/events/7","tenant":"north","payload":"ignored"}
       """
+    # Without a body there is no output record: `message` and bare fields read the source record.
     Then HTTP receiver "api" eventually receives at least 1 request
     And HTTP receiver "api" request 1 is
       """
       DELETE /v1/events/7
       Idempotency-Key: 7
+      X-Tenant: north
+      X-Payload: ignored
       """
 
     Examples:
@@ -666,6 +701,109 @@ Feature: HTTP emitter
       {"event_id":"3","payload":"third"}
       """
     And HTTP receiver "computed" has captured exactly 1 request
+
+    Examples:
+      | cluster_size | fields_type |
+      | 1            | VEC<STRING> |
+      | 3            | VEC<STRING> |
+
+  @http_emitter_requests
+  Scenario Outline: A computed HTTP method keeps its exact spelling, and an empty, oversized, invalid or unavailable method rejects its record before publication
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA outbound_event (event_id STRING, request_method STRING, padding I64);
+      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA event_body (event_id STRING);
+      CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string);
+      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE SCHEMA rejected_request (
+        event_id STRING, error_code STRING, operation STRING, affected_fields <fields_type>
+      );
+      CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
+      CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
+      CREATE VHOST edge http-emitter-{{test_id}}.example.com;
+      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR outgoing_source
+        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        TO outgoing
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE EMITTER methods FROM outgoing
+        TO HTTP api
+          METHOD concat(input.request_method, repeat('X', input.padding))
+          PATH concat('/methods/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_body_codec
+        INHERIT event_id
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_requests
+          SET event_id = input.event_id,
+              error_code = error.code,
+              operation = error.operation,
+              affected_fields = error.fields
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_requests_subscription TO rejected_requests;
+      START;
+      """
+    # The rejected methods precede the accepted ones, so a rejected method that was sent would be
+    # captured first. Method m7 is one byte longer than the 64-byte limit and a4 is exactly 64 bytes.
+    # CONNECT, TRACE, GET and HEAD are recognized in any ASCII case, and a codec body rules out GET.
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"m1","request_method":"","padding":0},{"event_id":"m2","request_method":"PO ST","padding":0},{"event_id":"m3","request_method":"connect","padding":0},{"event_id":"m4","request_method":"Trace","padding":0},{"event_id":"m5","request_method":"CONNECT","padding":0},{"event_id":"m6","request_method":"get","padding":0},{"event_id":"m7","request_method":"M","padding":64},{"event_id":"a1","request_method":"purge","padding":0},{"event_id":"a2","request_method":"Patch","padding":0},{"event_id":"a3","request_method":"OPTIONS","padding":0},{"event_id":"a4","request_method":"M","padding":63}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "event_id":"m1" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      "event_id":"m2" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      "event_id":"m3" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      "event_id":"m4" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      "event_id":"m5" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      "event_id":"m6" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      "event_id":"m7" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_method","method"]
+      """
+    And HTTP receiver "api" eventually receives at least 4 requests
+    And HTTP receiver "api" request 1 is
+      """
+      purge /methods/a1
+
+      {"event_id":"a1"}
+      """
+    And HTTP receiver "api" request 2 is
+      """
+      Patch /methods/a2
+
+      {"event_id":"a2"}
+      """
+    And HTTP receiver "api" request 3 is
+      """
+      OPTIONS /methods/a3
+
+      {"event_id":"a3"}
+      """
+    And HTTP receiver "api" request 4 is
+      """
+      MXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX /methods/a4
+
+      {"event_id":"a4"}
+      """
+    And HTTP receiver "api" has captured exactly 4 requests
 
     Examples:
       | cluster_size | fields_type |
@@ -1114,7 +1252,7 @@ Feature: HTTP emitter
     # was sent would be captured first.
     And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/events"
       """
-      [{"event_id":"c1","replacement":"first","header_name":"X-Custom","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":true},{"event_id":"h1","replacement":" bad","header_name":"X-Custom","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h2","replacement":"first","header_name":"Host","header_value":"other.example","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h3","replacement":"first","header_name":"Bad Name","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h4","replacement":"first","header_name":"X-Injected","header_value":"a\r\nInjected: yes","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h5","replacement":"first","header_name":"X-Edge","header_value":"v ","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h6","replacement":"first","header_name":"X-Custom","header_value":"v","first_bytes":40000,"second_bytes":0,"crowd":false},{"event_id":"h7","replacement":"first","header_name":"X-Custom","header_value":"v","first_bytes":20000,"second_bytes":20000,"crowd":false},{"event_id":"h8","replacement":"first","header_name":"X-Custom","header_value":"custom value","first_bytes":1,"second_bytes":0,"crowd":false},{"event_id":"h9","replacement":"first","header_name":"x-EMPTY","header_value":"now set","first_bytes":0,"second_bytes":0,"crowd":false}]
+      [{"event_id":"c1","replacement":"first","header_name":"X-Custom","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":true},{"event_id":"h1","replacement":" bad","header_name":"X-Custom","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h2","replacement":"first","header_name":"Host","header_value":"other.example","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h3","replacement":"first","header_name":"Bad Name","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h4","replacement":"first","header_name":"X-Injected","header_value":"a\r\nInjected: yes","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h5","replacement":"first","header_name":"X-Edge","header_value":"v ","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h6","replacement":"first","header_name":"X-Custom","header_value":"v","first_bytes":40000,"second_bytes":0,"crowd":false},{"event_id":"h7","replacement":"first","header_name":"X-Custom","header_value":"v","first_bytes":20000,"second_bytes":20000,"crowd":false},{"event_id":"h10","replacement":"first","header_name":"content-length","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h11","replacement":"first","header_name":"Transfer-Encoding","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h12","replacement":"first","header_name":"connection","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h13","replacement":"first","header_name":"Keep-Alive","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h14","replacement":"first","header_name":"Proxy-Connection","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h15","replacement":"first","header_name":"te","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h16","replacement":"first","header_name":"Trailer","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h17","replacement":"first","header_name":"UPGRADE","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h18","replacement":"first","header_name":"Expect","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h19","replacement":"first","header_name":":authority","header_value":"v","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h20","replacement":"first","header_name":"X-Custom","header_value":"a\u0000b","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h21","replacement":"first","header_name":"X-Custom","header_value":"a\u007fb","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h22","replacement":"first","header_name":"X-Custom","header_value":"\tv","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h23","replacement":"first","header_name":"X-Custom","header_value":"v\nInjected: yes","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h8","replacement":"first","header_name":"X-Custom","header_value":"custom value","first_bytes":1,"second_bytes":0,"crowd":false},{"event_id":"h9","replacement":"first","header_name":"x-EMPTY","header_value":"now set","first_bytes":0,"second_bytes":0,"crowd":false},{"event_id":"h24","replacement":"first","header_name":"X-City","header_value":"Z\u00fcrich","first_bytes":0,"second_bytes":0,"crowd":false}]
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
@@ -1126,8 +1264,23 @@ Feature: HTTP emitter
       "event_id":"h5" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
       "event_id":"h6" | "error_code":"validation" | "operation":"invoke" | "operation_index":5 | "affected_fields":["input.first_bytes"]
       "event_id":"h7" | "error_code":"validation" | "operation":"invoke" | "operation_index":6 | "affected_fields":["input.second_bytes"]
+      "event_id":"h10" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h11" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h12" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h13" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h14" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h15" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h16" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h17" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h18" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h19" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h20" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h21" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h22" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
+      "event_id":"h23" | "error_code":"validation" | "operation":"invoke" | "operation_index":4 | "affected_fields":["input.header_name","input.header_value"]
       """
-    And HTTP receiver "api" eventually receives at least 2 requests
+    # Header values are sent as their UTF-8 bytes.
+    And HTTP receiver "api" eventually receives at least 3 requests
     And HTTP receiver "api" request 1 is
       """
       POST /headers/h8
@@ -1144,14 +1297,19 @@ Feature: HTTP emitter
       X-Replaced: final
       X-Empty: now set
       """
-    And HTTP receiver "api" has captured exactly 2 requests
-    And HTTP receiver "crowded" eventually receives at least 9 requests
+    And HTTP receiver "api" request 3 is
+      """
+      POST /headers/h24
+      X-City: Zürich
+      """
+    And HTTP receiver "api" has captured exactly 3 requests
+    And HTTP receiver "crowded" eventually receives at least 24 requests
     And HTTP receiver "crowded" request 1 is
       """
       POST /crowded/h1
       X-Same:
       """
-    And HTTP receiver "crowded" has captured exactly 9 requests
+    And HTTP receiver "crowded" has captured exactly 24 requests
 
     Examples:
       | cluster_size | fields_type |
@@ -1210,10 +1368,11 @@ Feature: HTTP emitter
       START;
       """
     # The rejected targets precede the accepted ones, so a rejected target that was sent would be
-    # captured first. Target r6 is one byte longer than the 8 KiB limit.
+    # captured first. Target r6 is one byte longer than the 8 KiB limit; r8, r9 and r10 hold
+    # whitespace, the asterisk form and a control character.
     And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/events"
       """
-      [{"event_id":"r1","request_path":"//other.example/events","padding":0},{"event_id":"r2","request_path":"/a/..//events","padding":0},{"event_id":"r3","request_path":"/events?value=%ZZ","padding":0},{"event_id":"r4","request_path":"/events#fragment","padding":0},{"event_id":"r5","request_path":"/objects\\a","padding":0},{"event_id":"r6","request_path":"/","padding":8192},{"event_id":"r7","request_path":"https://other.example/events","padding":0},{"event_id":"a1","request_path":"/v1/a/../events?tag=a&tag=b&q=a+b","padding":0},{"event_id":"a2","request_path":"/objects/a%2Fb","padding":0},{"event_id":"a3","request_path":"/café","padding":0},{"event_id":"a4","request_path":"/events?","padding":0}]
+      [{"event_id":"r1","request_path":"//other.example/events","padding":0},{"event_id":"r2","request_path":"/a/..//events","padding":0},{"event_id":"r3","request_path":"/events?value=%ZZ","padding":0},{"event_id":"r4","request_path":"/events#fragment","padding":0},{"event_id":"r5","request_path":"/objects\\a","padding":0},{"event_id":"r6","request_path":"/","padding":8192},{"event_id":"r7","request_path":"https://other.example/events","padding":0},{"event_id":"r8","request_path":"/events with space","padding":0},{"event_id":"r9","request_path":"*","padding":0},{"event_id":"r10","request_path":"/events\u0001","padding":0},{"event_id":"a1","request_path":"/v1/a/../events?tag=a&tag=b&q=a+b","padding":0},{"event_id":"a2","request_path":"/objects/a%2Fb","padding":0},{"event_id":"a3","request_path":"/café","padding":0},{"event_id":"a4","request_path":"/events?","padding":0},{"event_id":"a5","request_path":"/v1/caf\u00e9?city=Z\u00fcrich&city=Bern","padding":0}]
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
@@ -1224,8 +1383,11 @@ Feature: HTTP emitter
       "event_id":"r5" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_path","path"]
       "event_id":"r6" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_path","path"]
       "event_id":"r7" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_path","path"]
+      "event_id":"r8" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_path","path"]
+      "event_id":"r9" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_path","path"]
+      "event_id":"r10" | "error_code":"validation" | "operation":"publish" | "affected_fields":["input.padding","input.request_path","path"]
       """
-    And HTTP receiver "api" eventually receives at least 4 requests
+    And HTTP receiver "api" eventually receives at least 5 requests
     And HTTP receiver "api" request 1 is
       """
       POST /v1/events?tag=a&tag=b&q=a+b
@@ -1246,7 +1408,13 @@ Feature: HTTP emitter
       POST /events?
       X-Event: a4
       """
-    And HTTP receiver "api" has captured exactly 4 requests
+    # Non-ASCII characters in the query are percent-encoded too, and repeated keys keep their order.
+    And HTTP receiver "api" request 5 is
+      """
+      POST /v1/caf%C3%A9?city=Z%C3%BCrich&city=Bern
+      X-Event: a5
+      """
+    And HTTP receiver "api" has captured exactly 5 requests
 
     Examples:
       | cluster_size | fields_type |
@@ -1346,6 +1514,150 @@ Feature: HTTP emitter
       {"event_id":"s2","payload":"south-2"}
       """
     And HTTP receiver "api" has captured exactly 3 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @http_emitter_requests
+  Scenario Outline: Interleaved branches of two source relays keep their own collection, request values and error routes, with one request awaiting a response at a time
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers requests for "/tenants/north/a/n2" with "respond 404; after 100ms"
+    And HTTP receiver "api" answers requests for "/tenants/south/b/s3" with "respond 409; after 100ms"
+    And HTTP receiver "api" answers unscripted requests with "respond 204; after 100ms"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, source STRING, payload STRING);
+      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA event_body (event_id STRING, payload STRING);
+      CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
+      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE SCHEMA tenant_branch (tenant STRING);
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE SCHEMA rejected_request (event_id STRING, source STRING, error_message STRING);
+      CREATE RELAY source_a SCHEMA outbound_event BRANCHED BY by_tenant;
+      CREATE RELAY source_b SCHEMA outbound_event BRANCHED BY by_tenant;
+      CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
+      CREATE VHOST edge http-emitter-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
+      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE INGESTOR from_a
+        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        TO source_a
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR from_b
+        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        TO source_b
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE EMITTER tenant_events
+        FROM source_a, source_b
+        COLLECT FOR 200ms MAX BATCH SIZE 1MiB
+        TO HTTP api
+          METHOD 'POST'
+          PATH concat('/tenants/', input.tenant, '/', input.source, '/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_body_codec
+        INHERIT event_id, payload
+        INVOKE write_header('X-Tenant', input.tenant),
+               write_header('X-Source', input.source)
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR SEND TO rejected_requests
+          SET event_id = input.event_id,
+              source = input.source,
+              error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_requests_subscription TO rejected_requests;
+      START;
+      """
+    # Both relays carry records of both branches. Every response takes 100ms, so requests the
+    # emitter sent side by side would await their responses together at the receiver.
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/a"
+      """
+      [{"event_id":"n1","tenant":"north","source":"a","payload":"a-n1"},{"event_id":"s1","tenant":"south","source":"a","payload":"a-s1"},{"event_id":"n2","tenant":"north","source":"a","payload":"a-n2"}]
+      """
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/b"
+      """
+      [{"event_id":"s2","tenant":"south","source":"b","payload":"b-s2"},{"event_id":"n3","tenant":"north","source":"b","payload":"b-n3"},{"event_id":"s3","tenant":"south","source":"b","payload":"b-s3"}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "event_id":"n2" | "source":"a" | "error_message":"HTTP endpoint answered with status 404" | key={"tenant":"north"}
+      "event_id":"s3" | "source":"b" | "error_message":"HTTP endpoint answered with status 409" | key={"tenant":"south"}
+      """
+    And HTTP receiver "api" eventually receives at least 6 requests
+    And HTTP receiver "api" captured one request that is
+      """
+      POST /tenants/north/a/n1
+      X-Tenant: north
+      X-Source: a
+
+      {"event_id":"n1","payload":"a-n1"}
+      """
+    And HTTP receiver "api" captured one request that is
+      """
+      POST /tenants/south/a/s1
+      X-Tenant: south
+      X-Source: a
+
+      {"event_id":"s1","payload":"a-s1"}
+      """
+    And HTTP receiver "api" captured one request that is
+      """
+      POST /tenants/north/a/n2
+      X-Tenant: north
+      X-Source: a
+
+      {"event_id":"n2","payload":"a-n2"}
+      """
+    And HTTP receiver "api" captured one request that is
+      """
+      POST /tenants/south/b/s2
+      X-Tenant: south
+      X-Source: b
+
+      {"event_id":"s2","payload":"b-s2"}
+      """
+    And HTTP receiver "api" captured one request that is
+      """
+      POST /tenants/north/b/n3
+      X-Tenant: north
+      X-Source: b
+
+      {"event_id":"n3","payload":"b-n3"}
+      """
+    And HTTP receiver "api" captured one request that is
+      """
+      POST /tenants/south/b/s3
+      X-Tenant: south
+      X-Source: b
+
+      {"event_id":"s3","payload":"b-s3"}
+      """
+    And HTTP receiver "api" has captured exactly 6 requests
+    And HTTP receiver "api" never had more than 1 request awaiting a response
 
     Examples:
       | cluster_size |
@@ -1540,3 +1852,71 @@ Feature: HTTP emitter
       | cluster_size | fields_type |
       | 1            | VEC<STRING> |
       | 3            | VEC<STRING> |
+
+  @http_emitter_requests
+  Scenario Outline: Explicitly leaked sensitive values reach the endpoint in the method, path, header and body
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA account_event (
+        account_id STRING SENSITIVE, verb STRING SENSITIVE, token STRING SENSITIVE, note STRING
+      );
+      CREATE CODEC account_events_codec FROM JSON TO SCHEMA account_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA account_body (account_id STRING SENSITIVE, note STRING);
+      CREATE WIRE JSON SCHEMA account_body_wire MODE STRICT (account_id string, note string);
+      CREATE CODEC account_body_codec FROM WIRE JSON SCHEMA account_body_wire TO SCHEMA account_body;
+      CREATE RELAY accounts SCHEMA account_event UNBRANCHED;
+      CREATE VHOST edge http-emitter-{{test_id}}.example.com;
+      CREATE ENDPOINT accounts_ingress ON edge PATH '/accounts' TYPE HTTP;
+      CREATE INGESTOR accounts_source
+        FROM ENDPOINT accounts_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING account_events_codec
+        TO accounts
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE EMITTER leaked FROM accounts
+        TO HTTP api
+          METHOD leak_sensitive(input.verb)
+          PATH concat('/accounts/', leak_sensitive(input.account_id))
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING account_body_codec
+        SET account_id = leak_sensitive(input.account_id),
+            note = input.note
+        INVOKE write_header('Authorization', concat('Bearer ', leak_sensitive(input.token)))
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/accounts"
+      """
+      [{"account_id":"acct-7","verb":"PUT","token":"tok-7","note":"renewed"}]
+      """
+    Then HTTP receiver "api" eventually receives at least 1 request
+    And HTTP receiver "api" request 1 is
+      """
+      PUT /accounts/acct-7
+      Authorization: Bearer tok-7
+
+      {"account_id":"acct-7","note":"renewed"}
+      """
+    And HTTP receiver "api" has captured exactly 1 request
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

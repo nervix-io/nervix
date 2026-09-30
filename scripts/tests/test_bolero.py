@@ -23,11 +23,18 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(bolero.BoleroError, message):
                 bolero.load_inventory(path)
 
-    def test_inventory_has_four_current_targets_and_exact_corpus_paths(self) -> None:
+    def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
-        self.assertEqual(len(inventory.targets), 4)
+        self.assertEqual({target.id for target in inventory.targets}, {
+            "client-emitter-wire",
+            "nspl-expression",
+            "nspl-model",
+            "nspl-archive-model",
+            "backup-record-manifest",
+            "client-processor-choice-request",
+        })
         self.assertEqual({target.package for target in inventory.targets},
-                         {"nervix-nspl", "nervix-backup"})
+                         {"nervix-client-wire", "nervix-nspl", "nervix-backup"})
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
@@ -454,7 +461,9 @@ class CliTests(unittest.TestCase):
     def test_fuzz_routes_select_targets_and_reject_zero_duration(self) -> None:
         with mock.patch.object(bolero, "fuzz_targets") as fuzz:
             self.assertEqual(self.invoke("fuzz", "nspl-expression", "3"), 0)
-            self.assertEqual(fuzz.call_args.args[1], (self.inventory.targets[0],))
+            selected = next(target for target in self.inventory.targets
+                            if target.id == "nspl-expression")
+            self.assertEqual(fuzz.call_args.args[1], (selected,))
             self.assertEqual(fuzz.call_args.args[2], 3)
             self.assertEqual(self.invoke("fuzz-all"), 0)
             self.assertEqual(fuzz.call_args.args[1], self.inventory.targets)
@@ -470,7 +479,9 @@ class CliTests(unittest.TestCase):
             qualify.assert_called_once_with(self.inventory)
         with mock.patch.object(bolero, "replay", return_value=101) as replay:
             self.assertEqual(self.invoke("replay", "nspl-expression", "failure"), 101)
-            self.assertEqual(replay.call_args.args[0], self.inventory.targets[0])
+            selected = next(target for target in self.inventory.targets
+                            if target.id == "nspl-expression")
+            self.assertEqual(replay.call_args.args[0], selected)
         with mock.patch.object(bolero, "reduce_failure") as reduce:
             self.assertEqual(self.invoke("reduce", "nspl-expression", "failure"), 0)
             reduce.assert_called_once()

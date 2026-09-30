@@ -165,6 +165,17 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     }
 
     match (emitter.sink.as_ref(), &emitter.body) {
+        (EmitSink::Client { .. }, nervix_models::EmitterBody::Client) => {}
+        (EmitSink::Client { .. }, _) => {
+            return Err(invalid(
+                "CLIENT emitter requires native Arrow output".to_string(),
+            ));
+        }
+        (_, nervix_models::EmitterBody::Client) => {
+            return Err(invalid(
+                "native CLIENT output requires TO CLIENT SCHEMA".to_string(),
+            ));
+        }
         (
             EmitSink::Http { .. },
             nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
@@ -278,7 +289,8 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 domain, identifier, signal, values, attributes, resource,
             )?;
         }
-        EmitSink::Http { .. }
+        EmitSink::Client { .. }
+        | EmitSink::Http { .. }
         | EmitSink::Kafka { .. }
         | EmitSink::Pulsar { .. }
         | EmitSink::RabbitMq { .. }
@@ -847,6 +859,11 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
                     "HTTP publish method requires ENCODE USING or WITHOUT BODY".to_string(),
                 ));
             }
+            nervix_models::EmitterBody::Client => {
+                return Err(invalid(
+                    "HTTP publish method cannot use native CLIENT output".to_string(),
+                ));
+            }
         };
         HttpMethod::parse(value, body)
             .map_err(|error| invalid(format!("HTTP publish method {}", error.current_context())))?;
@@ -1274,11 +1291,13 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let codec_route = emitter.body.codec().is_some();
+    let codec_route = emitter.body.codec().is_some()
+        || matches!(emitter.body, nervix_models::EmitterBody::Client);
     let has_output_construction =
         emitter.construction.inherit.is_some() || !emitter.construction.assignments.is_empty();
     let invalid_direct_construction = match emitter.body {
         nervix_models::EmitterBody::Codec { .. } => false,
+        nervix_models::EmitterBody::Client => false,
         nervix_models::EmitterBody::WithoutBody => has_output_construction,
         nervix_models::EmitterBody::Values => {
             has_output_construction || !emitter.construction.invocations.is_empty()
@@ -1362,7 +1381,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
     let output_sensitivity = match (emitter.sink.as_ref(), codec_route) {
-        (EmitSink::Http { .. }, true) => SchemaSensitivity::default(),
+        (EmitSink::Http { .. } | EmitSink::Client { .. }, true) => SchemaSensitivity::default(),
         _ => schema_sensitivity_for_internal_schema(output_schema),
     };
     compile_program_with_options_for_bindings_with_sensitivity(
