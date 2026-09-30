@@ -753,6 +753,14 @@ cleanup, once the nodes that dialed it have ended.
 
 ## gRPC Receivers
 
+The node trace-export scenarios start one or three real server processes with `--otel-enabled`,
+separate service names and the scenario's DNS configuration. A local gRPC collector captures their
+OTLP trace requests; the steps decode the current trace schema and require spans from every node
+and a query for the collector's fixture name. This uses the process cluster's existing readiness
+and failure diagnostics. Processes are dropped before the DNS authority, resolver files and
+collector, including when a scenario fails. The fixtures use no external collector container.
+
+
 A scenario about a node calling an external gRPC service, such as an OTLP/gRPC collector, starts an
 in-process receiver that serves HTTP/2 without TLS in its place. It reads each unary call to the end
 of its request and captures the method, the header fields, the compressed flag, and the one request
