@@ -739,13 +739,13 @@ defines the available metrics and their aggregation.
 
 ## Recovery, Panics, And Enforcement
 
-The compiler synchronization gate has its own typed tooling failures for malformed catalogs and
-scopes, conflicting reports, incomplete compiler passes, and missing, stale or unobserved reviewed
-sites. Reports preserve those classifications with source location, resolved receiver/operation,
-owner and compiled configuration context. Its CLI prints the error-stack attachments and fails;
-missing analysis never becomes a zero debt count. These are repository validation errors and do
-not add runtime failure variants. [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's
-coverage and synchronization policy.
+The compiler synchronization gate owns typed tooling failures for invalid source contracts,
+conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
+argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
+diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
+owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
+zero debt count. These are repository validation errors and add no runtime failure variants.
+[Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
 Some outcomes are intentionally not propagated. `discarded` records why an already handled or
 irrelevant result owes no further action. `reported` is used when the recovering call is the only

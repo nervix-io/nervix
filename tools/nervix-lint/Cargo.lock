@@ -342,6 +342,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "error-stack",
  "meticulous",
  "nervix-lint-report",
  "nervix-primitives",

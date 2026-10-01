@@ -12,8 +12,8 @@ pub mod rules;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
-    #[error("invalid source contract: {reason}")]
-    InvalidContract { reason: String },
+    #[error("invalid source contract: {problem}")]
+    InvalidContract { problem: ContractProblem },
     #[error("conflicting findings at {path}:{start}")]
     ConflictingFinding { path: String, start: u32 },
     #[error("compiler pass did not complete for {configuration}:{crate_name}")]
@@ -21,6 +21,41 @@ pub enum ReportError {
         configuration: String,
         crate_name: String,
     },
+}
+
+/// Source contract failures retain their classification until the diagnostic boundary.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ContractProblem {
+    #[error("context requires a context kind and reason")]
+    MissingArguments,
+    #[error("contract arguments must be named")]
+    UnnamedArgument,
+    #[error("contract argument names must be single identifiers")]
+    QualifiedArgument,
+    #[error("a context has exactly one kind")]
+    MultipleKinds,
+    #[error("contract values must be strings: {argument}")]
+    NonStringValue { argument: String },
+    #[error("duplicate contract argument: {argument}")]
+    DuplicateArgument { argument: String },
+    #[error("context requires its kind")]
+    MissingKind,
+    #[error("context requires a reason")]
+    MissingReason,
+    #[error("unknown context argument: {argument}")]
+    UnknownArgument { argument: String },
+    #[error("every contract requires a meaningful reason")]
+    EmptyReason,
+    #[error("bounded protocols require a key")]
+    MissingKey,
+    #[error("bounded protocols require a capacity or deadline")]
+    MissingBound,
+    #[error("bounded protocol keys and bounds cannot be empty")]
+    EmptyCoordinate,
+    #[error("only bounded protocols accept key and bound")]
+    UnexpectedCoordinate,
+    #[error("expected recurring, lifecycle, observer, outside or bounded; found {kind}")]
+    UnknownKind { kind: String },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -63,37 +98,31 @@ impl Context {
         key: Option<String>,
         bound: Option<String>,
     ) -> Result<Self, error_stack::Report<ReportError>> {
-        let invalid = |reason: &str| {
-            error_stack::Report::new(ReportError::InvalidContract {
-                reason: reason.into(),
-            })
-        };
+        let invalid = |problem| error_stack::Report::new(ReportError::InvalidContract { problem });
         if reason.trim().is_empty() {
-            return Err(invalid("every contract requires a meaningful reason"));
+            return Err(invalid(ContractProblem::EmptyReason));
         }
         if kind == "bounded" {
             let Some(key) = key else {
-                return Err(invalid("bounded protocols require a key"));
+                return Err(invalid(ContractProblem::MissingKey));
             };
             let Some(bound) = bound else {
-                return Err(invalid("bounded protocols require a capacity or deadline"));
+                return Err(invalid(ContractProblem::MissingBound));
             };
             if key.trim().is_empty() || bound.trim().is_empty() {
-                return Err(invalid("bounded protocol keys and bounds cannot be empty"));
+                return Err(invalid(ContractProblem::EmptyCoordinate));
             }
             return Ok(Self::Bounded { reason, key, bound });
         }
         if key.is_some() || bound.is_some() {
-            return Err(invalid("only bounded protocols accept key and bound"));
+            return Err(invalid(ContractProblem::UnexpectedCoordinate));
         }
         match kind {
             "recurring" => Ok(Self::Recurring { reason }),
             "lifecycle" => Ok(Self::Lifecycle { reason }),
             "observer" => Ok(Self::Observer { reason }),
             "outside" => Ok(Self::Outside { reason }),
-            _ => Err(invalid(
-                "expected recurring, lifecycle, observer, outside or bounded",
-            )),
+            _ => Err(invalid(ContractProblem::UnknownKind { kind: kind.into() })),
         }
     }
 

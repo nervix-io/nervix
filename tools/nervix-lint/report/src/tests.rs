@@ -165,24 +165,78 @@ fn bolero_authored_sites_preserve_every_configuration() {
 
 #[test]
 fn every_source_contract_argument_is_validated() {
-    for (kind, reason, key, bound) in [
-        ("recurring", "", None, None),
-        ("bounded", "admission", None, Some("one attempt")),
-        ("bounded", "admission", Some("attempt"), None),
-        ("bounded", "admission", Some(""), Some("one attempt")),
-        ("bounded", "admission", Some("attempt"), Some("")),
-        ("lifecycle", "installation", Some("attempt"), None),
-        ("unknown", "installation", None, None),
+    struct Case {
+        kind: &'static str,
+        reason: &'static str,
+        key: Option<&'static str>,
+        bound: Option<&'static str>,
+        problem: ContractProblem,
+    }
+    for case in [
+        Case {
+            kind: "recurring",
+            reason: "",
+            key: None,
+            bound: None,
+            problem: ContractProblem::EmptyReason,
+        },
+        Case {
+            kind: "bounded",
+            reason: "admission",
+            key: None,
+            bound: Some("one attempt"),
+            problem: ContractProblem::MissingKey,
+        },
+        Case {
+            kind: "bounded",
+            reason: "admission",
+            key: Some("attempt"),
+            bound: None,
+            problem: ContractProblem::MissingBound,
+        },
+        Case {
+            kind: "bounded",
+            reason: "admission",
+            key: Some(""),
+            bound: Some("one attempt"),
+            problem: ContractProblem::EmptyCoordinate,
+        },
+        Case {
+            kind: "bounded",
+            reason: "admission",
+            key: Some("attempt"),
+            bound: Some(""),
+            problem: ContractProblem::EmptyCoordinate,
+        },
+        Case {
+            kind: "lifecycle",
+            reason: "installation",
+            key: Some("attempt"),
+            bound: None,
+            problem: ContractProblem::UnexpectedCoordinate,
+        },
+        Case {
+            kind: "unknown",
+            reason: "installation",
+            key: None,
+            bound: None,
+            problem: ContractProblem::UnknownKind {
+                kind: "unknown".into(),
+            },
+        },
     ] {
-        assert!(
-            Context::from_parts(
-                kind,
-                reason.into(),
-                key.map(str::to_owned),
-                bound.map(str::to_owned)
-            )
-            .is_err()
-        );
+        let report = Context::from_parts(
+            case.kind,
+            case.reason.into(),
+            case.key.map(str::to_owned),
+            case.bound.map(str::to_owned),
+        )
+        .err()
+        .assured("each case violates a required source contract field");
+        let ReportError::InvalidContract { problem } = report.current_context() else {
+            panic!("invalid contract fields must retain their typed classification");
+        };
+        assert_eq!(problem, &case.problem);
     }
 }
 

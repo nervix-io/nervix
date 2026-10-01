@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use nervix_lint_report::Context;
+use nervix_lint_report::{Context, ContractProblem, ReportError};
 use rustc_errors::{Diag, Diagnostic};
 use rustc_hir::{Expr, HirId, def::DefKind};
 use rustc_lint::LateContext;
@@ -175,48 +175,56 @@ pub fn has_callee_contract(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
     }
 }
 
-fn parse_context(attribute: &rustc_hir::Attribute) -> Result<Context, String> {
+fn parse_context(
+    attribute: &rustc_hir::Attribute,
+) -> Result<Context, error_stack::Report<ReportError>> {
+    let invalid = |problem| error_stack::Report::new(ReportError::InvalidContract { problem });
     let Some(arguments) = attribute.meta_item_list() else {
-        return Err("context requires a context kind and reason".into());
+        return Err(invalid(ContractProblem::MissingArguments));
     };
     let mut kind = None;
     let mut values = BTreeMap::new();
     for argument in &arguments {
         let Some(item) = argument.meta_item() else {
-            return Err("contract arguments must be named".into());
+            return Err(invalid(ContractProblem::UnnamedArgument));
         };
         let Some(name) = item.ident() else {
-            return Err("contract argument names must be single identifiers".into());
+            return Err(invalid(ContractProblem::QualifiedArgument));
         };
         if item.is_word() {
             if kind.replace(name.name.to_string()).is_some() {
-                return Err("a context has exactly one kind".into());
+                return Err(invalid(ContractProblem::MultipleKinds));
             }
         } else {
             let Some(value) = item.value_str() else {
-                return Err("contract values must be strings".into());
+                return Err(invalid(ContractProblem::NonStringValue {
+                    argument: name.name.to_string(),
+                }));
             };
             if values
                 .insert(name.name.to_string(), value.to_string())
                 .is_some()
             {
-                return Err("duplicate contract argument".into());
+                return Err(invalid(ContractProblem::DuplicateArgument {
+                    argument: name.name.to_string(),
+                }));
             }
         }
     }
     let Some(kind) = kind else {
-        return Err("context requires its kind".into());
+        return Err(invalid(ContractProblem::MissingKind));
     };
     let Some(reason) = values.remove("reason") else {
-        return Err("context requires a reason".into());
+        return Err(invalid(ContractProblem::MissingReason));
     };
     let key = values.remove("key");
     let bound = values.remove("bound");
-    if !values.is_empty() {
-        return Err("unknown context argument".into());
+    if let Some((argument, _)) = values.first_key_value() {
+        return Err(invalid(ContractProblem::UnknownArgument {
+            argument: argument.clone(),
+        }));
     }
     Context::from_parts(&kind, reason, key, bound)
-        .map_err(|error| error.current_context().to_string())
 }
 
 impl Flow {
@@ -251,7 +259,9 @@ impl Flow {
                             .into(),
                     )
                 } else {
-                    parse_context(attribute).err()
+                    parse_context(attribute)
+                        .err()
+                        .map(|error| error.current_context().to_string())
                 };
                 if let Some(message) = problem {
                     cx.tcx.emit_node_span_lint(

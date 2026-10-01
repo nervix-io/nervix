@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 ahash.workspace = true
 anyhow.workspace = true
+error-stack.workspace = true
 meticulous.workspace = true
 nervix-lint-report = { path = "../report" }
 nervix-primitives.workspace = true
