@@ -150,6 +150,25 @@ def per_message_graph(name: str, weights: list[float], bias: float) -> bytes:
     return bytes(out)
 
 
+def convolution_graph(weights: list[float], bias: float) -> bytes:
+    """The score model expressed as a convolution, exercising cuDNN with the same public tensors."""
+    out = bytearray()
+    out += message_field(1, node("Reshape", ["features", "input_shape"], ["image"], "image"))
+    out += message_field(1, node("Conv", ["image", "weights", "bias"], ["convolution"], "convolution"))
+    out += message_field(1, node("Reshape", ["convolution", "output_shape"], ["score"], "score"))
+    out += field_string(2, "nervix_convolution_score")
+    out += message_field(5, tensor_initializer("weights", [1, 1, 1, 2], weights))
+    out += message_field(5, tensor_initializer("bias", [1], [bias]))
+    for name, values in (("input_shape", [1, 1, 1, 2]), ("output_shape", [1])):
+        shape = field_varint(1, len(values)) + field_varint(2, 7) + field_string(8, name)
+        for value in values:
+            shape += field_varint(7, value)
+        out += message_field(5, shape)
+    out += message_field(11, value_info("features", [2]))
+    out += message_field(12, value_info("score", [1]))
+    return bytes(out)
+
+
 def batch_graph() -> bytes:
     out = bytearray()
     out += message_field(
@@ -267,6 +286,7 @@ def main() -> None:
         default="tests/fixtures/onnx/scalar_identity.onnx",
         help="path to write the generated scalar identity ONNX model",
     )
+    parser.add_argument("--convolution-output", help="optional score model exercising cuDNN on CUDA")
     args = parser.parse_args()
 
     weights, bias = train_linear_regressor()
@@ -299,6 +319,11 @@ def main() -> None:
     scalar_output = Path(args.scalar_output)
     scalar_output.parent.mkdir(parents=True, exist_ok=True)
     scalar_output.write_bytes(model_proto(scalar_graph()))
+    if args.convolution_output is not None:
+        convolution_output = Path(args.convolution_output)
+        convolution_output.parent.mkdir(parents=True, exist_ok=True)
+        convolution_output.write_bytes(model_proto(convolution_graph(weights, bias)))
+        print(f"wrote {convolution_output}")
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
     print(
         f"wrote {alternate_output} weights={ALTERNATE_WEIGHTS!r} bias={ALTERNATE_BIAS!r}"

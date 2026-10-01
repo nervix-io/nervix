@@ -1,0 +1,10 @@
+# SHA-256 pins for manually published ONNX Runtime archives.
+# These pins are excluded from the build identity.
+
+["linux/amd64"]
+fingerprint = "7888757b32b1d25397b35c38c3d9b6d272bcd6ea61ebdc10ad837c6d965ad53a"
+sha256 = "51ab734de082c6f02d4692d4bdfb83e636c9d45553774df569a6bb6aace1e056"
+
+["linux/arm64"]
+fingerprint = "8d8daca7bd83eb3825ba58c3dcde6abdd31a62d31017457a2a9ae1d174a72b64"
+sha256 = "90f2d88e5b488f8ebe3366dde11ca06946d2be6ddbc290ee2760620a5857e943"

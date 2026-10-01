@@ -1,5 +1,5 @@
 Feature: Inferencer resources
-  Scenario Outline: Inferencer creation uses a static ONNX resource model
+  Scenario Outline: Inferencer creation uses a model with the statically linked ONNX Runtime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"

@@ -72,6 +72,5 @@ for the kernel and server packages cover **1,182 of 1,261 changed executable Rus
 
 ```bash
 just coverage-lib target/window-kernel-final.lcov --package nervix-simd-kernels
-ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" \
-  just coverage-lib target/window-server-final.lcov --package nervix-server --features testing
+just coverage-lib target/window-server-final.lcov --package nervix-server --features testing
 ```

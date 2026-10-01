@@ -49,6 +49,11 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
+
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
@@ -180,6 +185,11 @@ jobs:
         uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -352,6 +362,11 @@ jobs:
         uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -619,6 +634,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
+
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
@@ -773,6 +793,11 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
+
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -989,6 +1014,11 @@ jobs:
         uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2

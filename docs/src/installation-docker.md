@@ -1,5 +1,13 @@
 # Docker
 
+The Debian images contain the statically linked ONNX Runtime core. Both amd64 and arm64 images package
+the CUDA 13 provider and its user-space libraries; using CUDA requires a compatible host NVIDIA
+driver and GPU access for the container. CPU inference uses the same package without GPU access.
+Image builds fetch the checksum-pinned ONNX Runtime artifact over public R2 HTTPS without credentials before Docker starts,
+reusing a verified local package when available. Development and CI fail when the required artifact
+is unavailable; source compilation is an explicit maintainer task. See
+[Developing Nervix](developing-nervix.md#build-the-debian-image).
+
 Nervix publishes a rolling multi-architecture Debian image to
 `ghcr.io/nervix-io/nervix:debian-latest`. The image contains `nervix-server`, `nervix-cli`, and
 `nervix-nspl-format`. The examples on this page create a three-node cluster for local evaluation.

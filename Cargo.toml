@@ -7,6 +7,10 @@ version.workspace = true
 [lints]
 workspace = true
 
+[build-dependencies]
+serde_json = { workspace = true }
+toml = { workspace = true }
+
 [[bin]]
 bench = false
 name = "nervix-server"
@@ -153,12 +157,9 @@ ordered-float = { workspace = true }
 ort = { workspace = true, features = [
   "api-23",
   "cuda",
-  "load-dynamic",
   "ndarray",
-  "rocm",
   "std",
   "tracing",
-  "webgpu",
 ] }
 otel-tonic = { workspace = true }
 petgraph = { workspace = true }

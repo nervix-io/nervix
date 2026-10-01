@@ -8,8 +8,8 @@ ARG FLATBUFFERS_VERSION=25.12.19
 ARG FLATBUFFERS_SHA256=f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04d90696a
 
 ARG SONIC_PARALLELISM=2
-ARG SONIC_TARGET_CPUS=x86-64-v3
-ARG ONNXRUNTIME_VERSION=1.24.2
+# cargo-sonic filters the list to the selected target architecture.
+ARG SONIC_TARGET_CPUS=x86-64-v3,neoverse-n1
 
 FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS builder
 
@@ -103,7 +103,9 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY scripts/onnxruntime/manifest.toml ./scripts/onnxruntime/manifest.toml
+COPY --from=onnxruntime / /opt/onnxruntime/
 COPY benches/*.rs ./benches/
 COPY src ./src
 COPY crates ./crates
@@ -117,6 +119,8 @@ ENV RUSTC_WRAPPER=kache
 ENV KACHE_MAX_SIZE=1TiB
 ENV KACHE_CACHE_EXECUTABLES=true
 ENV KACHE_REMOTE_KEY_LISTING=false
+ENV ORT_LIB_PATH=/opt/onnxruntime/lib
+ENV ORT_PREFER_DYNAMIC_LINK=0
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -182,35 +186,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/nervix-server \
     && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/nervix-server.bundle \
     && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli \
-    && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/nervix-nspl-format
-
-ARG DEBIAN_VERSION=trixie
-FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS onnxruntime
-
-ARG ONNXRUNTIME_VERSION
-ARG TARGETARCH
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && case "${TARGETARCH}" in \
-        amd64) export ORT_ARCH=x64; export ORT_FLAVOR=gpu_cuda13 ;; \
-        arm64) export ORT_ARCH=aarch64; export ORT_FLAVOR=cpu ;; \
-        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
-    && if [ "${ORT_FLAVOR}" = "gpu_cuda13" ]; then \
-        export ORT_PACKAGE="onnxruntime-linux-${ORT_ARCH}-gpu_cuda13-${ONNXRUNTIME_VERSION}"; \
-    else \
-        export ORT_PACKAGE="onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}"; \
-    fi \
-    && curl -L --proto '=https' --tlsv1.2 -sSf \
-        "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${ORT_PACKAGE}.tgz" \
-        -o /tmp/onnxruntime.tgz \
-    && mkdir -p /onnxruntime \
-    && tar -xzf /tmp/onnxruntime.tgz -C /onnxruntime --strip-components=1 \
-    && rm /tmp/onnxruntime.tgz
+    && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/nervix-nspl-format \
+    && mkdir -p /artifacts/onnxruntime/lib /artifacts/onnxruntime/licenses \
+    && cp -R /opt/onnxruntime/runtime/. /artifacts/onnxruntime/ \
+    && for directory in /artifacts/nervix-server.bundle/*; do \
+      if [ -f "${directory}/nervix-server" ]; then \
+        for provider in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do \
+          ln -s "../../../lib/nervix/onnxruntime/${provider}" "${directory}/${provider}"; \
+        done; \
+      fi; \
+    done
 
 ARG DEBIAN_VERSION=trixie
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
@@ -219,6 +204,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libstdc++6 \
+        libatomic1 \
+        zlib1g \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 nervix \
     && useradd --system --uid 10001 --gid nervix --home-dir /var/lib/nervix --shell /usr/sbin/nologin nervix \
@@ -226,10 +213,11 @@ RUN groupadd --system --gid 10001 nervix \
     && chown -R nervix:nervix /var/lib/nervix
 VOLUME ["/var/lib/nervix"]
 ENV NERVIX_DB_PATH=/var/lib/nervix/db
-ENV LD_LIBRARY_PATH=/usr/local/lib
-ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/usr/local/lib/nervix/onnxruntime
 
-COPY --from=onnxruntime /onnxruntime/lib/libonnxruntime*.so* /usr/local/lib/
+COPY --from=builder /artifacts/onnxruntime/lib/ /usr/local/lib/nervix/onnxruntime/
+COPY --from=builder /artifacts/onnxruntime/licenses/ /usr/local/share/licenses/onnxruntime/providers/
+COPY --from=builder /opt/onnxruntime/LICENSE /opt/onnxruntime/ThirdPartyNotices.txt /usr/local/share/licenses/onnxruntime/
 COPY --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
 COPY --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
