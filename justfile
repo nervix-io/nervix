@@ -1293,137 +1293,139 @@ autoinherit-check:
     cargo autoinherit
     git diff --exit-code
 
-# Each Clippy invocation owns a build directory named after its recipe, so parallel recipes never
-# share Cargo's target directory lock. `just --jobs N` bounds the active recipe bodies.
+# Each package/configuration is a separate parallel dependency. The one Cargo recipe below
+# hashes its arguments and toolchain into an isolated directory, and `just --jobs N` bounds it.
+clippy_all_features_packages := [
+    "nervix-approx-into",
+    "nervix-arbitrary",
+    "nervix-backup",
+    "nervix-benchmark",
+    "nervix-bounded-write",
+    "nervix-branch-instances",
+    "nervix-checkpoint-replication",
+    "nervix-cli",
+    "nervix-client-ffi",
+    "nervix-client-wire",
+    "nervix-columnar-json",
+    "nervix-dataflow-graph",
+    "nervix-dns",
+    "nervix-expiry-map",
+    "nervix-jaq",
+    "nervix-models",
+    "nervix-nspl",
+    "nervix-nspl-format",
+    "nervix-primitives-macros",
+    "nervix-recovery",
+    "nervix-roto",
+    "nervix-simd-kernels",
+    "nervix-test-environment",
+    "nervix-vm",
+    "nervix-wasm-protocol",
+    "nervix-wasm-sdk",
+    "nervix-web-console",
+]
+
+clippy_connector_packages := [
+    "nervix-connector",
+    "nervix-connector-clickhouse",
+    "nervix-connector-http",
+    "nervix-connector-iceberg",
+    "nervix-connector-kafka",
+    "nervix-connector-mongodb",
+    "nervix-connector-mqtt",
+    "nervix-connector-mysql",
+    "nervix-connector-nats",
+    "nervix-connector-otel",
+    "nervix-connector-postgres",
+    "nervix-connector-prometheus",
+    "nervix-connector-pulsar",
+    "nervix-connector-rabbitmq",
+    "nervix-connector-redis",
+    "nervix-connector-sentry",
+    "nervix-connector-sqs",
+    "nervix-connector-syslog",
+    "nervix-connector-websockets",
+    "nervix-connector-zeromq",
+]
+
+clippy_shuttle_packages := [
+    "nervix-client-core",
+    "nervix-connector",
+    "nervix-connector-clickhouse",
+    "nervix-connector-http",
+    "nervix-connector-iceberg",
+    "nervix-connector-mongodb",
+    "nervix-connector-mqtt",
+    "nervix-connector-mysql",
+    "nervix-connector-nats",
+    "nervix-connector-otel",
+    "nervix-connector-postgres",
+    "nervix-connector-pulsar",
+    "nervix-connector-rabbitmq",
+    "nervix-connector-redis",
+    "nervix-connector-sentry",
+    "nervix-connector-sqs",
+    "nervix-connector-syslog",
+    "nervix-connector-zeromq",
+    "nervix-execution",
+    "nervix-interconnect",
+    "nervix-wasm",
+]
+
 [private, parallel]
-clippy-targets: cargo-clippy-workspace cargo-clippy-server-testing cargo-clippy-client-core cargo-clippy-connectors cargo-clippy-consensus cargo-clippy-execution-libraries cargo-clippy-primitives cargo-clippy-primitives-test-util cargo-clippy-shuttle cargo-clippy-primitives-shuttle cargo-clippy-turmoil cargo-clippy-primitives-turmoil cargo-clippy-loom-models cargo-clippy-primitives-loom cargo-clippy-loom-libraries cargo-clippy-server-loom-tests cargo-clippy-consensus-loom-tests cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+clippy-targets: ordinary-clippy-targets shuttle-clippy-targets turmoil-clippy-targets loom-clippy-targets
 
-cargo-clippy-workspace:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}"
-    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    # Execution-mode builds require their runner, Shuttle deliberately omits Tokio's process and
-    # runtime-builder APIs, and the modes cannot be enabled together. Exclude packages with a mode
-    # from the all-features workspace build; the ordinary, Shuttle, Turmoil and Loom recipes lint
-    # them separately.
-    mode_packages=(
-        nervix-client-core
-        'nervix-connector*'
-        nervix-consensus
-        nervix-execution
-        nervix-interconnect
-        nervix-model-harness
-        nervix-primitives
-        nervix-server
-        nervix-wasm
-    )
-    workspace_exclusions=()
-    for package in "${mode_packages[@]}"; do
-        workspace_exclusions+=(--exclude "${package}")
-    done
-    cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
+[private, parallel]
+ordinary-clippy-targets: \
+    *(clippy-target *clippy_all_features_packages ["--all-features", "--all-targets"]) \
+    *(clippy-target *clippy_connector_packages ["--all-targets"]) \
+    *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm"] ["--all-targets"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--features", "benchmarks testing"]) \
+    (clippy-target "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
+    (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
+    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["-q"]) \
+    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown", "-q"])
 
-cargo-clippy-server-testing:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
+[private, parallel]
+shuttle-clippy-targets: \
+    *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
+    *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
+    *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"])
 
-cargo-clippy-client-core:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features autocomplete --package nervix-client-core
+[private, parallel]
+turmoil-clippy-targets: \
+    *(clippy-target *["nervix-execution", "nervix-interconnect"] ["--all-targets", "--features", "turmoil"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "turmoil native"])
 
-cargo-clippy-connectors:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --package 'nervix-connector*'
-
-cargo-clippy-consensus:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features testing --package nervix-consensus
-
-cargo-clippy-execution-libraries:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets \
-        --package nervix-execution \
-        --package nervix-interconnect \
-        --package nervix-model-harness \
-        --package nervix-wasm
-
-cargo-clippy-primitives:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features native --package nervix-primitives
-
-cargo-clippy-primitives-test-util:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
-
-cargo-clippy-shuttle:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --features 'shuttle testing' \
-        --package nervix-client-core \
-        --package 'nervix-connector*' \
-        --package nervix-consensus \
-        --package nervix-execution \
-        --package nervix-interconnect \
-        --package nervix-server \
-        --package nervix-wasm
-
-cargo-clippy-primitives-shuttle:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
-
-cargo-clippy-turmoil:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features turmoil \
-        --package nervix-execution \
-        --package nervix-interconnect
-
-cargo-clippy-primitives-turmoil:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
-
-# Lint every Loom build, each in its own invocation: the models and their harness, the primitive
-# boundary, and the server and consensus libraries as they ship and in test mode, where the Loom
-# models of their owners are built. Their integration tests and binaries never run a model, and
-# consensus unit tests build with `testing`, whose fault controls only the server's tests use.
+# Lint the Loom models and harness, the primitive boundary, and each library as it ships and
+# in test mode. The same parallel dependencies run in the full validation matrix.
 cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
-loom-clippy-targets: cargo-clippy-loom-models cargo-clippy-primitives-loom cargo-clippy-loom-libraries cargo-clippy-server-loom-tests cargo-clippy-consensus-loom-tests
+loom-clippy-targets: \
+    *(clippy-target *["nervix-execution", "nervix-model-harness"] ["--all-targets", "--features", "loom"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
+    *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
+    (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
+    (clippy-target "nervix-consensus" ["--lib", "--profile", "test", "--features", "loom testing"])
 
-cargo-clippy-loom-models:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features loom \
-        --package nervix-execution \
-        --package nervix-model-harness
+# The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
+# profile and toolchain differences identify separate build directories. Keep kache configured.
+[private]
+clippy-target package args toolchain="":
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }}
 
-cargo-clippy-primitives-loom:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'loom native' --package nervix-primitives
-
-cargo-clippy-loom-libraries:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --features loom \
-        --package nervix-consensus \
-        --package nervix-server
-
-cargo-clippy-server-loom-tests:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --profile test --features loom --package nervix-server
-
-cargo-clippy-consensus-loom-tests:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
-
-# Lint one workspace package and all of its targets with warnings denied. Package and arguments
-# identify its isolated build directory; extra arguments are forwarded to Cargo.
-cargo-clippy-package package *args:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}/{{ sha256(show([package, args])) }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ quote(package) }} --all-targets {{ quote(args) }}
-
-cargo-clippy-server:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
-
-cargo-clippy-client:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-cli -q
-
-cargo-clippy-nspl-format:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-nspl-format -q
-
-cargo-clippy-web-console:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
-
-# The browser console decodes session frames, so the wire crate must build for the browser target.
-cargo-clippy-client-wire-wasm:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
+# Lint one package and all of its targets; extra arguments retain their boundaries.
+cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
 
 # Lint every product Clippy target, with four concurrent processes by default.
 cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
 
 [private, parallel]
-lint-inner: clippy-targets lint-typed-ratchet
+lint-inner: clippy-targets typed-ratchet-clippy-targets
 
 # Lint the product and compiler tooling in one bounded invocation.
 lint jobs=default_jobs: (run-with-jobs "lint-targets" jobs)
@@ -1506,8 +1508,14 @@ fmt-check-typed-ratchet: typed-ratchet-setup
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
 
-lint-typed-ratchet: typed-ratchet-setup
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 clippy --manifest-path tools/nervix-lint/Cargo.toml --workspace --all-targets -- -D warnings
+# Tooling packages use the same bounded scheduler and command, with their pinned compiler.
+lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
+
+[private]
+typed-ratchet-clippy-targets: typed-ratchet-setup typed-ratchet-clippy-packages
+
+[private, parallel]
+typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
 coverage-typed-ratchet-python: typed-ratchet-setup test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash

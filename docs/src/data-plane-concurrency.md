@@ -1161,7 +1161,8 @@ that a join or an extra lock publishes, or a real atomic does not make a model.
 
 The execution, consensus and server crates own a `loom` feature, and each forwards it to the
 primitive crate and to every dependency that owns one, so the whole library graph of each builds
-with Loom's primitives. `just cargo-clippy-loom`, which `just lint` runs, lints every Loom build:
+with Loom's primitives. `just cargo-clippy-loom`, whose package checks also run in `just lint`,
+lints every Loom build:
 the models and their harness, the primitive boundary, and the server and consensus libraries both
 as they ship and in test mode, where models of their owners are compiled.
 

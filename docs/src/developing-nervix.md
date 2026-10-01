@@ -197,12 +197,17 @@ Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to 
 limit. `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling
 Clippy recipes in one invocation, so they share the same limit.
 
-Each product Clippy invocation is a separate recipe and uses `clippy/<recipe_name>` beneath
-`CARGO_TARGET_DIR`, or the repository's `target` directory when that variable is unset.
-The stable recipe name isolates Cargo's build directory lock;
-`cargo-clippy-package` also hashes its package and arguments into the directory name. The compiler
-tooling workspace keeps its separate `typed-ratchet/driver` directory. All builds retain the
-configured kache wrapper. Cargo's compiler job limit applies separately within each recipe.
+Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
+The `[parallel]` groups map package lists onto that recipe, including the packages checked with
+`--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
+stay separate, so mutually exclusive execution modes never share a Cargo invocation.
+
+Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
+`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
+so each configuration has its own build directory lock. `just cargo-clippy-package <package>
+[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
+builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
+wrapper. Cargo's compiler job limit applies separately within each invocation.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
