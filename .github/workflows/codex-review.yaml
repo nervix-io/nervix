@@ -1,0 +1,95 @@
+name: Codex PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !endsWith(github.actor, '[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      final_message: ${{ steps.codex.outputs.final-message }}
+    steps:
+      - name: Check API key configuration
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "::error::Add the OPENAI_API_KEY repository secret to enable Codex PR reviews."
+            exit 1
+          fi
+
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare review context
+        env:
+          REVIEW_BASE: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git cat-file -e "${REVIEW_BASE}^{commit}"
+          git cat-file -e "${REVIEW_HEAD}^{commit}"
+          cat .github/codex/prompts/review.md > "${RUNNER_TEMP}/codex-review-prompt.md"
+          printf '\nBase commit: %s\nHead commit: %s\n' "$REVIEW_BASE" "$REVIEW_HEAD" \
+            >> "${RUNNER_TEMP}/codex-review-prompt.md"
+
+      - name: Review pull request
+        id: codex
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: ${{ runner.temp }}/codex-review-prompt.md
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+          effort: high
+          codex-args: '["--ephemeral"]'
+
+  publish:
+    needs: review
+    if: needs.review.outputs.final_message != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Publish review for current revision
+        uses: actions/github-script@v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.review.outputs.final_message }}
+        with:
+          script: |
+            const reviewed = context.payload.pull_request;
+            const request = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: reviewed.number,
+            };
+            const { data: current } = await github.rest.pulls.get(request);
+            if (current.state !== 'open' || current.draft ||
+                current.head.sha !== reviewed.head.sha ||
+                current.base.sha !== reviewed.base.sha) {
+              core.info('The pull request changed during review; skipping this result.');
+              return;
+            }
+            await github.rest.pulls.createReview({
+              ...request,
+              commit_id: reviewed.head.sha,
+              event: 'COMMENT',
+              body: `## Codex review\n\nReviewed commit ${reviewed.head.sha}.\n\n${process.env.CODEX_FINAL_MESSAGE}`,
+            });
