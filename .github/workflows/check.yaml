@@ -538,7 +538,7 @@ jobs:
       - name: Install CRAP and LCOV
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-crap,just
+          tool: cargo-crap,just,toml-cli
 
       - name: Install LCOV
         run: sudo apt-get update && sudo apt-get install -y lcov
