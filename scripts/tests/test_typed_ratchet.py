@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 from scripts import typed_ratchet
-from scripts.typed_ratchet import AnalysisError, Configuration, ROOT, Runner, TOOLING, atomic_json, digest, policy
+from scripts.typed_ratchet import AnalysisError, Configuration, ROOT, Runner, TOOLING, atomic_json, digest, summarize
 
 
 class CompletionTests(unittest.TestCase):
@@ -33,6 +33,7 @@ class CompletionTests(unittest.TestCase):
         self.runner.root = self.root
         self.runner.compiler = "qualified compiler"
         self.runner.identity = "current worktree fingerprint"
+        self.runner.environment = {"NERVIX_LINT_MODE": "gate"}
         self.configuration = Configuration("ordinary", "Cargo.toml", ("example",))
         self.key = "example-id::example::lib"
         self.expected = {self.key: {"package": "example", "source": str(self.source), "kind": "lib"}}
@@ -96,7 +97,7 @@ class RunnerIdentityTests(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name)
         self.target = self.root / "target"
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.root, check=True)
-        for name, text in {"src/lib.rs": "pub fn owner() {}", "Cargo.toml": "[workspace]", "Cargo.lock": "lock", str(TOOLING / "catalog.json"): "catalog", str(TOOLING / "configurations.toml"): "configuration", str(TOOLING / "scopes.json"): "review", "scripts/typed_lint_wrapper.py": "wrapper", "target/typed-ratchet/driver/debug/nervix-lint-driver": "driver", "target/typed-ratchet/driver/debug/nervix-lint-report": "validator"}.items():
+        for name, text in {"src/lib.rs": "pub fn owner() {}", "Cargo.toml": "[workspace]", "Cargo.lock": "lock", str(TOOLING / "report/src/rules.rs"): "rule code", str(TOOLING / "configurations.toml"): "configuration", "scripts/typed_lint_wrapper.py": "wrapper", "target/typed-ratchet/driver/debug/nervix-lint-driver": "driver", "target/typed-ratchet/driver/debug/nervix-lint-report": "validator"}.items():
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
@@ -113,9 +114,9 @@ class RunnerIdentityTests(unittest.TestCase):
         self.commands.start()
         self.addCleanup(self.commands.stop)
 
-    def test_compiler_driver_catalog_configuration_source_dependency_and_wrapper_invalidate(self) -> None:
+    def test_compiler_driver_rules_configuration_source_dependency_and_wrapper_invalidate(self) -> None:
         original = Runner(self.root, self.target)
-        for name in ("src/lib.rs", "Cargo.toml", "Cargo.lock", str(TOOLING / "catalog.json"), str(TOOLING / "configurations.toml"), "scripts/typed_lint_wrapper.py", "target/typed-ratchet/driver/debug/nervix-lint-driver", "target/typed-ratchet/driver/debug/nervix-lint-report"):
+        for name in ("src/lib.rs", "Cargo.toml", "Cargo.lock", str(TOOLING / "report/src/rules.rs"), str(TOOLING / "configurations.toml"), "scripts/typed_lint_wrapper.py", "target/typed-ratchet/driver/debug/nervix-lint-driver", "target/typed-ratchet/driver/debug/nervix-lint-report"):
             with self.subTest(name=name):
                 path = self.root / name
                 initial = path.read_bytes()
@@ -124,8 +125,6 @@ class RunnerIdentityTests(unittest.TestCase):
                 path.write_bytes(initial)
         with mock.patch("scripts.typed_ratchet.compiler_identity", return_value="another compiler"):
             self.assertNotEqual(Runner(self.root, self.target).identity, original.identity)
-        (self.root / TOOLING / "scopes.json").write_text("new review")
-        self.assertEqual(Runner(self.root, self.target).identity, original.identity)
 
     def test_cache_flags_and_local_cargo_configuration_invalidate(self) -> None:
         original = Runner(self.root, self.target)
@@ -268,6 +267,16 @@ class RunnerExecutionTests(CompletionTests):
         self.assertIn("example", command.call_args.args[0])
         self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
 
+    def test_required_gate_rejects_warnings_and_inventory_records_them(self) -> None:
+        messages = [{"reason": "compiler-message", "message": {"level": "warning", "code": {"code": "nervix::sync_acquisition"}}}]
+        self.runner.environment["NERVIX_LINT_MODE"] = "gate"
+        with self.assertRaisesRegex(AnalysisError, "unresolved Nervix diagnostic"):
+            self.runner.check_diagnostics(messages)
+        self.runner.environment["NERVIX_LINT_MODE"] = "inventory"
+        self.runner.check_diagnostics(messages)
+        self.runner.environment["NERVIX_LINT_MODE"] = "gate"
+        self.runner.check_diagnostics([{"reason": "compiler-message", "message": {"code": None}}])
+
 
 class MainTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -275,12 +284,11 @@ class MainTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name)
         (self.root / TOOLING).mkdir(parents=True)
-        (self.root / TOOLING / "scopes.json").write_text("[]")
-        (self.root / TOOLING / "review-context.json").write_text('{"inputs":{}}')
         self.runner = mock.Mock(root=self.root, target=self.root / "target", work=self.root / "evidence", compiler="qualified compiler", identity="qualified identity")
+        self.runner.inputs = {"src/lib.rs": "current source"}
         self.runner.analyze.side_effect = lambda configuration, **kwargs: {"configuration": json.loads(typed_ratchet.encode(dataclasses.asdict(configuration))), "reports": {}, "complete": True}
         self.configurations = [Configuration("ordinary", "Cargo.toml", ())]
-        for name, value in (("Runner", self.runner), ("load_configurations", self.configurations), ("policy", [])):
+        for name, value in (("Runner", self.runner), ("load_configurations", self.configurations), ("summarize", []), ("source_inputs", self.runner.inputs)):
             patch = mock.patch("scripts.typed_ratchet." + name, return_value=value)
             patch.start()
             self.addCleanup(patch.stop)
@@ -291,19 +299,16 @@ class MainTests(unittest.TestCase):
             status = typed_ratchet.main(["--root", str(self.root), *args])
         return status, output.getvalue()
 
-    def test_inventory_and_policy_have_explicit_different_evidence(self) -> None:
+    def test_inventory_and_diagnostic_gate_have_explicit_different_evidence(self) -> None:
         status, _ = self.run_main("--inventory")
         self.assertEqual(status, 0)
         path = self.runner.work / "inventory.json"
         inventory = json.loads(path.read_text())
-        self.assertFalse(inventory["policy_checked"])
+        self.assertFalse(inventory["diagnostics_checked"])
         status, _ = self.run_main()
         self.assertEqual(status, 0)
         current = json.loads(path.read_text())
-        self.assertTrue(current["policy_checked"])
-        self.assertEqual(current["debt"], 0)
-        self.assertEqual(current["policy_sha256"], digest(self.root / TOOLING / "scopes.json"))
-        self.assertEqual(current["review_context_sha256"], digest(self.root / TOOLING / "review-context.json"))
+        self.assertTrue(current["diagnostics_checked"])
 
     def test_partial_unknown_matrix_and_analysis_failure_do_not_pass(self) -> None:
         for arguments, text in ((("--configuration", "ordinary"), "whole declared matrix"), (("--configuration", "missing", "--inventory"), "unknown requested")):
@@ -317,21 +322,21 @@ class MainTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(self.root / "selected-target")}):
             status, _ = self.run_main("--fixture-mode", "ordinary", "--inventory", "--recompile")
             self.assertEqual(status, 0)
-            typed_ratchet.Runner.assert_called_with(self.root, self.root / "selected-target")
+            typed_ratchet.Runner.assert_called_with(self.root, self.root / "selected-target", inventory=True)
         self.runner.clean_authored_artifacts.assert_called_once()
         self.assertTrue(self.runner.analyze.call_args.kwargs["fresh"])
         self.assertEqual(self.runner.analyze.call_args.args[0].name, "fixture-ordinary")
 
     def test_turmoil_uses_a_separate_just_invocation_and_rejects_wrong_evidence(self) -> None:
         self.configurations[:] = [Configuration("turmoil", "Cargo.toml", (), features=("turmoil",))]
-        separate = {"complete": True, "compiler": self.runner.compiler, "root": str(self.root), "evidence": [{"configuration": {"name": "turmoil"}, "reports": {}}]}
+        separate = {"complete": True, "compiler": self.runner.compiler, "root": str(self.root), "diagnostics_checked": False, "source_identity": typed_ratchet.hashlib.sha256(typed_ratchet.encode(self.runner.inputs)).hexdigest(), "evidence": [{"configuration": {"name": "turmoil"}, "reports": {}}]}
         def nested(args, **kwargs):
             self.assertEqual(args[:2], ["just", "typed-ratchet-turmoil"])
             atomic_json(self.runner.work / "turmoil.json", separate)
             return mock.Mock(returncode=0)
         with mock.patch.dict(os.environ, {"RUSTFLAGS": ""}), mock.patch("scripts.typed_ratchet.subprocess.run", side_effect=nested):
             self.assertEqual(self.run_main("--inventory", "--fresh")[0], 0)
-            for field, value in (("complete", False), ("compiler", "wrong compiler"), ("root", "wrong worktree")):
+            for field, value in (("complete", False), ("compiler", "wrong compiler"), ("root", "wrong worktree"), ("diagnostics_checked", True), ("source_identity", "different inputs")):
                 previous = separate[field]
                 separate[field] = value
                 self.assertEqual(self.run_main("--inventory")[0], 1)
@@ -341,18 +346,28 @@ class MainTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"RUSTFLAGS": ""}), mock.patch("scripts.typed_ratchet.subprocess.run", return_value=mock.Mock(returncode=1)):
             self.assertEqual(self.run_main("--fixture-mode", "turmoil", "--inventory", "--recompile")[0], 1)
 
-    def test_human_review_and_expansion_origins_are_present(self) -> None:
-        finding = {"receiver_type": "&DashMap<u32, u32>", "operation": "get", "acquisition": "shared", "span": {"line": 3, "column": 2}, "expansion": [{"macro_name": "external::forward", "call_site": "src/lib.rs:2"}]}
-        site = {"acquisition": {"site": {"path": "src/lib.rs", "start": 10}, "configurations": {"ordinary:example": [finding]}}, "scope": {"owners": ["example::batch"], "frequency": "per batch", "rationale": "Retain its published map handle.", "disposition": {"class": "debt", "delivery": "owner repair"}}}
-        with mock.patch("scripts.typed_ratchet.policy", return_value=[site]):
+    def test_turmoil_child_cannot_select_an_arbitrary_partial_gate(self) -> None:
+        for flags in ((), ("--configuration", "ordinary"), ("--fixture-mode", "turmoil")):
+            self.assertEqual(self.run_main("--turmoil-child", *flags)[0], 1)
+        self.configurations[:] = [Configuration("turmoil", "Cargo.toml", (), features=("turmoil",))]
+        with mock.patch.dict(os.environ, {"RUSTFLAGS": "--cfg tokio_unstable"}):
+            self.assertEqual(self.run_main("--turmoil-child", "--configuration", "turmoil")[0], 0)
+            result = json.loads((self.runner.work / "inventory.json").read_text())
+            self.assertTrue(result["diagnostics_checked"])
+            self.assertFalse(result["matrix_complete"])
+
+    def test_source_changes_during_matrix_are_rejected(self) -> None:
+        with mock.patch("scripts.typed_ratchet.source_inputs", return_value={"src/lib.rs": "changed source"}):
+            self.assertEqual(self.run_main()[0], 1)
+
+    def test_source_contract_and_expansion_origins_are_present(self) -> None:
+        finding = {"receiver_type": "&DashMap<u32, u32>", "operation": "get", "acquisition": "shared", "owner": "example::batch", "context": {"context": "bounded", "reason": "bounded admission", "key": "branch identity", "bound": "one admitted batch"}, "span": {"line": 3, "column": 2}, "expansion": [{"macro_name": "external::forward", "call_site": "src/lib.rs:2"}]}
+        site = {"site": {"path": "src/lib.rs", "start": 10}, "configurations": {"ordinary:example": [finding]}}
+        with mock.patch("scripts.typed_ratchet.summarize", return_value=[site]):
             status, output = self.run_main("--show")
         self.assertEqual(status, 0)
-        for text in ("src/lib.rs:3:3", "DashMap", "shared", "per batch", "Retain its published map handle", "ordinary:example", "external::forward"):
+        for text in ("src/lib.rs:3:3", "DashMap", "shared", "bounded admission", "branch identity", "one admitted batch", "ordinary:example", "external::forward"):
             self.assertIn(text, output)
-        site["scope"]["disposition"] = {"class": "bounded_protocol", "key": "branch identity", "bound": "one admitted batch"}
-        rendered = typed_ratchet.render_finding(site)
-        self.assertIn("key branch identity", rendered)
-        self.assertIn("bound one admitted batch", rendered)
 
 
 class WorkspaceWrapperTests(unittest.TestCase):
@@ -391,6 +406,10 @@ class CacheQualificationTests(unittest.TestCase):
                     destination = pathlib.Path(arguments[4]) / TOOLING
                     destination.mkdir(parents=True)
                     (destination / "Cargo.toml").write_text("committed workspace")
+                if arguments[:2] == ["git", "diff"]:
+                    return str(TOOLING / "Cargo.toml") + "\0"
+                if arguments[:2] == ["git", "ls-files"]:
+                    return ""
 
             def qualify(worktree, target):
                 if worktree != root:
@@ -402,25 +421,3 @@ class CacheQualificationTests(unittest.TestCase):
             with mock.patch.object(qualification, "ROOT", root), mock.patch.object(qualification, "command", side_effect=command), mock.patch.object(qualification, "qualify", side_effect=qualify), mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}):
                 with self.assertRaisesRegex(RuntimeError, "workspace prepared"):
                     qualification.main()
-
-
-class CallerReviewTests(unittest.TestCase):
-    def test_changed_caller_invalidates_an_unchanged_helpers_review(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            tooling = root / TOOLING
-            tooling.mkdir(parents=True)
-            inputs = {"src/helper.rs": "unchanged acquisition", "src/caller.rs": "lifecycle caller"}
-            (tooling / "review-context.json").write_text(json.dumps({"inputs": inputs}))
-            (tooling / "scopes.json").write_text("[]")
-            runner = mock.Mock(root=root, target=root, inputs=dict(inputs))
-            success = mock.Mock(returncode=0, stdout=b"[]")
-            with mock.patch("scripts.typed_ratchet.subprocess.run", return_value=success):
-                self.assertEqual(policy(runner, [], inventory=False), [])
-                runner.inputs["src/caller.rs"] = "recurring batch caller"
-                with self.assertRaisesRegex(AnalysisError, "stale review context.*src/caller.rs"):
-                    policy(runner, [], inventory=False)
-                for context in ([], {}, {"inputs": []}, {"inputs": {"src/caller.rs": 0}}):
-                    (tooling / "review-context.json").write_text(json.dumps(context))
-                    with self.assertRaisesRegex(AnalysisError, "invalid review context"):
-                        policy(runner, [], inventory=False)

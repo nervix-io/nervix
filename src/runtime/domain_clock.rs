@@ -7,6 +7,14 @@
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "clock bindings are resolved when a domain, task or branch is installed"
+    )
+)]
+
 use std::{sync::Arc as StdArc, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
@@ -573,6 +581,13 @@ impl DomainClockObserver {
 
 /// A clock capability bound to one domain and one installed lifecycle generation.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "running tasks read their retained domain clock and execution snapshot"
+    )
+)]
 pub struct DomainClock {
     inner: Arc<DomainClockInner>,
     generation: u64,
@@ -792,6 +807,13 @@ pub(super) struct DomainIngestionSnapshot {
 
 /// The time value handed to one VM or WASM invocation after its clock generation is validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "running tasks read their retained domain clock and execution snapshot"
+    )
+)]
 pub(crate) struct DomainExecutionSnapshot {
     generation: u64,
     now: Timestamp,
@@ -1106,6 +1128,14 @@ impl Runtime {
         self.handle_domain_clock_progress(domain, authority.node_id(), &progress)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(super) fn bind_domain_clock(
         &self,
         domain: &DomainName,

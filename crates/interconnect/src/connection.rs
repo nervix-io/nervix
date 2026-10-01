@@ -7,6 +7,15 @@
 //! - **Depends on.** Certificate identity, bounded rkyv codecs, and execution admission.
 //! - **Must not know.** Runtime graphs, scheduling decisions, or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "connection and peer registration install or retire concrete transport \
+                  lifetimes; recurring transport operations override this default"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::poll_fn,
@@ -132,6 +141,13 @@ struct SlotControl {
     cancel: CancellationToken,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct CancelOnDrop {
     token: CancellationToken,
     armed: bool,
@@ -161,6 +177,13 @@ impl Drop for CancelOnDrop {
 /// and connections by reference instead of assembling a key for every operation. The keys name the
 /// endpoint, not an address, so a new DNS answer for the same endpoint changes only where the next
 /// connection is dialled and never retires a connection that is already established.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
@@ -277,6 +300,13 @@ fn increment(total: usize, addition: usize) -> usize {
         .assured("configured connection, stream and slot limits are far inside usize")
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 pub(crate) struct StreamLease {
     connection: Arc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
@@ -363,6 +393,13 @@ struct OutboundRelayKey {
 /// The attempt holds its channel's key, so the channel bookkeeping an attempt touches never
 /// rebuilds that key.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayAttemptKey {
     channel: RelayChannelKey,
     sequence: u64,
@@ -386,6 +423,13 @@ struct RelayChannelKey {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
@@ -429,6 +473,13 @@ impl RelayChannelWatermark {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 enum RelayAttemptEntry {
     Active(StdArc<RelayAdmissionRecord>),
     CancellationFence,
@@ -471,6 +522,15 @@ enum RelayAdmissionState {
     Cancelled,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one inbound admission record",
+        bound = "one terminal transition per reserved grant and retained admission permit",
+        reason = "admission records own the exact grant and its terminal resolution"
+    )
+)]
 struct RelayAdmissionRecord {
     attempt: RelayAttemptKey,
     admission_key: RelayAdmissionKey,
@@ -488,6 +548,13 @@ struct RelayAdmissionRecord {
     _terminal: OwnedSemaphorePermit,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayBodyCompletionGuard {
     admission: StdArc<RelayAdmissionRecord>,
     complete: bool,
@@ -516,10 +583,28 @@ impl Drop for RelayBodyCompletionGuard {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "the intake retains its exact grant record through the terminal transition",
+        key = "one admitted relay grant",
+        bound = "one synchronous status transition under its retained record; no guard crosses \
+                 await"
+    )
+)]
 pub struct RelayAdmission {
     record: StdArc<RelayAdmissionRecord>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport services each admitted body and resolves its exact cancellation \
+                  guard"
+    )
+)]
 pub struct RelayCancellationGuard {
     state: TransportState,
     peer_node_id: ClusterNodeName,
@@ -1129,6 +1214,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn ensure_class_slots(&self, target: &OutboundTarget, class: PoolClass) {
         for key in target.slot_keys(class) {
             self.ensure_slot(key);
@@ -1141,6 +1234,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn ensure_slot(&self, key: &ConnectionSlotKey) {
         if self.admission_closed.is_cancelled() {
             return;
@@ -1148,10 +1249,20 @@ impl TransportState {
         // Every lease passes through here, and in the steady state its slot is already running. A
         // shared lookup confirms that, so only a missing slot takes the exclusive entry and builds
         // an owned key.
-        if self.slots.contains_key(key) {
+        if nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.slots.contains_key(key)
+        ) {
             return;
         }
-        match self.slots.entry(key.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.slots.entry(key.clone())
+        ) {
             Entry::Occupied(_) => {}
             Entry::Vacant(entry) => {
                 let cancel = CancellationToken::new();
@@ -1161,7 +1272,13 @@ impl TransportState {
                 let state = self.clone();
                 let key = key.clone();
                 self.tasks.spawn(async move {
-                    state.run_slot(key, cancel).await;
+                    nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "Typed Ratchet 03 (86bc9eqjv): a missing retained transport slot installs \
+                         its one supervised connection task",
+                        state.run_slot(key, cancel)
+                    )
+                    .await;
                 });
             }
         }
@@ -1197,6 +1314,14 @@ impl TransportState {
         self.connection_changed.notify_waiters();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
         let mut backoff = self.options.reconnect_backoff;
         loop {
@@ -1528,6 +1653,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     pub(crate) async fn lease(
         &self,
         node_id: &ClusterNodeName,
@@ -1570,17 +1703,33 @@ impl TransportState {
     /// Lease a free stream on an established connection of `class` to `node_id`, starting any of
     /// the peer's slots in that class that are not running. On an established pool every step reads
     /// shared state, so the lease takes no exclusive lock.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn try_lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
     ) -> Option<StreamLease> {
-        let target = self
-            .targets
-            .get(node_id)
-            .map(|target| Arc::clone(target.value()))?;
-        self.ensure_class_slots(&target, class);
+        let target = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.targets.get(node_id)
+        )
+        .map(|target| Arc::clone(target.value()))?;
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
+             recurring lease attempts",
+            self.ensure_class_slots(&target, class)
+        );
 
         let slot_keys = target.slot_keys(class);
         let start = self
@@ -1592,7 +1741,13 @@ impl TransportState {
             % slot_keys.len();
         let (before_start, from_start) = slot_keys.split_at(start);
         for key in from_start.iter().chain(before_start) {
-            let Some(connection) = self.connections.get(key).map(|item| item.clone()) else {
+            let Some(connection) = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected \
+                 connection slot instead of reaching the shared registry per request",
+                self.connections.get(key)
+            )
+            .map(|item| item.clone()) else {
                 continue;
             };
             let Some(permit) = connection.stream_slots.try_lease(subquota) else {
@@ -1610,6 +1765,14 @@ impl TransportState {
         None
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) async fn send(
         &self,
         node_id: &ClusterNodeName,
@@ -1628,10 +1791,13 @@ impl TransportState {
                     peer_node_id: node_id.clone(),
                     registration: ack.registration.clone(),
                 };
-                let record = self
-                    .relay_admissions
-                    .get(&key)
-                    .map(|record| StdArc::clone(record.value()));
+                let record = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain pending request \
+                     ownership through the terminal response",
+                    self.relay_admissions.get(&key)
+                )
+                .map(|record| StdArc::clone(record.value()));
                 if let Some(record) = &record {
                     if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
                         record.reject(reason.clone());
@@ -1795,6 +1961,14 @@ impl TransportState {
             .map_err(|_| Report::new(TransportError::IncomingQueueFull))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn deliver_terminal_incoming(
         &self,
         peer_addr: SocketAddr,
@@ -2692,6 +2866,14 @@ impl ClientConnection {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn request_raw(
         &self,
         state: &TransportState,
@@ -2790,6 +2972,14 @@ impl ClientConnection {
 }
 
 impl StreamLease {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn request_raw(
         &self,
         state: &TransportState,

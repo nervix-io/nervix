@@ -54,7 +54,7 @@ HOST = "x86_64-unknown-linux-gnu"
 RUNNER = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER"
 SHOW_ENV = """\
 export LLVM_PROFILE_FILE='/repo/target/nervix-%p-%24m.profraw'
-export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage --cfg=trybuild_no_target'
+export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage'
 export CARGO_LLVM_COV=1
 export CARGO_LLVM_COV_SHOW_ENV=1
 export CARGO_LLVM_COV_TARGET_DIR=/repo/target/native-coverage-build
@@ -218,8 +218,7 @@ class InstrumentationTests(unittest.TestCase):
         self.assertEqual(exported["CARGO_LLVM_COV"], "1")
         self.assertEqual(
             exported["RUSTFLAGS"],
-            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage "
-            "--cfg=trybuild_no_target",
+            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage"
         )
         with self.assertRaisesRegex(RunnerError, "unexpected line"):
             native_coverage.parse_exports("RUSTFLAGS=-Cinstrument-coverage\n")

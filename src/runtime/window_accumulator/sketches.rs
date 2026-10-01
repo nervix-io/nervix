@@ -96,6 +96,11 @@ impl PaneSketches {
         self.panes.clear();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     pub(super) fn admit<R: RetainedWindowRows>(
         &mut self,
         demand: usize,
@@ -145,6 +150,11 @@ impl PaneSketches {
     }
 
     /// A sketch cannot subtract a row. Rebuild from survivors, which also discards expired panes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     pub(super) fn retain_after<R: RetainedWindowRows>(
         &mut self,
         demand: usize,
@@ -158,6 +168,11 @@ impl PaneSketches {
         self.admit(demand, rows, removed..rows.retained());
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     pub(super) fn evaluate<R: RetainedWindowRows>(
         &self,
         demand: usize,
@@ -268,6 +283,11 @@ impl HyperLogLog {
             registers: vec![0; 1_usize << precision],
         }
     }
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     fn admit(&mut self, key: &[u8]) {
         let digest = blake3::hash(key);
         let hash = u64::from_le_bytes(
@@ -336,6 +356,11 @@ impl BoundedTDigest {
             ),
         }
     }
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     fn admit(&mut self, value: f64) {
         self.centroids.insert(Centroid {
             mean: OrderedFloat(value),

@@ -441,6 +441,14 @@ impl RelayProcessorTemplate {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(super) async fn instantiate(
         &self,
         runtime: &Runtime,
@@ -720,6 +728,14 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(super) async fn instantiate(
         &self,
         runtime: &Runtime,

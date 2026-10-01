@@ -8,6 +8,15 @@
 //!   models.
 //! - **Must not know.** Runtime graphs, schedules, branch processing state, or external connectors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "relay grants, reconciliation, watermarks and payload attempts recur on \
+                  data-plane frames"
+    )
+)]
+
 use futures_util::StreamExt as _;
 
 use super::*;
@@ -115,7 +124,12 @@ impl TransportState {
             peer_node_id: node_id.clone(),
             delivery,
         };
-        let receiver_epoch = if let Some(epoch) = self.outbound_relay_epochs.get(&outbound_key) {
+        let receiver_epoch = if let Some(epoch) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_epochs.get(&outbound_key)
+        ) {
             *epoch
         } else {
             lease.connection.peer_epoch
@@ -218,7 +232,12 @@ impl TransportState {
             peer_node_id: node_id.clone(),
             delivery: payload.delivery,
         };
-        match self.outbound_relay_epochs.entry(outbound_key.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_epochs.entry(outbound_key.clone())
+        ) {
             Entry::Occupied(entry) => {
                 if *entry.get() != management.connection.peer_epoch {
                     drop(entry);
@@ -239,7 +258,12 @@ impl TransportState {
             peer_node_id: node_id.clone(),
             registration: admission.clone(),
         };
-        match self.outbound_relay_admissions.entry(admission_key.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_admissions.entry(admission_key.clone())
+        ) {
             Entry::Occupied(entry) => {
                 if entry.get() != &outbound_key {
                     return Err(Report::new(TransportError::RelayGrant(
@@ -343,11 +367,14 @@ impl TransportState {
 
             // Report in registration order, not map order, so every process sends the same reports
             // in the same sequence.
-            let registrations = self
-                .relay_attempts
-                .iter()
-                .filter_map(|record| record.progress_registration())
-                .collect::<BTreeSet<_>>();
+            let registrations = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant \
+                 and watermark state onto retained admission owners",
+                self.relay_attempts.iter()
+            )
+            .filter_map(|record| record.progress_registration())
+            .collect::<BTreeSet<_>>();
             let mut reports = FuturesUnordered::new();
             for registration in registrations {
                 nervix_primitives::task::consume_budget().await;
@@ -407,18 +434,28 @@ impl TransportState {
                 _ = self.admission_closed.cancelled() => break,
                 _ = interval.tick() => {}
             }
-            self.relay_watermarks.retain(|channel, watermark| {
-                if self.active_relay_channels.contains_key(channel) {
-                    return true;
-                }
-                let idle = Instant::now()
-                    .checked_duration_since(watermark.last_reconciled_at())
-                    .assured(
-                        "retain holds the watermark's shard exclusively, so every reconciliation \
-                         read the clock before this read",
-                    );
-                idle < RELAY_CHANNEL_RETENTION
-            });
+            nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant \
+                 and watermark state onto retained admission owners",
+                self.relay_watermarks.retain(|channel, watermark| {
+                    if nervix_primitives::expect_lint!(
+                        nervix::sync_acquisition,
+                        "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay \
+                         attempt, grant and watermark state onto retained admission owners",
+                        self.active_relay_channels.contains_key(channel)
+                    ) {
+                        return true;
+                    }
+                    let idle = Instant::now()
+                        .checked_duration_since(watermark.last_reconciled_at())
+                        .assured(
+                            "retain holds the watermark's shard exclusively, so every \
+                             reconciliation read the clock before this read",
+                        );
+                    idle < RELAY_CHANNEL_RETENTION
+                })
+            );
         }
     }
 
@@ -454,7 +491,12 @@ impl TransportState {
         let attempt = self.relay_attempt_key(peer_node_id, request.sender_epoch, request.delivery);
         let mut record_to_retire = None;
         let mut remove_cancellation_fence = false;
-        let status = match self.relay_attempts.entry(attempt.clone()) {
+        let status = match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_attempts.entry(attempt.clone())
+        ) {
             Entry::Occupied(entry) => {
                 let existing = entry.get().clone();
                 drop(entry);
@@ -464,9 +506,15 @@ impl TransportState {
                             let grant_id = record.reserved_grant_id();
                             let status = record.cancel();
                             if let Some(grant_id) = grant_id {
-                                self.grants.remove_if(&grant_id, |_, grant| {
-                                    StdArc::ptr_eq(&grant.admission, &record)
-                                });
+                                nervix_primitives::expect_lint!(
+                                    nervix::sync_acquisition,
+                                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move \
+                                     relay attempt, grant and watermark state onto retained \
+                                     admission owners",
+                                    self.grants.remove_if(&grant_id, |_, grant| {
+                                        StdArc::ptr_eq(&grant.admission, &record)
+                                    })
+                                );
                             }
                             status
                         } else {
@@ -482,7 +530,12 @@ impl TransportState {
                 if let Some(status) = self.retired_relay_status(&attempt) {
                     status
                 } else if cancel
-                    && !self.active_relay_channels.contains_key(&attempt.channel)
+                    && !nervix_primitives::expect_lint!(
+                        nervix::sync_acquisition,
+                        "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay \
+                         attempt, grant and watermark state onto retained admission owners",
+                        self.active_relay_channels.contains_key(&attempt.channel)
+                    )
                     && self.relay_sequence_follows_watermark(&attempt)
                 {
                     let fence = entry.insert(RelayAttemptEntry::CancellationFence);
@@ -496,9 +549,14 @@ impl TransportState {
             }
         };
         if remove_cancellation_fence {
-            self.relay_attempts.remove_if(&attempt, |_, candidate| {
-                matches!(candidate, RelayAttemptEntry::CancellationFence)
-            });
+            nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant \
+                 and watermark state onto retained admission owners",
+                self.relay_attempts.remove_if(&attempt, |_, candidate| {
+                    matches!(candidate, RelayAttemptEntry::CancellationFence)
+                })
+            );
         }
         self.send_relay_admission_response(respond, status.clone())
             .await?;
@@ -635,10 +693,13 @@ impl TransportState {
             };
             return self.send_relay_grant_response(respond, disposition).await;
         }
-        let existing = self
-            .relay_attempts
-            .get(&attempt)
-            .map(|entry| entry.value().clone());
+        let existing = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_attempts.get(&attempt)
+        )
+        .map(|entry| entry.value().clone());
         if let Some(existing) = existing {
             match existing {
                 RelayAttemptEntry::Active(record) => {
@@ -666,19 +727,25 @@ impl TransportState {
             }
             return Ok(());
         }
-        let active_sequence = self
-            .active_relay_channels
-            .get(&attempt.channel)
-            .map(|entry| *entry.value());
+        let active_sequence = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.active_relay_channels.get(&attempt.channel)
+        )
+        .map(|entry| *entry.value());
         if let Some(active_sequence) = active_sequence {
             let active_attempt = RelayAttemptKey {
                 channel: attempt.channel.clone(),
                 sequence: active_sequence,
             };
-            let still_unadmitted = self
-                .relay_attempts
-                .get(&active_attempt)
-                .is_some_and(|record| record.is_unadmitted());
+            let still_unadmitted = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant \
+                 and watermark state onto retained admission owners",
+                self.relay_attempts.get(&active_attempt)
+            )
+            .is_some_and(|record| record.is_unadmitted());
             if still_unadmitted {
                 send_static_error(
                     &mut respond,
@@ -689,8 +756,13 @@ impl TransportState {
                 .await?;
                 return Ok(());
             }
-            self.active_relay_channels
-                .remove_if(&attempt.channel, |_, sequence| *sequence == active_sequence);
+            nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant \
+                 and watermark state onto retained admission owners",
+                self.active_relay_channels
+                    .remove_if(&attempt.channel, |_, sequence| *sequence == active_sequence)
+            );
         }
         if !self.relay_sequence_follows_watermark(&attempt) {
             send_static_error(
@@ -756,7 +828,12 @@ impl TransportState {
                 return Ok(());
             }
         };
-        if self.relay_admissions.contains_key(&admission_key) {
+        if nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_admissions.contains_key(&admission_key)
+        ) {
             send_static_error(
                 &mut respond,
                 StatusCode::CONFLICT,
@@ -782,16 +859,21 @@ impl TransportState {
             _terminal: terminal,
         });
         let expiry = CancellationToken::new();
-        self.grants.insert(
-            grant_id,
-            RelayGrant {
-                expires_at: Instant::now()
-                    .checked_add(RELAY_GRANT_LIFETIME)
-                    .assured("the fixed relay grant lifetime fits the monotonic clock"),
-                reservation,
-                admission: StdArc::clone(&record),
-                _expiry: CancelOnDrop::new(expiry.clone()),
-            },
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.grants.insert(
+                grant_id,
+                RelayGrant {
+                    expires_at: Instant::now()
+                        .checked_add(RELAY_GRANT_LIFETIME)
+                        .assured("the fixed relay grant lifetime fits the monotonic clock"),
+                    reservation,
+                    admission: StdArc::clone(&record),
+                    _expiry: CancelOnDrop::new(expiry.clone()),
+                },
+            )
         );
         match self.register_relay_grant(&record, grant_id) {
             RelayGrantRegistration::Registered => {}
@@ -864,9 +946,9 @@ impl TransportState {
             nervix_primitives::select! {
                 _ = expiry.cancelled() => {}
                 _ = sleep(RELAY_GRANT_LIFETIME) => {
-                    let expired = grants
+                    let expired = nervix_primitives::expect_lint!(nervix::sync_acquisition, "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and watermark state onto retained admission owners", grants
                         .grants
-                        .remove_if(&grant_id, |_, grant| Instant::now() >= grant.expires_at);
+                        .remove_if(&grant_id, |_, grant| Instant::now() >= grant.expires_at));
                     if let Some((_, grant)) = expired {
                         let status = grant.admission.cancel();
                         grants.retire_relay_record(&grant.admission, status);
@@ -883,15 +965,30 @@ impl TransportState {
         record: &StdArc<RelayAdmissionRecord>,
         grant_id: u64,
     ) -> RelayGrantRegistration {
-        let attempt_entry = match self.relay_attempts.entry(record.attempt.clone()) {
+        let attempt_entry = match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_attempts.entry(record.attempt.clone())
+        ) {
             Entry::Occupied(entry) => {
-                self.grants.remove(&grant_id);
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.grants.remove(&grant_id)
+                );
                 return RelayGrantRegistration::Existing(entry.get().clone());
             }
             Entry::Vacant(entry) => {
                 if let Some(status) = self.retired_relay_status(&record.attempt) {
                     drop(entry);
-                    self.grants.remove(&grant_id);
+                    nervix_primitives::expect_lint!(
+                        nervix::sync_acquisition,
+                        "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay \
+                         attempt, grant and watermark state onto retained admission owners",
+                        self.grants.remove(&grant_id)
+                    );
                     let disposition = match status {
                         RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
                         RelayAdmissionStatus::Rejected(reason) => {
@@ -908,37 +1005,75 @@ impl TransportState {
                 }
                 if !self.relay_sequence_follows_watermark(&record.attempt) {
                     drop(entry);
-                    self.grants.remove(&grant_id);
+                    nervix_primitives::expect_lint!(
+                        nervix::sync_acquisition,
+                        "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay \
+                         attempt, grant and watermark state onto retained admission owners",
+                        self.grants.remove(&grant_id)
+                    );
                     return RelayGrantRegistration::InvalidSequence;
                 }
                 entry.insert(RelayAttemptEntry::Active(StdArc::clone(record)))
             }
         };
-        match self
-            .active_relay_channels
-            .entry(record.attempt.channel.clone())
-        {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.active_relay_channels
+                .entry(record.attempt.channel.clone())
+        ) {
             Entry::Occupied(occupied) => {
                 drop(occupied);
                 drop(attempt_entry);
-                self.relay_attempts.remove(&record.attempt);
-                self.grants.remove(&grant_id);
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.relay_attempts.remove(&record.attempt)
+                );
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.grants.remove(&grant_id)
+                );
                 return RelayGrantRegistration::ChannelBusy;
             }
             Entry::Vacant(entry) => {
                 entry.insert(record.attempt.sequence);
             }
         }
-        match self.relay_admissions.entry(record.admission_key.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_admissions.entry(record.admission_key.clone())
+        ) {
             Entry::Occupied(occupied) => {
                 drop(occupied);
                 drop(attempt_entry);
-                self.relay_attempts.remove(&record.attempt);
-                self.active_relay_channels
-                    .remove_if(&record.attempt.channel, |_, sequence| {
-                        *sequence == record.attempt.sequence
-                    });
-                self.grants.remove(&grant_id);
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.relay_attempts.remove(&record.attempt)
+                );
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.active_relay_channels
+                        .remove_if(&record.attempt.channel, |_, sequence| {
+                            *sequence == record.attempt.sequence
+                        })
+                );
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.grants.remove(&grant_id)
+                );
                 RelayGrantRegistration::AdmissionBusy
             }
             Entry::Vacant(entry) => {
@@ -952,7 +1087,14 @@ impl TransportState {
     fn next_grant_id(&self) -> u64 {
         loop {
             let id = self.options.entropy.next_u64();
-            if id != 0 && !self.grants.contains_key(&id) {
+            if id != 0
+                && !nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, \
+                     grant and watermark state onto retained admission owners",
+                    self.grants.contains_key(&id)
+                )
+            {
                 return id;
             }
         }
@@ -976,24 +1118,54 @@ impl TransportState {
     }
 
     fn retire_outbound_relay(&self, key: &OutboundRelayKey) {
-        self.outbound_relay_epochs.remove(key);
-        self.outbound_relay_admissions
-            .retain(|_, delivery| delivery != key);
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_epochs.remove(key)
+        );
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_admissions
+                .retain(|_, delivery| delivery != key)
+        );
     }
 
     pub(super) fn retire_outbound_relay_admission(&self, admission_key: &RelayAdmissionKey) {
         // A terminal acknowledgement for a downstream record names no relay admission, so a shared
         // lookup settles it without the exclusive lock a removal takes.
-        if !self.outbound_relay_admissions.contains_key(admission_key) {
+        if !nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_admissions.contains_key(admission_key)
+        ) {
             return;
         }
-        if let Some((_, key)) = self.outbound_relay_admissions.remove(admission_key) {
-            self.outbound_relay_epochs.remove(&key);
+        if let Some((_, key)) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.outbound_relay_admissions.remove(admission_key)
+        ) {
+            nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant \
+                 and watermark state onto retained admission owners",
+                self.outbound_relay_epochs.remove(&key)
+            );
         }
     }
 
     fn retired_relay_status(&self, attempt: &RelayAttemptKey) -> Option<RelayAdmissionStatus> {
-        let watermark = self.relay_watermarks.get(&attempt.channel)?;
+        let watermark = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_watermarks.get(&attempt.channel)
+        )?;
         watermark.mark_reconciled();
         if attempt.sequence < watermark.sequence {
             return Some(RelayAdmissionStatus::Retired);
@@ -1005,7 +1177,12 @@ impl TransportState {
     }
 
     fn relay_sequence_follows_watermark(&self, attempt: &RelayAttemptKey) -> bool {
-        let Some(watermark) = self.relay_watermarks.get(&attempt.channel) else {
+        let Some(watermark) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_watermarks.get(&attempt.channel)
+        ) else {
             return attempt.sequence == 0;
         };
         let Some(next_sequence) = watermark.sequence.checked_add(1) else {
@@ -1015,7 +1192,12 @@ impl TransportState {
     }
 
     fn record_relay_watermark(&self, attempt: &RelayAttemptKey, status: RelayAdmissionStatus) {
-        match self.relay_watermarks.entry(attempt.channel.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_watermarks.entry(attempt.channel.clone())
+        ) {
             Entry::Occupied(mut entry) => {
                 if attempt.sequence >= entry.get().sequence {
                     entry.insert(RelayChannelWatermark::new(attempt.sequence, status));
@@ -1033,22 +1215,37 @@ impl TransportState {
         status: RelayAdmissionStatus,
     ) {
         self.record_relay_watermark(&record.attempt, status);
-        self.relay_attempts
-            .remove_if(&record.attempt, |_, candidate| {
-                if let RelayAttemptEntry::Active(candidate) = candidate {
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_attempts
+                .remove_if(&record.attempt, |_, candidate| {
+                    if let RelayAttemptEntry::Active(candidate) = candidate {
+                        StdArc::ptr_eq(candidate, record)
+                    } else {
+                        false
+                    }
+                })
+        );
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.active_relay_channels
+                .remove_if(&record.attempt.channel, |_, sequence| {
+                    *sequence == record.attempt.sequence
+                })
+        );
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.relay_admissions
+                .remove_if(&record.admission_key, |_, candidate| {
                     StdArc::ptr_eq(candidate, record)
-                } else {
-                    false
-                }
-            });
-        self.active_relay_channels
-            .remove_if(&record.attempt.channel, |_, sequence| {
-                *sequence == record.attempt.sequence
-            });
-        self.relay_admissions
-            .remove_if(&record.admission_key, |_, candidate| {
-                StdArc::ptr_eq(candidate, record)
-            });
+                })
+        );
     }
 
     pub(super) async fn handle_relay_body(
@@ -1062,13 +1259,18 @@ impl TransportState {
     ) -> Result<(), Report<TransportError>> {
         let sender_epoch = header_u64(&request, "x-nervix-sender-epoch")?;
         let receiver_epoch = header_u64(&request, "x-nervix-receiver-epoch")?;
-        let claimed = self.grants.remove_if(&grant_id, |_, grant| {
-            grant.admission.attempt.channel.peer_node_id == peer_node_id
-                && grant.admission.attempt.channel.sender_epoch == sender_epoch
-                && grant.admission.attempt.channel.sender_epoch == peer_epoch
-                && grant.admission.attempt.channel.receiver_epoch == receiver_epoch
-                && Instant::now() < grant.expires_at
-        });
+        let claimed = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: move relay attempt, grant and \
+             watermark state onto retained admission owners",
+            self.grants.remove_if(&grant_id, |_, grant| {
+                grant.admission.attempt.channel.peer_node_id == peer_node_id
+                    && grant.admission.attempt.channel.sender_epoch == sender_epoch
+                    && grant.admission.attempt.channel.sender_epoch == peer_epoch
+                    && grant.admission.attempt.channel.receiver_epoch == receiver_epoch
+                    && Instant::now() < grant.expires_at
+            })
+        );
         let Some((_, grant)) = claimed else {
             respond.send_reset(Reason::REFUSED_STREAM);
             return Ok(());

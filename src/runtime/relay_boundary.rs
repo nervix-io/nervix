@@ -8,6 +8,15 @@
 //!   interconnect dispatcher.
 //! - **Must not know.** NSPL text, transactions, consensus operations, or connector internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "relay membership and channel installation establish retained concrete branch \
+                  and delivery handles"
+    )
+)]
+
 use super::*;
 
 #[cfg(all(test, feature = "shuttle"))]
@@ -48,6 +57,14 @@ pub(super) struct ConcreteRelayRuntimeBuild {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) struct RelayBoundaryServices {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: AtomicUsize,
@@ -71,6 +88,14 @@ pub(super) struct RelayOutboundChannel {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) struct RelayOutboundSlot {
     pub(super) gate: Mutex<()>,
     sequence: nervix_primitives::sync::blocking::Mutex<RelayOutboundSequence>,
@@ -78,6 +103,14 @@ pub(super) struct RelayOutboundSlot {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 struct RelayOutboundSequence {
     channel_incarnation: [u8; 16],
     next_sequence: u64,
@@ -113,6 +146,16 @@ impl RelayOutboundSlot {
         self.cancellation.cancel();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     pub(super) fn reopen_delivery_channel(&self) {
         self.sequence.lock().reopen();
     }
@@ -121,6 +164,16 @@ impl RelayOutboundSlot {
         self.next_delivery_at(Instant::now())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
         let mut channel = self.sequence.lock();
         if let Some(last_delivery_at) = channel.last_delivery_at
@@ -297,6 +350,14 @@ pub(super) struct BranchCollapseNode {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) enum RelayBoundaryFanout {
     Direct(Arc<RelayConsumerFanout>),
     BranchCollapse(Arc<BranchCollapseNode>),
@@ -316,6 +377,14 @@ pub(super) struct RoutedDelivery<'a> {
     pub(super) acks: Vec<Option<RemoteAckRegistration>>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
     RelayPayload {
         delivery: delivery.delivery,
@@ -1100,20 +1169,45 @@ impl RelayBoundaryServices {
         self.fanout.deactivate_owner_buffer();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> Arc<RelayOutboundSlot> {
         // A branch's slot is created once and then read on every batch it carries, so the steady
         // state resolves it with a borrowed key and clones nothing. Creation still goes through
         // `entry`, because two first batches for one branch must agree on a single slot: the slot
         // is what orders deliveries, and a racing pair of them would interleave the channel.
-        if let Some(existing) = self.ingress_slots.get(branch) {
+        if let Some(existing) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.ingress_slots.get(branch)
+        ) {
             return existing.clone();
         }
-        self.ingress_slots
-            .entry(branch.clone())
-            .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
-            .clone()
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.ingress_slots.entry(branch.clone())
+        )
+        .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
+        .clone()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn outbound_slot(
         &self,
         node_id: &ClusterNodeName,
@@ -1131,27 +1225,54 @@ impl RelayBoundaryServices {
             kind,
             branch: branch.clone(),
         };
-        if let Some(existing) = self.outbound_slots.get(&channel) {
+        if let Some(existing) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.outbound_slots.get(&channel)
+        ) {
             return existing.clone();
         }
-        self.outbound_slots
-            .entry(channel)
-            .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
-            .clone()
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.outbound_slots.entry(channel)
+        )
+        .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
+        .clone()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn remove_branch_slots(&self, branch: &Option<BranchKey>) {
-        if let Some((_, slot)) = self.ingress_slots.remove(branch) {
+        if let Some((_, slot)) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.ingress_slots.remove(branch)
+        ) {
             slot.cancel();
         }
-        self.outbound_slots.retain(|channel, slot| {
-            if &channel.branch == branch {
-                slot.cancel();
-                false
-            } else {
-                true
-            }
-        });
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.outbound_slots.retain(|channel, slot| {
+                if &channel.branch == branch {
+                    slot.cancel();
+                    false
+                } else {
+                    true
+                }
+            })
+        );
     }
 
     pub(super) async fn enqueue_owner_batch(
@@ -1183,6 +1304,16 @@ impl RelayBoundaryServices {
         self.fanout.begin_owner_batch_completion()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     pub(super) async fn dispatch_to_owner(
         &self,
         domain: &DomainName,
@@ -1302,6 +1433,16 @@ impl RelayBoundaryServices {
             .await
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     pub(super) async fn dispatch_remote_runtime_consumers(
         &self,
         domain: &DomainName,
@@ -1549,6 +1690,14 @@ impl RelayBoundaryBuilder {
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "retained relay handles route each admitted record and keep channel ordering \
+                      and fences"
+        )
+    )]
     pub(in crate::runtime) fn invalidate_branch_relay_generation(
         &self,
         domain: &DomainName,
@@ -1565,6 +1714,14 @@ impl Runtime {
 
     /// Whether this node owns the relay `services` serve. A relay whose schedule names no owner is
     /// owned wherever it runs.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "retained relay handles route each admitted record and keep channel ordering \
+                      and fences"
+        )
+    )]
     pub(in crate::runtime) fn owns_relay(&self, services: &RelayBoundaryServices) -> bool {
         let dispatcher = self.inner.remote_dispatcher.load();
         services.is_owned_by(dispatcher.as_deref().map(RemoteDispatcher::local_node_id))

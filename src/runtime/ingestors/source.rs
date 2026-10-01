@@ -654,6 +654,13 @@ impl RuntimeSourceHost {
 
     /// Unacknowledged input read while the ingestor is quiesced enters the quiesce control as one
     /// payload, which buffers it, drops it, or admits it for dispatch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn retain_unacknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
@@ -681,6 +688,13 @@ impl RuntimeSourceHost {
     /// with its acknowledgement root as it would be unquiesced; one it buffers or drops is
     /// acknowledged at once, because the buffer or the drop policy has taken it over from the
     /// source. The acknowledgements keep the batch's order.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn retain_acknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
@@ -732,6 +746,13 @@ impl RuntimeSourceHost {
 
     /// Decodes a batch into its ingest group and dispatches it, returning one acknowledgement per
     /// message for an acknowledged batch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn dispatch_batch(
         &mut self,
         batch: SourceIntakeBatch<'_>,
@@ -963,6 +984,13 @@ impl SourceHostServices for RuntimeSourceHost {
 }
 
 impl RuntimeSourceHost {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn dispatch_buffered_payload(
         &mut self,
         payload: &BufferedIngestPayload,
@@ -976,6 +1004,13 @@ impl RuntimeSourceHost {
 }
 
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained paced source host handles every poll and acknowledgement"
+    )
+)]
 trait PacedSourceHostServices: SourceHostServices {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool>;
     async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool>;
@@ -1003,6 +1038,13 @@ impl PacedSourceHostServices for RuntimeSourceHost {
 }
 
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained cadence selects each paced source poll"
+    )
+)]
 trait PacedSourceCadence: Send + 'static {
     async fn next(&mut self, cancellation: &CancellationToken) -> DomainClockWaitResult<Timestamp>;
 }
@@ -1088,6 +1130,13 @@ where
     PacedSourceAction::Poll
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained paced source handles every poll, retry and acknowledgement"
+    )
+)]
 async fn run_paced_source<C, H, D>(
     mut source: C,
     mut host: H,
@@ -1169,7 +1218,13 @@ async fn run_paced_source<C, H, D>(
     }
 
     flush_paced_source(&mut host).await;
-    if let Err(error) = source.close().await {
+    if let Err(error) = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "terminal source teardown closes its exact connector instance after the polling loop ends",
+        source.close()
+    )
+    .await
+    {
         host.report_error(error.to_string());
     }
     host.mark_unready();
@@ -1205,6 +1260,13 @@ where
 /// bound, so the loop reads nothing from the source. It replays what a quiesce buffer retained for
 /// those requests once the buffer is released, and closes the source at shutdown so its routes stop
 /// receiving requests.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained request source handles every admitted request and acknowledgement"
+    )
+)]
 pub(super) async fn run_request_source<C>(
     mut source: C,
     mut host: SourceHost,
@@ -1232,7 +1294,13 @@ pub(super) async fn run_request_source<C>(
         }
     }
 
-    if let Err(error) = source.close().await {
+    if let Err(error) = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "terminal source teardown closes its exact connector instance after the polling loop ends",
+        source.close()
+    )
+    .await
+    {
         host.report_error(format!("{error:#}"));
     }
     host.mark_unready();
@@ -1245,6 +1313,13 @@ enum BatchDisposition<P> {
     Shutdown,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained source handles every poll, retry and acknowledgement"
+    )
+)]
 pub(super) async fn run_source_instance_with_retry<C>(
     mut source: C,
     mut host: SourceHost,
@@ -1432,7 +1507,13 @@ pub(super) async fn run_source_instance_with_retry<C>(
     }
 
     flush_for_lifecycle(&mut host).await;
-    if let Err(error) = source.close().await {
+    if let Err(error) = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "terminal source teardown closes its exact connector instance after the polling loop ends",
+        source.close()
+    )
+    .await
+    {
         host.report_error(format!("{error:#}"));
     }
     host.mark_unready();
@@ -1455,6 +1536,13 @@ fn batch_request(acknowledgement: SourceAckPolicy) -> SourceBatchRequest {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the source driver owns position cloning while this admitted batch retains its \
+                  acknowledgement list"
+    )
+)]
 async fn handle_batch<C>(
     source: &mut C,
     host: &mut SourceHost,

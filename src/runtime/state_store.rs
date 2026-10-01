@@ -399,6 +399,17 @@ impl Drop for StateAdmission<'_> {
 /// admitted under the one it replaced. An admitted operation therefore either observes the new
 /// binding and is refused, or finishes before `rebind` returns.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "state placement authority and generation",
+        bound = "one exclusive state-store operation at a time; admitted storage jobs own \
+                 synchronous work",
+        reason = "the placement retains the authority which fences its checkpoint and reset \
+                  generations"
+    )
+)]
 pub(in crate::runtime) struct StateAssignmentAuthority {
     binding: AtomicU64,
     roles: ArcSwap<StateReplicationRoles>,
@@ -443,6 +454,13 @@ impl StateAssignmentAuthority {
         self.roles.load()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the assignment-qualified action or typed failure \
+                      conversion; local actions remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn serialize<T>(&self, action: impl FnOnce() -> T) -> T {
         self.serialize_with(|_| action())
     }
@@ -453,6 +471,13 @@ impl StateAssignmentAuthority {
     /// critical section as the contents, so the two cannot describe different moments: `rebind`
     /// publishes under the same barrier and keeps it until every operation admitted under the
     /// assignment it replaced has finished.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the assignment-qualified action or typed failure \
+                      conversion; local actions remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn serialize_with<T>(
         &self,
         action: impl FnOnce(StateAssignmentBinding) -> T,
@@ -466,6 +491,13 @@ impl StateAssignmentAuthority {
     /// The operation is counted as admitted before the binding is compared, which is what lets
     /// `rebind` wait for it, so `action` must not rebind this authority. Operations admitted under
     /// the same assignment run beside each other and beside exclusive operations and captures.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the assignment-qualified action or typed failure \
+                      conversion; local actions remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn authorize<T>(
         &self,
         token: StateAssignmentToken,
@@ -490,6 +522,13 @@ impl StateAssignmentAuthority {
     ///
     /// It excludes `rebind`, captures and every other exclusive operation, and no operation
     /// admitted under an earlier assignment is still running while it holds the barrier.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the assignment-qualified action or typed failure \
+                      conversion; local actions remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn authorize_exclusive<T>(
         &self,
         token: StateAssignmentToken,
@@ -565,10 +604,22 @@ pub(in crate::runtime) enum RuntimeStateOperationError {
 pub(in crate::runtime) type RuntimeStateResult<T> = Result<T, Report<RuntimeStateOperationError>>;
 
 impl RuntimeStateOperationError {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the checkpoint error owns the externally formatted reason \
+                                   through its Into contract")
+    )]
     pub(in crate::runtime) fn checkpoint(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Checkpoint(reason.into()))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the assignment-qualified action or typed failure \
+                      conversion; local actions remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn replication(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Replication(reason.into()))
     }
@@ -665,6 +716,16 @@ pub(in crate::runtime) struct RuntimeStateStore {
 }
 
 /// The handles one latest-snapshot write needs, cloned into the storage job that performs it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "replica state placement and checkpoint LSM",
+        bound = "one compare-and-install storage job at a time under the retained replica-install \
+                 barrier",
+        reason = "the admitted writer retains the exact store and installation barrier"
+    )
+)]
 struct LatestSnapshotWriter {
     db: Database,
     latest: Keyspace,

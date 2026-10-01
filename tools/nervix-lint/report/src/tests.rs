@@ -1,4 +1,4 @@
-//! Pure current-shape report, catalog, scope and aggregation properties.
+//! Pure current-shape report, source contract, API identity and aggregation properties.
 
 use std::collections::BTreeMap;
 
@@ -43,6 +43,7 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
             operation: "get".into(),
             definition: text.clone(),
             owner: "example::owner".into(),
+            context: seed[13].is_multiple_of(2).then(|| context(seed)),
             acquisition: match seed[10] % 4 {
                 0 => Acquisition::Shared,
                 1 => Acquisition::Exclusive,
@@ -58,32 +59,29 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
     }
 }
 
-fn scope(report: &CompilerReport, seed: &[u8; 32]) -> Scope {
-    let finding = &report.findings[0];
-    let disposition = match seed[8] % 6 {
-        0 => Disposition::Lifecycle,
-        1 => Disposition::Observer,
-        2 => Disposition::RetainedState,
-        3 => Disposition::BoundedProtocol {
-            key: "attempt identity".into(),
-            bound: "one admitted attempt".into(),
-        },
-        4 => Disposition::OutsideDataPlane {
-            boundary: "client session".into(),
-        },
-        _ => Disposition::Debt {
-            delivery: "owner repair".into(),
-        },
+fn context(seed: &[u8; 32]) -> Context {
+    let kind = match seed[8] % 5 {
+        0 => "recurring",
+        1 => "lifecycle",
+        2 => "observer",
+        3 => "outside",
+        _ => "bounded",
     };
-    Scope {
-        site: finding.span.site.clone(),
-        source_sha256: "qualified source hash".into(),
-        operation: finding.operation.clone(),
-        owners: BTreeSet::from([finding.owner.clone()]),
-        frequency: "per batch".into(),
-        rationale: "reviewed owner and call chain".into(),
-        disposition,
-    }
+    let (key, bound) = if kind == "bounded" {
+        (
+            Some(format!("attempt_{}", seed[9])),
+            Some(format!("{} admitted attempts", u16::from(seed[11]) + 1)),
+        )
+    } else {
+        (None, None)
+    };
+    Context::from_parts(
+        kind,
+        format!("owner_{} executes this path", seed[12]),
+        key,
+        bound,
+    )
+    .assured("the property constructs complete current contracts")
 }
 
 #[test]
@@ -95,42 +93,43 @@ fn bolero_compiler_reports_round_trip() {
         let decoded: CompilerReport = serde_json::from_slice(&bytes)
             .assured("the property constructs bounded, complete current values");
         assert_eq!(decoded, original);
+        let encoded = serde_json::to_value(&original.findings[0])
+            .assured("a current finding has its complete field set");
+        let fields = encoded.as_object().assured("findings encode as objects");
+        for field in fields.keys() {
+            let mut incomplete = fields.clone();
+            incomplete.remove(field);
+            let result = serde_json::from_value::<Finding>(serde_json::Value::Object(incomplete));
+            assert!(
+                result.is_err(),
+                "every current finding field is required: {field}"
+            );
+        }
     });
 }
 
 #[test]
-fn bolero_catalog_and_scopes_round_trip() {
+fn bolero_source_contracts_round_trip() {
     bolero::check!().with_type::<[u8; 32]>().for_each(|seed| {
-        let original_report = report(seed);
-        let original_scope = scope(&original_report, seed);
-        let bytes = serde_json::to_vec(&vec![original_scope.clone()])
-            .assured("the property constructs bounded, complete current values");
-        let parsed = parse_scopes(&bytes)
-            .assured("the property constructs bounded, complete current values");
-        assert_eq!(parsed.get(&original_scope.site), Some(&original_scope));
-        let catalog = Catalog {
-            apis: vec![Api {
-                receivers: vec![format!("receiver_{}", seed[9])],
-                defining_crates: vec!["engine".into()],
-                operations: BTreeMap::from([(
-                    "get".into(),
-                    original_report.findings[0].acquisition,
-                )]),
-                rationale: "read guard".into(),
-            }],
-        };
-        let bytes = serde_json::to_vec(&catalog)
-            .assured("the property constructs bounded, complete current values");
-        let decoded = Catalog::parse(&bytes)
-            .assured("the property constructs bounded, complete current values");
-        assert_eq!(decoded, catalog);
+        let original = context(seed);
+        let bytes = serde_json::to_vec(&original).assured("the generated contract is serializable");
+        let decoded: Context =
+            serde_json::from_slice(&bytes).assured("the generated contract is valid");
+        assert_eq!(decoded, original);
         assert_eq!(
-            decoded.acquisition(&catalog.apis[0].receivers[0], "engine", "get"),
-            Some(original_report.findings[0].acquisition)
+            decoded.is_recurring(),
+            matches!(
+                original,
+                Context::Recurring { .. } | Context::Bounded { .. }
+            )
         );
         assert_eq!(
-            decoded.acquisition(&catalog.apis[0].receivers[0], "custom", "get"),
-            None
+            decoded.permits_acquisition(),
+            !matches!(original, Context::Recurring { .. })
+        );
+        assert_eq!(
+            decoded.is_lifecycle(),
+            matches!(original, Context::Lifecycle { .. })
         );
     });
 }
@@ -161,65 +160,99 @@ fn bolero_authored_sites_preserve_every_configuration() {
                 ),
             ])
         );
-        let mut reviewed = scope(&ordinary, seed);
-        reviewed.owners.insert(modeled.findings[0].owner.clone());
-        let input = PolicyInput {
-            reports,
-            scopes: vec![reviewed.clone()],
-            source_sha256: BTreeMap::from([(
-                reviewed.site.path.clone(),
-                reviewed.source_sha256.clone(),
-            )]),
-        };
-        let classified = input
-            .classify()
-            .assured("the property constructs bounded, complete current values");
-        assert_eq!(classified.len(), 1);
-        assert_eq!(classified[0].scope, reviewed);
     });
 }
 
 #[test]
-fn malformed_catalog_and_scope_are_rejected() {
-    assert!(Catalog::parse(b"{}").is_err());
-    let seed = [0; 32];
-    let report = report(&seed);
-    let mut reviewed = scope(&report, &seed);
-    reviewed.rationale.clear();
-    assert!(reviewed.validate().is_err());
-    reviewed.rationale = "a bounded acquisition".into();
-    reviewed.disposition = Disposition::BoundedProtocol {
-        key: String::new(),
-        bound: "one attempt".into(),
-    };
-    assert!(reviewed.validate().is_err());
+fn every_source_contract_argument_is_validated() {
+    for (kind, reason, key, bound) in [
+        ("recurring", "", None, None),
+        ("bounded", "admission", None, Some("one attempt")),
+        ("bounded", "admission", Some("attempt"), None),
+        ("bounded", "admission", Some(""), Some("one attempt")),
+        ("bounded", "admission", Some("attempt"), Some("")),
+        ("lifecycle", "installation", Some("attempt"), None),
+        ("unknown", "installation", None, None),
+    ] {
+        assert!(
+            Context::from_parts(
+                kind,
+                reason.into(),
+                key.map(str::to_owned),
+                bound.map(str::to_owned)
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]
-fn catalog_definition_identity_and_duplicate_contracts() {
-    let api = Api {
-        receivers: vec!["engine::Map".into()],
-        defining_crates: vec!["engine".into()],
-        operations: BTreeMap::from([("get".into(), Acquisition::Shared)]),
-        rationale: "borrowed read guard".into(),
-    };
-    let catalog = Catalog {
-        apis: vec![api.clone()],
-    };
-    assert_eq!(catalog.acquisition("owned::Map", "engine", "get"), None);
-    assert_eq!(catalog.acquisition("engine::Map", "engine", "custom"), None);
-    let repeated = Catalog {
-        apis: vec![api.clone(), api],
-    };
-    let bytes =
-        serde_json::to_vec(&repeated).assured("the current catalog has only serializable fields");
-    assert!(matches!(
-        Catalog::parse(&bytes)
-            .err()
-            .assured("the catalog repeats one API")
-            .current_context(),
-        ReportError::DuplicateApi { .. }
-    ));
+fn recognition_requires_actual_definition_and_receiver_identity() {
+    use crate::rules::{acquisition, may_acquire};
+    for (receiver, defining_crate, operation, expected) in [
+        (
+            "lock_api::mutex::Mutex",
+            "lock_api",
+            "lock",
+            Acquisition::Exclusive,
+        ),
+        (
+            "lock_api::rwlock::RwLock",
+            "lock_api",
+            "read",
+            Acquisition::Shared,
+        ),
+        (
+            "tokio::sync::mutex::Mutex",
+            "tokio",
+            "try_lock",
+            Acquisition::TryExclusive,
+        ),
+        (
+            "shuttle_tokio_impl_inner::sync::rwlock::RwLock",
+            "shuttle_tokio_impl_inner",
+            "try_read",
+            Acquisition::TryShared,
+        ),
+        (
+            "loom::sync::mutex::Mutex",
+            "loom",
+            "lock",
+            Acquisition::Exclusive,
+        ),
+        (
+            "std::sync::poison::rwlock::RwLock",
+            "std",
+            "write",
+            Acquisition::Exclusive,
+        ),
+        ("dashmap::DashMap", "dashmap", "get", Acquisition::Shared),
+        (
+            "shuttle_dashmap_impl::DashMap",
+            "shuttle_dashmap_impl",
+            "try_entry",
+            Acquisition::TryExclusive,
+        ),
+        (
+            "nervix_primitives::collections::scheduled::DashMap",
+            "nervix_primitives",
+            "into_iter",
+            Acquisition::Shared,
+        ),
+    ] {
+        assert_eq!(
+            acquisition(receiver, defining_crate, operation),
+            Some(expected)
+        );
+        assert!(may_acquire(operation));
+        assert_eq!(acquisition(receiver, "application", operation), None);
+        assert_eq!(
+            acquisition("application::Collection", defining_crate, operation),
+            None
+        );
+        assert_eq!(acquisition(receiver, defining_crate, "borrow_mut"), None);
+    }
+    assert!(!may_acquire("borrow_mut"));
 }
 
 #[test]
@@ -259,136 +292,4 @@ fn completion_and_expansion_instances_are_preserved() {
             .assured("the empty report slice has no incomplete report")
             .is_empty()
     );
-}
-
-#[test]
-fn every_acquisition_requires_a_current_reviewed_scope() {
-    let compiler = report(&[0; 32]);
-    let reviewed = scope(&compiler, &[0; 32]);
-    let mut input = PolicyInput {
-        reports: vec![compiler.clone()],
-        scopes: vec![],
-        source_sha256: BTreeMap::from([(
-            reviewed.site.path.clone(),
-            reviewed.source_sha256.clone(),
-        )]),
-    };
-    assert!(matches!(
-        input
-            .classify()
-            .err()
-            .assured("a new authored acquisition has no review")
-            .current_context(),
-        ReportError::MissingScope { .. }
-    ));
-    input.scopes = vec![reviewed.clone(), reviewed.clone()];
-    assert!(matches!(
-        input
-            .classify()
-            .err()
-            .assured("the authored scope is duplicated")
-            .current_context(),
-        ReportError::DuplicateScope { .. }
-    ));
-    input.scopes = vec![reviewed.clone()];
-    input.scopes[0].owners = BTreeSet::from(["example::another_owner".into()]);
-    assert!(matches!(
-        input
-            .classify()
-            .err()
-            .assured("the reviewed owner changed")
-            .current_context(),
-        ReportError::StaleScope { .. }
-    ));
-    input.scopes = vec![reviewed.clone()];
-    input.source_sha256.clear();
-    assert!(matches!(
-        input
-            .classify()
-            .err()
-            .assured("the source fingerprint is missing")
-            .current_context(),
-        ReportError::StaleScope { .. }
-    ));
-    input
-        .source_sha256
-        .insert(reviewed.site.path.clone(), reviewed.source_sha256.clone());
-    input.scopes[0].operation = "write".into();
-    assert!(matches!(
-        input
-            .classify()
-            .err()
-            .assured("the operation no longer matches its review")
-            .current_context(),
-        ReportError::StaleScope { .. }
-    ));
-    input.scopes = vec![reviewed.clone()];
-    input.reports.clear();
-    assert!(matches!(
-        input
-            .classify()
-            .err()
-            .assured("the declared acquisition was not compiled")
-            .current_context(),
-        ReportError::UnobservedScope { .. }
-    ));
-    input.reports.push(compiler);
-    let sites = input
-        .classify()
-        .assured("the current authored site matches its review");
-    assert_eq!(sites[0].scope, reviewed);
-    assert!(!sites[0].scope.disposition.is_debt());
-    assert!(
-        Disposition::Debt {
-            delivery: "owner repair".into()
-        }
-        .is_debt()
-    );
-}
-
-#[test]
-fn scope_encoding_and_each_required_review_field_are_checked() {
-    assert!(parse_scopes(b"{}").is_err());
-    for field in 0..3 {
-        let compiler = report(&[0; 32]);
-        let mut reviewed = scope(&compiler, &[0; 32]);
-        match field {
-            0 => reviewed.owners.clear(),
-            1 => reviewed.frequency.clear(),
-            _ => reviewed.rationale.clear(),
-        }
-        assert!(matches!(
-            reviewed
-                .validate()
-                .err()
-                .assured("one required review field is empty")
-                .current_context(),
-            ReportError::IncompleteScope { .. }
-        ));
-    }
-    let compiler = report(&[0; 32]);
-    let mut reviewed = scope(&compiler, &[0; 32]);
-    reviewed.disposition = Disposition::BoundedProtocol {
-        key: "attempt".into(),
-        bound: String::new(),
-    };
-    assert!(matches!(
-        reviewed
-            .validate()
-            .err()
-            .assured("the protocol review lacks its bound")
-            .current_context(),
-        ReportError::UnboundedProtocol { .. }
-    ));
-    reviewed.disposition = Disposition::OutsideDataPlane {
-        boundary: String::new(),
-    };
-    assert!(matches!(
-        reviewed
-            .validate()
-            .err()
-            .assured("the external boundary must be named")
-            .current_context(),
-        ReportError::IncompleteScope { .. }
-    ));
 }

@@ -13,6 +13,14 @@
 //! ingestor of that client borrows from the same instance, which is what makes the declared bounds
 //! a property of the transport rather than of whoever happened to open a connection first.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "named client pools are registered, replaced and retired when their users attach"
+    )
+)]
+
 use error_stack::Report;
 use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, SinkStartError};
 use nervix_connector_mongodb::MongoDbClient;
@@ -344,6 +352,13 @@ impl Runtime {
     /// The instance is built from the first user's resolved configuration. Every pool-capable
     /// client renders the same configuration for all of its users, so the instance a later user
     /// joins is the one its own configuration describes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "sink installation retains one shared-client lease for its configuration"
+        )
+    )]
     pub(in crate::runtime) async fn lease_shared_client(
         &self,
         domain: &DomainName,
@@ -459,6 +474,13 @@ impl Runtime {
     }
 
     /// Give back one user's interest, closing the instance once the last one leaves.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "sink teardown releases its exact shared-client lease"
+        )
+    )]
     fn release_shared_client(&self, key: &DomainNodeRef) {
         let closed = {
             let Some(mut slot) = self.inner.shared_clients.get_mut(key) else {
@@ -476,6 +498,13 @@ impl Runtime {
     }
 
     /// Register one pooled sink's stable wait publication for observers.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "sink installation retains one pool-wait publication slot"
+        )
+    )]
     pub(in crate::runtime) fn register_pool_wait(
         &self,
         waiter: DomainNodeRef,

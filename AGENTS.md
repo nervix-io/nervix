@@ -957,27 +957,31 @@ build and the existing tests, and nothing in it changes behavior.
   API, control flow written as `Option` and `Result` combinator chains, signatures returning a
   Nervix error without `Report`, node identities carried as `String`, struct fields gated on
   `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
-  in the data plane. It also records `data_plane_lock_acquisitions` through the pinned compiler
-  pass in `tools/nervix-lint`, with resolved API identity and reviewed per-site owner/frequency
-  scopes, and `write_once_rwlock_fields` for names and
-  shared references held as `RwLock<Option<...>>` fields. CI fails when a count is above
-  `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run
-  `just ratchet --update` and commit the baseline in the same change; `just ratchet --show <count>`
-  lists the sites behind one count.
-- Synchronization acquisitions use the compiler catalog and the complete declared configuration
-  matrix. Every authored site has an explicit scope with source fingerprint, all resolved owners,
-  frequency and rationale. Lifecycle, observer, retained state, bounded protocol and debt are
-  separate dispositions; bounded protocols name their key and bound. Missing, stale, duplicate,
-  unobserved or incomplete analysis fails. Do not classify a site from its filename, sharing traits
-  or method spelling. Preserve the source scanner for its disjoint rules and primitive provenance.
-  The wider source review context binds caller changes too; trace affected call chains and update
-  their scopes before recording a refreshed context, even when a helper body did not change.
-- The synchronization driver and its isolated artifacts use `nightly-2026-09-17`; product builds
-  stay on the stable toolchain. Its workspace wrapper composes beneath configured kache. Cached
-  diagnostics never replace complete side reports: use the supported cache namespace and rebuild
-  only the isolated authored artifacts when evidence is missing. `just test-typed-ratchet` and
-  `just qualify-typed-ratchet-cache` qualify the fixtures and completion contract. Tooling Bolero
-  targets use their declared manifest through the shared runner and both CI modes.
+  in the data plane. It records `write_once_rwlock_fields` for names and shared references held as
+  `RwLock<Option<...>>` fields. CI fails when a structural count exceeds `debt-baseline.json`.
+  A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
+  and commit the baseline; `just ratchet --show <count>` lists its sites.
+- Synchronization uses real Nervix compiler diagnostics across the complete declared configuration
+  matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
+  beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual
+  recurring, lifecycle, observer, outside or bounded execution, with reasons and bounded identities.
+  Use normal reason-bearing expectations on one operation, including `expect_lint!`; retained debt
+  names its owning repair task. Blanket allow, broad/undocumented/unfulfilled expectations and an
+  expectation widened to cover another operation fail. Generated reports are outputs under target,
+  never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
+- Supported local helper/callback edges are re-evaluated, and callee/trait contracts cross compiler
+  metadata boundaries. A hot caller of a lifecycle-only helper is diagnosed. Unknown dispatch needs
+  a callable source contract or a diagnostic, not an inherited cold module classification. Preserve
+  disjoint structural and primitive provenance checks, including inactive cfg and authored macros.
+  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#source-contracts) owns the annotation,
+  inheritance, exception and supported-effect contract; no universal ownership proof is claimed.
+- The synchronization driver and isolated artifacts use `nightly-2026-09-17`; product builds stay
+  stable. Its workspace wrapper composes beneath configured kache. Current source, annotations,
+  rule/dependency/configuration inputs and complete declared target evidence are required, including
+  zero findings. Missing evidence rebuilds only isolated authored artifacts in a supported cache
+  namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify diagnostics,
+  current paired API doctests and completion/cache behavior. Tooling Bolero targets use the shared
+  inventory and current ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.

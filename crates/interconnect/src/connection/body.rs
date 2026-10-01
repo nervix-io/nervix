@@ -16,6 +16,14 @@ use nervix_primitives::time::timeout;
 use super::BODY_CHUNK_BYTES;
 use crate::TransportError;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport services each admitted body and resolves its exact cancellation \
+                  guard"
+    )
+)]
 pub(super) async fn send_body(
     stream: &mut SendStream<Bytes>,
     body: ChargedBytes,
@@ -60,6 +68,13 @@ pub(super) async fn send_body(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport performs this operation for each admitted frame or stream request"
+    )
+)]
 pub(super) async fn send_response(
     mut respond: server::SendResponse<Bytes>,
     status: StatusCode,
@@ -87,6 +102,13 @@ pub(super) async fn send_response(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport performs this operation for each admitted frame or stream request"
+    )
+)]
 pub(super) async fn send_static_error(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
@@ -146,6 +168,13 @@ pub(super) async fn send_static_error(
     })?
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport performs this operation for each admitted frame or stream request"
+    )
+)]
 pub(super) async fn read_body(
     executor: &Executor,
     class: MemoryClass,
@@ -163,6 +192,13 @@ pub(super) async fn read_body(
     Ok(ChargedBytes::from_buffer(buffer))
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport performs this operation for each admitted frame or stream request"
+    )
+)]
 pub(super) async fn read_body_into(
     buffer: &mut BudgetedBuffer,
     progress_timeout: Duration,

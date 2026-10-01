@@ -651,6 +651,10 @@ impl CompiledSchema {
         )
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the schema name conversion")
+    )]
     pub(crate) fn wasm_processor_schema(&self, name: impl Into<String>) -> WasmProcessorSchema {
         WasmProcessorSchema {
             name: name.into(),
@@ -1124,6 +1128,10 @@ impl CompiledCodecBatchEncoder<'_> {
 }
 
 /// Writes an encoding that was built whole into `output`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external writer interface encodes one admitted payload")
+)]
 fn write_payload(
     codec: &str,
     output: &mut impl io::Write,
@@ -1217,6 +1225,12 @@ impl RuntimeRecordBatch {
         batch_payload_bytes(&self.batch)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn from_rows<'a>(
         expected_schema: StdArc<ArrowSchema>,
         rows: impl ExactSizeIterator<Item = &'a RuntimeRow>,
@@ -1616,6 +1630,12 @@ impl RuntimeRecordBatch {
 }
 
 /// The JSON subscription projection of a binary Arrow value, including binary list elements.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn json_value_from_binary_arrow(
     array: &dyn Array,
     ty: &ParseAsType,
@@ -1668,6 +1688,12 @@ fn json_value_from_binary_arrow(
 }
 
 impl RuntimeRow {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn new(
         batch: Arc<RuntimeRecordBatch>,
         row: usize,
@@ -3034,6 +3060,12 @@ struct ArrowCodecRow<'a> {
 }
 
 impl<'a> ArrowCodecRow<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     fn new(codec: &'a CompiledCodec, batch: &'a RuntimeRecordBatch, row_index: usize) -> Self {
         Self {
             codec,
@@ -3111,10 +3143,22 @@ struct ArrowCodecValue<'a> {
 }
 
 impl<'a> ArrowCodecValue<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Arrow column interface supplies the selected row null test"
+        )
+    )]
     fn is_null(&self) -> bool {
         self.array.is_null(self.row_index)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Arrow column interface supplies the selected typed row value"
+        )
+    )]
     fn typed<T: 'static>(&self) -> error_stack::Result<&'a T, RuntimeSchemaError> {
         self.array.as_any().downcast_ref::<T>().ok_or_else(|| {
             Report::new(RuntimeSchemaError::ExactTypeMismatch {
@@ -4299,6 +4343,12 @@ fn append_avro_value_to_arrow(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn typed_arrow_builder<'a, T: 'static>(
     builder: &'a mut dyn ArrayBuilder,
     expected: &ArrowDataType,
@@ -4599,6 +4649,12 @@ pub(crate) struct RuntimeValueColumn {
 impl RuntimeValueColumn {
     /// Reads `array` under the name `field`, which names the column in the errors reading it
     /// raises.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn new(
         field: impl Into<String>,
         array: ArrayRef,
@@ -4620,6 +4676,12 @@ impl RuntimeValueColumn {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 pub(crate) fn runtime_value_from_arrow_array(
     array: &dyn Array,
     ty: &ParseAsType,
@@ -4716,6 +4778,12 @@ pub(crate) fn runtime_value_from_arrow_array(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn typed_arrow_array<'a, T: 'static>(
     array: &'a dyn Array,
     ty: &ParseAsType,
@@ -4733,6 +4801,12 @@ fn typed_arrow_array<'a, T: 'static>(
     })
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn runtime_values_from_arrow_slice(
     array: &dyn Array,
     element: &ParseAsType,

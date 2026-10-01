@@ -787,6 +787,15 @@ typed fields let the caller act; which context must cross each boundary; and whi
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
 
+The isolated architecture compiler emits ordinary Rust tool diagnostics:
+`nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
+`nervix::invalid_contract`. Source contracts and narrow reason-bearing expectations own the
+architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+compiler reports and changed inputs fail the repository command; they are tooling failures, with
+no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
+warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
+states the rule boundary and the claims the compiler does not make.
+
 ## Connector Status Observation
 
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy

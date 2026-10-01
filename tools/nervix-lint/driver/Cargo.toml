@@ -5,6 +5,7 @@ name = "nervix-lint-driver"
 version.workspace = true
 
 [dependencies]
+ahash.workspace = true
 anyhow.workspace = true
 meticulous.workspace = true
 nervix-lint-report = { path = "../report" }

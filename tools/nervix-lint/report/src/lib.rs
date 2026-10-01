@@ -1,25 +1,19 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: compiler acquisition reports, API classification and reviewed site scopes.
+//! Owns: generated compiler evidence, source contracts and finite resolved API recognition.
 //! Depends on: serialization and typed error reporting; no compiler internals.
-//! Must not know: graph execution, model-checker scheduling or runtime policy implementation.
+//! Must not know: runtime graph execution or manually maintained facts about product source.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use indexmap::{IndexMap, map::Entry};
 use serde::{Deserialize, Serialize};
 
+pub mod rules;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
-    #[error("invalid analysis JSON")]
-    Json,
-    #[error("catalog repeats receiver {receiver} operation {operation}")]
-    DuplicateApi { receiver: String, operation: String },
-    #[error("scope repeats authored site {path}:{start}")]
-    DuplicateScope { path: String, start: u32 },
-    #[error("scope lacks its owner, frequency or rationale at {path}:{start}")]
-    IncompleteScope { path: String, start: u32 },
-    #[error("bounded protocol scope lacks its key or bound at {path}:{start}")]
-    UnboundedProtocol { path: String, start: u32 },
+    #[error("invalid source contract: {reason}")]
+    InvalidContract { reason: String },
     #[error("conflicting findings at {path}:{start}")]
     ConflictingFinding { path: String, start: u32 },
     #[error("compiler pass did not complete for {configuration}:{crate_name}")]
@@ -27,12 +21,6 @@ pub enum ReportError {
         configuration: String,
         crate_name: String,
     },
-    #[error("missing reviewed acquisition scope at {path}:{start}")]
-    MissingScope { path: String, start: u32 },
-    #[error("stale reviewed acquisition scope at {path}:{start}")]
-    StaleScope { path: String, start: u32 },
-    #[error("scope at {path}:{start} was not observed in any declared configuration")]
-    UnobservedScope { path: String, start: u32 },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,67 +32,81 @@ pub enum Acquisition {
     TryExclusive,
 }
 
+/// A source-owned execution contract, read from compiler metadata. Narrower contracts override
+/// inherited defaults. Recurring callers are checked against lifecycle-only entry points.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Api {
-    pub receivers: Vec<String>,
-    pub defining_crates: Vec<String>,
-    pub operations: BTreeMap<String, Acquisition>,
-    pub rationale: String,
+#[serde(tag = "context", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Context {
+    Recurring {
+        reason: String,
+    },
+    Lifecycle {
+        reason: String,
+    },
+    Observer {
+        reason: String,
+    },
+    Outside {
+        reason: String,
+    },
+    Bounded {
+        reason: String,
+        key: String,
+        bound: String,
+    },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Catalog {
-    pub apis: Vec<Api>,
-}
-
-impl Catalog {
-    pub fn parse(bytes: &[u8]) -> Result<Self, error_stack::Report<ReportError>> {
-        let catalog: Self = serde_json::from_slice(bytes).map_err(|error| {
-            error_stack::Report::new(ReportError::Json).attach(error.to_string())
-        })?;
-        let mut identities = BTreeMap::new();
-        for api in &catalog.apis {
-            for receiver in &api.receivers {
-                for operation in api.operations.keys() {
-                    let key = (receiver.clone(), operation.clone());
-                    if identities.insert(key, ()).is_some() {
-                        return Err(error_stack::Report::new(ReportError::DuplicateApi {
-                            receiver: receiver.clone(),
-                            operation: operation.clone(),
-                        }));
-                    }
-                }
-            }
+impl Context {
+    pub fn from_parts(
+        kind: &str,
+        reason: String,
+        key: Option<String>,
+        bound: Option<String>,
+    ) -> Result<Self, error_stack::Report<ReportError>> {
+        let invalid = |reason: &str| {
+            error_stack::Report::new(ReportError::InvalidContract {
+                reason: reason.into(),
+            })
+        };
+        if reason.trim().is_empty() {
+            return Err(invalid("every contract requires a meaningful reason"));
         }
-        Ok(catalog)
+        if kind == "bounded" {
+            let Some(key) = key else {
+                return Err(invalid("bounded protocols require a key"));
+            };
+            let Some(bound) = bound else {
+                return Err(invalid("bounded protocols require a capacity or deadline"));
+            };
+            if key.trim().is_empty() || bound.trim().is_empty() {
+                return Err(invalid("bounded protocol keys and bounds cannot be empty"));
+            }
+            return Ok(Self::Bounded { reason, key, bound });
+        }
+        if key.is_some() || bound.is_some() {
+            return Err(invalid("only bounded protocols accept key and bound"));
+        }
+        match kind {
+            "recurring" => Ok(Self::Recurring { reason }),
+            "lifecycle" => Ok(Self::Lifecycle { reason }),
+            "observer" => Ok(Self::Observer { reason }),
+            "outside" => Ok(Self::Outside { reason }),
+            _ => Err(invalid(
+                "expected recurring, lifecycle, observer, outside or bounded",
+            )),
+        }
     }
 
-    pub fn acquisition(
-        &self,
-        receiver: &str,
-        defining_crate: &str,
-        operation: &str,
-    ) -> Option<Acquisition> {
-        // This is the finite reviewed API catalog, not graph state: currently eight families,
-        // at most three receiver identities and three defining crates in any family.
-        for api in &self.apis {
-            if !api.receivers.iter().any(|name| name == receiver) {
-                continue;
-            }
-            if !api
-                .defining_crates
-                .iter()
-                .any(|name| name == defining_crate)
-            {
-                continue;
-            }
-            if let Some(acquisition) = api.operations.get(operation) {
-                return Some(*acquisition);
-            }
-        }
-        None
+    pub fn is_recurring(&self) -> bool {
+        matches!(self, Self::Recurring { .. } | Self::Bounded { .. })
+    }
+
+    pub fn permits_acquisition(&self) -> bool {
+        !matches!(self, Self::Recurring { .. })
+    }
+
+    pub fn is_lifecycle(&self) -> bool {
+        matches!(self, Self::Lifecycle { .. })
     }
 }
 
@@ -146,6 +148,8 @@ pub struct Finding {
     pub definition: String,
     pub owner: String,
     pub acquisition: Acquisition,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub context: Option<Context>,
     pub span: SourceSpan,
     pub expansion: Vec<Expansion>,
 }
@@ -163,86 +167,6 @@ pub struct CompilerReport {
     pub excluded_generated: u32,
     pub excluded_external: u32,
     pub complete: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Disposition {
-    OutsideDataPlane { boundary: String },
-    Lifecycle,
-    Observer,
-    RetainedState,
-    BoundedProtocol { key: String, bound: String },
-    Debt { delivery: String },
-}
-
-impl Disposition {
-    pub fn is_debt(&self) -> bool {
-        matches!(self, Self::Debt { .. })
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Scope {
-    pub site: SiteId,
-    pub source_sha256: String,
-    pub operation: String,
-    pub owners: BTreeSet<String>,
-    pub frequency: String,
-    pub rationale: String,
-    pub disposition: Disposition,
-}
-
-impl Scope {
-    pub fn validate(&self) -> Result<(), error_stack::Report<ReportError>> {
-        if self.owners.is_empty()
-            || self.owners.iter().any(|owner| owner.trim().is_empty())
-            || self.frequency.trim().is_empty()
-            || self.rationale.trim().is_empty()
-        {
-            return Err(error_stack::Report::new(ReportError::IncompleteScope {
-                path: self.site.path.clone(),
-                start: self.site.start,
-            }));
-        }
-        if let Disposition::OutsideDataPlane { boundary } = &self.disposition
-            && boundary.trim().is_empty()
-        {
-            return Err(error_stack::Report::new(ReportError::IncompleteScope {
-                path: self.site.path.clone(),
-                start: self.site.start,
-            }));
-        }
-        if let Disposition::BoundedProtocol { key, bound } = &self.disposition
-            && (key.trim().is_empty() || bound.trim().is_empty())
-        {
-            return Err(error_stack::Report::new(ReportError::UnboundedProtocol {
-                path: self.site.path.clone(),
-                start: self.site.start,
-            }));
-        }
-        Ok(())
-    }
-}
-
-pub fn parse_scopes(
-    bytes: &[u8],
-) -> Result<BTreeMap<SiteId, Scope>, error_stack::Report<ReportError>> {
-    let scopes: Vec<Scope> = serde_json::from_slice(bytes)
-        .map_err(|error| error_stack::Report::new(ReportError::Json).attach(error.to_string()))?;
-    let mut result = BTreeMap::new();
-    for scope in scopes {
-        scope.validate()?;
-        let site = scope.site.clone();
-        if result.insert(site.clone(), scope).is_some() {
-            return Err(error_stack::Report::new(ReportError::DuplicateScope {
-                path: site.path,
-                start: site.start,
-            }));
-        }
-    }
-    Ok(result)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -318,79 +242,6 @@ pub fn aggregate(
         }
     }
     Ok(sites.into_values().map(SiteInstances::finish).collect())
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PolicyInput {
-    pub reports: Vec<CompilerReport>,
-    pub scopes: Vec<Scope>,
-    pub source_sha256: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClassifiedSite {
-    pub acquisition: AuthoredSite,
-    pub scope: Scope,
-}
-
-impl PolicyInput {
-    pub fn classify(&self) -> Result<Vec<ClassifiedSite>, error_stack::Report<ReportError>> {
-        let bytes = serde_json::to_vec(&self.scopes).map_err(|error| {
-            error_stack::Report::new(ReportError::Json).attach(error.to_string())
-        })?;
-        let scopes = parse_scopes(&bytes)?;
-        let authored = aggregate(&self.reports)?;
-        let mut observed = BTreeSet::new();
-        let mut result = Vec::new();
-        for site in authored {
-            let key = &site.site;
-            let Some(scope) = scopes.get(key) else {
-                return Err(error_stack::Report::new(ReportError::MissingScope {
-                    path: key.path.clone(),
-                    start: key.start,
-                })
-                .attach(format!("resolved acquisition: {site:#?}")));
-            };
-            let owners = site
-                .configurations
-                .values()
-                .flatten()
-                .map(|finding| finding.owner.clone())
-                .collect::<BTreeSet<_>>();
-            if self.source_sha256.get(&key.path) != Some(&scope.source_sha256)
-                || owners != scope.owners
-                || site
-                    .configurations
-                    .values()
-                    .flatten()
-                    .any(|finding| finding.operation != scope.operation)
-            {
-                return Err(error_stack::Report::new(ReportError::StaleScope {
-                    path: key.path.clone(),
-                    start: key.start,
-                })
-                .attach(format!(
-                    "review: {scope:#?}; resolved acquisition: {site:#?}"
-                )));
-            }
-            observed.insert(key.clone());
-            result.push(ClassifiedSite {
-                acquisition: site,
-                scope: scope.clone(),
-            });
-        }
-        for key in scopes.keys() {
-            if !observed.contains(key) {
-                return Err(error_stack::Report::new(ReportError::UnobservedScope {
-                    path: key.path.clone(),
-                    start: key.start,
-                }));
-            }
-        }
-        Ok(result)
-    }
 }
 
 #[cfg(test)]

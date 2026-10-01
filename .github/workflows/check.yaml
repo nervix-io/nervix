@@ -875,13 +875,13 @@ jobs:
       - name: Native coverage collector
         run: just test-native-coverage
 
-      - name: Compiler synchronization qualification
+      - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
 
       - name: Setup uv for compiler runner coverage
         uses: astral-sh/setup-uv@v6
 
-      - name: Compiler cache and runner qualification
+      - name: Compiler cache changes, interruption and runner qualification
         run: |
           just qualify-typed-ratchet-cache
           just coverage-typed-ratchet-python
