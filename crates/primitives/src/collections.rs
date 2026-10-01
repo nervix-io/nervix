@@ -6,6 +6,15 @@
 //! order an owner's use of the queue against other tasks, and the queue's own memory safety stays
 //! unmodeled. The ordinary build re-exports both unchanged.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "backend implementation is a primitive mechanism; consumer acquisitions are \
+                  checked at their resolved calls"
+    )
+)]
+
 #[cfg(not(feature = "shuttle"))]
 pub use concurrent_queue::ConcurrentQueue;
 pub use concurrent_queue::{PopError, PushError};

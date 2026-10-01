@@ -36,7 +36,7 @@ def run(*arguments: str) -> tuple[int, str, str]:
 
 class RatchetGateTests(unittest.TestCase):
     def setUp(self) -> None:
-        patch = mock.patch("scripts.ratchet.typed_sites", return_value=[])
+        patch = mock.patch("scripts.ratchet.check_synchronization", return_value=None)
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -72,8 +72,8 @@ class RatchetGateTests(unittest.TestCase):
             write_repository(root, {"src/lib.rs": "fn owner() {}\n"})
             write_baseline(root / BASELINE_FILE, {count.name: 0 for count in COUNTS})
             before = (root / BASELINE_FILE).read_bytes()
-            with mock.patch("scripts.ratchet.typed_sites", side_effect=SystemExit("missing reviewed scope")):
-                with self.assertRaisesRegex(SystemExit, "missing reviewed scope"):
+            with mock.patch("scripts.ratchet.check_synchronization", side_effect=SystemExit("compiler diagnostics failed")):
+                with self.assertRaisesRegex(SystemExit, "compiler diagnostics failed"):
                     run("--root", str(root), "--update")
             self.assertEqual((root / BASELINE_FILE).read_bytes(), before)
 

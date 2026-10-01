@@ -23,6 +23,14 @@
 //! present. Terminal teardown negatively acknowledges whatever still waits, so a source with
 //! external acknowledgements redelivers it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "shutdown and impact inspection observe installed task and acknowledgement owners"
+    )
+)]
+
 use super::*;
 
 /// How often a draining node re-reads its work. The read is in-process, and the interval bounds

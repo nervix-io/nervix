@@ -9,6 +9,14 @@
 //!   the endpoint and client sources the server keeps.
 //! - **Must not know.** NSPL parsing, registry validation, or placement computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "source installation and intake withdrawal bind one exact connector lifetime"
+    )
+)]
+
 use super::*;
 
 pub(in crate::runtime) mod endpoint;

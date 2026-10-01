@@ -9,6 +9,14 @@
 //! - **Must not know.** The server. It speaks the session API through the client core and nothing
 //!   else.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "CLI session and terminal coordination belong to the client edge"
+    )
+)]
+
 use std::{
     collections::BTreeSet,
     io,

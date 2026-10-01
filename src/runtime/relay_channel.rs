@@ -32,6 +32,16 @@ use tracing::debug;
 use triomphe::Arc;
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "relay pause and quiescence generation",
+        bound = "one gate state per channel; finite admitted and retained counters and the \
+                 engagement deadline",
+        reason = "dispatch retains the exact channel gate and its generation"
+    )
+)]
 pub(in crate::runtime) struct RelayDispatchGate {
     closed: AtomicBool,
     in_flight_dispatches: AtomicUsize,
@@ -110,6 +120,13 @@ impl RelayDispatchGate {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     pub(super) fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
         let mut state = self.state.lock();
         loop {
@@ -399,6 +416,13 @@ impl RelayDispatchGateEngagement {
 }
 
 impl RelayDispatchGateLease {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn engage(
         gate: Arc<RelayDispatchGate>,
         deadline: Instant,
@@ -446,6 +470,13 @@ mod gate_tests {
 
     use super::{RelayDispatchGate, RelayDispatchGateLease};
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     fn engage(
         gate: &Arc<RelayDispatchGate>,
         deadline: Instant,
@@ -850,6 +881,13 @@ impl<T: Clone> RelayConsumerQueue<T> {
     /// Delivers `batch` to each admitted consumer, cloning it for every consumer but the last.
     ///
     /// Returns the batch when there is no consumer to deliver it to.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     fn deliver_each<'consumer>(
         consumers: impl IntoIterator<Item = &'consumer Arc<Self>>,
         batch: T,

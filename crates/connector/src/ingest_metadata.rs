@@ -13,7 +13,19 @@
 ///
 /// Connectors implement this over their own borrowed message so a group's header builders
 /// are appended from the source directly, without an owned header vector per message.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source host visits transport headers for each admitted record"
+    )
+)]
 pub trait IngestMessageHeaders: Send + Sync {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a synchronous header visitor; local \
+                                   visitor bodies remain analyzed")
+    )]
     fn visit(&self, visit: &mut dyn FnMut(&str, &str));
 }
 

@@ -280,6 +280,15 @@ outside the executor, bounded by the host's flush deadline and a per-request met
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
 
+The source and sink traits carry source-local compiler execution contracts. Polling, message/header
+access, acknowledgements, publish, retry, flush and commit callbacks are recurring. Source open and
+close are explicit lifetime boundaries; Kafka domain-offset initialization is a resume installation
+boundary. Implementations inherit the trait method's frequency. External driver, conversion and
+callback dispatch is documented at its owning callable, and local callback bodies remain checked.
+These annotations describe this chapter's existing lifecycle; they supply no runtime admission or
+ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
+syntax, inheritance, diagnostics and operation-specific repair expectations.
+
 ## Source boundary
 
 Each domain revision installs its ingestor plans with its schedule. Building a domain, swapping or

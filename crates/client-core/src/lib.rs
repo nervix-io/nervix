@@ -12,6 +12,14 @@
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
 //!   it learns arrives over the session protocol.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "native client session and attachment ownership belongs to the client edge"
+    )
+)]
+
 mod backup;
 mod client;
 mod connection;

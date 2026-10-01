@@ -626,6 +626,12 @@ test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps b
         --input tests/features/runtime/client_conformance.feature \
         --tags {{ quote(tags) }} {{ args }}
 
+test-runtime-state-capabilities: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --features testing --package nervix-server --doc runtime::
+
 # Validate the small unsafe boundary used by deduplicator expiration tracking.
 test-expiry-map:
     cargo test --package nervix-expiry-map
@@ -686,7 +692,7 @@ test-coverage: tests-deps
         --package nervix-model-harness \
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
-    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --workspace --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -700,7 +706,7 @@ test-scenarios-coverage: tests-deps
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
-    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --workspace --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -713,7 +719,11 @@ coverage-clean-workspace:
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
 coverage-report-workspace *args:
-    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --workspace --lcov --output-path lcov.info {{ args }}
+
+# Check the same merged workspace coverage and complexity limit locally as CI does.
+check-coverage report="lcov-workspace.info":
+    cargo crap --lcov {{ quote(report) }} --min 30 --threshold 30
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
@@ -1446,24 +1456,41 @@ typed-ratchet-turmoil *args:
     RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}" python3 -m scripts.typed_ratchet {{ args }}
 
 test-typed-ratchet-compiler:
-    just typed-ratchet --fixture-mode ordinary --recompile --inventory --output target/typed-ratchet/fixture-ordinary.json
+    just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
     python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
-test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-modeled test-typed-ratchet-docs
+test-typed-ratchet-contracts: typed-ratchet-build
+    python3 -m unittest scripts.tests.compiler_contract_checks
+
+test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
 
 test-typed-ratchet-ordinary:
     just test-typed-ratchet-reports
     just test-typed-ratchet-compiler
+    just test-typed-ratchet-contracts
+    just test-typed-ratchet-docs
 
 test-typed-ratchet-modeled:
-    just typed-ratchet --fixture-mode shuttle --inventory --output target/typed-ratchet/fixture-shuttle.json
-    just typed-ratchet --fixture-mode loom --inventory --output target/typed-ratchet/fixture-loom.json
-    just typed-ratchet --fixture-mode turmoil --inventory --output target/typed-ratchet/fixture-turmoil.json
+    just typed-ratchet --fixture-mode shuttle --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-shuttle.json
+    just typed-ratchet --fixture-mode loom --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-loom.json
+    just typed-ratchet --fixture-mode turmoil --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-turmoil.json
     python3 -m unittest scripts.tests.compiler_fixture_checks.ModeledFixtureTests
 
-# Compile the fixture's type examples without instrumenting compile-only checks for coverage.
 test-typed-ratchet-docs:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/fixtures cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
+    #!/usr/bin/env bash
+    set -euo pipefail
+    doctest_flags="${RUSTDOCFLAGS:-} -Z unstable-options --persist-doctests {{ cargo_target_dir }}/typed-ratchet/doctests"
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        doctest_flags+=" -C instrument-coverage"
+    fi
+    RUSTDOCFLAGS="$doctest_flags" CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/docs \
+        cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
+
+# Current API examples compile alongside their compile_fail counterparts on the product toolchain.
+test-typed-ratchet-product-docs:
+    cargo +1.98 test --package nervix-primitives --doc expect_lint
+    cargo +1.98 test --package nervix-vm --doc FunctionInjector
+    RUSTUP_TOOLCHAIN=1.98 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
     python3 -m scripts.tests.qualify_typed_ratchet_cache
@@ -1482,7 +1509,7 @@ fmt-check-typed-ratchet: typed-ratchet-setup
 lint-typed-ratchet: typed-ratchet-setup
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 clippy --manifest-path tools/nervix-lint/Cargo.toml --workspace --all-targets -- -D warnings
 
-coverage-typed-ratchet-python:
+coverage-typed-ratchet-python: typed-ratchet-setup test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
