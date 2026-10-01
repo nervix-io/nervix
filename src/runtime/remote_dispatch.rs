@@ -192,6 +192,7 @@ impl PendingRemoteAck {
         if !self.admitted.load(Ordering::Relaxed) {
             return false;
         }
+        #[allow(deprecated)] // until try_update is stabilized
         let previous = self
             .silent_sweeps
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {

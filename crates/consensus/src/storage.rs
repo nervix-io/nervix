@@ -841,6 +841,7 @@ impl StoreInner {
     /// The view is opened on the ordered consensus storage worker, so its records, applied index
     /// and membership belong to one committed revision. Each worker turn seals and synchronizes
     /// one section from that view, releasing its bulk reservation before the next turn.
+    #[allow(deprecated)] // until try_update is stabilized
     async fn seal_generation(&self) -> io::Result<SnapshotManifest> {
         let section_limit = self.executor.limits().snapshot_section_bytes.as_u64();
         let generation = self.snapshots.claim_generation();
@@ -855,8 +856,9 @@ impl StoreInner {
             let log_bytes_at_open = seal.log_bytes_at_open;
             let manifest = seal.into_manifest(generation);
             self.publish_manifest(manifest.clone(), None).await?;
+            #[allow(deprecated)] // until try_update is stabilized
             self.log_bytes_since_snapshot
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_sub(log_bytes_at_open)
                 })
                 .assured(

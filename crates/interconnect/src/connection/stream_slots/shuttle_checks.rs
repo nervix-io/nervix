@@ -133,18 +133,20 @@ impl DrainObservation {
             !self.has_begun(),
             "the {subquota:?} subquota leased a slot after the drain began"
         );
+        #[allow(deprecated)] // until try_update is stabilized
         let granted =
             self.outstanding
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
                     outstanding.checked_add(1)
                 });
         granted.assured("a connection holds at most a few dozen stream slots");
     }
 
     fn lease_returned(&self) {
+        #[allow(deprecated)] // until try_update is stabilized
         let returned =
             self.outstanding
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
                     outstanding.checked_sub(1)
                 });
         returned.assured("a lease task returns only the slots it recorded as granted");

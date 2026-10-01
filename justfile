@@ -1387,8 +1387,8 @@ ordinary-clippy-targets: \
     (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
-    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["-q"]) \
-    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown", "-q"])
+    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] []) \
+    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
 [private, parallel]
 shuttle-clippy-targets: \

@@ -954,6 +954,7 @@ impl TransportState {
     pub(crate) fn next_coordination_identity(
         &self,
     ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
+        #[allow(deprecated)] // until try_update is stabilized
         let sequence = self
             .next_coordination_sequence
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1734,6 +1735,7 @@ impl TransportState {
         );
 
         let slot_keys = target.slot_keys(class);
+        #[allow(deprecated)] // until try_update is stabilized
         let start = self
             .next_connection
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

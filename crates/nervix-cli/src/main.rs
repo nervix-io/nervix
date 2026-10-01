@@ -1336,6 +1336,7 @@ impl EventLineSender {
             line.truncate(boundary);
             line.push_str(EVENT_LINE_SUFFIX);
         }
+        #[allow(deprecated)] // until try_update is stabilized
         match self.sender.try_send(line) {
             Ok(()) => {}
             Err(nervix_primitives::sync::mpsc::error::TrySendError::Full(_)) => {
