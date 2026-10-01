@@ -243,8 +243,7 @@ just test-connectors <filter>
 ### Compiler synchronization gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
-synchronization gate in the isolated `tools/nervix-lint` workspace. `just typed-ratchet-setup`
-installs the pinned analysis compiler, compiler libraries and matching LLVM tools. Product builds
+synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
 Prepare the ordinary server build prerequisites, including `just build-web-console`.
 
