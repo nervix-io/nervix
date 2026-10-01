@@ -363,7 +363,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                 return Err(Status::permission_denied("the upload is not authorized"));
             }
             if fail_upload_replies
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()

@@ -667,7 +667,7 @@ impl RelayConsumerFanout {
         let id = self
             .branch_dispatch_gates
             .next_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_add(1)
             })
             .assured("a relay cannot publish 2^64 branch-scoped gate leases");

@@ -357,7 +357,7 @@ impl RelayDispatchGate {
 
     fn increment_in_flight_dispatches(&self) {
         self.in_flight_dispatches
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 current.checked_add(1)
             })
             .assured("a process cannot hold usize::MAX live relay dispatch permits");
@@ -366,7 +366,7 @@ impl RelayDispatchGate {
     fn decrement_in_flight_dispatches(&self) {
         let previous = self
             .in_flight_dispatches
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 current.checked_sub(1)
             })
             .verified("this permit or rolled-back acquisition raised the count");
@@ -799,7 +799,7 @@ impl<T> RelayFanout<T> {
             registered
         });
         self.receiver_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_add(1)
             })
             .assured("a node cannot hold usize::MAX consumers of one relay");
@@ -818,7 +818,7 @@ impl<T> RelayFanout<T> {
             remaining
         });
         self.receiver_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
             })
             .verified("the leaving consumer raised the count when it registered");
@@ -836,18 +836,18 @@ impl<T> RelayConsumerQueue<T> {
 
     /// Reserves one admission, or reports that this consumer already holds `capacity`.
     fn try_admit(&self, capacity: usize) -> bool {
-        let admission =
-            self.admitted
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
-                    if admitted >= capacity {
-                        return None;
-                    }
-                    Some(
-                        admitted
-                            .checked_add(1)
-                            .verified("the comparison above holds the count below the capacity"),
-                    )
-                });
+        let admission = self
+            .admitted
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
+                if admitted >= capacity {
+                    return None;
+                }
+                Some(
+                    admitted
+                        .checked_add(1)
+                        .verified("the comparison above holds the count below the capacity"),
+                )
+            });
         admission.is_ok()
     }
 
@@ -870,7 +870,7 @@ impl<T> RelayConsumerQueue<T> {
 
     fn release_admission(&self) {
         self.admitted
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
                 admitted.checked_sub(1)
             })
             .verified("every release follows the admission that raised the count");
@@ -912,7 +912,7 @@ impl<'fanout, T> RelayAdmissionWait<'fanout, T> {
     fn begin(fanout: &'fanout RelayFanout<T>) -> Self {
         fanout
             .waiting_publishers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
                 waiting.checked_add(1)
             })
             .assured("a node cannot hold usize::MAX publishers waiting on one relay");
@@ -924,7 +924,7 @@ impl<T> Drop for RelayAdmissionWait<'_, T> {
     fn drop(&mut self) {
         self.fanout
             .waiting_publishers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
                 waiting.checked_sub(1)
             })
             .verified("this wait raised the count when it began");

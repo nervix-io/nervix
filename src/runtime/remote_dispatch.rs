@@ -193,7 +193,7 @@ impl PendingRemoteAck {
         }
         let previous = self
             .silent_sweeps
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {
                 sweeps.checked_add(1)
             })
             .assured(

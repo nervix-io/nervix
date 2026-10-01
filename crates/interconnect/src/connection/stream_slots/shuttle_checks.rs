@@ -135,7 +135,7 @@ impl DrainObservation {
         );
         let granted =
             self.outstanding
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
                     outstanding.checked_add(1)
                 });
         granted.assured("a connection holds at most a few dozen stream slots");
@@ -144,7 +144,7 @@ impl DrainObservation {
     fn lease_returned(&self) {
         let returned =
             self.outstanding
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
                     outstanding.checked_sub(1)
                 });
         returned.assured("a lease task returns only the slots it recorded as granted");

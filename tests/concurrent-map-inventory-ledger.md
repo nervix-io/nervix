@@ -381,7 +381,7 @@ as completed fuzz execution.
 ### Same-host routing measurement
 
 `just bench-endpoint-routing` ran before and after on the same Intel Core i9-14900HX host with
-Rust 1.98.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
+Rust 1.99.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
 Each run used five samples of 10,000 operations against the same live endpoint ingestor, with
 per-thread jemalloc allocated-byte counters and the cooperative budget inside the loop. The request
 case measures endpoint selection and intake admission; the retained case measures intake admission

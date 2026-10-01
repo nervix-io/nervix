@@ -123,7 +123,7 @@ impl RelaySubscriptions {
 
     fn close_attached(&self) {
         self.epoch
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |epoch| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |epoch| {
                 epoch.checked_add(1)
             })
             .assured("a relay is not redeclared 2^64 times on one node");

@@ -1339,7 +1339,7 @@ impl EventLineSender {
             Ok(()) => {}
             Err(nervix_primitives::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.dropped
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                         // The displayed gap count clamps once it reaches its representable limit.
                         Some(match count.checked_add(1) {
                             Some(next) => next,

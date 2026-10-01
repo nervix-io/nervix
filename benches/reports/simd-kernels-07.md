@@ -6,7 +6,7 @@ The baseline is `b607538691ebda2666062ed02c06deec4cf179d2` (`origin/main` when t
 started) with this change's Criterion programs added, so both revisions run the same cases; the
 candidate is the revision containing this report. Measurements were made on 2026-09-30 UTC on an
 AMD Ryzen AI 9 HX 370 (Zen 5 and Zen 5c cores, AVX-512) with 24 logical CPUs, x86-64 Linux,
-rustc 1.98.1, LLVM 22.1.8, `fearless_simd` 1.0.0, Arrow 58.4.0, and Criterion 0.5.1. Release
+rustc 1.99.0, LLVM 22.1.8, `fearless_simd` 1.0.0, Arrow 58.4.0, and Criterion 0.5.1. Release
 builds use the repository's configured kache wrapper. The VM timing binaries use
 `target-cpu=native`; the inspected binaries and the kernel timing binary use the Docker image's
 `x86-64-v3` payload target.

@@ -2,6 +2,8 @@ set minimum-version := "1.56.0"
 set unstable
 set lists
 
+export RUSTUP_AUTO_INSTALL := "0"
+
 rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
@@ -1490,9 +1492,9 @@ test-typed-ratchet-docs:
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
-    cargo +1.98 test --package nervix-primitives --doc expect_lint
-    cargo +1.98 test --package nervix-vm --doc FunctionInjector
-    RUSTUP_TOOLCHAIN=1.98 just test-runtime-state-capabilities
+    cargo +1.99 test --package nervix-primitives --doc expect_lint
+    cargo +1.99 test --package nervix-vm --doc FunctionInjector
+    RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
     python3 -m scripts.tests.qualify_typed_ratchet_cache

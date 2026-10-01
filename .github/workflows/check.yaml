@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -176,7 +176,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -347,7 +347,7 @@ jobs:
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -530,7 +530,7 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
 
       - name: Install CRAP and LCOV
         uses: taiki-e/install-action@v2
@@ -612,7 +612,7 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -761,7 +761,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -961,7 +961,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -1093,7 +1093,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 

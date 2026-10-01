@@ -856,7 +856,7 @@ impl StoreInner {
             let manifest = seal.into_manifest(generation);
             self.publish_manifest(manifest.clone(), None).await?;
             self.log_bytes_since_snapshot
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_sub(log_bytes_at_open)
                 })
                 .assured(

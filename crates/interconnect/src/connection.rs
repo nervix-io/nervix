@@ -955,7 +955,7 @@ impl TransportState {
     ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
         let sequence = self
             .next_coordination_sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| Report::new(CoordinationIdentityAllocationError))?;
@@ -1734,7 +1734,7 @@ impl TransportState {
         let slot_keys = target.slot_keys(class);
         let start = self
             .next_connection
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.checked_add(1).unwrap_or_default())
             })
             .assured("the round-robin cursor update always returns a value")
