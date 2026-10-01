@@ -1647,6 +1647,10 @@ test-nspl *args:
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
 
+# Check the shared R2 configuration used by native CI jobs and Docker builds.
+test-kache-ci:
+    uv run --locked python -m unittest scripts.tests.test_kache_ci
+
 test-docs:
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js

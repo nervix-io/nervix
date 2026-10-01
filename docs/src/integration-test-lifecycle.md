@@ -109,6 +109,14 @@ the full builds: every kache-backed job and Docker image build uses a 1 TiB stor
 an upper bound, not a disk reservation. The runner's actual disk capacity remains the practical
 limit.
 
+The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
+first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
+`artifacts-pr` prefix, configured in the daemon's TOML file. This lets successive PR runs reuse
+their builds. Protected-branch pushes use only `artifacts`; scheduled and manually dispatched
+native jobs retain kache's read-only policy. Fork PRs still need credentials to access R2.
+Kache 0.28.1's `doctor` displays the generic read-only CI policy even when the PR prefix is
+enabled; actual uploads confirm that PR publication is active.
+
 CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
 name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its
 credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and
