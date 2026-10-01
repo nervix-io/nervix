@@ -95,7 +95,7 @@ jobs:
 
       - name: Run runner tests and every ordinary Bolero property
         run: |
-          just build-web-console
+          just toolchains-install
           just test-bolero-runner
           just test-bolero
 
@@ -188,7 +188,7 @@ jobs:
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |
-          just build-web-console
+          just toolchains-install
           just coverage-bolero 30
 
       - name: Upload runner coverage to Codecov

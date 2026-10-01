@@ -1742,6 +1742,10 @@ validate-clock-boundaries:
 validate-typed-errors:
     python3 -m scripts.check_typed_errors
 
+toolchains-install:
+    rustup toolchain install
+    rustup +nightly-2026-09-17 toolchain install
+
 # Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
 test-nspl *args:

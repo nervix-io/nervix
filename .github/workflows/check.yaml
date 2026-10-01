@@ -148,7 +148,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Validate
-        run: just validate-ci
+        run: |
+          just toolchains-install
+          just validate-ci
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -276,7 +278,9 @@ jobs:
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
       - name: Tests coverage
-        run: just test-coverage
+        run: |
+          just toolchains-install
+          just test-coverage
 
       - name: Upload tests coverage
         if: always()
@@ -447,7 +451,9 @@ jobs:
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
       - name: Scenario coverage
-        run: just test-scenarios-coverage
+        run: |
+          just toolchains-install
+          just test-scenarios-coverage
 
       - name: Upload scenarios coverage
         if: always()
@@ -719,7 +725,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Client conformance
-        run: just test-client-conformance
+        run: |
+          just toolchains-install
+          just test-client-conformance
 
       - name: Publish kache report
         if: always()
@@ -857,7 +865,9 @@ jobs:
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
       - name: Capability doctests
-        run: just test-capability-docs
+        run: |
+          just toolchains-install
+          just test-capability-docs
 
       - name: Expiry map Miri
         run: just test-expiry-map-miri
@@ -1048,7 +1058,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Shuttle concurrency checks
-        run: just test-shuttle
+        run: |
+          just toolchains-install
+          just test-shuttle
 
       - name: Publish kache report
         if: always()
@@ -1153,7 +1165,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Turmoil simulations
-        run: just test-turmoil
+        run: |
+          just toolchains-install
+          just test-turmoil
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check
