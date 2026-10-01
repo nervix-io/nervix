@@ -406,7 +406,14 @@ just test
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
-`just fuzz <target> [duration]`. `just help` lists the recipes.
+`just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
+discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
+
+Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Bolero and
+extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker points to
+`scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
+`CARGO_ENCODED_RUSTFLAGS` supplied by coverage, simulation or sanitizer tooling. Browser targets
+use their own linker. `just validate-workflows` checks the Actions workflow definitions.
 
 Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
 `nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
@@ -431,6 +438,7 @@ just ratchet --show data_plane_lock_acquisitions
 just typed-ratchet --show
 just typed-ratchet --configuration shuttle --inventory
 just test-typed-ratchet
+just test-typed-ratchet-docs
 just qualify-typed-ratchet-cache
 ```
 
@@ -453,11 +461,17 @@ declarations. When it is stale, trace the changed callers, update affected scope
 reviewed inputs. An unchanged helper body does not establish that its callers remain cold.
 
 The cache qualification checks fresh and Cargo-fresh runs, an actual kache dependency hit, recovery
-from a missing side report, cross-worktree rejection, and the same trybuild diagnostic twice in each
-of two worktrees. Kache 0.28 executes workspace-wrapper chains directly while caching ordinary
-dependencies; the gate also rejects incomplete cached compiler evidence independently of that
-implementation choice. The known trybuild path problem is investigated with the configured wrapper
-and recorded qualification evidence, without a direct-rustc retry.
+from a missing side report, fixture doctests twice, and cross-worktree rejection in two worktrees.
+Kache 0.28 executes workspace-wrapper chains directly while caching ordinary dependencies; the
+gate also rejects incomplete cached compiler evidence independently of that implementation choice.
+
+### Capability doctests
+
+`just test-capability-docs` checks runtime state handles, logical and physical deadlines,
+subscription predicates, and the UDF execution context with `compile_fail` doctests beside their
+APIs. Paired compiling examples check that the imports and current signatures remain valid. These
+checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
+the runtime examples require the `testing` feature, which the recipe enables.
 
 ### Deterministic concurrency checks
 
@@ -584,12 +598,12 @@ Name producers to run only those, one or more of `test-typed-ratchet`, `bench-sm
 just coverage-native-extras nspl-completion-walk
 ```
 
-A producer runs its check exactly as `just <producer>` does and fails when the check fails. The
-recipe first adds the `llvm-tools` component to the toolchain `rust-toolchain.toml` pins, with
-`just llvm-tools`, because only the compiler's own LLVM tools read its profiles. What the check
-needs first, such as the web console the server benches link, is built normally. Before
-instrumentation, `bench-smoke` fetches the verified ONNX Runtime artifact and builds the web
-console. The recipe that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
+A producer runs its check exactly as `just <producer>` does and fails when the check fails.
+`rust-toolchain.toml` includes the `llvm-tools` component because only the compiler's own LLVM
+tools read its profiles. What the check needs first, such as the web console the server benches
+link, is built normally. Before instrumentation, `bench-smoke` fetches the verified ONNX Runtime
+artifact and builds the web console. The recipe that executes Nervix code then runs in the
+environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a
 check that only compile, target the browser or run under a model checker stay uninstrumented, and

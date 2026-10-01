@@ -1157,6 +1157,51 @@ impl CompiledUdf {
     }
 }
 
+/// Executes domain UDFs with the caller's execution time and prior row errors.
+///
+/// Injection supplies the complete execution context:
+///
+/// ```no_run
+/// use nervix_models::Timestamp;
+/// use nervix_roto::UdfExecutor;
+/// use nervix_vm::{
+///     FunctionInjector, RowErrorMask, RowSelection, TypedArray,
+///     program::{FunctionName, Span},
+/// };
+///
+/// fn inject(
+///     injector: &UdfExecutor,
+///     function: &FunctionName,
+///     arguments: &[TypedArray],
+///     rows: &RowSelection,
+///     span: Span,
+///     now: Timestamp,
+///     prior_error_rows: RowErrorMask<'_>,
+/// ) {
+///     drop(injector.inject_with_context(function, arguments, rows, span, now, prior_error_rows));
+/// }
+/// ```
+///
+/// The current injection API cannot be called without the execution time:
+///
+/// ```compile_fail
+/// use nervix_roto::UdfExecutor;
+/// use nervix_vm::{
+///     FunctionInjector, RowErrorMask, RowSelection, TypedArray,
+///     program::{FunctionName, Span},
+/// };
+///
+/// fn inject(
+///     injector: &UdfExecutor,
+///     function: &FunctionName,
+///     arguments: &[TypedArray],
+///     rows: &RowSelection,
+///     span: Span,
+///     prior_error_rows: RowErrorMask<'_>,
+/// ) {
+///     drop(injector.inject_with_context(function, arguments, rows, span, prior_error_rows));
+/// }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct UdfExecutor {
     functions: HashMap<String, Arc<CompiledUdf>>,

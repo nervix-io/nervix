@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
@@ -54,7 +55,7 @@ HOST = "x86_64-unknown-linux-gnu"
 RUNNER = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER"
 SHOW_ENV = """\
 export LLVM_PROFILE_FILE='/repo/target/nervix-%p-%24m.profraw'
-export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage --cfg=trybuild_no_target'
+export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage'
 export CARGO_LLVM_COV=1
 export CARGO_LLVM_COV_SHOW_ENV=1
 export CARGO_LLVM_COV_TARGET_DIR=/repo/target/native-coverage-build
@@ -103,12 +104,9 @@ class InventoryTests(unittest.TestCase):
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
                 native_coverage.validate_composition(producer, recipes)
-        # The setup action installs the toolchain under its patch release, not under the channel
-        # rust-toolchain.toml pins, so the recipes add the compiler's own LLVM tools themselves.
-        for collector in ("coverage-native-extras", "test-native-coverage"):
-            with self.subTest(recipe=collector):
-                self.assertEqual(native_coverage.dependency_names(recipes[collector]), ["llvm-tools"])
-        self.assertEqual(recipes["llvm-tools"]["body"], [["rustup component add llvm-tools"]])
+        # Coverage profiles must be read with the selected compiler's own LLVM tools.
+        toolchain = tomllib.loads((REPOSITORY / "rust-toolchain.toml").read_text())["toolchain"]
+        self.assertIn("llvm-tools", toolchain["components"])
 
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
@@ -218,8 +216,7 @@ class InstrumentationTests(unittest.TestCase):
         self.assertEqual(exported["CARGO_LLVM_COV"], "1")
         self.assertEqual(
             exported["RUSTFLAGS"],
-            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage "
-            "--cfg=trybuild_no_target",
+            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage",
         )
         with self.assertRaisesRegex(RunnerError, "unexpected line"):
             native_coverage.parse_exports("RUSTFLAGS=-Cinstrument-coverage\n")

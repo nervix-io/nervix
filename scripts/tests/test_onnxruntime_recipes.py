@@ -93,7 +93,7 @@ sys.exit(builder.main())
     def test_development_and_ci_require_published_artifacts_before_building_the_product(self) -> None:
         recipes = [
             ["build-server"], ["test"], ["docker-build-debian"], ["test-admission-runtime"],
-            ["test-runtime"], ["test-endpoint-intake"], ["bench-endpoint-routing"],
+            ["test-runtime"], ["test-capability-docs"], ["test-endpoint-intake"], ["bench-endpoint-routing"],
             ["bench-admitted-work"], ["bench-state-replication"], ["bench-task-handles"],
             ["coverage-task-handles"], ["coverage-runtime"], ["bench-smoke"], ["ratchet"],
             ["coverage-scenarios", str(self.root / "scenarios.lcov")],

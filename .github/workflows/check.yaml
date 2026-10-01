@@ -35,8 +35,8 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Cold validation includes Clippy, compiled discovery and the complete compiler matrix.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
       - name: Setup Rust
@@ -70,8 +70,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -207,8 +206,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -384,8 +382,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -657,8 +654,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -817,8 +813,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -884,11 +879,11 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
-      - name: Runtime state capability checks
-        run: just test-runtime-state-capabilities
-
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Capability doctests
+        run: just test-capability-docs
+
       - name: Expiry map Miri
         run: just test-expiry-map-miri
 
@@ -1038,8 +1033,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Checkout
