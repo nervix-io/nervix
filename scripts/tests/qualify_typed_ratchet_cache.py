@@ -1,4 +1,4 @@
-"""Qualify the real compiler/cache composition and trybuild in two isolated worktrees."""
+"""Qualify the real compiler/cache composition and fixture doctests in two worktrees."""
 
 from __future__ import annotations
 
@@ -43,9 +43,9 @@ def qualify(root: pathlib.Path, target: pathlib.Path) -> dict:
     recovered = runner.analyze(configuration, fresh=True)
     assert recovered["complete"]
     assert recovered["cache_namespace"] != salt, "missing reports did not establish a new analysis namespace"
-    subprocess.run(["just", "test-typed-ratchet-ui"], cwd=root, check=True)
-    subprocess.run(["just", "test-typed-ratchet-ui"], cwd=root, check=True)
-    return {"root": str(root), "identity": runner.identity, "fresh": first, "cargo_fresh": repeated, "kache_hits": hits, "missing_side_report_recovered": True, "recovered": recovered, "trybuild": "passed twice with configured wrapper"}
+    for _ in range(2):
+        subprocess.run(["just", "test-typed-ratchet-docs"], cwd=root, check=True)
+    return {"root": str(root), "identity": runner.identity, "fresh": first, "cargo_fresh": repeated, "kache_hits": hits, "missing_side_report_recovered": True, "recovered": recovered, "doctests": "passed twice with configured wrapper"}
 
 
 def main() -> None:

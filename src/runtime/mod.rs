@@ -658,8 +658,98 @@ pub(crate) use domain_clock::{
     DomainExecutionSnapshot,
 };
 pub(crate) use domain_execution::LookupRuntime;
-/// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
-/// operations are absent from each capability.
+/// Opaque runtime-state handles exposed for capability doctests under `testing`.
+///
+/// All six handle types are available to the examples:
+///
+/// ```no_run
+/// use nervix_server::runtime::state_capability_compile_tests::{
+///     KafkaOffsetSnapshotInstaller, KafkaOffsetStateOriginator, KafkaOffsetStateRead,
+///     MaterializedRelaySnapshotInstaller, MaterializedRelayStateOriginator,
+///     MaterializedRelayStateRead,
+/// };
+///
+/// fn handles(
+///     _kafka_reader: &KafkaOffsetStateRead,
+///     _kafka_originator: &KafkaOffsetStateOriginator,
+///     _kafka_installer: &KafkaOffsetSnapshotInstaller,
+///     _materialized_reader: &MaterializedRelayStateRead,
+///     _materialized_originator: &MaterializedRelayStateOriginator,
+///     _materialized_installer: &MaterializedRelaySnapshotInstaller,
+/// ) {}
+/// ```
+///
+/// Kafka offset readers cannot originate mutations or install snapshots:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
+///
+/// fn mutate(reader: &KafkaOffsetStateRead) {
+///     drop(reader.apply_committed_offset("events", 0, 1));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
+///
+/// fn install(reader: &KafkaOffsetStateRead) {
+///     drop(reader.install_snapshot(1, &[]));
+/// }
+/// ```
+///
+/// Originators and snapshot installers have separate operations:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateOriginator;
+///
+/// fn install(originator: &KafkaOffsetStateOriginator) {
+///     drop(originator.install_snapshot(1, &[]));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetSnapshotInstaller;
+///
+/// fn mutate(installer: &KafkaOffsetSnapshotInstaller) {
+///     drop(installer.apply_committed_offset("events", 0, 1));
+/// }
+/// ```
+///
+/// Materialized-state readers cannot originate mutations or install snapshots:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead;
+///
+/// fn mutate(reader: &MaterializedRelayStateRead) {
+///     drop(reader.remove_key(&None));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead;
+///
+/// fn install(reader: &MaterializedRelayStateRead) {
+///     drop(reader.install_snapshot(1, &[]));
+/// }
+/// ```
+///
+/// Materialized-state originators and snapshot installers also have separate operations:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateOriginator;
+///
+/// fn install(originator: &MaterializedRelayStateOriginator) {
+///     drop(originator.install_snapshot(1, &[]));
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelaySnapshotInstaller;
+///
+/// fn mutate(installer: &MaterializedRelaySnapshotInstaller) {
+///     drop(installer.remove_key(&None));
+/// }
+/// ```
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod state_capability_compile_tests {
@@ -674,16 +764,100 @@ pub mod state_capability_compile_tests {
     };
 }
 
-/// Opaque logical clock and deadline capabilities exposed only so compile-fail tests can prove
-/// that they cannot be interchanged with the physical deadlines of the connector contract.
+/// Opaque logical clock and deadline capabilities exposed for doctests under `testing`.
+///
+/// Each wait accepts its own deadline type:
+///
+/// ```no_run
+/// use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
+/// use nervix_primitives::sync::CancellationToken;
+/// use nervix_server::runtime::clock_capability_compile_tests::{DomainClock, LogicalDeadline};
+///
+/// async fn wait(
+///     clock: &DomainClock,
+///     logical: LogicalDeadline,
+///     capability: PhysicalDeadlineCapability,
+///     physical: PhysicalDeadline,
+/// ) {
+///     drop(clock.wait_until(logical, &CancellationToken::new()).await);
+///     capability.wait_until(physical).await;
+/// }
+/// ```
+///
+/// A logical wait does not accept a physical deadline:
+///
+/// ```compile_fail
+/// use nervix_connector::physical_time::PhysicalDeadline;
+/// use nervix_primitives::sync::CancellationToken;
+/// use nervix_server::runtime::clock_capability_compile_tests::DomainClock;
+///
+/// async fn wait(clock: &DomainClock, deadline: PhysicalDeadline) {
+///     drop(clock.wait_until(deadline, &CancellationToken::new()).await);
+/// }
+/// ```
+///
+/// A physical wait does not accept a logical deadline:
+///
+/// ```compile_fail
+/// use nervix_connector::physical_time::PhysicalDeadlineCapability;
+/// use nervix_server::runtime::clock_capability_compile_tests::LogicalDeadline;
+///
+/// async fn wait(capability: PhysicalDeadlineCapability, deadline: LogicalDeadline) {
+///     capability.wait_until(deadline).await;
+/// }
+/// ```
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod clock_capability_compile_tests {
     pub use super::domain_clock::{DomainClock, LogicalDeadline};
 }
 
-/// The opaque subscription predicate exposed only so compile-fail tests can prove that general VM
-/// programs and predicates compiled with a different input context cannot be substituted.
+/// The opaque subscription predicate exposed for capability doctests under `testing`.
+///
+/// The subscription predicate and VM input types are available to the examples:
+///
+/// ```no_run
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+/// use nervix_vm::{CompiledPredicate, CompiledProgram};
+///
+/// fn predicates(
+///     _subscription: CompiledSubscriptionPredicate,
+///     _program: CompiledProgram,
+///     _predicate: CompiledPredicate,
+/// ) {}
+/// ```
+///
+/// General VM programs cannot be converted into subscription predicates:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+/// use nervix_vm::CompiledProgram;
+///
+/// fn subscription(program: CompiledProgram) -> CompiledSubscriptionPredicate {
+///     program.into()
+/// }
+/// ```
+///
+/// A VM predicate compiled in another input context cannot be converted either:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+/// use nervix_vm::CompiledPredicate;
+///
+/// fn subscription(predicate: CompiledPredicate) -> CompiledSubscriptionPredicate {
+///     predicate.into()
+/// }
+/// ```
+///
+/// The inner VM predicate remains private:
+///
+/// ```compile_fail
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+///
+/// fn inner(predicate: CompiledSubscriptionPredicate) {
+///     drop(predicate.predicate);
+/// }
+/// ```
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod subscription_predicate_capability_compile_tests {

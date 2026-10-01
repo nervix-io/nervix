@@ -811,7 +811,8 @@ build and the existing tests, and nothing in it changes behavior.
   `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
   features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
   production path and complete assertion in ordinary randomized/corpus and coverage-guided
-  libFuzzer runs. Registration and both CI modes are mandatory even while other work is concurrent.
+  libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent;
+  CI runs the sanitizer mode only for PRs labeled `fuzz`.
   Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
   features and model-checker dependencies out of ordinary and fuzz builds.
 - For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for
@@ -822,6 +823,10 @@ build and the existing tests, and nothing in it changes behavior.
   before changing product code.
 - Parser-only work requires positive parse tests, negative parse tests, and completion-context tests
   that guard against grammar-branch leakage. Composed language phrases require completion coverage.
+- Use Rustdoc `compile_fail` doctests beside the owning API for compile-time rejection checks.
+  Do not use `trybuild` or add its dependencies, harnesses, fixtures, or diagnostic snapshots.
+  Pair rejection examples with compiling examples of the current imports and supported signatures,
+  and run the doctests in the normal test commands and CI.
 - Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
   test fixture, including to assert that loading it fails. See
   [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).

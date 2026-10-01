@@ -41,7 +41,7 @@ fuzz-reduce target failure:
 validate-bolero:
     python3 scripts/bolero.py validate
 
-# Check the dedicated PR and campaign workflow with the pinned Actions linter.
+# Check the dedicated Bolero workflow with the pinned Actions linter.
 validate-bolero-workflow:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
 
@@ -63,7 +63,7 @@ coverage-bolero-runner:
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
-# The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
+# The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
 coverage-bolero duration="2":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -117,7 +117,12 @@ test: tests-deps
         --package nervix-model-harness \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
+    just test-capability-docs
     just test-turmoil
+
+# Check capability examples with rustdoc, including runtime exports enabled only for tests.
+test-capability-docs: build-web-console
+    cargo test --package nervix-server --package nervix-roto --features nervix-server/testing --doc
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -601,12 +606,6 @@ test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps b
         --input tests/features/runtime/client_conformance.feature \
         --tags {{ quote(tags) }} {{ args }}
 
-test-runtime-state-capabilities: tests-deps
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --features testing --test runtime_state_capabilities
-
 # Validate the small unsafe boundary used by deduplicator expiration tracking.
 test-expiry-map:
     cargo test --package nervix-expiry-map
@@ -654,8 +653,8 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
-    # These server targets cover every server test except the scenario suite and the compile-fail
-    # capability checks, which run in their own jobs.
+    # These server targets cover every server test except the scenario suite, which runs in its
+    # own job.
     cargo llvm-cov --no-report --lib --bins --benches --test harness_liveness \
         --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
@@ -1008,18 +1007,13 @@ coverage-turmoil output:
 # writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
 # target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
 # Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
-coverage-native-extras *producers: llvm-tools
+coverage-native-extras *producers:
     python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
 
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
-test-native-coverage: llvm-tools
+test-native-coverage:
     NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
-
-# Add the LLVM tools that read coverage profiles to the toolchain rust-toolchain.toml pins, which
-# must be the compiler's own: a toolchain installed under another name does not provide them.
-llvm-tools:
-    rustup component add llvm-tools
 
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
@@ -1395,7 +1389,7 @@ test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output target/typed-ratchet/fixture-ordinary.json
     python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
-test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-modeled
+test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-modeled test-typed-ratchet-docs
 
 test-typed-ratchet-ordinary:
     just test-typed-ratchet-reports
@@ -1407,8 +1401,9 @@ test-typed-ratchet-modeled:
     just typed-ratchet --fixture-mode turmoil --inventory --output target/typed-ratchet/fixture-turmoil.json
     python3 -m unittest scripts.tests.compiler_fixture_checks.ModeledFixtureTests
 
-test-typed-ratchet-ui:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/ui cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --test diagnostics
+# Compile the fixture's type examples without instrumenting compile-only checks for coverage.
+test-typed-ratchet-docs:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/fixtures cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
 
 qualify-typed-ratchet-cache: typed-ratchet-build
     python3 -m scripts.tests.qualify_typed_ratchet_cache
@@ -2055,7 +2050,7 @@ coverage-task-handles output="target/task-handles.lcov" report="target/task-hand
     cargo llvm-cov --bench task_handles --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
 
 # Inspect a benchmark harness from an existing successful instrumented run without rebuilding it.
-coverage-task-handles-export executable profile output="target/task-handles-benchmark.lcov": llvm-tools
+coverage-task-handles-export executable profile output="target/task-handles-benchmark.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"

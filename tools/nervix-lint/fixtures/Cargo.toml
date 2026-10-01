@@ -19,6 +19,3 @@ nervix-primitives = { path = "../../../crates/primitives", features = [
 ] }
 serde_json = "1"
 triomphe = "0.1"
-
-[dev-dependencies]
-trybuild = "=1.0.121"

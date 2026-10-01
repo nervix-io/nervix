@@ -35,6 +35,17 @@ pub fn io_operations(reader: &mut impl Read, writer: &mut impl Write) -> std::io
     Ok(())
 }
 
+/// A collection fixture whose resolved type is independent of its method names.
+///
+/// ```
+/// use nervix_lint_fixtures::CustomCollection;
+/// let collection: CustomCollection = CustomCollection;
+/// ```
+///
+/// ```compile_fail
+/// use nervix_lint_fixtures::CustomCollection;
+/// let number: u32 = CustomCollection;
+/// ```
 pub struct CustomCollection;
 
 impl CustomCollection {

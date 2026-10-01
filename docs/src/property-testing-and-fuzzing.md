@@ -190,9 +190,11 @@ profile enables optimization, debug information, debug assertions and overflow c
 use the pinned nightly and keep the configured kache wrapper. Modeled execution features are
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
-PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
-libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
-manual campaigns. Job limits reserve additional time for compilation, artifacts and cleanup. A
+PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
+the PR has the `fuzz` label, with 30 seconds of engine time per target. Adding or removing the
+label reevaluates the jobs; the gate requires sanitizer success when the label is present and
+accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs execute the ordinary
+properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 
