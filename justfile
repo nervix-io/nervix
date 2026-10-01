@@ -1445,7 +1445,7 @@ fmt-check-typed-ratchet: typed-ratchet-setup
 lint-typed-ratchet: typed-ratchet-setup
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 clippy --manifest-path tools/nervix-lint/Cargo.toml --workspace --all-targets -- -D warnings
 
-coverage-typed-ratchet-python:
+coverage-typed-ratchet-python: typed-ratchet-setup test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
