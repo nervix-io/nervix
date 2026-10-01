@@ -60,9 +60,24 @@ struct Operation {
     finding: usize,
 }
 
-type ExpectationKey = (rustc_ast::AttrId, u16);
-type ExpectationCounts =
-    HashMap<(ExpectationKey, String), (StableLintExpectationId, HashSet<HirId>)>;
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct ExpectationKey {
+    attribute: rustc_ast::AttrId,
+    lint_index: u16,
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct ExpectedLint {
+    expectation: ExpectationKey,
+    lint: String,
+}
+
+struct ReviewedOperations {
+    expectation: StableLintExpectationId,
+    operations: HashSet<HirId>,
+}
+
+type ExpectationCounts = HashMap<ExpectedLint, ReviewedOperations>;
 
 /// Narrowest metadata contract wins. Parent contracts supply defaults for their definitions;
 /// call reachability can make a helper recurring even when its inherited default is cold.
@@ -584,7 +599,7 @@ impl Flow {
         }
         let fulfilled: HashSet<_> = expectations
             .keys()
-            .map(|(expectation, _)| *expectation)
+            .map(|expected| expected.expectation)
             .collect();
         for (expectation, contract) in cx.tcx.lint_expectations(()) {
             if contract.lint_tool == Some(Symbol::intern("nervix"))
@@ -604,17 +619,18 @@ impl Flow {
                 );
             }
         }
-        for ((_, lint), (expectation, occurrences)) in expectations {
-            if occurrences.len() > 1 {
+        for (expected, reviewed) in expectations {
+            if reviewed.operations.len() > 1 {
                 cx.tcx.emit_node_span_lint(
                     INVALID_CONTRACT,
-                    expectation.hir_id,
-                    cx.tcx.hir_span(expectation.hir_id),
+                    reviewed.expectation.hir_id,
+                    cx.tcx.hir_span(reviewed.expectation.hir_id),
                     Message {
                         message: format!(
-                            "expect({lint}) covers {} distinct operations; attach an expectation \
-                             to each reviewed operation",
-                            occurrences.len()
+                            "expect({}) covers {} distinct operations; attach an expectation to \
+                             each reviewed operation",
+                            expected.lint,
+                            reviewed.operations.len()
                         ),
                     },
                 );
@@ -633,9 +649,15 @@ impl Flow {
         // expectation outside the syntactic ancestor list. Its compiler ID is authoritative.
         if let Some(expectation) = cx.tcx.lint_level_spec_at_node(lint, node).lint_id() {
             counts
-                .entry((expectation_key(cx.tcx, expectation), lint.name_lower()))
-                .or_insert_with(|| (expectation, HashSet::new()))
-                .1
+                .entry(ExpectedLint {
+                    expectation: expectation_key(cx.tcx, expectation),
+                    lint: lint.name_lower(),
+                })
+                .or_insert_with(|| ReviewedOperations {
+                    expectation,
+                    operations: HashSet::new(),
+                })
+                .operations
                 .insert(node);
         }
     }
@@ -681,10 +703,10 @@ impl Flow {
 
 fn expectation_key(tcx: TyCtxt<'_>, expectation: StableLintExpectationId) -> ExpectationKey {
     // Like rustc's expectation check, canonicalize copied HIR attributes from one expansion.
-    (
-        tcx.hir_attrs(expectation.hir_id)[usize::from(expectation.attr_index)].id(),
-        expectation.lint_index,
-    )
+    ExpectationKey {
+        attribute: tcx.hir_attrs(expectation.hir_id)[usize::from(expectation.attr_index)].id(),
+        lint_index: expectation.lint_index,
+    }
 }
 
 fn binding_context(tcx: TyCtxt<'_>, definition: DefId) -> Option<Context> {
