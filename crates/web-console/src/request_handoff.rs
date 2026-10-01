@@ -139,6 +139,7 @@ impl RequestReceiver {
         }
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     fn release(&self, bytes: usize) {
         self.load
             .try_update_value(|load| load.release(bytes))

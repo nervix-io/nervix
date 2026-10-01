@@ -950,12 +950,13 @@ impl TransportState {
         &self.node_id
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     pub(crate) fn next_coordination_identity(
         &self,
     ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
         let sequence = self
             .next_coordination_sequence
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| Report::new(CoordinationIdentityAllocationError))?;
@@ -1711,6 +1712,7 @@ impl TransportState {
                       state-poll work"
         )
     )]
+    #[allow(deprecated)] // until try_update is stabilized
     fn try_lease(
         &self,
         node_id: &ClusterNodeName,
@@ -1734,7 +1736,7 @@ impl TransportState {
         let slot_keys = target.slot_keys(class);
         let start = self
             .next_connection
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.checked_add(1).unwrap_or_default())
             })
             .assured("the round-robin cursor update always returns a value")

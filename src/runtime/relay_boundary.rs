@@ -647,6 +647,7 @@ impl RelayConsumerFanout {
         permits
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     async fn engage_branch_dispatch_gate(
         &self,
         scope: WasmStateResetScope,
@@ -667,7 +668,7 @@ impl RelayConsumerFanout {
         let id = self
             .branch_dispatch_gates
             .next_id
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_add(1)
             })
             .assured("a relay cannot publish 2^64 branch-scoped gate leases");
