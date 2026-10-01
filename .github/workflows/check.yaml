@@ -65,8 +65,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -197,8 +196,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -369,8 +367,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -637,8 +634,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -792,8 +788,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -1008,8 +1003,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Checkout

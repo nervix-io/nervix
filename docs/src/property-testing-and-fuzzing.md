@@ -192,7 +192,9 @@ use the pinned nightly and keep the configured kache wrapper. Modeled execution 
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
 PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
-the PR has the `fuzz` label, with 30 seconds of engine time per target. Adding or removing the
+the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
+[CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
+their own compiler flags. Adding or removing the
 label reevaluates the jobs; the gate requires sanitizer success when the label is present and
 accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs execute the ordinary
 properties. Job limits reserve additional time for compilation, artifacts and cleanup. A

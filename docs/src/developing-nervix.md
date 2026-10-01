@@ -208,6 +208,12 @@ For representation properties and sanitizer fuzzing, see
 `just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
 discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
 
+Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Bolero and
+extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker points to
+`scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
+`CARGO_ENCODED_RUSTFLAGS` supplied by coverage, simulation or sanitizer tooling. Browser targets
+use their own linker. `just validate-workflows` checks the Actions workflow definitions.
+
 Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
 `nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
 passed to the test binaries, so a test name filter narrows the run:

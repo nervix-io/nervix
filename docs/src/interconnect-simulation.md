@@ -488,6 +488,9 @@ artifact. The job runs `just test-turmoil`, then `just test-turmoil-replay-check
 uploads `target/turmoil-failures` as the `turmoil-failures` artifact. The coverage job does not run
 the simulation; `just coverage-turmoil` measures its lines locally.
 
+The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
+adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking.
+
 Every bound nests inside the next, so the innermost expired bound names the stuck run, and the job
 still has time to upload what it found. This follows the convention of [The Suite
 Watchdog](./integration-test-lifecycle.md#the-suite-watchdog).

@@ -42,8 +42,11 @@ validate-bolero:
     python3 scripts/bolero.py validate
 
 # Check the dedicated Bolero workflow with the pinned Actions linter.
-validate-bolero-workflow:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
+validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
+
+# Check selected Actions workflows, or all workflows when no paths are supplied.
+validate-workflows *workflows:
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 {{ workflows }}
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
 qualify-bolero:

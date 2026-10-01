@@ -38,7 +38,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk
+          tool: just,toml-cli,trunk,wild-linker
 
       - name: Install server build dependencies
         run: |
@@ -61,7 +61,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Configure kache remote
@@ -125,7 +125,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk
+          tool: just,toml-cli,trunk,wild-linker
 
       - name: Install server build dependencies
         run: |
@@ -151,7 +151,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Configure kache remote

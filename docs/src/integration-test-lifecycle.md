@@ -73,6 +73,10 @@ and formatter, so a selection containing CLI scenarios needs no separate binary 
 CLI process coverage recipe exercises transaction inspection and the clock-following process
 scenarios.
 
+The CI `scenarios` job uses the shared native
+[CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI and scenario harness,
+including their instrumented builds. Coverage flags do not replace Wild linker selection.
+
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
 `--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `2`, so its
