@@ -71,11 +71,13 @@ fn exercise_the_atomic_surface() {
     assert_eq!(counter.fetch_max(3, Ordering::AcqRel), u64::MAX - 14);
     assert_eq!(counter.fetch_min(3, Ordering::AcqRel), u64::MAX - 14);
     assert_eq!(
+        #[allow(clippy::deprecated)] // until try_update is released to stable
         counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| current
             .checked_add(1)),
         Ok(3)
     );
     assert_eq!(
+        #[allow(clippy::deprecated)] // until try_update is released to stable
         counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |_| None),
         Err(4)
     );

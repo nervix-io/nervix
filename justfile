@@ -1439,16 +1439,12 @@ audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args: typed-ratchet-setup typed-ratchet-build
+ratchet *args: typed-ratchet-build
     python3 -m scripts.ratchet {{ args }}
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
 test-ratchet-units:
     python3 -m unittest scripts.tests.test_ratchet
-
-# The compiler driver and analyzed crates use this dated nightly; product builds remain stable.
-typed-ratchet-setup:
-    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
 
 typed-ratchet-build:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -1466,7 +1462,7 @@ test-typed-ratchet-compiler:
 test-typed-ratchet-contracts: typed-ratchet-build
     python3 -m unittest scripts.tests.compiler_contract_checks
 
-test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
+test-typed-ratchet: test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
 
 test-typed-ratchet-ordinary:
     just test-typed-ratchet-reports
@@ -1502,11 +1498,11 @@ qualify-typed-ratchet-cache: typed-ratchet-build
 test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
-fmt-typed-ratchet: typed-ratchet-setup
+fmt-typed-ratchet:
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
 
-fmt-check-typed-ratchet: typed-ratchet-setup
+fmt-check-typed-ratchet:
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
 
@@ -1514,12 +1510,12 @@ fmt-check-typed-ratchet: typed-ratchet-setup
 lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
 
 [private]
-typed-ratchet-clippy-targets: typed-ratchet-setup typed-ratchet-clippy-packages
+typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 
 [private, parallel]
 typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
-coverage-typed-ratchet-python: typed-ratchet-setup test-typed-ratchet-compiler test-typed-ratchet-modeled
+coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
@@ -1744,7 +1740,7 @@ validate-typed-errors:
 
 toolchains-install:
     rustup toolchain install
-    rustup +nightly-2026-09-17 toolchain install
+    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
 
 # Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
