@@ -33,7 +33,7 @@ install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="":
+test-bolero filter="": build-web-console
     python3 scripts/bolero.py test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
@@ -72,7 +72,7 @@ qualify-bolero:
     python3 scripts/bolero.py qualify
 
 # Exercise the inventory and runner's validation and failure paths.
-test-bolero-runner:
+test-bolero-runner: build-web-console
     python3 -m unittest scripts.tests.test_bolero
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
