@@ -18,7 +18,7 @@ ONNX Runtime build for the host and stop on any other.
 Install:
 
 - Rust via `rustup`
-- `just`
+- `just` (latest release)
 - `zellij`
 
 ## Start The Server
@@ -190,6 +190,19 @@ For repository-wide validation:
 ```bash
 just validate
 ```
+
+CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
+`just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
+Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to select another
+limit. `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling
+Clippy recipes in one invocation, so they share the same limit.
+
+Each product Clippy invocation is a separate recipe and uses `clippy/<recipe_name>` beneath
+`CARGO_TARGET_DIR`, or the repository's `target` directory when that variable is unset.
+The stable recipe name isolates Cargo's build directory lock;
+`cargo-clippy-package` also hashes its package and arguments into the directory name. The compiler
+tooling workspace keeps its separate `typed-ratchet/driver` directory. All builds retain the
+configured kache wrapper. Cargo's compiler job limit applies separately within each recipe.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that

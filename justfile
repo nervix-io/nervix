@@ -1,13 +1,30 @@
+set minimum-version := "1.56.0"
+set unstable
+set lists
+
 rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
+default_jobs := num_jobs() || "4"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
 help:
     just --list
+
+# Start one bounded invocation and retain the caller's repository variable overrides.
+[private]
+run-with-jobs recipe jobs:
+    {{ quote(just_executable()) }} --justfile {{ quote(justfile()) }} --jobs {{ quote(jobs) }} \
+        rust_toolchain_version={{ quote(rust_toolchain_version) }} \
+        rustflags={{ quote(rustflags) }} \
+        build_mode={{ quote(build_mode) }} \
+        release_flag={{ quote(release_flag) }} \
+        cargo_target_dir={{ quote(cargo_target_dir) }} \
+        turmoil_failures={{ quote(turmoil_failures) }} \
+        {{ quote(recipe) }}
 
 # Install the qualified CLI version with only the libFuzzer engine.
 install-cargo-bolero:
@@ -1266,15 +1283,20 @@ autoinherit-check:
     cargo autoinherit
     git diff --exit-code
 
-cargo-clippy-all:
+# Each Clippy invocation owns a build directory named after its recipe, so parallel recipes never
+# share Cargo's target directory lock. `just --jobs N` bounds the active recipe bodies.
+[private, parallel]
+clippy-targets: cargo-clippy-workspace cargo-clippy-server-testing cargo-clippy-client-core cargo-clippy-connectors cargo-clippy-consensus cargo-clippy-execution-libraries cargo-clippy-primitives cargo-clippy-primitives-test-util cargo-clippy-shuttle cargo-clippy-primitives-shuttle cargo-clippy-turmoil cargo-clippy-primitives-turmoil cargo-clippy-loom-models cargo-clippy-primitives-loom cargo-clippy-loom-libraries cargo-clippy-server-loom-tests cargo-clippy-consensus-loom-tests cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+
+cargo-clippy-workspace:
     #!/usr/bin/env bash
     set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}"
     export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    # Execution-mode builds require their runner, Shuttle's deliberately omits Tokio's process and
-    # runtime-builder APIs, and the modes cannot be enabled together. Lint the packages that own a
-    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary
-    # and the Turmoil targets here, and the Loom builds in `cargo-clippy-loom`.
+    # Execution-mode builds require their runner, Shuttle deliberately omits Tokio's process and
+    # runtime-builder APIs, and the modes cannot be enabled together. Exclude packages with a mode
+    # from the all-features workspace build; the ordinary, Shuttle, Turmoil and Loom recipes lint
+    # them separately.
     mode_packages=(
         nervix-client-core
         'nervix-connector*'
@@ -1291,18 +1313,34 @@ cargo-clippy-all:
         workspace_exclusions+=(--exclude "${package}")
     done
     cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
-    cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
-    cargo clippy --all-targets --features autocomplete --package nervix-client-core
-    cargo clippy --all-targets --package 'nervix-connector*'
-    cargo clippy --all-targets --features testing --package nervix-consensus
-    cargo clippy --all-targets \
+
+cargo-clippy-server-testing:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
+
+cargo-clippy-client-core:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features autocomplete --package nervix-client-core
+
+cargo-clippy-connectors:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --package 'nervix-connector*'
+
+cargo-clippy-consensus:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features testing --package nervix-consensus
+
+cargo-clippy-execution-libraries:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets \
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-model-harness \
         --package nervix-wasm
-    cargo clippy --all-targets --features native --package nervix-primitives
-    cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
-    cargo clippy --lib --features 'shuttle testing' \
+
+cargo-clippy-primitives:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features native --package nervix-primitives
+
+cargo-clippy-primitives-test-util:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
+
+cargo-clippy-shuttle:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package 'nervix-connector*' \
         --package nervix-consensus \
@@ -1310,59 +1348,78 @@ cargo-clippy-all:
         --package nervix-interconnect \
         --package nervix-server \
         --package nervix-wasm
-    cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
-    cargo clippy --all-targets --features turmoil \
+
+cargo-clippy-primitives-shuttle:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
+
+cargo-clippy-turmoil:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features turmoil \
         --package nervix-execution \
         --package nervix-interconnect
-    cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
+
+cargo-clippy-primitives-turmoil:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
 
 # Lint every Loom build, each in its own invocation: the models and their harness, the primitive
 # boundary, and the server and consensus libraries as they ship and in test mode, where the Loom
 # models of their owners are built. Their integration tests and binaries never run a model, and
 # consensus unit tests build with `testing`, whose fault controls only the server's tests use.
-cargo-clippy-loom:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
-    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    cargo clippy --all-targets --features loom \
+cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
+
+[private, parallel]
+loom-clippy-targets: cargo-clippy-loom-models cargo-clippy-primitives-loom cargo-clippy-loom-libraries cargo-clippy-server-loom-tests cargo-clippy-consensus-loom-tests
+
+cargo-clippy-loom-models:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features loom \
         --package nervix-execution \
         --package nervix-model-harness
-    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
-    cargo clippy --lib --features loom \
+
+cargo-clippy-primitives-loom:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --all-targets --features 'loom native' --package nervix-primitives
+
+cargo-clippy-loom-libraries:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --features loom \
         --package nervix-consensus \
         --package nervix-server
-    cargo clippy --lib --profile test --features loom --package nervix-server
-    cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
 
-# Lint one workspace package and all of its targets with warnings denied, sharing the workspace
-# lint build directory. Extra arguments are forwarded to Cargo.
+cargo-clippy-server-loom-tests:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --profile test --features loom --package nervix-server
+
+cargo-clippy-consensus-loom-tests:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
+
+# Lint one workspace package and all of its targets with warnings denied. Package and arguments
+# identify its isolated build directory; extra arguments are forwarded to Cargo.
 cargo-clippy-package package *args:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ package }} --all-targets {{ args }}
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}/{{ sha256(show([package, args])) }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ quote(package) }} --all-targets {{ quote(args) }}
 
 cargo-clippy-server:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-server" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
 
 cargo-clippy-client:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-cli -q
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-cli -q
 
 cargo-clippy-nspl-format:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-nspl-format" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-nspl-format -q
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-nspl-format -q
 
 cargo-clippy-web-console:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-web-console" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
 
 # The browser console decodes session frames, so the wire crate must build for the browser target.
 cargo-clippy-client-wire-wasm:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy/{{ recipe_name() }}" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
 
-[parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+# Lint every product Clippy target, with four concurrent processes by default.
+cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
 
-[parallel]
-lint-inner: cargo-clippy lint-typed-ratchet
+[private, parallel]
+lint-inner: clippy-targets lint-typed-ratchet
 
-lint: build-web-console lint-inner
+# Lint the product and compiler tooling in one bounded invocation.
+lint jobs=default_jobs: (run-with-jobs "lint-targets" jobs)
+
+[private]
+lint-targets: build-web-console lint-inner
 
 audit:
     cargo audit
@@ -1434,7 +1491,11 @@ coverage-typed-ratchet-python:
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+# Format and validate, with four concurrent recipe bodies by default.
+validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
+
+[private]
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1531,7 +1592,11 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+# Check formatting and validate with the same concurrency default as local validation.
+validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
+
+[private]
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
 # direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a
