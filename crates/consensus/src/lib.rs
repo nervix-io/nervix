@@ -10,6 +10,15 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "Raft log, snapshot and control-plane replication ownership is outside graph \
+                  processing"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,

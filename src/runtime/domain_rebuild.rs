@@ -5,6 +5,14 @@
 //! - **Depends on.** Typed registry plans, runtime capabilities and installed resources.
 //! - **Must not know.** NSPL parsing, transaction decisions or connector internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "domain activation and recovery install complete retained execution surfaces"
+    )
+)]
+
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
 use super::*;

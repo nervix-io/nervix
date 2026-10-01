@@ -112,6 +112,13 @@ pub(super) struct WindowRow {
 }
 
 /// The rows a window retains, oldest first.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "window accumulation reads branch-owned retained rows during each admitted update"
+    )
+)]
 pub(super) trait RetainedWindowRows {
     fn retained(&self) -> usize;
 

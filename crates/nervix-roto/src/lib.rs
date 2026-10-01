@@ -646,12 +646,15 @@ fn base_library() -> impl roto::Registerable {
         }
 
         impl Val<BoolColumnBuilder> {
+            #[cfg_attr(nervix_lint, nervix::context(bounded, reason = "Roto callbacks share the builder required by the external value API", key = "one admitted UDF call column builder", bound = "one synchronous builder transition per callback; the extension executor bounds the admitted call"))]
             fn push(builder: Val<BoolColumnBuilder>, value: bool) {
                 builder.0.0.lock().push(Some(value));
             }
+            #[cfg_attr(nervix_lint, nervix::context(bounded, reason = "Roto callbacks share the builder required by the external value API", key = "one admitted UDF call column builder", bound = "one synchronous builder transition per callback; the extension executor bounds the admitted call"))]
             fn push_null(builder: Val<BoolColumnBuilder>) {
                 builder.0.0.lock().push(None);
             }
+            #[cfg_attr(nervix_lint, nervix::context(bounded, reason = "Roto callbacks share the builder required by the external value API", key = "one admitted UDF call column builder", bound = "one synchronous builder transition per callback; the extension executor bounds the admitted call"))]
             fn finish(builder: Val<BoolColumnBuilder>) -> Val<BoolColumn> {
                 let values = std::mem::take(
                     &mut *builder.0.0.lock()
@@ -983,6 +986,11 @@ impl fmt::Debug for CompiledUdf {
 impl CompiledUdf {
     /// Runs the function over the rows `rows` names. A UDF is pure, so it reads the rows' values
     /// and never their identities.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the admitted Roto extension and external Arrow values own \
+                                   their dynamic effects")
+    )]
     fn execute(
         &self,
         arguments: &[TypedArray],

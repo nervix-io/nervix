@@ -212,6 +212,11 @@ impl ReplicatedDeduplicatorState {
     }
 
     /// The keys a keyspace holds, oldest first, each shared with that keyspace.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained expiry map supplies its snapshot iterator for \
+                                   one published generation")
+    )]
     fn published_keys(
         recent_keys: &ExpiryMap<DeduplicatorKey, Timestamp>,
     ) -> Vec<PublishedDeduplicatorKey> {

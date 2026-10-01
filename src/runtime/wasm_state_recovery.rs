@@ -73,6 +73,15 @@ impl WasmStateRecoveryRequest {
 /// The answer would not change, because the budget is decided from committed state, but the asking
 /// would cost one cluster round trip per record.
 #[derive(Debug, Default)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "refused guest branch generation",
+        bound = "at most 33 retained refused-recovery entries",
+        reason = "recovery claims and releases belong to the bounded refused-state owner"
+    )
+)]
 pub(in crate::runtime) struct RaisedWasmStateRecoveries {
     raised: DashMap<RuntimeStatePlacement, (), RandomState>,
 }

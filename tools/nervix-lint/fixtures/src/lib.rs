@@ -3,6 +3,14 @@
 //! Depends on: ordinary collections, I/O and the selected primitive boundary.
 //! Must not know: the implementation of the detector or its policy classifications.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "compiler API calibration invokes these examples during installation"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Read, Write},
@@ -10,6 +18,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
+pub use nervix_primitives::expect_lint;
 use nervix_primitives::{
     collections::DashMap,
     sync::blocking::{Mutex, MutexGuard, RwLock},
@@ -35,6 +44,17 @@ pub fn io_operations(reader: &mut impl Read, writer: &mut impl Write) -> std::io
     Ok(())
 }
 
+/// Ordinary methods are selected using their real receiver type.
+///
+/// ```
+/// let mut collection = nervix_lint_fixtures::CustomCollection;
+/// collection.entry(1);
+/// ```
+///
+/// ```compile_fail
+/// let mut collection = 1_u32;
+/// collection.entry(1);
+/// ```
 pub struct CustomCollection;
 
 impl CustomCollection {

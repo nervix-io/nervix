@@ -217,46 +217,48 @@ just test-connectors <filter>
 
 ### Compiler synchronization gate
 
-`just ratchet`, `just validate` and `just validate-ci` run the same synchronization gate. The
-compiler-resolved acquisition inventory and reviewed owner/frequency scopes live in the isolated
-`tools/nervix-lint` workspace. `just typed-ratchet-setup` installs the dated nightly with compiler
-libraries and matching LLVM tools. The product toolchain remains stable, and tooling, analysis and
-product artifacts occupy separate target directories. Prepare the ordinary build prerequisites,
-including `just build-web-console`, before analyzing the server.
+`just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
+synchronization gate in the isolated `tools/nervix-lint` workspace. `just typed-ratchet-setup`
+installs the pinned analysis compiler, compiler libraries and matching LLVM tools. Product builds
+remain stable. Tooling, analysis and product artifacts occupy separate target directories.
+Prepare the ordinary server build prerequisites, including `just build-web-console`.
 
 ```bash
 just ratchet
-just ratchet --show data_plane_lock_acquisitions
 just typed-ratchet --show
 just typed-ratchet --configuration shuttle --inventory
 just test-typed-ratchet
 just qualify-typed-ratchet-cache
 ```
 
-The JSON report records resolved receivers, operations, spans, owner variants, expansion origins,
-compiled configurations and generated/external exclusions. The human listing includes frequency,
-rationale, debt delivery, and each bounded fence's key and bound. Partial configuration selections
-are inventory only. The policy gate requires the whole declared matrix and complete current
-compiler/Cargo evidence, even for zero sites. See [Data-Plane Concurrency](data-plane-concurrency.md)
-for its matrix, review rules, calibration and exclusions.
+Declare `#[cfg_attr(nervix_lint, nervix::context(...))]` at the source's owning execution boundary.
+Choose recurring, lifecycle, observer, outside or bounded; every kind requires a reason, and
+bounded protocols also require their identity key and bound. Trait/type/module inheritance and
+local call relationships supply defaults. Hot callers of lifecycle-only helpers, unknown dispatch,
+invalid annotations and recurring acquisitions produce ordinary Rust diagnostics. Use a narrow
+`nervix_primitives::expect_lint!` with a meaningful reason and owning repair task for retained debt.
+An expectation covering multiple operations or no operation fails. See
+[Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
+contract, inheritance, supported call effects and limitations.
 
-The compiler workspace wrapper nests beneath configured kache. Completion hashes the compiler,
-driver, validator, catalog, source/dependency/configuration inputs, Cargo configuration and build
-flags; policy review is checked on every run. Cargo-fresh artifacts can reuse matching side reports.
-Missing reports cause the gate to establish analysis using `KACHE_KEY_SALT` and to rebuild only its
-isolated authored artifacts. `--fresh` reruns Cargo; `--recompile` discards those authored artifacts
-so fixture qualification executes the compiler callback. Neither changes `RUSTC_WRAPPER`.
+The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
+compiled configurations and generated/external exclusions. It is generated evidence under
+`target/`, not an approval database. Partial selections are inventories; the required diagnostic
+gate needs the complete matrix and complete current compiler/Cargo evidence, including zero.
 
-Frequency review also depends on `review-context.json`, which fingerprints product callers and
-declarations. When it is stale, trace the changed callers, update affected scopes and record the
-reviewed inputs. An unchanged helper body does not establish that its callers remain cold.
+The workspace wrapper nests beneath configured kache. Completion identities cover current source,
+annotations, rule code, compiler, driver, validator, dependencies, Cargo configuration and flags.
+Cargo-fresh artifacts reuse matching complete side reports. Missing reports establish analysis
+using `KACHE_KEY_SALT` and rebuild only isolated authored artifacts. `--fresh` reruns Cargo;
+`--recompile` discards those authored artifacts to execute the callback. Every path preserves
+`RUSTC_WRAPPER`. Changing a caller, callee, annotation or source location needs only a new run.
 
-The cache qualification checks fresh and Cargo-fresh runs, an actual kache dependency hit, recovery
-from a missing side report, cross-worktree rejection, and the same trybuild diagnostic twice in each
-of two worktrees. Kache 0.28 executes workspace-wrapper chains directly while caching ordinary
-dependencies; the gate also rejects incomplete cached compiler evidence independently of that
-implementation choice. The known trybuild path problem is investigated with the configured wrapper
-and recorded qualification evidence, without a direct-rustc retry.
+Cache qualification exercises fresh and Cargo-fresh analysis, an actual kache dependency hit,
+changed source/annotation/rule/dependency/configuration inputs, missing and interrupted output,
+and two isolated worktrees. Kache 0.28 runs workspace-wrapper chains directly while caching
+ordinary dependencies; complete evidence is validated independently of that detail. Paired
+compiling/compile-fail Rust doctests replace snapshot-based API checks. Compiler semantic fixtures
+remain necessary to qualify resolved lints and cross-crate metadata.
 
 ### Deterministic concurrency checks
 
@@ -446,6 +448,12 @@ is tested with:
 ```bash
 just test-native-coverage
 ```
+
+The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
+selected. CI merges those reports with the native extra reports, checks complexity against that
+complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+CLI and console for focused inspection; it does not replace the workspace export.
+Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
 ### The scenario suite's execution budget
 

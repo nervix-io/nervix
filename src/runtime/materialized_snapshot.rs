@@ -81,6 +81,10 @@ pub(in crate::runtime) enum MaterializedSnapshotError {
 }
 
 impl MaterializedSnapshotError {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed snapshot error conversion")
+    )]
     fn encoding(error: impl ToString) -> Report<Self> {
         Report::new(Self::Encode {
             reason: error.to_string(),

@@ -5,6 +5,14 @@
 //! May depend on: replicated WASM guest state, the state store, compiled WASM modules and schedules.
 //! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "WASM state assignment and checkpoint setup bind the exact guest-state generation"
+    )
+)]
+
 use super::*;
 
 /// How often a checkpoint waiting for its replicas reads the schedule again, so a changed
@@ -16,6 +24,14 @@ impl Runtime {
     /// branch checkpoint. A reset uses this before offering its first guest checkpoint, so a
     /// replica can never reject that checkpoint merely because the lifecycle announcement raced
     /// it. The wait registers for the next replica report before it reads what the replicas hold.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a state-generation reset confirms its branch lifecycle before publishing \
+                      the first guest save"
+        )
+    )]
     pub(in crate::runtime) async fn confirm_branch_lru_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
@@ -355,6 +371,14 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(in crate::runtime) fn replicated_wasm_processor_state(
         &self,
         placement: RuntimeStatePlacement,

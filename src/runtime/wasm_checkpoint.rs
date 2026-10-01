@@ -116,6 +116,10 @@ impl WasmCallbackReporting<'_> {
     /// every acknowledgement the callback decided, and every input the instance still buffers, is
     /// negatively acknowledged, and the next work for the branch recreates the guest from the
     /// committed checkpoint.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the bounded guest checkpoint executor owns its generic effects")
+    )]
     pub(super) async fn complete_callback(
         self,
         replicated_state: &ReplicatedWasmProcessorState,

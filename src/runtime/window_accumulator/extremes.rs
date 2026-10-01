@@ -61,6 +61,11 @@ impl RowExtremes {
     }
 
     /// Consider every row of `run`, which the window has just admitted.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies comparison over retained window rows; \
+                                   local comparison bodies remain analyzed")
+    )]
     pub(super) fn admit<R: RetainedWindowRows>(
         &mut self,
         demand: usize,
@@ -177,6 +182,11 @@ impl RowExtremes {
     }
 
     /// Order the keys of the retained rows at `left` and `right`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies comparison over retained window rows; \
+                                   local comparison bodies remain analyzed")
+    )]
     fn compare<R: RetainedWindowRows>(
         order: ExtremeOrder,
         demand: usize,
@@ -204,6 +214,11 @@ impl RowExtremes {
     }
 
     /// The retained position of the row admitted under `sequence`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies comparison over retained window rows; \
+                                   local comparison bodies remain analyzed")
+    )]
     fn position_of<R: RetainedWindowRows>(rows: &R, sequence: u64) -> usize {
         let oldest = rows.retained_row(0).sequence;
         let offset = sequence
@@ -214,6 +229,11 @@ impl RowExtremes {
     }
 
     /// Forget the `count` oldest retained rows. The rows are still retained while this runs.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies comparison over retained window rows; \
+                                   local comparison bodies remain analyzed")
+    )]
     pub(super) fn retract_oldest<R: RetainedWindowRows>(&mut self, rows: &R, count: usize) {
         let survivor = if count < rows.retained() {
             Some(rows.retained_row(count).sequence)
@@ -239,6 +259,11 @@ impl RowExtremes {
 
     /// The value `function` answers: the first argument of the extreme row, or a typed null when
     /// no retained row contributed.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies comparison over retained window rows; \
+                                   local comparison bodies remain analyzed")
+    )]
     pub(super) fn evaluate<R: RetainedWindowRows>(
         &self,
         demand: usize,
