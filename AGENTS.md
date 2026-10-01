@@ -951,8 +951,10 @@ build and the existing tests, and nothing in it changes behavior.
 - Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
   `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
   `just fuzz-all [duration]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
-  `just fuzz-reduce` for saved exact inputs. `just validate-bolero` enforces inventory and
-  scoped compiled discovery. A random seed identifies one generated case, not an entire
+  `just fuzz-reduce` for saved exact inputs. Bolero commands and the dedicated Bolero workflow
+  enforce inventory and scoped compiled discovery; `just validate-bolero` runs that check alone.
+  Do not add Bolero checks to `just validate`, `just validate-ci`, or the Check workflow's
+  validation job. A random seed identifies one generated case, not an entire
   entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
   before cleanup.
 - Use `just validate` for formatting and validation.

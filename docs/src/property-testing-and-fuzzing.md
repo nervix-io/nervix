@@ -74,9 +74,9 @@ target or executable fails the run before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
 bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
-remain enforced by the shared runner. Validation uses a 16-CPU runner and the same overall limit
-to complete Clippy, compiled discovery and the declared compiler synchronization matrix from a
-cold cache.
+remain enforced by the shared runner. Validation uses a 4-CPU runner and the same overall limit
+to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
+inventory and compiled discovery run through the dedicated Bolero commands and workflow.
 The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
 instrumentation and the full modeled suite.
 
@@ -181,7 +181,8 @@ corpus paths different from Bolero's actual work directory. Discovery executes o
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
-`just validate` and `just validate-ci` include this gate.
+`just validate` and `just validate-ci` do not run Bolero checks. The dedicated Bolero commands
+perform discovery before their selected action, and the ordinary Bolero CI job owns this check.
 
 `just test-bolero` requires the configured randomized-case count and checked-in corpus
 replay for every selected property, checking Bolero's reported input counts. Fuzz runs use real

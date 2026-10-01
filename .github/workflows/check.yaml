@@ -36,7 +36,7 @@ jobs:
   checks:
     name: checks
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Cold validation includes Clippy, compiled discovery and the complete compiler matrix.
+    # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
       - name: Setup Rust

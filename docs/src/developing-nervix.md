@@ -205,7 +205,8 @@ just test
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
-`just fuzz <target> [duration]`. `just help` lists the recipes.
+`just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
+discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
 
 Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
 `nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
