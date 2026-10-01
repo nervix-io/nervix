@@ -27,3 +27,23 @@ just cluster-dashboard
 ```
 
 The local dashboard uses the `default` user with password `nervix`.
+
+## Pull Request Reviews
+
+The `Codex PR Review` workflow posts an advisory GitHub review when a pull request
+opens, receives new commits, reopens, or becomes ready for review. It reviews the
+PR's changes using `AGENTS.md` and the relevant architecture documentation.
+Drafts, fork PRs, and events triggered by bot accounts are skipped. The Codex
+action restricts triggers to repository collaborators with write access.
+
+Add an OpenAI API key as the `OPENAI_API_KEY` repository secret before enabling
+the workflow on the default branch:
+
+```bash
+gh secret set OPENAI_API_KEY --repo nervix-io/nervix
+```
+
+The command prompts for the key. Reviews use the OpenAI API and its billing. Codex
+runs with read-only permissions; a separate job publishes its feedback for the
+reviewed revision. See the [official Codex GitHub Action documentation](https://learn.chatgpt.com/docs/github-action)
+for the action's configuration.
