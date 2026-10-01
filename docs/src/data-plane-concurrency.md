@@ -1103,8 +1103,9 @@ depth-first search, and each deliberately broken order must deadlock in some sch
 process, in `nervix-execution`, `nervix-interconnect`, `nervix-client-core`, and `nervix-server`. It then repeats each
 package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses the repository's
 kache-backed build and prepares the server's test dependencies; `just test` continues to run the
-ordinary suite. CI runs `just test-shuttle` and uploads `target/shuttle-failures` when a check
-fails. `just test-shuttle <filter>` selects checks whose full name contains the filter. The
+ordinary suite. CI's dedicated `shuttle` job runs `just test-shuttle` and uploads
+`target/shuttle-failures` as the `shuttle-failures` artifact when a check fails.
+`just test-shuttle <filter>` selects checks whose full name contains the filter. The
 runner stores a failing schedule under
 `target/shuttle-failures/<package>/<fully-qualified-test-name>/`; replay uses that path and exact
 test name. See the command recipe in [Developing Nervix](./developing-nervix.md).

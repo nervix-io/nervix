@@ -749,8 +749,8 @@ jobs:
   # coverage from that same run.
   extra-tests:
     name: extra-tests
-    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation and
-    # all modeled builds; each check retains its own bounded runner contract.
+    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
+    # compiler checks and modeled primitive and Loom builds.
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -887,9 +887,6 @@ jobs:
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
-      - name: Shuttle concurrency checks
-        run: just test-shuttle
-
       # The primitive boundary's conformance in every execution mode, the ordinary one collected
       # for coverage, then every registered Loom model of a production owner explored to
       # exhaustion, then the proof that each model fails under the ordering weakening it exists to
@@ -937,16 +934,6 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-      # A modeled concurrency failure is only reproducible from the schedule that produced it, and
-      # this job is the only witness of that schedule.
-      - name: Upload Shuttle failure traces
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shuttle-failures
-          path: target/shuttle-failures
-          if-no-files-found: ignore
-
       # A failed Loom model is only reproducible from the checkpoint of the execution that failed,
       # and a failed qualification from its weakened run; this job is the only witness of either.
       - name: Upload Loom failure evidence
@@ -958,6 +945,131 @@ jobs:
             target/loom-failures
             target/loom-qualification/*/*.log
             target/loom-qualification/*/*.json
+          if-no-files-found: ignore
+
+  # Shuttle's in-process scheduling checks and uncontrolled-nondeterminism rechecks run
+  # independently of the native coverage collectors and other extra tests.
+  shuttle:
+    name: shuttle
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Shuttle concurrency checks
+        run: just test-shuttle
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # A modeled concurrency failure is only reproducible from the schedule that produced it,
+      # and this job is the only witness of that schedule.
+      - name: Upload Shuttle failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shuttle-failures
+          path: target/shuttle-failures
           if-no-files-found: ignore
 
   # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
