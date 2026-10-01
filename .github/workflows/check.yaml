@@ -538,7 +538,7 @@ jobs:
       - name: Install CRAP and LCOV
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-crap
+          tool: cargo-crap,just
 
       - name: Install LCOV
         run: sudo apt-get update && sudo apt-get install -y lcov
@@ -573,14 +573,14 @@ jobs:
             lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
             lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
           done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
-          cargo crap --lcov lcov-workspace.info --min 30 --threshold 30
+          just check-coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           disable_search: true
           fail_ci_if_error: true
-          files: ./lcov.info
+          files: ./lcov-workspace.info
           use_oidc: true
 
       - name: Upload merged coverage

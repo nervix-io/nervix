@@ -667,7 +667,7 @@ test-coverage: tests-deps
         --package nervix-model-harness \
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
-    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --workspace --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -681,7 +681,7 @@ test-scenarios-coverage: tests-deps
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
-    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --workspace --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -694,7 +694,11 @@ coverage-clean-workspace:
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
 coverage-report-workspace *args:
-    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --workspace --lcov --output-path lcov.info {{ args }}
+
+# Check the same merged workspace coverage and complexity limit locally as CI does.
+check-coverage report="lcov-workspace.info":
+    cargo crap --lcov {{ quote(report) }} --min 30 --threshold 30
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed

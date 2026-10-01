@@ -449,6 +449,12 @@ is tested with:
 just test-native-coverage
 ```
 
+The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
+selected. CI merges those reports with the native extra reports, checks complexity against that
+complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+CLI and console for focused inspection; it does not replace the workspace export.
+Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
+
 ### The scenario suite's execution budget
 
 The Cucumber suite bounds its own run. A step, a teardown diagnostic or a node stop that never
