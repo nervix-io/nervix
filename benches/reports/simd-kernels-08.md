@@ -5,7 +5,7 @@
 The production VM baseline is `54dbfec52d72c8995955e11f7c1206e9749ac318`, with the candidate's
 three numeric constant-division benchmark programs added to the harness. The candidate is the
 revision containing this report. Both run the same 1,024-row programs. Measurements were made
-on 2026-09-30 UTC on an Intel Core i9-14900HX, 32 logical CPUs, x86-64 Linux, rustc 1.98.0,
+on 2026-09-30 UTC on an Intel Core i9-14900HX, 32 logical CPUs, x86-64 Linux, rustc 1.99.0,
 LLVM 22.1.8, Arrow 58.4.0, `fearless_simd` 1.0.0 and Criterion 0.5.1. The host supports AVX2.
 Builds retain the repository's configured kache wrapper. Native builds use `target-cpu=native`;
 the additional production-target measurements and inspection use `x86-64-v3`.

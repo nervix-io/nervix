@@ -10,6 +10,15 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "Raft log, snapshot and control-plane replication ownership is outside graph \
+                  processing"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -4049,6 +4058,7 @@ impl SnapshotTransferIds {
 
     /// The identity of the next transfer this node sends.
     fn allocate(&self) -> io::Result<u64> {
+        #[allow(deprecated)] // until try_update is stabilized
         self.next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)

@@ -22,6 +22,10 @@ pub(crate) struct RecordMetadataColumns {
 
 impl RecordMetadataColumns {
     /// The columns of `rows`, in order.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies an iterator of immutable row metadata")
+    )]
     pub(crate) fn from_rows(rows: impl IntoIterator<Item = RuntimeRecordMetadata>) -> Self {
         let rows = rows.into_iter();
         let mut low = Vec::with_capacity(rows.size_hint().0);
@@ -34,6 +38,11 @@ impl RecordMetadataColumns {
     }
 
     /// The columns of every part, one after another.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies iteration over selected metadata parts \
+                                   in this admitted batch")
+    )]
     pub(crate) fn concat<'a>(parts: impl IntoIterator<Item = &'a Self>) -> Self {
         let mut low = Vec::new();
         let mut high = Vec::new();
@@ -111,6 +120,10 @@ impl RecordMetadataColumns {
     }
 
     /// Every row's watermarks as a relay payload carries them to another node.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies an iterator of immutable row metadata")
+    )]
     pub(crate) fn to_remote(&self) -> Vec<RemoteRuntimeRecordMetadata> {
         self.rows().map(|metadata| metadata.to_remote()).collect()
     }

@@ -749,13 +749,13 @@ defines the available metrics and their aggregation.
 
 ## Recovery, Panics, And Enforcement
 
-The compiler synchronization gate has its own typed tooling failures for malformed catalogs and
-scopes, conflicting reports, incomplete compiler passes, and missing, stale or unobserved reviewed
-sites. Reports preserve those classifications with source location, resolved receiver/operation,
-owner and compiled configuration context. Its CLI prints the error-stack attachments and fails;
-missing analysis never becomes a zero debt count. These are repository validation errors and do
-not add runtime failure variants. [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's
-coverage and synchronization policy.
+The compiler synchronization gate owns typed tooling failures for invalid source contracts,
+conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
+argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
+diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
+owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
+zero debt count. These are repository validation errors and add no runtime failure variants.
+[Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
 Some outcomes are intentionally not propagated. `discarded` records why an already handled or
 irrelevant result owes no further action. `reported` is used when the recovering call is the only
@@ -796,6 +796,15 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+The isolated architecture compiler emits ordinary Rust tool diagnostics:
+`nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
+`nervix::invalid_contract`. Source contracts and narrow reason-bearing expectations own the
+architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+compiler reports and changed inputs fail the repository command; they are tooling failures, with
+no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
+warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
+states the rule boundary and the claims the compiler does not make.
 
 ## Connector Status Observation
 

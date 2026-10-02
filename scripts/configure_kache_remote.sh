@@ -51,8 +51,10 @@ PY
 
 mkdir -p "$(dirname -- "${config_path}")"
 umask 077
+# Kache permits PR uploads only to a separate prefix. Keep it in the file so
+# the daemon receives the policy along with the remote configuration.
 printf \
-    '[cache.remote]\ntype = "s3"\nbucket = "%s"\nregion = "%s"\nendpoint = %s\n' \
+    '[cache.remote]\ntype = "s3"\nbucket = "%s"\nregion = "%s"\nendpoint = %s\npull_request_prefix = "artifacts-pr"\n' \
     "${bucket}" \
     "${region}" \
     "${endpoint_toml}" \

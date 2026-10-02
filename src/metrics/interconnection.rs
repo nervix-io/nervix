@@ -17,6 +17,15 @@
 //! standing state behind — a connection that failed, a stream that reset, a request that finished
 //! — are counted as they happen.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "interconnect metric registration and exposition observe retained transport \
+                  counters"
+    )
+)]
+
 use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};

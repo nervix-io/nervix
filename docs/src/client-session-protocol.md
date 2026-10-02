@@ -79,6 +79,13 @@ implementation in another language needs only the schema. The Rust client additi
 language edge, which it uses to split a request into statements and to recognize the statements it
 serves itself, such as `USE`; everything it knows about the cluster arrives over the protocol.
 
+The Rust client and CLI declare their edge ownership in gated compiler source contracts. Their
+session maps remain client-owned synchronization outside the server record-path acquisition rule.
+Server relay subscription fan-out remains recurring data-plane execution with its own source
+contracts and exact-operation repair expectations. The annotations change no session framing,
+recovery or delivery guarantee. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
+owns this compiler boundary.
+
 ## Wire Format
 
 ### One Schema, Eight Frame Roots

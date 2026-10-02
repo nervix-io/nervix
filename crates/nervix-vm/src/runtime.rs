@@ -682,11 +682,39 @@ pub enum FunctionExecutionPolicy {
 /// error by the row's position in the selection. A conditional arm calls a function for the rows
 /// it selects only, so a function that looks a row up in context it holds, such as the headers of
 /// the message a row was decoded from, reads the row's identity from the selection.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each VM invocation executes the selected injected function in its supplied \
+                  execution context"
+    )
+)]
 pub trait FunctionInjector: Send + Sync + fmt::Debug {
     fn execution_policy(&self, _function: &FunctionName) -> FunctionExecutionPolicy {
         FunctionExecutionPolicy::Inline
     }
 
+    /// Injection receives the current domain timestamp and the selected rows' prior errors.
+    ///
+    /// ```
+    /// use nervix_models::Timestamp;
+    /// use nervix_vm::{FunctionInjector, RowErrorMask, RowSelection, TypedArray, program::{FunctionName, Span}};
+    /// fn invoke(injector: &dyn FunctionInjector, function: &FunctionName,
+    ///     arguments: &[TypedArray], rows: &RowSelection, span: Span,
+    ///     now: Timestamp, errors: RowErrorMask<'_>) {
+    ///     let _ = injector.inject_with_context(function, arguments, rows, span, now, errors);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use nervix_vm::{FunctionInjector, RowErrorMask, RowSelection, TypedArray, program::{FunctionName, Span}};
+    /// fn invoke(injector: &dyn FunctionInjector, function: &FunctionName,
+    ///     arguments: &[TypedArray], rows: &RowSelection, span: Span,
+    ///     now: u64, errors: RowErrorMask<'_>) {
+    ///     let _ = injector.inject_with_context(function, arguments, rows, span, now, errors);
+    /// }
+    /// ```
     fn inject_with_context(
         &self,
         function: &FunctionName,

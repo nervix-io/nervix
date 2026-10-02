@@ -63,8 +63,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
 | `replica-progress` | `nervix-checkpoint-replication` replica reports, offers and announcer steps against the monotonic quorum contract: each replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone | bounded report, offer, step, cancel and retire sequences over four replicas and sixteen revisions, v1 | 256 | 256 bytes |
 | `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
-| `typed-catalog-scope` | `nervix-lint-report` complete catalog/scope parsing equality | resolved identities and all reviewed disposition variants, v1 | 256 | 32 bytes |
-| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration and review | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+| `typed-source-contract` | `nervix-lint-report` complete source-contract parsing equality | bounded current execution-contract annotations, v1 | 256 | 32 bytes |
+| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
 
 Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
 properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
@@ -77,10 +77,10 @@ tests in folders and explicitly configured library or test paths. A missing or a
 target or executable fails the run before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
-bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
-remain enforced by the shared runner. Validation uses a 16-CPU runner and the same overall limit
-to complete Clippy, compiled discovery and the declared compiler synchronization matrix from a
-cold cache.
+bounded campaign. Its overall limit is three hours; per-build, per-case and per-campaign deadlines
+remain enforced by the shared runner. Validation uses an 8-CPU runner and a two-hour limit
+to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
+inventory and compiled discovery run through the dedicated Bolero commands and workflow.
 The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
 instrumentation and the full modeled suite.
 
@@ -162,15 +162,17 @@ Both CI modes install those prerequisites.
 Asset builds stage Trunk's complete output and preserve byte-identical published files, including
 their timestamps, so preparing assets again keeps the native server's compiled artifacts reusable.
 
-On a shared host, a cold server sanitizer build can exceed the runner's build deadline. Run
-`CARGO_BUILD_JOBS=1 just prepare-archive-counts-fuzz` to prepare its binary first, then run the
-registered registry and window campaigns with `just fuzz`. Preparation records its own build log
-and metadata; it does not count as a completed fuzz campaign. The dedicated sanitizer CI job also
-prepares the server binary and builds with one Cargo job to bound compiler memory; its overall
-deadline includes that preparation before the sanitizer evidence is collected. Preparation has
-a 7,200-second deadline. The CI job allows 180 minutes on a PR and 360 minutes for longer campaigns,
-including compilation, all selected target campaigns, failure qualification and artifact upload.
-The native validation job allows 90 minutes for its full checks, including compiled discovery.
+On a shared host, a cold sanitizer build can exceed the runner's build deadline.
+`just prepare-bolero <id>` prepares one exact registered target through the same instrumented
+build path that runs its campaigns. `CARGO_BUILD_JOBS=1 just prepare-archive-counts-fuzz` uses that
+command for the declared server library shared by the registry and window count properties.
+Then run the registered campaigns with `just fuzz`. Preparation records its own build log and
+metadata with a 7,200-second compilation deadline; it does not count as a completed fuzz campaign.
+The sanitizer CI job runs only on PRs labeled `fuzz`, prepares that server binary with one Cargo
+build job to bound compiler memory, and allows 180 minutes for preparation, all target campaigns,
+failure qualification and artifact upload. An expected sanitizer skip contributes no execution or
+coverage evidence. The Check workflow's validation job and the dedicated Bolero discovery job
+retain their separate scopes and limits.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
@@ -207,7 +209,8 @@ manifest. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
-`just validate` and `just validate-ci` include this gate.
+`just validate` and `just validate-ci` do not run Bolero checks. The dedicated Bolero commands
+perform discovery before their selected action, and the ordinary Bolero CI job owns this check.
 
 `just test-bolero` requires the configured randomized-case count and checked-in corpus
 replay for every selected property, checking Bolero's reported input counts. Fuzz runs use real
@@ -216,9 +219,13 @@ profile enables optimization, debug information, debug assertions and overflow c
 use the pinned nightly and keep the configured kache wrapper. Modeled execution features are
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
-PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
-libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
-manual campaigns. Job limits reserve additional time for compilation, artifacts and cleanup. A
+PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
+the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
+[CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
+their own compiler flags. Adding or removing the
+label reevaluates the jobs; the gate requires sanitizer success when the label is present and
+accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs execute the ordinary
+properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 

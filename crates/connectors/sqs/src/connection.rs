@@ -102,6 +102,10 @@ impl<'a> FailedRequest<'a> {
     /// describe the connection, never a message, and carry no credentials. A response from the
     /// service keeps the SDK's own short description, because the service's message can repeat
     /// what the request carried.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "formats the typed external AWS SDK request failure")
+    )]
     pub(crate) fn description(&self) -> String {
         let mut description = self.error.to_string();
         if !self.unanswered {

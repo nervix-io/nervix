@@ -665,6 +665,19 @@ def build_instrumented(
     return matches[0]
 
 
+def prepare_target(inventory: Inventory, target: Target) -> None:
+    verify_tool(inventory)
+    path = run_dir(target)
+    started = time.monotonic()
+    result = "failed preparation"
+    try:
+        binary = build_instrumented(inventory, target, path)
+        result = "instrumented preparation"
+    finally:
+        metadata(path, target, bolero_args(inventory, target), result, time.monotonic() - started)
+    print(f"{target.id}: prepared {binary}; artifacts: {path}")
+
+
 def run_instrumented(
     binary: pathlib.Path,
     target: Target,
@@ -984,6 +997,8 @@ def main() -> int:
     subparsers.add_parser("validate")
     subparsers.add_parser("list")
     subparsers.add_parser("qualify")
+    prepare = subparsers.add_parser("prepare")
+    prepare.add_argument("target")
     test = subparsers.add_parser("test")
     test.add_argument("filter", nargs="?")
     fuzz = subparsers.add_parser("fuzz")
@@ -1006,6 +1021,9 @@ def main() -> int:
         return 0
     if args.action == "qualify":
         qualify(inventory)
+        return 0
+    if args.action == "prepare":
+        prepare_target(inventory, exact_target(inventory, args.target))
         return 0
     if args.action == "test":
         test_targets(inventory, select(inventory, args.filter))

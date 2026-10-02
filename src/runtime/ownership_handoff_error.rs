@@ -46,6 +46,10 @@ pub(crate) enum OwnershipHandoffError {
 }
 
 impl OwnershipHandoffError {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed checkpoint error conversion")
+    )]
     pub(in crate::runtime) fn checkpoint(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Checkpoint(reason.into()))
     }
@@ -58,6 +62,10 @@ impl OwnershipHandoffError {
         Report::new(Self::Schedule(reason.into()))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed state error conversion")
+    )]
     pub(in crate::runtime) fn state(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::State(reason.into()))
     }

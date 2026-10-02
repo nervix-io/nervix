@@ -11,6 +11,15 @@
 //! - **Must not know.** Which sink crate the emitter publishes through, how its records are
 //!   encoded or mapped, or how the registry validated it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "sink task installation binds retained handles before executing its recurring \
+                  body"
+    )
+)]
+
 use error_stack::{AttachmentKind, FrameKind, ResultExt as _};
 use nervix_connector::{
     SinkAcknowledgementServices, SinkAcknowledgements, SinkBoundedExecution, SinkEventReporter,
@@ -208,6 +217,12 @@ impl EmitterRuntimeError {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the connector failure is formatted through its external Display contract"
+    )
+)]
 pub(super) fn emitter_report(
     context: EmitterRuntimeError,
     error: impl std::fmt::Display,
@@ -220,10 +235,22 @@ pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<Emitte
 }
 
 impl EmitterSinkContext {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the connector failure becomes a retained status string \
+                                   through its external Into contract")
+    )]
     pub(super) fn record_failure(&self, error: impl Into<String>) {
         self.status.record_error(error.into());
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the connector retry reason becomes a retained status string through its \
+                      external Into contract"
+        )
+    )]
     pub(super) fn record_retry(
         &self,
         error: impl Into<String>,
@@ -994,6 +1021,13 @@ impl EmitterTask {
 }
 
 impl EmitterTaskLoop<'_> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the retained sink task handles input, retries, flush and commit cadence"
+        )
+    )]
     async fn run(&mut self) {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1488,6 +1522,12 @@ impl EmitterBatchContext<'_> {
         self.metrics_dirty.mark();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies iteration over this admitted set of error batches"
+        )
+    )]
     async fn handle_publish_error_batches(
         &self,
         batches: impl IntoIterator<Item = EmitterPublishBatch>,

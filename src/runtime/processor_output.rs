@@ -185,6 +185,10 @@ pub(super) struct ProcessorOutputBatchScope {
     pub(super) shared: SharedBatchColumns,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the admitted expression executor owns its generic effects")
+)]
 pub(super) async fn evaluate_processor_output_events(
     context: &mut ProcessorOutputDispatchContext<'_>,
     output: &mut RelayProcessorOutputNode,

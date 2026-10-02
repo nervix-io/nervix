@@ -98,7 +98,7 @@ class InventoryTests(unittest.TestCase):
             "backup-record-manifest",
             "client-processor-choice-request",
             "branch-membership",
-            "typed-report", "typed-catalog-scope", "typed-site-union",
+            "typed-report", "typed-source-contract", "typed-site-union",
             "nspl-statement",
             "nspl-statement-text",
             "nspl-format-document",
@@ -657,6 +657,60 @@ class ExecutionTests(unittest.TestCase):
                     bolero.fuzz_targets(self.inventory, (self.target,), 1)
                 self.assertEqual(metadata.call_args.args[3], "failed build")
 
+    def test_preparation_records_the_selected_binary_without_running_a_campaign(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "models-archived-counts")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            binary = run / "representations-2222"
+            binary.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable tests/representations/main.rs ({binary})\n", "")
+            execute_build = self.command_with_build(build)
+
+            def execute(args, **kwargs):
+                if args[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(args, 0, "revision\n", "")
+                return execute_build(args, **kwargs)
+
+            with (
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "command", side_effect=execute) as commands,
+                mock.patch.object(bolero, "run_instrumented") as campaign,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                bolero.prepare_target(self.inventory, target)
+            campaign.assert_not_called()
+            report = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(report["result"], "instrumented preparation")
+            self.assertEqual(report["target"], target.id)
+            self.assertEqual(report["test_target"], "test:representations")
+            self.assertEqual(report["features"], list(target.features))
+            args = next(call.args[0] for call in commands.call_args_list
+                        if call.args[0][:3] == ["cargo", "bolero", "test"])
+            self.assertEqual(args[args.index("--runs") + 1], "0")
+            self.assertEqual(args[args.index("--toolchain") + 1], self.inventory.nightly)
+            self.assertEqual(args[args.index("--sanitizer") + 1], self.inventory.sanitizer)
+
+    def test_failed_preparation_keeps_evidence_and_propagates_the_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            with (
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "build_instrumented",
+                                  side_effect=bolero.BoleroError("build failed")),
+                mock.patch.object(bolero, "command",
+                                  return_value=subprocess.CompletedProcess([], 0, "revision\n", "")),
+                mock.patch.object(bolero, "run_instrumented") as campaign,
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "build failed"):
+                    bolero.prepare_target(self.inventory, self.target)
+            campaign.assert_not_called()
+            report = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(report["result"], "failed preparation")
+            self.assertEqual(report["target"], self.target.id)
+
     def test_fuzz_copies_seed_corpus_and_requires_engine_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run = pathlib.Path(directory) / "run"
@@ -793,6 +847,15 @@ class CliTests(unittest.TestCase):
     def test_list_and_validation_routes(self) -> None:
         self.assertEqual(self.invoke("validate"), 0)
         self.assertEqual(self.invoke("list"), 0)
+
+    def test_preparation_requires_an_exact_registered_target(self) -> None:
+        with mock.patch.object(bolero, "prepare_target") as prepare:
+            self.assertEqual(self.invoke("prepare", "models-archived-counts"), 0)
+            selected = next(target for target in self.inventory.targets
+                            if target.id == "models-archived-counts")
+            prepare.assert_called_once_with(self.inventory, selected)
+            with self.assertRaisesRegex(bolero.BoleroError, "unknown Bolero target"):
+                self.invoke("prepare", "models-archive")
 
     def test_fuzz_routes_select_targets_and_reject_zero_duration(self) -> None:
         with mock.patch.object(bolero, "fuzz_targets") as fuzz:

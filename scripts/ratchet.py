@@ -853,11 +853,6 @@ COUNTS: tuple[Count, ...] = (
         count_data_plane_cluster_awaits,
     ),
     Count(
-        "data_plane_lock_acquisitions",
-        "compiler-resolved recurring synchronization debt under reviewed owner scopes",
-        None,
-    ),
-    Count(
         "write_once_rwlock_fields",
         "write-once names and shared references stored behind `RwLock`",
         count_write_once_rwlock_fields,
@@ -897,28 +892,18 @@ def measure_sources(root: Path) -> dict[str, list[Site]]:
     return {count.name: count.collect(files) for count in COUNTS if count.collect is not None}
 
 
-def typed_sites(root: Path) -> list[Site]:
+def check_synchronization(root: Path) -> None:
     from scripts import typed_ratchet
 
     target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
     destination = target / "typed-ratchet/gate.json"
     if typed_ratchet.main(["--root", str(root), "--target-dir", str(target), "--output", str(destination)]):
-        raise SystemExit("error: compiler synchronization analysis did not pass; no debt count was accepted")
-    analysis = json.loads(destination.read_text())
-    sites = []
-    for classified in analysis["findings"]:
-        if classified["scope"]["disposition"]["class"] != "debt":
-            continue
-        acquisition = classified["acquisition"]
-        finding = next(iter(acquisition["configurations"].values()))[0]
-        sites.append(Site(acquisition["site"]["path"], finding["span"]["line"], typed_ratchet.render_finding(classified)))
-    return sites
+        raise SystemExit("error: compiler synchronization diagnostics failed")
 
 
 def measure(root: Path) -> dict[str, list[Site]]:
-    sites = measure_sources(root)
-    sites["data_plane_lock_acquisitions"] = typed_sites(root)
-    return sites
+    check_synchronization(root)
+    return measure_sources(root)
 
 
 def read_baseline(path: Path) -> dict[str, int]:

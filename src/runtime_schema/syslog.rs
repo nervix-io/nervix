@@ -274,6 +274,12 @@ impl SyslogBatchMember {
     /// timestamp, and a `MSG` that is the JSON array of the members' own messages.
     ///
     /// The members must share a frame header, which the packing that chose them guarantees.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external writer interface encodes one admitted syslog frame"
+        )
+    )]
     pub(super) fn write_frame(
         members: &[&Self],
         output: &mut impl std::io::Write,
@@ -1014,6 +1020,10 @@ fn prepare_append(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external Arrow builder owns one appended scalar")
+)]
 fn append_u8(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
@@ -1041,6 +1051,10 @@ fn append_u8(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external Arrow builder owns one appended scalar")
+)]
 fn append_string(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
@@ -1068,6 +1082,10 @@ fn append_string(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external Arrow builder owns one appended scalar")
+)]
 fn append_datetime(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,

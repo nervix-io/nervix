@@ -26,6 +26,15 @@ public client boundary: its listeners, authentication, FlatBuffers frames, reque
 command dispositions, and client recovery. The interconnect carries only node-to-node traffic,
 including the subscription fan-out that feeds a client's Row frames.
 
+Source-local compiler contracts distinguish peer/slot installation from recurring stream,
+frame, admission and acknowledgement operations. Retained admission records and placement progress
+name their bounded protocol key and transition bound; shared relay/connection discovery and remote
+ACK tracking retain exact-operation expectations naming their repair tasks. A conditional first
+installation from a recurring transport path documents that phase at the call. The compiler's
+contracts do not establish wire delivery or concurrency guarantees; those remain the protocols
+and checks described here. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
+owns the compiler authoring contract.
+
 ## Simulation Boundary
 
 The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a

@@ -460,6 +460,13 @@ impl SessionState {
 ///
 /// A trait rather than a closure: the returned future borrows the sink under one concrete
 /// lifetime, which keeps it `Send` inside the spawned connection tasks that drive signaling.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the selected sink accepts each admitted signaling payload"
+    )
+)]
 pub trait SignalingDataSink {
     fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
 }

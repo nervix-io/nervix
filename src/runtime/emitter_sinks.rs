@@ -87,11 +87,11 @@ impl EmitterSinkStarter {
         let label = plan.sink.label();
         let batch = plan.sink.batch();
         let sink: Box<dyn EmitterSink> = match &plan.sink {
-            EmitterSinkPlan::Client(sink) => Box::new(ClientEmitterSink::new(
-                context,
-                sink,
-                output_schema.clone(),
-                plan.retry_policy,
+            EmitterSinkPlan::Client(sink) => Box::new(nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "sink initialization publishes one concrete client-emitter endpoint lifetime \
+                 before processing records",
+                ClientEmitterSink::new(context, sink, output_schema.clone(), plan.retry_policy,)
             )),
             EmitterSinkPlan::Http(sink) => Self::http_request(
                 codec,
