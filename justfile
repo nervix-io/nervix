@@ -1428,9 +1428,12 @@ loom-clippy-targets: \
 
 # The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
 # profile and toolchain differences identify separate build directories. Keep kache configured.
+# On CI nothing reads a build directory after its lint and the runner's disk cannot hold them all,
+# so a target that passed deletes its own.
 [private]
 clippy-target package args toolchain="":
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
+    @{{ if env("CI", "") == "true" { "rm -rf " + quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) } else { "true" } }}
 
 # Lint one package and all of its targets; extra arguments retain their boundaries.
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
