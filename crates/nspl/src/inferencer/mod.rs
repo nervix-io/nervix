@@ -12,11 +12,12 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, braced_list_value_tokens,
-        branch_selection, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
-        if_not_exists_clause, inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_expression_tokens, resource_ref,
+        branch_selection, embedded, filter_where_clause, flushed_processor_outputs,
+        from_relay_clauses, if_not_exists_clause, inferencer_name, into_parse_error, kw,
+        kw_phrase2, lex_input, materialized_state_dependencies, resource_ref,
         resource_version_clause, string_lit, suggest_from, tok,
     },
+    semantic_program::read_expression,
 };
 
 fn field_mapping<'src>()
@@ -24,17 +25,11 @@ fn field_mapping<'src>()
     string_lit()
         .then(tensor_schema())
         .then_ignore(tok(Token::Eq))
-        .then(braced_list_value_tokens())
-        .try_map(|((tensor, schema), tokens), span| {
-            crate::parse_expression(&render_expression_tokens(&tokens))
-                .map(|expression| InferencerTensorMapping {
-                    tensor,
-                    schema,
-                    expression,
-                })
-                .map_err(|error| {
-                    Rich::custom(span, error.current_context().embedded_expression_message())
-                })
+        .then(embedded(braced_list_value_tokens(), read_expression))
+        .map(|((tensor, schema), expression)| InferencerTensorMapping {
+            tensor,
+            schema,
+            expression,
         })
 }
 

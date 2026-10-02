@@ -101,8 +101,8 @@ use uuid::Uuid;
 use crate::common::{
     cli_terminal::{CliTerminal, DisplayWaitError},
     client_conformance::{
-        ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
-        corpus_report,
+        ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
+        SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
@@ -3487,6 +3487,38 @@ async fn when_client_probe_attaches_to_the_domain_clock_through_forwarder(
     let mut target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
     target.grpc_uri = forwarded;
     start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
+}
+
+/// Starts a probe that opens a producer on `ingestor` and a consumer on `emitter` through the TCP
+/// forwarder a preceding step stood in front of `node_id`'s gRPC endpoint, so the scenario can end
+/// the probe's session by stopping the forwarder while the probe holds a delivery.
+#[when(
+    expr = "the {string} client probe publishes to ingestor {string} and consumes emitter \
+            {string} through the forwarded gRPC endpoint of node {string}"
+)]
+async fn when_client_probe_publishes_and_consumes_through_forwarder(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    ingestor: String,
+    emitter: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let exercise = ProbeExercise::Endpoints {
+        ingestor: expand_placeholders(world, &ingestor),
+        emitter: expand_placeholders(world, &emitter),
+    };
+    let mut target = client_probe_target(world, &node_id, exercise);
+    target.grpc_uri = forwarded;
+    start_client_probe(world, runtime, &node_id, target, OPENED_LINE).await;
 }
 
 #[then(expr = "within {string} the client probe prints {string}")]

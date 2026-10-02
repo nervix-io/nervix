@@ -86,7 +86,7 @@ coverage-bolero-runner:
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
 # The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
-coverage-bolero duration="2":
+coverage-bolero duration="2": build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)

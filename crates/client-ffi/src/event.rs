@@ -48,6 +48,21 @@ pub enum CellState {
     Redacted,
 }
 
+impl CellState {
+    /// Reads a state a host passed as a byte.
+    pub(crate) fn from_host(state: u8) -> Result<Self, Failure> {
+        match state {
+            1 => Ok(Self::Value),
+            2 => Ok(Self::Null),
+            3 => Ok(Self::Redacted),
+            _ => Err(Failure::invalid_argument(
+                "states",
+                "holds a byte that is not an nx_cell_state",
+            )),
+        }
+    }
+}
+
 impl From<CellState> for u8 {
     fn from(state: CellState) -> Self {
         match state {

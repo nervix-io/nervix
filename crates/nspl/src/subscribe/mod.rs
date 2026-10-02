@@ -8,10 +8,11 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2,
-        lex_input, relay_ref, render_expression_tokens, session_subscription_name,
-        session_subscription_ref, string_lit, suggest_from, tok, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, embedded, field_ref, into_parse_error, kw,
+        kw_phrase2, lex_input, relay_ref, session_subscription_name, session_subscription_ref,
+        string_lit, suggest_from, tok, word_raw,
     },
+    semantic_program::read_expression,
 };
 
 pub(crate) fn subscription_literal_parser<'src>()
@@ -114,19 +115,13 @@ pub fn parse_batch_sample_rate(input: &str) -> error_stack::Result<String, Parse
 fn subscription_where_clause<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::Where)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !matches!(token, Token::Semicolon))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|tokens, span| {
-            crate::parse_expression(&render_expression_tokens(&tokens)).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+    kw(Identifier::Where).ignore_then(embedded(
+        any()
+            .filter(|token: &Token| !matches!(token, Token::Semicolon))
+            .repeated()
+            .at_least(1),
+        read_expression,
+    ))
 }
 
 pub fn create_subscription_parser<'src>()

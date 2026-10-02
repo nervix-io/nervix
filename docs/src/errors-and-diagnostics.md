@@ -342,9 +342,12 @@ diagnostic's message and byte span into it. A batch of statements is lexed once 
 is parsed from its own run of those tokens, so a diagnostic indexes the whole submitted text
 wherever in the batch the rejected statement starts. The session edge turns the stage into the
 failed command's `lex error` or `parse error` message and passes every span through unchanged, so a
-client underlines it in the text it sent. A statement grammar that embeds an expression reports the
-expression's first diagnostic at the whole embedded region, because a statement diagnostic carries
-one message and one span. A caller that owns a larger operation adds its own context above the
+client underlines it in the text it sent. A statement grammar reads an expression it embeds from
+the statement's own tokens, with the reader a standalone expression uses, and reports the reader's
+first diagnostic at the tokens of the statement where the reader failed, with the message the
+standalone reader gives the same text. It carries no expectations of the expression grammar, so
+completion inside an unfinished expression offers nothing rather than guessing at expression
+syntax. A caller that owns a larger operation adds its own context above the
 language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
@@ -722,6 +725,23 @@ treated as non-sensitive display text and applies the emitter route's message er
 each member. IPC encoding failures and an output row above the declared byte limit follow that
 policy, without quoting the row. Owner or forwarder loss revokes the attempt; the delivery remains
 volatile, and a client must not interpret a lost ACK reply as successful processing.
+
+The shared C binding converts the producers' and consumers' reports at its reporting boundary as it
+converts a clock-event wait's. A refused open is `NX_ERROR_REJECTED`, and `nx_error_open_refusal`
+reads its typed refusal. A batch built for another schema, or with too many rows or bytes, a
+builder input that does not fill its level or is not UTF-8, and an identity the producer does not
+hold are `NX_ERROR_INVALID_ARGUMENT`, and nothing is sent. A stream a host submits is not checked
+before it is sent: the producer answers it with its outcome, which a submission reports as a value
+rather than a failure, `NX_SUBMISSION_NOT_ADMITTED` with its batch defect for a stream that is not
+the canonical one. A closed or ended producer is `NX_ERROR_CLOSED`, and a consumer read past its
+close is too. `ConsumerInterrupted` is `NX_ERROR_INTERRUPTED` and `ConsumerReopenRequired` or a
+producer that must be opened again is `NX_ERROR_REOPEN_REQUIRED`, read with the handle's reopen
+reason; a consumer whose bounded reconnect failed is `NX_ERROR_CONNECT`. A settlement of an
+expired reference is `NX_ERROR_REJECTED`, and `SettlementUnknown` is `NX_ERROR_UNCERTAIN`. A
+cancelled or expired wait returns `NX_ERROR_CANCELLED` or `NX_ERROR_DEADLINE` without writing its
+output. A submission cancelled that way sent nothing, and an outcome wait leaves its submission
+with the producer. A read stays with the consumer, which hands its reply to the next read, and a
+settlement may still have reached the server.
 
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
