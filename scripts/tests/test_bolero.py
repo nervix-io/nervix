@@ -41,6 +41,7 @@ class InventoryTests(unittest.TestCase):
             "typed-report", "typed-source-contract", "typed-site-union",
             "nspl-statement",
             "nspl-statement-text",
+            "nspl-expression-text",
             "nspl-format-document",
             "nspl-format-text",
             "models-names",

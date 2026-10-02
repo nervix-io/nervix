@@ -214,7 +214,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   context allows, `Function Properties` and `Errors` for optional results, sensitivity, and where a
   failure goes, then the section of each operator and function the expression uses. Check that:
   - literals are `I64` and `F64`, so a narrower operand's literal is cast (`input.count > 5 AS U32`),
-    and there is no exponent, `DATETIME`, or `BYTES` literal;
+    a float is one word (`2.5`, never `2 .5`), and there is no exponent, `DATETIME`, or `BYTES`
+    literal;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
   - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an

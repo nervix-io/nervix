@@ -15,7 +15,7 @@ const NAME_BYTES: u64 = 128;
 const NAME_TAIL: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
 
 /// Pieces a generated string is assembled from. Beside plain text they hold every character the
-/// NSPL lexers treat specially: both quote styles, the dollar-quote delimiters a renderer picks
+/// NSPL lexer treats specially: both quote styles, the dollar-quote delimiters a renderer picks
 /// and prefixes of them, backslashes and the escapes they could start, line breaks, a comma and
 /// braces that separate configuration entries, and text outside ASCII, including a combining mark
 /// and characters Unicode classes as whitespace.
@@ -35,7 +35,7 @@ const BYTE_SIZE_UNITS: [&str; 9] = ["B", "KB", "KiB", "MB", "MiB", "GB", "GiB", 
 
 impl Arbitrary<'_> {
     /// A name NSPL spells in every position that reads a name: one lower-case ASCII identifier that
-    /// no keyword of either NSPL lexer can match.
+    /// no NSPL keyword can match.
     ///
     /// A name is one letter, a letter and an underscore followed by more, or an underscore
     /// followed by more. No keyword is a single letter or starts with either head, so no

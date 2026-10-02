@@ -342,9 +342,12 @@ diagnostic's message and byte span into it. A batch of statements is lexed once 
 is parsed from its own run of those tokens, so a diagnostic indexes the whole submitted text
 wherever in the batch the rejected statement starts. The session edge turns the stage into the
 failed command's `lex error` or `parse error` message and passes every span through unchanged, so a
-client underlines it in the text it sent. A statement grammar that embeds an expression reports the
-expression's first diagnostic at the whole embedded region, because a statement diagnostic carries
-one message and one span. A caller that owns a larger operation adds its own context above the
+client underlines it in the text it sent. A statement grammar reads an expression it embeds from
+the statement's own tokens, with the reader a standalone expression uses, and reports the reader's
+first diagnostic at the tokens of the statement where the reader failed, with the message the
+standalone reader gives the same text. It carries no expectations of the expression grammar, so
+completion inside an unfinished expression offers nothing rather than guessing at expression
+syntax. A caller that owns a larger operation adds its own context above the
 language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning

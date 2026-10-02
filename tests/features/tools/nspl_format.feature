@@ -248,6 +248,40 @@ Feature: NSPL file formatting
       """
     And the NSPL file "broken.nspl" is unchanged
 
+  Scenario: An expression a statement embeds is reported at its own offending token
+    Given an NSPL file "broken.nspl" containing
+      """
+      create subscription readings to metrics where input.value = = 1;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:1:61
+      """
+    And the last command error contains
+      """
+      found =
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
+  Scenario: A number split at its dot is not a float in a statement's expression
+    Given an NSPL file "broken.nspl" containing
+      """
+      create subscription readings to metrics where input.value = 1 .5;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:1:63
+      """
+    And the last command error contains
+      """
+      found .
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
   Scenario: A file that cannot be lexed is reported at the lex stage and left untouched
     Given an NSPL file "unlexable.nspl" containing
       """
