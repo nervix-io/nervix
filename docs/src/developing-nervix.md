@@ -123,10 +123,13 @@ check can run without a GPU.
 The pinned runtime forces warnings to errors on its core and CUDA targets. Release builds pass
 CMake's `--compile-no-warning-as-error` switch so newer LLVM diagnostics remain visible warnings.
 Actual compiler errors still fail the build. This setting participates in the artifact identity.
+Each NVCC invocation uses one compiler thread so `--jobs` bounds concurrent CUDA frontends,
+including the memory-intensive MoE and LLM kernels.
 CUDA compilation uses generated Abseil headers that exclude Clang's relocation builtin,
-class nullability annotations, and lifetime annotations from NVCC compilations. Ordinary Clang
-compilation retains those features. The fetched dependencies remain unchanged, and the
-corrections are part of the build identity.
+class nullability annotations, and lifetime annotations from NVCC compilations. These headers
+apply to the CUDA provider and its architecture-specific object libraries, including FlashAttention,
+SM90/SM120 TMA, and LLM targets. Ordinary Clang compilation retains those features. The fetched
+dependencies remain unchanged, and the corrections are part of the build identity.
 
 The CUDA provider also compiles a generated copy of `linear_attention_impl.cu` whose three
 generic launch lambdas deduce their `Status` return types. This prevents Clang from instantiating
@@ -184,8 +187,12 @@ for code generation. CUDA compilation explicitly selects the SBSA SDK, and CUDA 
 uses the configured LLVM host compiler and LLD.
 
 Before installation, cross-builds link an arm64 C API smoke program and run CPU inference and CUDA
-provider loading under QEMU. Full GPU verification uses `just verify-onnxruntime linux/arm64` on
-an arm64 Linux host with an NVIDIA GPU and driver. QEMU cannot verify GPU execution.
+provider loading under QEMU. The guest loader receives the SBSA SDK's `libcuda` driver stub in a
+private smoke directory to resolve driver symbols without executing GPU work. Other CUDA libraries
+come from the package. The driver stub is excluded from the artifact and the host QEMU process's
+library paths; deployments use their installed NVIDIA driver. Full GPU verification uses
+`just verify-onnxruntime linux/arm64` on an arm64 Linux host with an NVIDIA GPU and driver.
+QEMU cannot verify GPU execution.
 Native and cross-builds use the same target artifact identity; their compiler intermediates remain
 separate by toolchain identity. Cached artifacts require none of these cross-build tools or SDKs.
 

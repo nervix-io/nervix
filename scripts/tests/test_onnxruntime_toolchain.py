@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from shutil import which
 import subprocess
+import sys
 import tempfile
 from textwrap import dedent
 import unittest
@@ -82,6 +83,9 @@ class NativeToolchainTests(unittest.TestCase):
         for path in (sysroot, gcc, cuda / "targets/sbsa-linux/include", cudnn / "lib"):
             path.mkdir(parents=True)
         (cuda / "targets/sbsa-linux/include/cuda_runtime.h").write_text("CUDA header")
+        driver = cuda / "targets/sbsa-linux/lib/stubs/libcuda.so"
+        driver.parent.mkdir(parents=True)
+        driver.write_bytes(b"target driver stub")
         return {"ONNXRUNTIME_SYSROOT": str(sysroot), "ONNXRUNTIME_GCC_TOOLCHAIN": str(gcc),
                 "CUDA_HOME": str(cuda), "CUDNN_HOME": str(cudnn)}
 
@@ -148,6 +152,65 @@ class NativeToolchainTests(unittest.TestCase):
             self.assertEqual(execution[:3], ["/host/bin/qemu-aarch64", "-L", environment["ONNXRUNTIME_SYSROOT"]])
             self.assertIn(f"LD_LIBRARY_PATH={destination}/runtime/lib", execution[4])
             self.assertEqual(execution[-1], "cuda-load")
+
+    @unittest.skipUnless(sys.platform == "linux" and CLANG_CXX, "requires Linux and Clang")
+    def test_cross_provider_loading_resolves_only_the_sdk_driver_stub(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = self.cross_sdk(root)
+            with patch.dict(os.environ, environment):
+                tools = HostToolchain.discover("linux/arm64")
+            build = RuntimeBuild(BuildSpec.create("linux/arm64", repo=ROOT), root)
+            destination = root / "package"
+            construct_cuda_runtime(destination)
+            driver = Path(environment["CUDA_HOME"]) / "targets/sbsa-linux/lib/stubs/libcuda.so"
+            (driver.parent / "libcudart.so").write_text("another SDK stub")
+            driver_source = root / "driver.cc"
+            driver_source.write_text('extern "C" int nervix_driver_fixture() { return 47; }')
+            provider_source = root / "provider.cc"
+            provider_source.write_text('extern "C" int nervix_driver_fixture();\n'
+                                       'extern "C" int probe() { return nervix_driver_fixture(); }')
+            probe_source = root / "probe.cc"
+            probe_source.write_text(dedent("""\
+                #include <dlfcn.h>
+                #include <cstdio>
+                int main(int argc, char** argv) {
+                  void* provider = dlopen(argv[1], RTLD_NOW);
+                  if (!provider) { std::fprintf(stderr, "%s\\n", dlerror()); return 1; }
+                  auto probe = reinterpret_cast<int (*)()>(dlsym(provider, "probe"));
+                  return probe && probe() == 47 ? 0 : 2;
+                }
+            """))
+            provider = destination / "runtime/lib/libonnxruntime_providers_cuda.so"
+            probe = root / "loader-probe"
+            for command in (
+                [CLANG_CXX, "-shared", "-fPIC", str(driver_source), "-Wl,-soname,libcuda.so.1", "-o", str(driver)],
+                [CLANG_CXX, "-shared", "-fPIC", str(provider_source), str(driver), "-o", str(provider)],
+                [CLANG_CXX, str(probe_source), "-ldl", "-o", str(probe)],
+            ):
+                subprocess.run(command, check=True, capture_output=True, text=True)
+
+            def run_smoke(command: list[str], **kwargs: object) -> None:
+                if command[0] != tools.cross.emulator:
+                    return
+                self.assertEqual(command[-1], "cuda-load")
+                # Exercise the guest loader environment using native ELF fixtures, without
+                # requiring QEMU or an installed target SDK in the tooling test suite.
+                guest = kwargs["env"].copy()
+                guest["LD_LIBRARY_PATH"] = command[4].split("=", 1)[1]
+                result = subprocess.run([str(probe), str(provider)], env=guest, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                directories = [Path(path) for path in guest["LD_LIBRARY_PATH"].split(os.pathsep)]
+                resolved = next(path / "libcuda.so.1" for path in directories if (path / "libcuda.so.1").is_file())
+                self.assertEqual(resolved.resolve(), driver)
+                self.assertEqual([path.name for path in resolved.parent.iterdir()], ["libcuda.so.1"])
+                self.assertEqual(kwargs["env"].get("LD_LIBRARY_PATH"), os.environ.get("LD_LIBRARY_PATH"))
+
+            with patch("scripts.build_onnxruntime.run", side_effect=run_smoke):
+                build._smoke(destination, tools)
+            self.assertEqual({path.name for path in (destination / "runtime/lib").iterdir()},
+                             {"libonnxruntime_providers_shared.so", "libonnxruntime_providers_cuda.so",
+                              "libcudnn_graph.so.9", "libnvrtc-builtins.so.13.2"})
 
     def test_cross_sdk_requires_an_existing_sysroot(self) -> None:
         with patch.dict(os.environ, {"ONNXRUNTIME_SYSROOT": "/unavailable-arm64-sysroot"}):
@@ -310,6 +373,23 @@ class NativeToolchainTests(unittest.TestCase):
                 add_library(onnxruntime STATIC empty.cc)
                 add_library(onnxruntime_providers_shared SHARED empty.cc)
                 add_library(onnxruntime_providers_cuda SHARED empty.cc "{linear_attention}")
+                target_include_directories(onnxruntime_providers_cuda PRIVATE "{abseil}")
+                foreach(name flash_attention sm90_tma sm120_tma llm)
+                  add_library(onnxruntime_providers_cuda_${{name}} OBJECT empty.cc)
+                  target_include_directories(onnxruntime_providers_cuda_${{name}} PRIVATE "{abseil}")
+                  target_link_libraries(onnxruntime_providers_cuda PRIVATE onnxruntime_providers_cuda_${{name}})
+                endforeach()
+                function(record_cuda_includes)
+                  get_property(targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+                  foreach(target IN LISTS targets)
+                    if(target MATCHES "^onnxruntime_providers_cuda($|_)")
+                      get_target_property(includes ${{target}} INCLUDE_DIRECTORIES)
+                      string(REPLACE ";" "\n" includes "${{includes}}")
+                      file(WRITE "${{CMAKE_BINARY_DIR}}/${{target}}-includes.txt" "${{includes}}")
+                    endif()
+                  endforeach()
+                endfunction()
+                cmake_language(DEFER CALL record_cuda_includes)
                 """))
             build = root / "build"
             result = subprocess.run([
@@ -346,14 +426,23 @@ class NativeToolchainTests(unittest.TestCase):
                 #endif
                 #endif
                 """))
-            for mode in ("host", "nvcc"):
-                with self.subTest(mode=mode):
-                    command = [CLANG_CXX, "-std=c++20", "-fsyntax-only",
-                               "-I", str(build / "nervix-cuda-includes"), "-I", str(abseil)]
-                    if mode == "nvcc":
-                        command.append("-D__NVCC__=1")
-                    result = subprocess.run([*command, str(source)], capture_output=True, text=True, timeout=30)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            includes_files = sorted(build.glob("*-includes.txt"))
+            self.assertEqual(len(includes_files), 5)
+            for includes_file in includes_files:
+                for mode in ("host", "nvcc"):
+                    with self.subTest(target=includes_file.stem, mode=mode):
+                        command = [CLANG_CXX, "-std=c++20", "-fsyntax-only"]
+                        # Evaluate CUDA-only include entries for the reduced NVCC preprocessing probe.
+                        for directory in includes_file.read_text().splitlines():
+                            if directory.startswith("$<$<COMPILE_LANGUAGE:CUDA>:"):
+                                if mode == "host":
+                                    continue
+                                directory = directory.removeprefix("$<$<COMPILE_LANGUAGE:CUDA>:").removesuffix(">")
+                            command += ["-I", directory]
+                        if mode == "nvcc":
+                            command.append("-D__NVCC__=1")
+                        result = subprocess.run([*command, str(source)], capture_output=True, text=True, timeout=30)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             for path, content in original_headers.items():
                 self.assertEqual(path.read_bytes(), content)
 

@@ -45,8 +45,15 @@ function(nervix_cuda_abseil)
     "#if defined(__NVCC__)\n#define ABSL_ATTRIBUTE_LIFETIME_BOUND\n#elif ABSL_HAVE_CPP_ATTRIBUTE(clang::lifetimebound)"
     content "${content}")
   file(CONFIGURE OUTPUT "${headers}/absl/base/attributes.h" CONTENT "${content}" @ONLY)
-  target_include_directories(onnxruntime_providers_cuda BEFORE PRIVATE
-    "$<$<COMPILE_LANGUAGE:CUDA>:${headers}>")
+  # Architecture-specific kernels compile in independently configured object libraries.
+  # Apply the headers after graph composition to every CUDA provider target.
+  get_property(targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(target IN LISTS targets)
+    if(target MATCHES "^onnxruntime_providers_cuda($|_)")
+      target_include_directories(${target} BEFORE PRIVATE
+        "$<$<COMPILE_LANGUAGE:CUDA>:${headers}>")
+    endif()
+  endforeach()
 endfunction()
 
 function(nervix_cuda_linear_attention)

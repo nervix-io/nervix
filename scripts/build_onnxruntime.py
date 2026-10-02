@@ -535,6 +535,8 @@ class RuntimeBuild:
                             f"onnxruntime_CUDNN_HOME={tools.cudnn_home}",
                             f"CMAKE_CUDA_ARCHITECTURES={self.spec.configuration['cuda_architectures']}",
                             f"CMAKE_CUDA_HOST_COMPILER={tools.cuda_host.executable}",
+                            # Keep concurrent NVCC frontends within Ninja's job budget.
+                            "onnxruntime_NVCC_THREADS=1",
                             "onnxruntime_USE_FPA_INTB_GEMM=OFF", *tools.cuda.definitions("CUDA")]
             # CMake's generated NVCC rules do not carry COMPILER_ARG1 into compilation.
             cuda_flags = [*tools.cuda.arguments, *shlex.split(os.environ.get("CUDAFLAGS", ""))]
@@ -689,6 +691,18 @@ class RuntimeBuild:
             sysroot = tools.cross.runtime_root
             directories = [destination / "runtime/lib", sysroot / "lib", sysroot / "usr/lib",
                            sysroot / "lib/aarch64-linux-gnu", sysroot / "usr/lib/aarch64-linux-gnu"]
+            if self.spec.cuda_enabled:
+                # Provider loading needs driver symbols, but this check never executes a GPU.
+                # Expose only NVIDIA's target driver stub, outside the packaged runtime.
+                stub = tools.cuda_home / "targets/sbsa-linux/lib/stubs/libcuda.so"
+                if not stub.is_file():
+                    raise BuildError(f"arm64 CUDA provider loading requires the SBSA driver stub: {stub}")
+                driver = smoke_dir / "cuda-driver"
+                driver.mkdir(exist_ok=True)
+                link = driver / "libcuda.so.1"
+                link.unlink(missing_ok=True)
+                link.symlink_to(stub)
+                directories.insert(1, driver)
             prefix = [tools.cross.emulator, "-L", str(sysroot), "-E",
                       "LD_LIBRARY_PATH=" + os.pathsep.join(str(path) for path in directories)]
             smoke = [*prefix, *smoke]
