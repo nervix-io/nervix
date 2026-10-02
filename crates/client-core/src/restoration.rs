@@ -22,7 +22,7 @@
 //! before publishing a new attachment. A restoration task waits for the replies of its own
 //! requests and sends a transient refusal again while the exchange stays open.
 
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use ahash::HashSet;
 use error_stack::Report;
@@ -33,8 +33,10 @@ use nervix_client_wire::{
     SubscribeDisposition,
 };
 use nervix_models::DomainName;
-use nervix_primitives::time::sleep;
-use triomphe::Arc;
+use nervix_primitives::{
+    sync::{Arc, StdArc},
+    time::sleep,
+};
 
 use crate::{
     consumer::ConsumerHandle,

@@ -5,25 +5,26 @@
 //!   confirm it, while an inspection reads its progress, and while the acknowledgements it holds
 //!   race the deliveries of the same inputs.
 //! - **Depends on.** The production checkpoint state, checkpoint holds, acknowledgement sets and
-//!   the server Shuttle runner.
+//!   the model harness's Shuttle runner.
 //! - **Must not know.** Guest execution, stable storage, or how a replica reaches the owner.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
-use std::sync::Arc as StdArc;
-
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     ClusterNodeName, DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint,
     WasmCheckpointStage, WasmStateGeneration,
 };
-use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::{
+    sync::StdArc,
+    unmodeled::sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use super::*;
 use crate::{
     runtime::{BranchKey, RuntimeState, wasm_state::WasmCheckpointReplicas},
     runtime_ack::AckOutcome,
     runtime_schema::RuntimeValue,
-    shuttle_test::check_interleavings,
 };
 
 const MODEL_TASK_JOINS: &str =
@@ -193,7 +194,9 @@ fn a_checkpoint_waiting_for_its_replicas_misses_no_confirmation() {
         let state = StdArc::new(ReplicatedWasmProcessorState::new(
             placement(),
             None,
-            triomphe::Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+            nervix_primitives::sync::Arc::new(
+                nervix_primitives::publication::ArcSwapOption::empty(),
+            ),
         ));
         let record = StdArc::new(ConfirmationRecord::default());
         let mut replicating = Vec::with_capacity(REPLICAS.len());

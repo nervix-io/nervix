@@ -5,9 +5,7 @@
 //! - **Depends on.** The primitive publication boundary and connector retry vocabulary.
 //! - **Must not know.** Shared registries, graph planning, payloads or transport drivers.
 
-use std::sync::Arc as StdArc;
-
-use nervix_primitives::publication::ArcSwapOption;
+use nervix_primitives::{publication::ArcSwapOption, sync::StdArc};
 
 /// Healthy tasks publish no failure. The error and its retry are observed together.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,9 +117,9 @@ mod tests {
     #[test]
     fn shuttle_status_observers_read_coherent_error_and_retry() {
         use meticulous::ResultExt as _;
-        use triomphe::Arc;
+        use nervix_primitives::sync::Arc;
 
-        crate::shuttle_test::check_random(
+        nervix_model_harness::shuttle::check_random(
             || {
                 shuttle::future::block_on(async {
                     let status = Arc::new(TaskStatus::<u8>::default());

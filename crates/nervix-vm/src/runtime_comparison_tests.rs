@@ -8,11 +8,10 @@
 //! - **Depends on.** The NSPL parser, the VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How the kernels traverse their Arrow buffers.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::StdArc;
 
 use super::{execute_predicate_in_context, execute_program_sync};
 use crate::{

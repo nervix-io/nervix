@@ -80,9 +80,12 @@ compilation with the production or Shuttle builds.
 | Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Tokio's, outside every model and never driven by the checks: a socket created inside a check fails it | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, timers, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
 | Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | Turmoil's simulated sockets and DNS table, which `nervix_primitives::net` selects | A task on the simulated host's scheduler, through `task::spawn_cpu`; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller, with timers that follow its clock | `--cfg tokio_unstable` |
 | Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
+| Turmoil for the browser's target | The `turmoil` feature with `--target wasm32-unknown-unknown` | Fails to compile with the boundary's diagnostic that execution modes run on native targets only, before any simulator dependency is built | | | |
 
 Only the Turmoil recipes pass `--cfg tokio_unstable`, and `just validate-primitive-boundary` rejects
-the flag in any other recipe, in Cargo configuration, in a workflow and in a build script. With it,
+the flag in any other recipe, in Cargo configuration, in a workflow and in a build script. It
+rejects `--cfg turmoil` everywhere, and a bare `turmoil` in a `cfg` predicate: the mode is the
+`turmoil` feature, never a cfg every crate of the build would read. With it,
 Turmoil seeds each host runtime's
 scheduling from the simulation seed and configures an unhandled task panic to shut that host's
 runtime down, which fails the run. Without it, scheduling would not follow the seed and a panicking
@@ -92,18 +95,21 @@ in `Cargo.lock`, is used without its unstable filesystem feature.
 
 Validation keeps the modes apart:
 
-- `just validate-turmoil-dependencies` fails when the normal workspace dependency graph, with or
-  without default features, contains a Turmoil package.
+- `just validate-execution-mode-dependencies` fails when the normal dependency graph of the
+  workspace, or of any package built on its own, with or without default features, contains
+  Turmoil, Loom, Shuttle or a Shuttle wrapper, or enables an execution mode on the primitive
+  boundary.
 - `just validate-primitive-boundary` rejects every path to Tokio's or Turmoil's sockets, Tokio's
   timers, or the standard library's monotonic clock and sockets outside `nervix-primitives`, and a
   `turmoil` dependency outside the boundary unless it is optional behind the package's own
   `turmoil` feature, as the interconnect's harness takes it. The simulated path therefore cannot
   name an operating-system socket or clock that would escape its host.
-- `just validate-shuttle-dependencies` does the same for Shuttle.
 - `just validate-execution-mode-conflicts` builds `nervix-primitives` with every pair of the
   `loom`, `shuttle` and `turmoil` modes and with all three, and `nervix-interconnect` with Shuttle
   while its execution dependency selects Turmoil, and requires the diagnostic naming the modes in
-  each.
+  each. It builds each mode for the browser's target and requires the boundary's own diagnostic
+  first, and builds the NSPL formatter, a product binary, with each mode and requires the
+  diagnostic that a modeled build is a test artifact.
 - `just lint` runs Clippy over every target of both packages with the `turmoil` feature, beside the
   production and Shuttle lints.
 - `just test` runs the workspace with all features while excluding every package that offers a
@@ -385,11 +391,11 @@ itself.
 
 | Command | What it runs | Bound and exit |
 | --- | --- | --- |
-| `just test-turmoil [budget_seconds]` | The primitive boundary's simulated-host checks, the `nervix-execution` library under the `turmoil` feature, the interconnect library's `wire::simulation_checks` and `authentication::simulation_tests`, and every case of the `simulation` target over its committed seeds | Builds first, then runs inside a real-time budget of 480 seconds by default; exits `124` naming the in-progress records when it expires |
-| `just test-turmoil-simulation [args]` | The `simulation` target alone, with libtest arguments, such as a test name and `--exact` | The per-run bounds only |
+| `just test-turmoil [budget_seconds]` | The primitive boundary's simulated-host checks, the `nervix-execution` library under the `turmoil` feature, the interconnect library's `wire::simulation_checks` and `authentication::simulation_tests`, and every case of the `simulation` target over its committed seeds | Builds first, then runs inside a real-time budget of 480 seconds by default; exits `124` naming the in-progress records when it expires. Reports how many tests each invocation and the whole suite discovered, selected, executed and completed, keeps each invocation's output under `target/turmoil-suite`, and fails when an invocation executed none, when a test `tests/turmoil-inventory.toml` registers did not run or ran ignored, and when a simulation test ran unregistered |
+| `just test-turmoil-simulation [args]` | The `simulation` target alone, with libtest arguments, such as a test name and `--exact` | The per-run bounds only; fails when the selection executes no test |
 | `just test-turmoil-replay <record>` | Exactly the recorded package, target, test, and case, once, with the recorded inputs, in a fresh process | Exits nonzero when the replay fails, including when it reproduces the record, and when no case in the recorded test matches |
 | `just test-turmoil-replay-check` | Injects a failure at five simulated seconds into the partition-before-connect case, requires exactly one record, and requires its replay to report `turmoil replay: reproduced the recorded outcome and trace` | Fails when any of those does not hold |
-| `just test-turmoil-sweep [first] [count] [budget_seconds]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes | A real-time budget of 1,500 seconds by default; exits `124` when it expires |
+| `just test-turmoil-sweep [first] [count] [budget_seconds]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes | A real-time budget of 1,500 seconds by default; exits `124` when it expires, and fails when the sweep executes no test |
 | `just coverage-turmoil <output>` | The same tests as `just test-turmoil` under `cargo llvm-cov`, writing an LCOV report | None beyond the per-run bounds |
 
 The replay prints a verdict for every run:
@@ -682,10 +688,13 @@ A new case follows the same contract as the existing ones.
    outcomes only, never payloads, key material, process identifiers, or map-ordered listings.
 9. **Prove release.** Shut every transport down before its host exits, assert its connection counts
    afterwards, and check every pool, queue, and reservation the plan touches against its bound.
-10. **Run it.** Iterate with `just test-turmoil-simulation <test> --exact`, run
+10. **Register it.** Add the test to its invocation in `tests/turmoil-inventory.toml`, which
+    `just test-turmoil` holds the suite to: a registered test that does not run, or runs ignored,
+    fails the suite, and so does a simulation test that runs without being registered.
+11. **Run it.** Iterate with `just test-turmoil-simulation <test> --exact`, run
     `just test-turmoil-sweep` to look for divergence across seeds, then `just test-turmoil` and
     `just validate`.
-11. **Keep this chapter current** in the same change: the scenario matrix, its bounds, and any new
+12. **Keep this chapter current** in the same change: the scenario matrix, its bounds, and any new
     limit.
 
 ## Findings And Retained Regressions

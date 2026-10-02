@@ -11,7 +11,7 @@ use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 pub struct BranchInstanceRegistry<K, V>
 where
@@ -278,8 +278,10 @@ mod tests {
 
     use meticulous::OptionExt as _;
     use nervix_models::Timestamp;
-    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
-    use triomphe::Arc;
+    use nervix_primitives::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::BranchInstanceRegistry;
 

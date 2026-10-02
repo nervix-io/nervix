@@ -7,9 +7,10 @@
 //! - **Depends on.** Hickory's error types.
 //! - **Must not know.** Whether a caller retries, or what it would have connected to.
 
-use std::{error::Error, sync::Arc};
+use std::error::Error;
 
 use hickory_resolver::net::{DnsError, NetError};
+use nervix_primitives::sync::StdArc;
 use strum::AsRefStr;
 use thiserror::Error;
 
@@ -90,7 +91,7 @@ impl DnsLookupError {
             }
             // Redis exposes its stored cause as an `Arc<dyn Error>` rather than the
             // value inside the Arc, so normal `source` traversal stops at the wrapper.
-            if let Some(inner) = cause.downcast_ref::<Arc<dyn Error + Send + Sync>>()
+            if let Some(inner) = cause.downcast_ref::<StdArc<dyn Error + Send + Sync>>()
                 && let Some(lookup) = Self::find_in(inner.as_ref())
             {
                 return Some(lookup);
@@ -120,7 +121,7 @@ mod tests {
             "redis.nervix.test",
             DnsLookupFailure::NameNotFound,
         ));
-        let arc: Arc<dyn Error + Send + Sync> = Arc::new(io);
+        let arc: StdArc<dyn Error + Send + Sync> = StdArc::new(io);
         let lookup = DnsLookupError::find_in(&arc)
             .expect("the typed cause survives Redis's Arc and io::Error wrappers");
         assert_eq!(lookup.name(), "redis.nervix.test");

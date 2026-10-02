@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use nervix_models::{DomainNodeRef, ModelKind, ModelName, SchemaFingerprint, Timestamp};
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicBool, Ordering},
     blocking::Mutex,
 };
-use triomphe::Arc;
 
 use super::*;
 

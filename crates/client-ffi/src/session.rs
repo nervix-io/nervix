@@ -20,8 +20,7 @@ use meticulous::OptionExt as _;
 use nervix_client_core::{
     AutocompleteOutcome, Client, ConnectOptions, DomainName, ExecutionHandle,
 };
-use nervix_primitives::unmodeled::runtime::Runtime;
-use triomphe::Arc;
+use nervix_primitives::{sync::Arc, unmodeled::runtime::Runtime};
 
 use crate::{
     abi,

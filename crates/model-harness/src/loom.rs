@@ -16,9 +16,11 @@
 use std::env;
 
 use loom::{MAX_THREADS, model::Builder};
-use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
+use nervix_primitives::{
+    sync::Arc,
+    unmodeled::sync::atomic::{AtomicUsize, Ordering},
+};
 use tracing_subscriber::{EnvFilter, fmt};
-use triomphe::Arc;
 
 use crate::exploration::{InvariantId, LOOM_BRANCH_LIMIT, refused_loom_settings};
 

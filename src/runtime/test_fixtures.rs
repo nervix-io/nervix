@@ -5,9 +5,9 @@
 //! test needs before it can exercise anything. A fixture used by one module belongs in
 //! that module's own test module instead.
 
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
-use nervix_primitives::unmodeled::sync::OnceLock;
+use nervix_primitives::{sync::StdArc, unmodeled::sync::OnceLock};
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
@@ -26,14 +26,13 @@ use nervix_models::{
     ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nervix_primitives::{
-    sync::watch,
+    sync::{Arc, watch},
     time::{sleep, timeout},
 };
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
-use triomphe::Arc;
 
 use super::{
     wasm_output::{WasmMaterializedOutput, WasmOutputError, WasmOutputValidator},
@@ -328,7 +327,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         0,
         Vec::new(),
         None,
-        triomphe::Arc::new(super::BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(super::BranchPresence::new()),
     ))
 }
 

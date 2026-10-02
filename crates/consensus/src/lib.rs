@@ -24,7 +24,6 @@ use std::{
     future::Future,
     io,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -42,7 +41,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{
-        Mutex as AsyncMutex,
+        Arc, Mutex as AsyncMutex, StdArc,
         atomic::{AtomicU64, Ordering},
         blocking::Mutex,
         broadcast, watch,
@@ -81,7 +80,6 @@ use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
 use tracing::{error, info};
-use triomphe::Arc;
 
 mod command_execution;
 mod connectivity_fault;
@@ -6106,7 +6104,7 @@ mod tests {
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp, TransactionPosition,
     };
-    use nervix_primitives::sync::atomic::AtomicU64;
+    use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
         entry::RaftEntry,
         storage::{RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
@@ -6114,7 +6112,6 @@ mod tests {
         vote::RaftLeaderIdExt,
     };
     use tempfile::tempdir;
-    use triomphe::Arc;
 
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
@@ -7176,7 +7173,7 @@ mod tests {
             BTreeMap::from([(node.clone(), crate::Node::new("https://node-1.invalid"))]),
         )?;
         state.last_membership =
-            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+            nervix_primitives::sync::Arc::new(openraft::StoredMembership::new(None, membership));
         let stale = captured_inputs(&state, "tenant");
         apply_consensus_command(
             &mut state,
@@ -7217,7 +7214,7 @@ mod tests {
             BTreeMap::from([(node, crate::Node::new("https://node-1.invalid"))]),
         )?;
         state.last_membership =
-            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+            nervix_primitives::sync::Arc::new(openraft::StoredMembership::new(None, membership));
 
         let applied = apply_consensus_command(
             &mut state,

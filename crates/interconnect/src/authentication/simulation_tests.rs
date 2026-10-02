@@ -13,14 +13,16 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     process::Command,
-    sync::Arc as StdArc,
     time::{Duration, SystemTime},
 };
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
-use nervix_primitives::time::{Instant, sleep_until};
+use nervix_primitives::{
+    sync::StdArc,
+    time::{Instant, sleep_until},
+};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,

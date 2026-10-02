@@ -6,9 +6,11 @@
 //! the Loom models of this module create a job's cancellation through the same constructor, so the
 //! models check the protocol the pool runs.
 
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use thiserror::Error;
-use triomphe::Arc;
 
 /// The caller stopped waiting for this job before it finished.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -99,10 +101,12 @@ mod loom_models {
     use meticulous::ResultExt as _;
     use nervix_model_harness::{InvariantId, loom::explore};
     use nervix_primitives::{
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
     };
-    use triomphe::Arc;
 
     use super::{ArmedCancellation, Cancellation, Cancelled};
 

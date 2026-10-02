@@ -38,7 +38,7 @@ pub(crate) const LONGEST_FORMATTED_VALUE: usize = 256;
 /// A format `format_datetime` writes DATETIME values in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DatetimeFormat {
-    items: triomphe::Arc<[FormatItem]>,
+    items: nervix_primitives::sync::Arc<[FormatItem]>,
 }
 
 impl DatetimeFormat {
@@ -47,7 +47,7 @@ impl DatetimeFormat {
     pub fn compile(written: &str, zone: &Zone) -> Result<Self, FormatDefect> {
         let items = compile_items(written)?;
         let format = Self {
-            items: triomphe::Arc::from(items),
+            items: nervix_primitives::sync::Arc::from(items),
         };
         let longest = format.longest_value(zone);
         if longest > LONGEST_FORMATTED_VALUE {
@@ -76,7 +76,7 @@ impl DatetimeFormat {
 /// A format compiled for reading, before the time zone a call names is attached to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseFormat {
-    items: triomphe::Arc<[ReadItem]>,
+    items: nervix_primitives::sync::Arc<[ReadItem]>,
     layout: ParseLayout,
 }
 
@@ -108,7 +108,7 @@ impl ParseFormat {
             return Err(FormatDefect::TooLong { longest });
         }
         Ok(Self {
-            items: triomphe::Arc::from(items),
+            items: nervix_primitives::sync::Arc::from(items),
             layout,
         })
     }
@@ -117,7 +117,7 @@ impl ParseFormat {
 /// A format `parse_datetime` reads text in, together with how a read text names its instant.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DatetimeParser {
-    items: triomphe::Arc<[ReadItem]>,
+    items: nervix_primitives::sync::Arc<[ReadItem]>,
     reading: TextReading,
 }
 
@@ -214,7 +214,7 @@ impl DatetimeParser {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum FormatItem {
     /// Text written as it is.
-    Literal(triomphe::Arc<str>),
+    Literal(nervix_primitives::sync::Arc<str>),
     /// A field of the local date and time.
     Field(FormatDirective),
     /// Something about the zone, which a format only writes.
@@ -225,7 +225,7 @@ enum FormatItem {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ReadItem {
     /// Text read only where it appears exactly.
-    Literal(triomphe::Arc<str>),
+    Literal(nervix_primitives::sync::Arc<str>),
     /// A field of the local date and time.
     Field(FormatDirective),
 }
@@ -535,7 +535,7 @@ impl fmt::Display for FormatDefect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextExpectation {
     /// The format's literal text.
-    Literal(triomphe::Arc<str>),
+    Literal(nervix_primitives::sync::Arc<str>),
     /// A directive's field.
     Directive(FormatDirective),
 }
@@ -608,7 +608,9 @@ impl ItemsBuilder {
         }
         let text = std::mem::take(&mut self.literal);
         self.items
-            .push(FormatItem::Literal(triomphe::Arc::from(text.as_str())));
+            .push(FormatItem::Literal(nervix_primitives::sync::Arc::from(
+                text.as_str(),
+            )));
     }
 
     fn finish(mut self) -> Vec<FormatItem> {

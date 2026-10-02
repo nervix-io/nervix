@@ -7,11 +7,14 @@
 //! - **Depends on.** Certificate identity, Rustls, and Tokio's monotonic clock.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
-use std::{net::SocketAddr, sync::Arc as StdArc, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use error_stack::Report;
 use nervix_models::{ClusterNodeName, NodeEndpoint};
-use nervix_primitives::time::{Instant, timeout};
+use nervix_primitives::{
+    sync::StdArc,
+    time::{Instant, timeout},
+};
 use rustls::{
     pki_types::{CertificateDer, ServerName},
     time_provider::{DefaultTimeProvider, TimeProvider},

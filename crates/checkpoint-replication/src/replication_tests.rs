@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{Announcer, AnnouncerStep, CheckpointReplication};
 

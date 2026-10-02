@@ -44,6 +44,7 @@ use nervix_primitives::{
     collections::DashMap,
     stream::wrappers::ReceiverStream,
     sync::{
+        Arc,
         atomic::{AtomicU64, Ordering},
         mpsc, oneshot, watch,
     },
@@ -52,7 +53,6 @@ use nervix_primitives::{
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tracing::debug;
-use triomphe::Arc;
 
 use super::{OpenedRoute, ProducerOpen, ProducerRoute, RouteEnded};
 use crate::runtime::{

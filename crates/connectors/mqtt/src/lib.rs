@@ -43,6 +43,7 @@ use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicU32, Ordering},
         watch,
     },
@@ -59,7 +60,6 @@ pub use source::{
 };
 use thiserror::Error;
 use tracing::warn;
-use triomphe::Arc;
 use url::{Host, Url};
 
 const MQTT: &str = "mqtt";

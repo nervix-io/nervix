@@ -48,6 +48,7 @@ shuttle = [
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
+  "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
   "nervix-wasm/shuttle",
 ]
@@ -192,7 +193,6 @@ tower-service = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
-triomphe = { workspace = true }
 typed-builder = { workspace = true }
 ubyte = { workspace = true }
 upon = { workspace = true }
@@ -225,6 +225,7 @@ mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
 # The runtime's timer tests advance a paused clock.
+nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["fs", "signal", "term"] }

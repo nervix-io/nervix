@@ -137,6 +137,28 @@ fn exercise_threads() {
     assert_eq!(result, 5);
 }
 
+/// Shared ownership is the library's own type in every mode and on every target: no model checker
+/// counts references, so no mode substitutes a type of its own.
+#[test]
+fn shared_ownership_is_the_same_library_type_in_every_mode() {
+    assert!(is_same_type::<crate::sync::Arc<u8>, triomphe::Arc<u8>>());
+    assert!(is_same_type::<crate::sync::StdArc<u8>, std::sync::Arc<u8>>());
+    assert!(is_same_type::<crate::sync::StdWeak<u8>, std::sync::Weak<u8>>());
+}
+
+/// The `futures` families the unmodeled surface offers the browser console are that crate's own.
+#[test]
+fn the_unmodeled_futures_families_are_the_futures_crates_own() {
+    assert!(is_same_type::<
+        crate::unmodeled::futures::mpsc::UnboundedSender<u8>,
+        futures_channel::mpsc::UnboundedSender<u8>,
+    >());
+    assert!(is_same_type::<
+        crate::unmodeled::futures::AbortHandle,
+        futures_util::future::AbortHandle,
+    >());
+}
+
 #[cfg(not(any(feature = "loom", feature = "shuttle")))]
 mod ordinary {
     use std::sync::atomic as standard;
@@ -189,6 +211,10 @@ mod ordinary {
     #[test]
     fn ordinary_execution_selects_each_librarys_own_items() {
         assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<
+            crate::sync::AtomicWaker,
+            futures_util::task::AtomicWaker,
+        >());
         assert!(is_same_type::<crate::sync::Semaphore, tokio::sync::Semaphore>());
         assert!(is_same_type::<
             crate::sync::watch::Sender<u8>,
@@ -516,14 +542,15 @@ mod shuttle_mode {
         );
     }
 
-    /// Each registration and notification of `Notify`, and each read of the watch channel's version
-    /// that registers or decides, lets the scheduler choose the next task. A drop does not.
+    /// Each registration and notification of `Notify`, each registration, take and wake of an
+    /// atomic waker, and each read of the watch channel's version that registers or decides, lets
+    /// the scheduler choose the next task. A drop does not.
     #[cfg(feature = "native")]
     #[test]
     fn every_registration_and_notification_is_a_scheduling_point() {
         use std::pin::pin;
 
-        use crate::sync::{Notify, watch};
+        use crate::sync::{AtomicWaker, Notify, watch};
 
         shuttle::check_random(
             || {
@@ -544,6 +571,17 @@ mod shuttle_mode {
                 let before = context_switches();
                 drop(unregistered);
                 assert_eq!(context_switches(), before);
+
+                let registration = AtomicWaker::new();
+                let before = context_switches();
+                registration.register(std::task::Waker::noop());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                assert!(registration.take().is_some());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                registration.wake();
+                assert!(context_switches() > before);
 
                 let (sender, receiver) = watch::channel(0_u8);
                 let before = context_switches();
@@ -609,6 +647,10 @@ mod loom_mode {
         >());
         assert!(is_same_type::<crate::thread::Builder, loom::thread::Builder>());
         assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<
+            crate::sync::AtomicWaker,
+            futures_util::task::AtomicWaker,
+        >());
         assert!(is_same_type::<
             crate::sync::watch::Sender<u8>,
             tokio::sync::watch::Sender<u8>,

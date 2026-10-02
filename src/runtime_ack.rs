@@ -11,13 +11,13 @@
 
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
     blocking::Mutex,
     oneshot, watch,
 };
 use nervix_recovery::NoReceiver as _;
 use serde::{Deserialize, Serialize};
-use triomphe::Arc;
 
 const ACK_SHARES_FIT_IN_MEMORY: &str =
     "every pending ACK share has an in-memory owner, so their count fits in usize";
@@ -796,8 +796,7 @@ impl AckSet {
 mod tests {
     use std::time::Duration;
 
-    use nervix_primitives::time::timeout;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
 
@@ -1039,14 +1038,16 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_primitives::{sync::oneshot::error::TryRecvError, thread};
-    use triomphe::Arc;
+    use nervix_model_harness::shuttle::{check_dfs, check_pct};
+    use nervix_primitives::{
+        sync::{Arc, oneshot::error::TryRecvError},
+        thread,
+    };
 
     use super::{
         AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
         AckRootTracker, AckSet, Ordering,
     };
-    use crate::shuttle_test::{check_dfs, check_pct};
 
     // Models with more than three tasks have too many interleavings to enumerate, so they sample
     // schedules that need up to `PCT_DEPTH` ordering constraints to fail.

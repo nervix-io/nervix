@@ -7,11 +7,12 @@
 //! - **Depends on.** `arc-swap` and the runtime state sequence.
 //! - **Must not know.** What a generation holds, how it is encoded, or where it is persisted.
 
-use std::sync::Arc as StdArc;
-
 use nervix_primitives::{
     publication::ArcSwap,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        StdArc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 use super::lsm_sequence::LsmSequence;

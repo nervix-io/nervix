@@ -3,22 +3,24 @@
 //! Layer: test harness.
 //! - **Owns.** The coverage, exclusion, liveness and fail-stop invariants the barrier is held to
 //!   while writers that applied writes wait for, share, fail and abandon synchronizations.
-//! - **Depends on.** The production durability barrier and the server Shuttle runner.
+//! - **Depends on.** The production durability barrier and the model harness's Shuttle runner.
 //! - **Must not know.** The database a synchronization flushes, or what the writes hold.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
-use std::sync::Arc as StdArc;
-
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::unmodeled::sync::atomic::{
-    AtomicBool as StdAtomicBool, AtomicU64 as StdAtomicU64, Ordering as StdOrdering,
+use nervix_model_harness::shuttle::check_interleavings;
+use nervix_primitives::{
+    sync::StdArc,
+    unmodeled::sync::atomic::{
+        AtomicBool as StdAtomicBool, AtomicU64 as StdAtomicU64, Ordering as StdOrdering,
+    },
 };
 use nervix_recovery::Discarded as _;
 
 use super::DurabilityBarrier;
-use crate::{runtime::state_store::RuntimePersistenceError, shuttle_test::check_interleavings};
+use crate::runtime::state_store::RuntimePersistenceError;
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";

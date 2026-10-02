@@ -26,9 +26,9 @@ use arrow_schema::{DataType, Field, Fields};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_models::{JsonPath, JsonPathStep, ParseAsType};
+use nervix_primitives::sync::Arc;
 use simd_json::{Buffers, StaticNode};
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{
     error::{ErrorCode, RowErrors, SideError, SideErrorReason},
@@ -145,7 +145,7 @@ impl JsonTarget {
 
     /// The field of a collection whose elements have this type.
     fn element_field(&self) -> arrow_schema::FieldRef {
-        std::sync::Arc::new(Field::new("item", self.data_type(), false))
+        nervix_primitives::sync::StdArc::new(Field::new("item", self.data_type(), false))
     }
 
     fn fixed_width(len: NonZeroU32) -> i32 {
@@ -826,24 +826,44 @@ impl ValueColumn {
     fn finish(self, nulls: Option<arrow_buffer::NullBuffer>) -> ArrayRef {
         match self {
             Self::Bool(mut values) => {
-                std::sync::Arc::new(BooleanArray::new(values.finish(), nulls))
+                nervix_primitives::sync::StdArc::new(BooleanArray::new(values.finish(), nulls))
             }
             Self::String { offsets, bytes } => {
                 let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
                 let array = StringArray::try_new(offsets, Buffer::from_vec(bytes), nulls)
                     .verified("the column wrote increasing offsets over whole UTF-8 strings");
-                std::sync::Arc::new(array)
+                nervix_primitives::sync::StdArc::new(array)
             }
-            Self::UInt8(values) => std::sync::Arc::new(UInt8Array::new(values.into(), nulls)),
-            Self::Int8(values) => std::sync::Arc::new(Int8Array::new(values.into(), nulls)),
-            Self::UInt16(values) => std::sync::Arc::new(UInt16Array::new(values.into(), nulls)),
-            Self::Int16(values) => std::sync::Arc::new(Int16Array::new(values.into(), nulls)),
-            Self::UInt32(values) => std::sync::Arc::new(UInt32Array::new(values.into(), nulls)),
-            Self::Int32(values) => std::sync::Arc::new(Int32Array::new(values.into(), nulls)),
-            Self::UInt64(values) => std::sync::Arc::new(UInt64Array::new(values.into(), nulls)),
-            Self::Int64(values) => std::sync::Arc::new(Int64Array::new(values.into(), nulls)),
-            Self::Float32(values) => std::sync::Arc::new(Float32Array::new(values.into(), nulls)),
-            Self::Float64(values) => std::sync::Arc::new(Float64Array::new(values.into(), nulls)),
+            Self::UInt8(values) => {
+                nervix_primitives::sync::StdArc::new(UInt8Array::new(values.into(), nulls))
+            }
+            Self::Int8(values) => {
+                nervix_primitives::sync::StdArc::new(Int8Array::new(values.into(), nulls))
+            }
+            Self::UInt16(values) => {
+                nervix_primitives::sync::StdArc::new(UInt16Array::new(values.into(), nulls))
+            }
+            Self::Int16(values) => {
+                nervix_primitives::sync::StdArc::new(Int16Array::new(values.into(), nulls))
+            }
+            Self::UInt32(values) => {
+                nervix_primitives::sync::StdArc::new(UInt32Array::new(values.into(), nulls))
+            }
+            Self::Int32(values) => {
+                nervix_primitives::sync::StdArc::new(Int32Array::new(values.into(), nulls))
+            }
+            Self::UInt64(values) => {
+                nervix_primitives::sync::StdArc::new(UInt64Array::new(values.into(), nulls))
+            }
+            Self::Int64(values) => {
+                nervix_primitives::sync::StdArc::new(Int64Array::new(values.into(), nulls))
+            }
+            Self::Float32(values) => {
+                nervix_primitives::sync::StdArc::new(Float32Array::new(values.into(), nulls))
+            }
+            Self::Float64(values) => {
+                nervix_primitives::sync::StdArc::new(Float64Array::new(values.into(), nulls))
+            }
             Self::Vec {
                 element,
                 offsets,
@@ -853,7 +873,7 @@ impl ValueColumn {
                 let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
                 let array = ListArray::try_new(element.element_field(), offsets, values, nulls)
                     .verified("the column wrote increasing offsets over its own elements");
-                std::sync::Arc::new(array)
+                nervix_primitives::sync::StdArc::new(array)
             }
             Self::Array {
                 element,
@@ -869,7 +889,7 @@ impl ValueColumn {
                     nulls,
                 )
                 .verified("the column wrote exactly its width of elements for every value");
-                std::sync::Arc::new(array)
+                nervix_primitives::sync::StdArc::new(array)
             }
         }
     }
@@ -929,7 +949,10 @@ impl ScanColumn {
             Self::Exists {
                 mut values,
                 mut validity,
-            } => std::sync::Arc::new(BooleanArray::new(values.finish(), validity.finish())),
+            } => nervix_primitives::sync::StdArc::new(BooleanArray::new(
+                values.finish(),
+                validity.finish(),
+            )),
         }
     }
 }

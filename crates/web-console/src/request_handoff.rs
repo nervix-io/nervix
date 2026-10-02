@@ -18,10 +18,10 @@ use std::{
 };
 
 use error_stack::Report;
-use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::{Stream, StreamExt as _};
 use leptos::prelude::*;
 use meticulous::OptionExt as _;
+use nervix_primitives::unmodeled::futures::mpsc;
 use nervix_recovery::Discarded as _;
 
 use crate::{ConsoleRequest, RequestRefusal, SESSION_LIMITS};
@@ -36,7 +36,7 @@ const _: () = assert!(MAX_WAITING_REQUESTS > 0);
 /// Creates the two ends of the hand-off. Every control holds a clone of the sender; the session
 /// loop owns the receiver, which ends once every sender is gone.
 pub(crate) fn request_handoff() -> (RequestSender, RequestReceiver) {
-    let (sender, receiver) = unbounded();
+    let (sender, receiver) = mpsc::unbounded();
     let load = StoredValue::new(WaitingLoad::default());
     (
         RequestSender { sender, load },
@@ -99,7 +99,7 @@ struct WaitingRequest {
 /// A control's end of the hand-off.
 #[derive(Clone)]
 pub(crate) struct RequestSender {
-    sender: UnboundedSender<WaitingRequest>,
+    sender: mpsc::UnboundedSender<WaitingRequest>,
     /// Shared with the receiver, which releases the room of every request the loop takes.
     load: StoredValue<WaitingLoad>,
 }
@@ -127,7 +127,7 @@ impl RequestSender {
 /// The session loop's end of the hand-off. It yields requests in the order the controls issued
 /// them, and ends once every sender is gone.
 pub(crate) struct RequestReceiver {
-    receiver: UnboundedReceiver<WaitingRequest>,
+    receiver: mpsc::UnboundedReceiver<WaitingRequest>,
     load: StoredValue<WaitingLoad>,
 }
 

@@ -10,7 +10,7 @@
 use nervix_client_core::{
     ClientConsumerLimits, DomainName, EmitterConsumer, EmitterName, wire::EmitterOpened,
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,

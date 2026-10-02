@@ -2,13 +2,12 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The proof that the server's `shuttle` feature reaches the atomics a dependency owns.
-//! - **Depends on.** The vocabulary's atomic timestamp and the server Shuttle runner.
+//! - **Depends on.** The vocabulary's atomic timestamp and the model harness's Shuttle runner.
 //! - **Must not know.** What a timestamp marks, or any runtime protocol.
 
+use nervix_model_harness::shuttle::check_random;
 use nervix_models::{AtomicTimestamp, Timestamp};
 use shuttle::current::context_switches;
-
-use crate::shuttle_test::check_random;
 
 /// Shuttle counts every point at which it could switch threads, including the ones where it keeps
 /// running the same thread, so only an operation it observes advances the count. The timestamp

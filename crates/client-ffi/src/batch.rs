@@ -23,9 +23,8 @@ use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{EmitterDelivery, ProducerBatch};
 use nervix_models::{ParseAsType, SchemaField};
-use nervix_primitives::sync::blocking::OnceLock;
+use nervix_primitives::sync::{Arc, blocking::OnceLock};
 use nervix_recovery::Discarded as _;
-use triomphe::Arc;
 
 use crate::{
     abi,

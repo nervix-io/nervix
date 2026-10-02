@@ -117,7 +117,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_cancellation_before_admission_wakes_its_waiter() {
-        let admission = triomphe::Arc::new(RequestAdmission::default());
+        let admission = nervix_primitives::sync::Arc::new(RequestAdmission::default());
         let waiter = admission.clone();
         let waiting =
             nervix_primitives::task::spawn(

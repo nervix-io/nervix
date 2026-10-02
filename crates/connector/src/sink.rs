@@ -24,9 +24,8 @@ use nervix_models::{
     FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
     MessageErrorOperation, StructuredMessageError, Timestamp,
 };
-use nervix_primitives::time::Instant;
+use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::physical_time::PhysicalDeadline;
 

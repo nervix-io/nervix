@@ -11,30 +11,9 @@
 [[permission]]
 items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no invariant reads."
-owner = "The execution crate's Shuttle runner."
-path = "crates/execution/src/tests.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
-
-[[permission]]
-items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
-limit = "Runner bookkeeping that no invariant reads."
-owner = "The interconnect's Shuttle runner."
-path = "crates/interconnect/src/shuttle_test.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
-
-[[permission]]
-items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
-limit = "Runner bookkeeping that no invariant reads."
-owner = "The server's Shuttle runner."
-path = "src/shuttle_test.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
-
-[[permission]]
-items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
-limit = "Runner bookkeeping that no invariant reads."
-owner = "The Rust client's Shuttle runner."
-path = "crates/client-core/src/shuttle_test.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
+owner = "The Shuttle runner of nervix-model-harness."
+path = "crates/model-harness/src/shuttle.rs"
+reason = "The highest step count spans every schedule the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
 items = [
@@ -241,11 +220,23 @@ path = "src/runtime/test_fixtures.rs"
 reason = "The compiled schema is built once per test process and shared by every test in it, including every model execution."
 
 [[permission]]
-items = ["sync::Once"]
+items = [
+  "futures::AbortHandle",
+  "futures::Abortable",
+  "futures::select",
+  "sync::Once",
+]
 limit = "The browser console runs in no execution mode, so nothing it does is modeled."
-owner = "The browser console's executor installation."
+owner = "The browser console: its executor installation, its session loop's waits and its cancellable uploads."
 path = "crates/web-console/src/main.rs"
-reason = "The console installs its task executor once per page, and a browser build has no native capability to select a modeled primitive from."
+reason = "The console installs its task executor once per page, and its tasks wait on and cancel futures on the browser's event loop, which no execution mode runs and where the boundary's native families do not exist: a browser build has no native capability to select a modeled primitive from."
+
+[[permission]]
+items = ["futures::mpsc"]
+limit = "The browser console runs in no execution mode, so nothing it does is modeled."
+owner = "The browser console's request hand-off."
+path = "crates/web-console/src/request_handoff.rs"
+reason = "The console's controls hand requests to its session loop on the browser's event loop, which no execution mode runs and where the boundary's native channels do not exist."
 
 [[permission]]
 items = ["time::Instant"]

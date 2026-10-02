@@ -28,9 +28,8 @@ use nervix_client_wire::{
     BackupDownloadMessage, EncodedFrame, SessionLimits,
 };
 use nervix_models::{CommandExecutionReference, Timestamp, UserName};
-use nervix_primitives::sync::{blocking::Mutex, mpsc};
+use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 use thiserror::Error;
-use triomphe::Arc;
 
 /// Archive bytes one download frame carries at most.
 const DOWNLOAD_CHUNK_BYTES: usize = 256 * 1024;
@@ -332,9 +331,8 @@ async fn refuse_read(
 pub(in crate::application) mod test_archives {
     //! Retained archives held in memory, which count how often they are released.
 
-    use std::sync::Arc as StdArc;
-
     use error_stack::Report;
+    use nervix_primitives::sync::StdArc;
     // A release count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
     // changes in the same scheduling step as the release it counts.
     use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
@@ -403,11 +401,12 @@ pub(in crate::application) mod test_archives {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
-    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
+    use nervix_primitives::{
+        sync::StdArc,
+        unmodeled::sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use super::{test_archives::*, *};
 
@@ -642,17 +641,16 @@ mod shuttle_tests {
     //! collecting, concurrent downloads collect an archive exactly once, and the archive is
     //! released exactly once however they finish.
 
-    use std::sync::Arc as StdArc;
-
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
+    use nervix_model_harness::shuttle::check_interleavings;
     use nervix_primitives::{
+        sync::StdArc,
         thread,
         unmodeled::sync::atomic::{AtomicUsize, Ordering},
     };
     use shuttle::future::block_on;
 
     use super::{test_archives::*, *};
-    use crate::shuttle_test::check_interleavings;
 
     /// Enough bytes for several chunks, so a stream has frames to run ahead with.
     const ARCHIVE_BYTES: usize = 3 * 256 * 1024 + 1;

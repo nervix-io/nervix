@@ -6523,7 +6523,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml 0.8.2",
- "triomphe",
  "upon",
  "uuid",
 ]
@@ -6549,7 +6548,6 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -6560,7 +6558,6 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -6588,7 +6585,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "triomphe",
  "url",
 ]
 
@@ -6611,6 +6607,7 @@ dependencies = [
  "meticulous",
  "nervix-client-wire",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-nspl",
  "nervix-primitives",
@@ -6624,7 +6621,6 @@ dependencies = [
  "tokio",
  "tonic 0.13.1",
  "tracing",
- "triomphe",
  "url",
  "uuid",
 ]
@@ -6650,7 +6646,6 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "tonic 0.13.1",
- "triomphe",
  "uuid",
 ]
 
@@ -6689,6 +6684,7 @@ dependencies = [
  "error-stack",
  "itoa",
  "meticulous",
+ "nervix-primitives",
  "nervix-simd-kernels",
  "ryu",
  "serde",
@@ -6718,7 +6714,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "triomphe",
  "upon",
  "url",
  "uuid",
@@ -6829,7 +6824,6 @@ dependencies = [
  "rdkafka",
  "thiserror 2.0.21",
  "tracing",
- "triomphe",
 ]
 
 [[package]]
@@ -6874,7 +6868,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "triomphe",
  "url",
 ]
 
@@ -7054,7 +7047,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
- "triomphe",
 ]
 
 [[package]]
@@ -7142,7 +7134,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.24.0",
- "triomphe",
  "url",
 ]
 
@@ -7185,7 +7176,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "triomphe",
  "ubyte",
 ]
 
@@ -7227,7 +7217,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "triomphe",
  "webpki-roots 1.0.9",
 ]
 
@@ -7242,7 +7231,6 @@ dependencies = [
  "nervix-primitives",
  "shuttle",
  "thiserror 2.0.21",
- "triomphe",
  "ubyte",
 ]
 
@@ -7254,7 +7242,6 @@ dependencies = [
  "intrusive-collections",
  "meticulous",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -7276,6 +7263,7 @@ dependencies = [
  "meticulous",
  "nervix-dns",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7295,7 +7283,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "triomphe",
  "turmoil",
  "ubyte",
  "url",
@@ -7326,9 +7313,9 @@ version = "0.1.0-dev"
 dependencies = [
  "loom",
  "nervix-primitives",
+ "shuttle",
  "tracing",
  "tracing-subscriber",
- "triomphe",
 ]
 
 [[package]]
@@ -7358,7 +7345,6 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "triomphe",
  "url",
  "uuid",
 ]
@@ -7405,6 +7391,7 @@ dependencies = [
  "nervix-arbitrary",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nervix-recovery",
  "tempfile",
  "thiserror 2.0.21",
@@ -7417,6 +7404,8 @@ dependencies = [
  "arc-swap",
  "concurrent-queue",
  "dashmap 6.2.1",
+ "futures-channel",
+ "futures-util",
  "loom",
  "meticulous",
  "nervix-primitives-macros",
@@ -7430,6 +7419,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "triomphe",
  "turmoil",
 ]
 
@@ -7470,7 +7460,6 @@ dependencies = [
  "regex",
  "roto",
  "thiserror 2.0.21",
- "triomphe",
  "uuid",
 ]
 
@@ -7572,6 +7561,7 @@ dependencies = [
  "nervix-expiry-map",
  "nervix-interconnect",
  "nervix-jaq",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-nspl",
  "nervix-primitives",
@@ -7629,7 +7619,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "triomphe",
  "typed-builder 0.20.1",
  "ubyte",
  "upon",
@@ -7719,7 +7708,6 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.21",
  "tokio",
- "triomphe",
  "unicode-normalization",
  "url",
  "uuid",
@@ -7746,7 +7734,6 @@ dependencies = [
  "nonzero_ext",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "triomphe",
  "wasmtime",
 ]
 
@@ -7783,7 +7770,6 @@ dependencies = [
  "bytes",
  "console_error_panic_hook",
  "error-stack",
- "futures-channel",
  "futures-util",
  "gloo-net 0.7.0",
  "js-sys",

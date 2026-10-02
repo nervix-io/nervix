@@ -24,7 +24,7 @@ use nervix_connector::{
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, Timestamp, TopicName};
 use nervix_primitives::{
-    sync::watch,
+    sync::{Arc, watch},
     time::{Instant, sleep_until},
 };
 use rdkafka::{
@@ -35,7 +35,6 @@ use rdkafka::{
 };
 use thiserror::Error;
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 const KAFKA: &str = "kafka";
 const DOMAIN_ASSIGNMENT_RETRY: Duration = Duration::from_millis(100);

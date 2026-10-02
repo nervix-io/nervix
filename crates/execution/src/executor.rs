@@ -1,12 +1,10 @@
 //! The executor: every worker class and memory budget of a node behind one shared handle.
 
-use std::sync::Arc as StdArc;
-
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::ResultExt as _;
+use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{
     AdmissionError, Cancellation, ChargedBytes, CpuClass, ExecutionConfig, ExecutionConfigError,

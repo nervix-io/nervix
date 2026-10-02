@@ -14,7 +14,6 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc as StdArc, Weak},
     time::Duration,
 };
 
@@ -31,12 +30,12 @@ use nervix_models::{
     ClientConsumerLimits, DomainName, EmitterName, RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::sync::{
+    Arc, StdArc, StdWeak,
     atomic::{AtomicBool, Ordering},
     blocking::Mutex as SyncMutex,
     oneshot, watch,
 };
 use nervix_recovery::Discarded as _;
-use triomphe::Arc;
 use uuid::Uuid;
 
 use crate::{
@@ -121,7 +120,7 @@ pub enum ConsumerConnection {
 
 #[derive(Clone, Default)]
 pub(crate) struct DesiredConsumers {
-    desired: Arc<SyncMutex<BTreeMap<usize, Weak<ConsumerHandle>>>>,
+    desired: Arc<SyncMutex<BTreeMap<usize, StdWeak<ConsumerHandle>>>>,
 }
 
 /// One competing application consumer attached to an emitter on a single session exchange.
@@ -281,7 +280,7 @@ impl DesiredConsumers {
     pub(crate) fn restorable(&self) -> Vec<StdArc<ConsumerHandle>> {
         let mut desired = self.desired.lock();
         desired.retain(|_, handle| handle.strong_count() > 0);
-        desired.values().filter_map(Weak::upgrade).collect()
+        desired.values().filter_map(StdWeak::upgrade).collect()
     }
 
     pub(crate) fn exchange_ended(&self, generation: &Arc<()>) {
@@ -863,8 +862,9 @@ impl EmitterDelivery {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use nervix_model_harness::shuttle::check_random_and_pct;
+
     use super::*;
-    use crate::shuttle_test::check_random_and_pct;
 
     #[test]
     fn shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange() {

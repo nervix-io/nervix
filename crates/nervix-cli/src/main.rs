@@ -50,6 +50,7 @@ use nervix_nspl::client_statement::{
 use nervix_primitives::{
     runtime::Handle,
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         blocking::Mutex,
     },
@@ -63,7 +64,6 @@ use reedline::{
 };
 use thiserror::Error;
 use tokio::signal;
-use triomphe::Arc;
 
 mod backup;
 mod restore;
@@ -72,6 +72,8 @@ use self::{
     backup::{BackupRequest, CliBackupScope, CliReportFormat},
     restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
 };
+
+nervix_primitives::product_binary!("nervix-cli");
 
 const HISTORY_FILE: &str = ".nervix_client_history";
 const EVENT_BUFFER_RECORDS: usize = 128;

@@ -22,7 +22,6 @@ use std::{
     hash::RandomState,
     net::SocketAddr,
     ops::Deref,
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -44,7 +43,7 @@ use nervix_primitives::{
     net::{TcpListener, TcpStream},
     publication::ArcSwap,
     sync::{
-        CancellationToken, Notify, OwnedSemaphorePermit, Semaphore,
+        Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
@@ -53,7 +52,6 @@ use nervix_primitives::{
 };
 use strum::EnumCount as _;
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,

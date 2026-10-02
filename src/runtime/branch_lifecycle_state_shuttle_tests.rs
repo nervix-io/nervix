@@ -7,14 +7,14 @@
 //! - **Depends on.** The production branch lifecycle handle and the server Shuttle runner.
 //! - **Must not know.** What a checkpoint holds, the interconnect, or stable storage.
 
-use std::sync::Arc as StdArc;
-
 use meticulous::ResultExt as _;
 use nervix_interconnect::RuntimeState;
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::SchemaFingerprint;
+use nervix_primitives::sync::StdArc;
 
 use super::{AnnouncedCheckpoint, ReplicatedBranchLifecycle};
-use crate::{runtime::test_fixtures::string_branch_key, shuttle_test::check_interleavings};
+use crate::runtime::test_fixtures::string_branch_key;
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";

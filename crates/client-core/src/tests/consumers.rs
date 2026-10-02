@@ -8,7 +8,6 @@
 
 use std::{
     num::{NonZeroU32, NonZeroU64},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -23,6 +22,7 @@ use nervix_models::{
     AckWindow, ClientConsumerLimits, ClientEndpointContract, EmitterName, ParseAsType, RelayName,
     Timestamp,
 };
+use nervix_primitives::sync::StdArc;
 use uuid::Uuid;
 
 use super::{DEADLINE, Loopback, domain, field};

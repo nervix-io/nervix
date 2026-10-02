@@ -12,10 +12,9 @@
 
 use std::{
     cell::Cell,
-    fmt,
-    io::{self, Cursor, Write as _},
+    fmt, io,
+    io::{Cursor, Write as _},
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc as StdArc,
 };
 
 use ahash::HashMap;
@@ -61,6 +60,7 @@ use nervix_models::{
     RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
     ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
 use prost::Message as ProstMessage;
@@ -75,7 +75,6 @@ use serde::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
-use triomphe::Arc;
 
 mod arrow_body;
 mod batch_container;

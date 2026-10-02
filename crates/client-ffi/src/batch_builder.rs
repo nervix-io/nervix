@@ -11,7 +11,7 @@
 //! as soon as the call returns. Values are never converted: a level takes exactly its type's
 //! width or text, a boolean is 0 or 1, and a string is UTF-8.
 
-use std::{num::NonZeroU32, sync::Arc as StdArc};
+use std::num::NonZeroU32;
 
 use arch_into::ArchInto as _;
 use arrow_array::{ArrayRef, RecordBatch, make_array};
@@ -19,6 +19,7 @@ use arrow_buffer::{BooleanBuffer, Buffer, MutableBuffer};
 use arrow_data::ArrayData;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, SchemaField};
+use nervix_primitives::sync::StdArc;
 
 use crate::{
     abi,

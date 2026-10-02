@@ -1,6 +1,7 @@
-use std::{io, sync::Arc as StdArc, time::Duration};
+use std::{io, time::Duration};
 
 use meticulous::ResultExt as _;
+use nervix_primitives::sync::StdArc;
 use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},

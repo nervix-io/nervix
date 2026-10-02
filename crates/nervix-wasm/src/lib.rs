@@ -15,7 +15,6 @@ use std::{
     convert::Infallible,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -26,7 +25,9 @@ use flatbuffers::{Allocator, FlatBufferBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
-use nervix_primitives::sync::mpsc;
+#[cfg(test)]
+use nervix_primitives::sync::Arc;
+use nervix_primitives::sync::{StdArc, mpsc};
 // The epoch driver is an operating-system thread that no model runs, so the flag that stops it is a
 // real atomic in every mode.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, Ordering};
@@ -34,8 +35,6 @@ use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 pub use nervix_wasm_protocol::SavedStateRejection;
 use thiserror::Error;
-#[cfg(test)]
-use triomphe::Arc;
 use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel,
     ResourceLimiter, Store, Trap, TypedFunc,
@@ -2362,16 +2361,13 @@ fn ensure_success(export: &'static str, code: i32) -> StackResult<(), WasmGuestC
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        sync::Arc as StdArc,
-    };
+    use std::path::{Path, PathBuf};
 
     use arrow_array::{Int32Array, RecordBatch, StringArray};
     use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema};
     use nervix_models::{CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName};
-    use nervix_primitives::sync::atomic::AtomicU64;
+    use nervix_primitives::sync::{StdArc, atomic::AtomicU64};
     use nonzero_ext::nonzero;
 
     use super::*;

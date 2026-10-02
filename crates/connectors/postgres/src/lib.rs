@@ -962,10 +962,9 @@ fn float_text(value: f64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 

@@ -12,7 +12,6 @@ workspace = true
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }

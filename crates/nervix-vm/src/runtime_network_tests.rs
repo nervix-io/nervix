@@ -10,10 +10,9 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How the kernels parse text or walk columns.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{Array, BinaryArray, BooleanArray, Int64Array, ListArray, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::execute_program_sync;
 use crate::{

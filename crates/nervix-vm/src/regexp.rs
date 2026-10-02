@@ -10,13 +10,16 @@
 //! - **Depends on.** The regex engine and the `regex` error vocabulary the VM reports.
 //! - **Must not know.** Registers, batches, row errors, or which rows a pattern applies to.
 
-use std::{collections::hash_map::Entry, sync::Arc};
+use std::collections::hash_map::Entry;
 
 use ahash::{HashMap, HashMapExt};
 use indexmap::IndexMap;
 use nervix_primitives::{
     publication::ArcSwapOption,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        StdArc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use regex_automata::{
     Input, MatchKind,
@@ -112,14 +115,14 @@ impl Eq for PatternSource {}
 #[derive(Debug, Clone)]
 pub struct ConstantPattern {
     text: Box<str>,
-    outcome: Arc<PatternOutcome>,
+    outcome: StdArc<PatternOutcome>,
 }
 
 impl ConstantPattern {
     fn compile(text: &str) -> Self {
         Self {
             text: Box::from(text),
-            outcome: Arc::new(PatternOutcome::compile(text)),
+            outcome: StdArc::new(PatternOutcome::compile(text)),
         }
     }
 
@@ -137,7 +140,7 @@ impl ConstantPattern {
         }
     }
 
-    pub(crate) fn outcome(&self) -> &Arc<PatternOutcome> {
+    pub(crate) fn outcome(&self) -> &StdArc<PatternOutcome> {
         &self.outcome
     }
 }
@@ -185,7 +188,7 @@ type CreateCache = Box<dyn Fn() -> Cache + Send + Sync>;
 /// many rows it searches.
 #[derive(Debug)]
 pub struct PreparedRegex {
-    regex: Arc<meta::Regex>,
+    regex: StdArc<meta::Regex>,
     caches: Pool<Cache, CreateCache>,
 }
 
@@ -205,9 +208,9 @@ impl PreparedRegex {
             .syntax(syntax)
             .build(pattern)
             .map_err(regex_error)?;
-        let regex = Arc::new(regex);
+        let regex = StdArc::new(regex);
         let create: CreateCache = {
-            let regex = Arc::clone(&regex);
+            let regex = StdArc::clone(&regex);
             Box::new(move || regex.create_cache())
         };
         Ok(Self {
@@ -307,7 +310,7 @@ impl ActiveRegex<'_> {
 }
 
 /// Compiled patterns keyed by their text, in the order they were compiled.
-type PatternTable = IndexMap<Box<str>, Arc<PatternOutcome>, ahash::RandomState>;
+type PatternTable = IndexMap<Box<str>, StdArc<PatternOutcome>, ahash::RandomState>;
 
 /// The bounded cache one call keeps for the patterns it reads from a field.
 ///
@@ -320,7 +323,7 @@ type PatternTable = IndexMap<Box<str>, Arc<PatternOutcome>, ahash::RandomState>;
 /// an empty cache, and a clone of the program shares the cache with its original.
 #[derive(Debug, Clone, Default)]
 pub struct DynamicPatterns {
-    shared: Arc<PatternCache>,
+    shared: StdArc<PatternCache>,
 }
 
 #[derive(Debug, Default)]
@@ -399,13 +402,17 @@ impl DynamicPatterns {
 }
 
 impl PatternCache {
-    fn resolve(&self, snapshot: Option<&Arc<PatternTable>>, text: &str) -> Arc<PatternOutcome> {
+    fn resolve(
+        &self,
+        snapshot: Option<&StdArc<PatternTable>>,
+        text: &str,
+    ) -> StdArc<PatternOutcome> {
         if let Some(table) = snapshot
             && let Some(outcome) = table.get(text)
         {
-            return Arc::clone(outcome);
+            return StdArc::clone(outcome);
         }
-        let outcome = Arc::new(PatternOutcome::compile(text));
+        let outcome = StdArc::new(PatternOutcome::compile(text));
         self.compilations.fetch_add(1, Ordering::Relaxed);
         let mut evicted = false;
         self.table.rcu(|current| {
@@ -421,9 +428,9 @@ impl PatternCache {
                     next.shift_remove_index(0);
                     evicted = true;
                 }
-                next.insert(Box::from(text), Arc::clone(&outcome));
+                next.insert(Box::from(text), StdArc::clone(&outcome));
             }
-            Some(Arc::new(next))
+            Some(StdArc::new(next))
         });
         if evicted {
             self.evictions.fetch_add(1, Ordering::Relaxed);
@@ -434,7 +441,7 @@ impl PatternCache {
 
 /// The patterns one batch of rows uses, each distinct pattern resolved once.
 pub(crate) struct BatchPatterns {
-    outcomes: Vec<Arc<PatternOutcome>>,
+    outcomes: Vec<StdArc<PatternOutcome>>,
     rows: RowPatterns,
 }
 
@@ -447,7 +454,7 @@ enum RowPatterns {
 
 impl BatchPatterns {
     /// The patterns of a batch whose rows all use one pattern.
-    pub(crate) fn shared(outcome: Arc<PatternOutcome>) -> Self {
+    pub(crate) fn shared(outcome: StdArc<PatternOutcome>) -> Self {
         Self {
             outcomes: vec![outcome],
             rows: RowPatterns::Shared,
@@ -455,7 +462,7 @@ impl BatchPatterns {
     }
 
     /// The distinct patterns of the batch, in the order rows first used them.
-    pub(crate) fn outcomes(&self) -> &[Arc<PatternOutcome>] {
+    pub(crate) fn outcomes(&self) -> &[StdArc<PatternOutcome>] {
         &self.outcomes
     }
 
@@ -471,8 +478,7 @@ impl BatchPatterns {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use nervix_primitives::sync::StdArc;
     use rstest::rstest;
 
     use super::{
@@ -620,8 +626,8 @@ mod tests {
         );
 
         let again = cache.resolve_rows([Some("b+"), Some("a+")].into_iter());
-        assert!(Arc::ptr_eq(&again.outcomes()[0], &batch.outcomes()[1]));
-        assert!(Arc::ptr_eq(&again.outcomes()[1], &batch.outcomes()[0]));
+        assert!(StdArc::ptr_eq(&again.outcomes()[0], &batch.outcomes()[1]));
+        assert!(StdArc::ptr_eq(&again.outcomes()[1], &batch.outcomes()[0]));
         assert_eq!(cache.statistics().compiled, 3);
     }
 
@@ -683,7 +689,7 @@ mod tests {
 
     #[test]
     fn shared_batch_patterns_answer_slot_zero_for_every_row() {
-        let outcome = Arc::new(PatternOutcome::compile("a"));
+        let outcome = StdArc::new(PatternOutcome::compile("a"));
         let batch = BatchPatterns::shared(outcome);
         assert_eq!(batch.slot(0), Some(0));
         assert_eq!(batch.slot(1_000), Some(0));

@@ -35,14 +35,13 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     sync::{
-        CancellationToken,
+        Arc, CancellationToken,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::{Mutex, RwLock},
         broadcast, mpsc, oneshot, watch,
     },
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
-use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
 

@@ -20,7 +20,7 @@ use nervix_client_core::{
     ClientProducerAdmission, ClientProducerLimits, DomainName, IngestorName, ProducerBatch,
     ProducerEnd, SubmissionId,
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,

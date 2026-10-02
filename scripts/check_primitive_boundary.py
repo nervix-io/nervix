@@ -3,18 +3,27 @@
 """Hold every governed Nervix primitive to the primitive boundary, and every mode to its owner.
 
 `nervix-primitives` selects the execution-sensitive primitives of a build for its execution mode:
-atomics, orderings and fences; async and thread-blocking synchronization; tasks, the async runtime
-and its attributes and `select!`; timers and the monotonic clock; sockets; streams over channels;
-publication; concurrent collections; threads and thread-local storage. Code that reaches one of them
-any other way escapes that selection: a modeled build would run it on a real primitive, or on a
-backend the rest of the graph does not use, a simulated host would wait on the operating system's
-clock or reach its network, and a check would claim coverage it does not have. The source rules
-reject every such path in every tracked or new Rust file outside the owner, including tests,
-benchmarks, examples and macro bodies, whether written as an import, a renamed or grouped import, a
-glob, a fully qualified path, an attribute, a renamed crate, or through an alias of `std`, `core` or
-their `sync`, `time` or `net` module. Comments and literal contents are blanked first, and
-conditional compilation is ignored, so an inactive `cfg` branch is checked like an active one. Each
-violation names the approved path.
+atomics, orderings and fences; shared ownership; async and thread-blocking synchronization, including
+waker registration; tasks, the async runtime and its attributes and `select!`; timers and the
+monotonic clock; sockets; streams over channels; publication; concurrent collections; threads and
+thread-local storage. Code that reaches one of them any other way escapes that selection: a modeled
+build would run it on a real primitive, or on a backend the rest of the graph does not use, a
+simulated host would wait on the operating system's clock or reach its network, and a check would
+claim coverage it does not have. The source rules reject every such path in every tracked or new
+Rust file outside the owner, including tests, benchmarks, examples and macro bodies, whether written
+as an import, a renamed or grouped import, a glob, a fully qualified path, an attribute, a renamed
+crate, or through an alias of `std`, `core` or their `sync`, `time` or `net` module. Comments and
+literal contents are blanked first, and conditional compilation is ignored, so an inactive `cfg`
+branch is checked like an active one. Each violation names the approved path.
+
+The `futures` crates' channels, locks, executors, waker registration, `select!` and abort handles
+are governed too: a native task takes those families from the boundary, which selects them from
+Tokio, and the browser console, whose event loop no mode runs, reaches the `futures` ones through
+`nervix_primitives::unmodeled::futures` under a permission. Their pure combinators, like Tokio's I/O
+traits, filesystem, process and signal modules and its `pin!` and `join!`, are real in every mode
+and are not governed here. Guest code, the WASM guest SDK and every guest library built on it, is
+compiled into a user's WASM guest, where no mode exists and no Nervix process runs, so its sources
+are outside the source rules.
 
 Resolving a name through the operating system, with `tokio::net::lookup_host` or a
 `ToSocketAddrs` trait, goes around the node's resolver, so those paths are rejected too, naming the
@@ -28,12 +37,20 @@ executor instead, so any other file that names either needs a permission in
 `crates/primitives/blocking-permissions.toml` naming the file, the items it names by their paths
 below `nervix_primitives`, its owner, why that owner stays outside the executor, and what bounds its
 work instead. A use no permission lists for its file and a listed item the file does not name both
-fail. Tokio's I/O traits, filesystem, process and signal modules and its pure `pin!` and `join!`
-macros are real in every mode and are not governed here.
+fail.
 
-Tokio's unstable runtime controls belong to the Turmoil build alone: `--cfg tokio_unstable` may
-appear only in a `justfile` recipe whose name names Turmoil, and never in Cargo configuration or a
-workflow, so no other build changes how Tokio schedules or reports.
+An execution mode is a feature of the boundary and never a global cfg, which every crate of a build
+reads, Tokio's included. A bare `loom`, `shuttle` or `turmoil` in a `cfg` predicate is rejected, and
+so is `--cfg loom`, `--cfg shuttle` or `--cfg turmoil` in any `justfile` recipe, Cargo
+configuration, workflow or build script. Tokio's unstable runtime controls belong to the Turmoil
+build alone: `--cfg tokio_unstable` may appear only in a `justfile` recipe whose name names Turmoil.
+
+The analysis cfg, `nervix_lint`, is tooling only. The synchronization analysis driver alone sets
+it, to read the contracts written beside the code, and the analysis must read the code a product
+build compiles. So `--cfg nervix_lint` is rejected in every recipe, configuration, workflow and
+build script; a `cfg` or `cfg!` predicate that names it is rejected, because it would select code;
+and a `cfg_attr` it gates holds only `nervix::` contracts and lint levels. The rules above read
+what an annotation gates like any other source.
 
 A selected atomic belongs to one model execution, so it never lives in a `static`, which outlives
 every execution, and it is never constructed in a const context, which Loom's atomics do not
@@ -45,20 +62,33 @@ unless the file imports it only from the unmodeled path. The rules read declared
 constructions, so a struct that holds an atomic hides it from them when it is built lazily; the rule
 still applies to it.
 
+Loom models atomics, its threads and thread-local storage, and nothing else, so Loom model code, an
+inline module or a module file whose declaration compiles it only for Loom, names no other selected
+family: in a Loom build that family is the ordinary library, outside every model. Shared ownership,
+real in every mode, and permitted unmodeled primitives are named explicitly, and pass.
+
 A real primitive that must stay outside every model is reached through
 `nervix_primitives::unmodeled` and needs a permission in `crates/primitives/unmodeled-permissions.toml`
-naming the file, the items it uses by their paths below `unmodeled`, its owner, the reason and the
-verification limit. A use without a permission, an item the permission does not list, and a
-permission nothing uses all fail. A real atomic may live in a `static`.
+naming the one Rust file, the items it uses by their paths below `unmodeled`, its owner, the reason
+and the verification limit. A use without a permission, an item the permission does not list, a
+permission for a directory, a glob or a file the boundary does not govern, an item the unmodeled path
+does not have, and a permission nothing uses all fail. A real atomic may live in a `static`.
 
-The manifest rules keep mode selection in one place. Only the owner selects Loom, and the harness
-runs it, so no other package may depend on `loom`. Only the owner depends on the libraries whose
-families it selects and on their Shuttle wrappers. Turmoil is also a runner, so beside the owner, a
-package whose harness drives a simulation may depend on it, as an optional dependency its own
-`turmoil` feature enables, and never names its network. A package that owns a `loom`, `shuttle` or
-`turmoil` feature depends on `nervix-primitives` directly and forwards the mode to it, and forwards
-it to every workspace dependency that owns the same mode, so the whole graph of that package uses
-one backend even when it is built on its own.
+The source and manifest rules read every tracked file and every new file Git does not ignore, in
+the workspace and in the isolated tooling workspaces beside it, with their fixtures and fixture
+macros. What a build wrote is not authored source: Cargo tags each build directory it creates with a
+`CACHEDIR.TAG`, and nothing below a tagged directory is read, wherever it is nested.
+
+The manifest rules keep mode selection in one place, in every tracked or new manifest, whether or
+not the workspace lists it. Only the owner selects Loom, and the harness runs it, so no other
+package may depend on `loom`. Only the owner depends on the libraries whose families it selects and
+on their Shuttle wrappers. No other package renames a governed crate, which would hide its paths from
+the source rules. Turmoil is also a runner, so beside the owner, a package whose harness drives a
+simulation may depend on it, as an optional dependency its own `turmoil` feature enables, and never
+names its network. A package that owns a `loom`, `shuttle` or `turmoil` feature depends on
+`nervix-primitives` directly and forwards the mode to it, and forwards it to every workspace
+dependency that owns the same mode, so the whole graph of that package uses one backend even when it
+is built on its own.
 
 Run it from the repository root as `python3 -m scripts.check_primitive_boundary`, which is what
 `just validate-primitive-boundary` does.
@@ -67,6 +97,7 @@ Run it from the repository root as `python3 -m scripts.check_primitive_boundary`
 from __future__ import annotations
 
 import argparse
+import posixpath
 import re
 import subprocess
 import sys
@@ -142,6 +173,10 @@ UNMODELED_ITEMS = frozenset(
         ("time", "sleep"),
         ("time", "Instant"),
         ("net", "TcpListener"),
+        ("futures", "mpsc"),
+        ("futures", "select"),
+        ("futures", "AbortHandle"),
+        ("futures", "Abortable"),
         ("select",),
         ("task_local",),
     }
@@ -156,10 +191,14 @@ class Route:
     replacement: tuple[str, ...]
     # What reaching the governed path does, in a violation's words.
     verb: str = "bypasses the boundary"
+    # Whether the replacement names the whole replacing item, so the rest of a longer governed path
+    # is not carried over to it.
+    exact: bool = False
 
 
 RESOLVES_AROUND = "resolves names around the node's resolver"
 NODE_RESOLVER = ("nervix_dns", "DnsResolver")
+CANCELLATION = ("nervix_primitives", "sync", "CancellationToken")
 
 
 # The families beyond atomics, which have rules of their own below. The longest matching prefix
@@ -173,8 +212,8 @@ ROUTES = (
     Route(("tokio", "time"), ("nervix_primitives", "time")),
     Route(("tokio", "time", "Duration"), ("std", "time", "Duration")),
     Route(("tokio", "net"), ("nervix_primitives", "net")),
-    Route(("tokio", "net", "lookup_host"), NODE_RESOLVER, RESOLVES_AROUND),
-    Route(("tokio", "net", "ToSocketAddrs"), NODE_RESOLVER, RESOLVES_AROUND),
+    Route(("tokio", "net", "lookup_host"), NODE_RESOLVER, RESOLVES_AROUND, exact=True),
+    Route(("tokio", "net", "ToSocketAddrs"), NODE_RESOLVER, RESOLVES_AROUND, exact=True),
     Route(("tokio", "select"), ("nervix_primitives", "select")),
     Route(("tokio", "test"), ("nervix_primitives", "test")),
     Route(("tokio", "main"), ("nervix_primitives", "main")),
@@ -193,7 +232,7 @@ ROUTES = (
     Route(("std", "net", "TcpListener"), ("nervix_primitives", "net", "TcpListener")),
     Route(("std", "net", "TcpStream"), ("nervix_primitives", "net", "TcpStream")),
     Route(("std", "net", "UdpSocket"), ("nervix_primitives", "net", "UdpSocket")),
-    Route(("std", "net", "ToSocketAddrs"), NODE_RESOLVER, RESOLVES_AROUND),
+    Route(("std", "net", "ToSocketAddrs"), NODE_RESOLVER, RESOLVES_AROUND, exact=True),
     Route(("std", "os", "unix", "net"), ("nervix_primitives", "net")),
     Route(("turmoil", "net"), ("nervix_primitives", "net")),
     Route(("shuttle", "thread"), ("nervix_primitives", "thread")),
@@ -209,11 +248,59 @@ ROUTES = (
     Route(("shuttle_tokio_stream",), ("nervix_primitives", "stream")),
     Route(("shuttle_parking_lot",), ("nervix_primitives", "sync", "blocking")),
     Route(("shuttle_dashmap",), ("nervix_primitives", "collections")),
+    # Shared ownership: the same library types in every mode, reached through the boundary.
+    Route(("triomphe",), ("nervix_primitives", "sync")),
+    *(
+        Route((*module, "Arc"), ("nervix_primitives", "sync", "StdArc"))
+        for module in (("std", "sync"), ("alloc", "sync"), ("shuttle", "sync"), ("loom", "sync"))
+    ),
+    *(
+        Route((*module, "Weak"), ("nervix_primitives", "sync", "StdWeak"))
+        for module in (("std", "sync"), ("alloc", "sync"), ("shuttle", "sync"), ("loom", "sync"))
+    ),
+    # The `futures` crates' own synchronization, executors, waker registration, `select!` and abort
+    # handles, whose native families the boundary selects from Tokio. The browser console, which
+    # runs in no execution mode, reaches the ones it needs through `unmodeled::futures`.
+    *(
+        route
+        for facade in (("futures",), ("futures_util",))
+        for route in (
+            Route((*facade, "channel"), ("nervix_primitives", "sync")),
+            Route((*facade, "lock"), ("nervix_primitives", "sync")),
+            Route((*facade, "executor"), ("nervix_primitives", "runtime")),
+            Route(
+                (*facade, "task", "AtomicWaker"),
+                ("nervix_primitives", "sync", "AtomicWaker"),
+                exact=True,
+            ),
+            Route((*facade, "select"), ("nervix_primitives", "select"), exact=True),
+            Route((*facade, "select_biased"), ("nervix_primitives", "select"), exact=True),
+            Route(
+                (*facade, "future", "AbortHandle"),
+                ("nervix_primitives", "task", "AbortHandle"),
+                exact=True,
+            ),
+            Route((*facade, "future", "Abortable"), CANCELLATION, exact=True),
+            Route((*facade, "future", "AbortRegistration"), CANCELLATION, exact=True),
+            Route((*facade, "future", "abortable"), CANCELLATION, exact=True),
+            Route((*facade, "stream", "abortable"), CANCELLATION, exact=True),
+        )
+    ),
+    Route(("futures_channel",), ("nervix_primitives", "sync")),
+    Route(("futures_executor",), ("nervix_primitives", "runtime")),
+    Route(("futures_core", "task", "__internal", "AtomicWaker"), ("nervix_primitives", "sync", "AtomicWaker"), exact=True),
+    Route(("atomic_waker",), ("nervix_primitives", "sync")),
 )
-# The `sync` modules whose non-atomic items are the thread-blocking family, and what stays allowed
-# in them: shared ownership is not governed here.
-SYNC_MODULES = (("std", "sync"), ("core", "sync"), ("shuttle", "sync"), ("loom", "sync"))
-SYNC_UNGOVERNED = frozenset({"Arc", "Weak", "atomic"})
+# The `sync` modules whose items, beyond the atomics and shared ownership that have routes of their
+# own, are the thread-blocking family.
+SYNC_MODULES = (
+    ("std", "sync"),
+    ("core", "sync"),
+    ("alloc", "sync"),
+    ("shuttle", "sync"),
+    ("loom", "sync"),
+)
+SYNC_UNGOVERNED = frozenset({"atomic"})
 BLOCKING = ("nervix_primitives", "sync", "blocking")
 GOVERNED_ROOTS = frozenset(
     {route.prefix[0] for route in ROUTES} | {module[0] for module in SYNC_MODULES}
@@ -226,6 +313,12 @@ LOOM_MODELED_THREAD = frozenset({"Builder", "JoinHandle", "current", "park", "sp
 LOOM_MODELED_ITEMS = frozenset(
     {("nervix_primitives", "thread", item) for item in LOOM_MODELED_THREAD}
     | {("nervix_primitives", "thread_local")}
+)
+# What Loom model code may name beside what Loom models, because naming it hides nothing: shared
+# ownership, which is real in every mode and whose reference counts no claim relies on, and the
+# unmodeled path, whose real primitives each carry a permission.
+LOOM_REAL_ITEMS = frozenset(
+    {("nervix_primitives", "sync", item) for item in ("Arc", "StdArc", "StdWeak")}
 )
 # Modules below which the routes govern some items but not others, such as `std::time`, whose
 # `Instant` is governed and whose `Duration` is a value. A file that imports one of them reaches its
@@ -269,8 +362,29 @@ BLOCKING_ITEMS = {
     for item, confinement in CONFINED.items()
     if confinement.declared_in == BLOCKING_PERMISSIONS
 }
-# Tokio's unstable runtime controls, which only the Turmoil recipes pass.
-TOKIO_UNSTABLE = re.compile(r"--cfg[\s=]+['\"]?tokio_unstable|rustc-cfg=tokio_unstable")
+# A cfg passed to every crate of a build: a `--cfg` flag, in any of the spellings a recipe, Cargo
+# configuration or workflow uses, or one a build script emits. Only Tokio's unstable runtime
+# controls may be such a cfg, and only in the Turmoil recipes.
+_GLOBAL_CFG = re.compile(
+    r"--cfg(?:\s*=\s*|[\"',\s]+)[\"']?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|rustc-cfg=(?P<emitted>[A-Za-z_][A-Za-z0-9_]*)"
+)
+TOKIO_UNSTABLE = "tokio_unstable"
+# The cfg the synchronization analysis driver sets to read the contracts written beside the code,
+# the tool namespace those contracts live in, and the lint levels an expectation may use.
+ANALYSIS_CFG = "nervix_lint"
+ANALYSIS_TOOL = "nervix"
+LINT_LEVELS = frozenset({"allow", "deny", "expect", "forbid", "warn"})
+# Cargo tags every build directory it creates with this file, whose content starts with the
+# signature of the cache-directory convention.
+CACHE_TAG = "CACHEDIR.TAG"
+CACHE_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
+# The build of the release image, and the packages it builds for release.
+RELEASE_BUILD = "Dockerfile.debian"
+_RELEASE_PACKAGE = re.compile(r"(?<![A-Za-z0-9_-])--package\s+(?P<package>[A-Za-z0-9_-]+)")
+_PRODUCT_BINARY = re.compile(
+    r"nervix_primitives\s*::\s*product_binary\s*!\s*\(\s*\"(?P<name>[^\"]*)\"\s*\)"
+)
 JUSTFILE = "justfile"
 CONFIGURATION_GLOBS = (".cargo/config.toml", ".cargo/config", ".github/workflows/*.yaml", ".github/workflows/*.yml")
 # A recipe header starts at the first column and ends its name and parameters with a colon that does
@@ -280,9 +394,12 @@ _RECIPE = re.compile(r"^@?(?P<name>[A-Za-z_][A-Za-z0-9_-]*)[^:\n]*:(?!=)")
 OWNER_ONLY_PACKAGES = frozenset(
     {
         "arc-swap",
+        "atomic-waker",
         "concurrent-queue",
         "dashmap",
         "flume",
+        "futures-channel",
+        "futures-executor",
         "parking_lot",
         "shuttle-dashmap",
         "shuttle-parking_lot",
@@ -290,11 +407,16 @@ OWNER_ONLY_PACKAGES = frozenset(
         "shuttle-tokio-stream",
         "shuttle-tokio-util",
         "tokio-stream",
+        "triomphe",
     }
 )
 # Turmoil is a runner as well as the network the owner selects, so a package whose harness drives a
 # simulation may depend on it behind its own `turmoil` feature.
 TURMOIL = "turmoil"
+# The WASM guest SDK. It and every guest library built on it are compiled into a user's WASM guest,
+# a single-threaded program inside the host's sandbox where no execution mode exists and that no
+# Nervix process runs, so their sources are outside the source rules; their manifests are checked.
+GUEST_SDK = "nervix-wasm-sdk"
 
 _USE_ITEM = re.compile(r"(?<![A-Za-z0-9_])use\s+(?P<tree>[^;]*);")
 _EXTERN_CRATE = re.compile(
@@ -319,8 +441,28 @@ _MODULE_WITH_BODY = re.compile(
     r"(?P<attributes>(?:#\[[^\]]*\]\s*)*)(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{"
 )
-_NEGATED_CFG = re.compile(r"not\s*\([^()]*\)")
-_LOOM_FEATURE = re.compile(r"feature\s*=\s*\"loom\"")
+# A `mod` item without a body, and the attributes in front of it.
+_MODULE_DECLARATION = re.compile(
+    r"(?P<attributes>(?:#\[[^\]]*\]\s*)*)(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+_PATH_ATTRIBUTE = re.compile(r"#\[\s*path\s*=\s*\"(?P<path>[^\"]*)\"\s*\]")
+# Files whose out-of-line modules live beside them rather than in a directory named after them:
+# module roots, and the crate roots Cargo finds in these directories.
+_MODULE_ROOT_FILES = frozenset({"build.rs", "lib.rs", "main.rs", "mod.rs"})
+_CRATE_ROOT_DIRECTORIES = frozenset({"bin", "benches", "examples", "tests"})
+_CFG_PREDICATE = re.compile(r"(?<![A-Za-z0-9_])cfg(?:_attr)?\s*!?\s*\(")
+_MODE_CFG_NAME = re.compile(r"(?<![A-Za-z0-9_])(?P<name>loom|shuttle|turmoil)(?![A-Za-z0-9_])")
+# A conditional-compilation form, told apart by whether it selects code or attaches attributes.
+_CFG_USE = re.compile(r"(?<![A-Za-z0-9_])(?P<kind>cfg_attr|cfg)\s*!?\s*\(")
+_ANALYSIS_CFG_NAME = re.compile(rf"(?<![A-Za-z0-9_]){ANALYSIS_CFG}(?![A-Za-z0-9_])")
+_ATTRIBUTE_PATH = re.compile(
+    r"\s*(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)"
+)
+# One token of a `cfg` predicate: an option name, a string literal, or its punctuation.
+_CFG_TOKEN = re.compile(
+    r"\s*(?:(?P<name>[A-Za-z_][A-Za-z0-9_]*)|(?P<string>\"(?:[^\"\\]|\\.)*\")|(?P<symbol>[(),=]))"
+)
 _CFG_ATTRIBUTE = re.compile(r"#\[\s*cfg\s*\((?P<condition>.*?)\)\s*\]", re.S)
 _IDENTIFIER = r"\$?[A-Za-z_][A-Za-z0-9_]*"
 _PATH = re.compile(rf"(?<![A-Za-z0-9_$])(?:::\s*)?{_IDENTIFIER}(?:\s*::\s*{_IDENTIFIER})*")
@@ -439,7 +581,7 @@ def route_of(path: Sequence[str]) -> Routed | None:
             if best is None or len(route.prefix) > len(best.prefix):
                 best = route
     if best is not None:
-        if best.replacement == NODE_RESOLVER:
+        if best.exact:
             return Routed(best.replacement, best.verb)
         return Routed(best.replacement + path[len(best.prefix) :], best.verb)
     for module in SYNC_MODULES:
@@ -726,93 +868,204 @@ class FileUses:
     declared: dict[tuple[str, ...], int] = field(default_factory=dict)
 
 
+class CfgError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Cfg:
+    """One `cfg` predicate: a configuration option, or `all`, `any` or `not` over predicates."""
+
+    combinator: str | None
+    option: str | None = None
+    operands: tuple[Cfg, ...] = ()
+
+    @classmethod
+    def parse(cls, condition: str) -> Cfg:
+        """Read the predicate `condition` spells, or raise `CfgError`."""
+
+        tokens: list[str] = []
+        position = 0
+        while position < len(condition):
+            match = _CFG_TOKEN.match(condition, position)
+            if match is None:
+                if condition[position:].strip():
+                    raise CfgError(f"cannot read `cfg({condition.strip()})`")
+                break
+            tokens.append(match.group(match.lastgroup))
+            position = match.end()
+        predicate, index = cls._parse_at(tokens, 0, condition)
+        if index != len(tokens):
+            raise CfgError(f"cannot read `cfg({condition.strip()})`")
+        return predicate
+
+    @classmethod
+    def _parse_at(cls, tokens: Sequence[str], index: int, condition: str) -> tuple[Cfg, int]:
+        unreadable = CfgError(f"cannot read `cfg({condition.strip()})`")
+        if index >= len(tokens) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tokens[index]):
+            raise unreadable
+        name = tokens[index]
+        index += 1
+        if index < len(tokens) and tokens[index] == "=":
+            if index + 1 >= len(tokens) or not tokens[index + 1].startswith('"'):
+                raise unreadable
+            return cls(combinator=None, option=f"{name}={tokens[index + 1]}"), index + 2
+        if index >= len(tokens) or tokens[index] != "(":
+            return cls(combinator=None, option=name), index
+        if name not in ("all", "any", "not"):
+            raise unreadable
+        index += 1
+        operands: list[Cfg] = []
+        while index < len(tokens) and tokens[index] != ")":
+            operand, index = cls._parse_at(tokens, index, condition)
+            operands.append(operand)
+            if index < len(tokens) and tokens[index] == ",":
+                index += 1
+            elif index >= len(tokens) or tokens[index] != ")":
+                raise unreadable
+        if index >= len(tokens):
+            raise unreadable
+        if name == "not" and len(operands) != 1:
+            raise unreadable
+        return cls(combinator=name, operands=tuple(operands)), index + 1
+
+    def without_loom(self) -> bool | None:
+        """The predicate's value in a build without the `loom` feature, or `None` where another
+        option decides it. Three-valued logic keeps every definite answer true for every value the
+        other options can take."""
+
+        if self.combinator is None:
+            if self.option == 'feature="loom"':
+                return False
+            return None
+        values = [operand.without_loom() for operand in self.operands]
+        if self.combinator == "not":
+            value = values[0]
+            if value is None:
+                return None
+            return not value
+        if self.combinator == "all":
+            if False in values:
+                return False
+            if None in values:
+                return None
+            return True
+        if True in values:
+            return True
+        if None in values:
+            return None
+        return False
+
+
 def _loom_only(attributes: str) -> bool:
-    """Whether `attributes` compile their item only for Loom: a `cfg` that requires the `loom`
-    feature outside every `not(...)`."""
+    """Whether `attributes` compile their item only for Loom: one of its `cfg` predicates is false
+    in every build without the `loom` feature. Raises `CfgError` for a predicate it cannot read."""
 
     for match in _CFG_ATTRIBUTE.finditer(attributes):
-        condition = match.group("condition")
-        previous = None
-        while previous != condition:
-            previous = condition
-            condition = _NEGATED_CFG.sub("", condition)
-        if _LOOM_FEATURE.search(condition):
+        if Cfg.parse(match.group("condition")).without_loom() is False:
             return True
     return False
 
 
 def _loom_modeled(path: Sequence[str]) -> bool:
+    """Whether Loom model code may name `path`: Loom models it, or it is explicitly real."""
+
     path = tuple(path)
-    if path in LOOM_MODELED_ITEMS:
+    if path in LOOM_MODELED_ITEMS or path[:3] in LOOM_REAL_ITEMS:
+        return True
+    if path[: len(UNMODELED_ROOT)] == UNMODELED_ROOT:
         return True
     return any(path[: len(module)] == module for module in LOOM_MODELED_MODULES)
 
 
-def check_loom_models(file: RustFile) -> list[Site]:
+def check_loom_models(file: RustFile, loom_only_file: bool = False) -> list[Site]:
     """Reject a family Loom does not model in a module compiled only for Loom.
 
     In a Loom build such a family is the ordinary library, which no model observes, so a model that
     named one would run a real primitive silently. What an owner the model drives uses internally
-    is outside this check: a Loom claim excludes it.
+    is outside this check: a Loom claim excludes it. A module compiled only for Loom is an inline
+    module whose attributes require the `loom` feature, or, when `loom_only_file` says so, the
+    whole file, which a `mod` declaration compiled only for Loom brought in. A module whose `cfg` it
+    cannot read is rejected, since whether it is model code is unknown.
     """
 
     violations: list[Site] = []
+    for declaration in _MODULE_DECLARATION.finditer(file.literals):
+        try:
+            _loom_only(declaration.group("attributes"))
+        except CfgError as error:
+            violations.append(file.site(declaration.start(), f"{RULE}: {error}"))
+    blocks: list[tuple[int, int]] = []
     for module in _MODULE_WITH_BODY.finditer(file.literals):
-        if not _loom_only(module.group("attributes")):
+        try:
+            only_for_loom = _loom_only(module.group("attributes"))
+        except CfgError as error:
+            violations.append(file.site(module.start(), f"{RULE}: {error}"))
             continue
-        brace = module.end() - 1
-        start, end = brace, _end_of_block(file.code, brace)
-        block = file.code[start:end]
-        thread_aliases: set[str] = set()
-
-        def reject(offset: int, path: Sequence[str]) -> None:
-            violations.append(
-                file.site(
-                    start + offset,
-                    f"{RULE}: Loom model code names `{'::'.join(path)}`, which a Loom build takes "
-                    "from the ordinary library, outside every model; a Loom model uses only "
-                    "atomics, the threads it spawns, joins, parks and yields, and thread-local "
-                    "storage",
-                )
-            )
-
-        use_spans: list[tuple[int, int]] = []
-        for match in _USE_ITEM.finditer(block):
-            use_spans.append((match.start(), match.end()))
-            try:
-                leaves = use_leaves(match.group("tree"))
-            except UseTreeError:
-                continue
-            for leaf in leaves:
-                path = leaf.path
-                if path[:1] != ("nervix_primitives",):
-                    continue
-                if path == ("nervix_primitives", "thread"):
-                    thread_aliases.add(leaf.alias or "thread")
-                    continue
-                if not _loom_modeled(path):
-                    reject(match.start(), path)
-        outside_uses = list(block)
-        for use_start, use_end in use_spans:
-            for index in range(use_start, use_end):
-                if outside_uses[index] != "\n":
-                    outside_uses[index] = " "
-        body = "".join(outside_uses)
-        for match in _QUALIFIED_PATH.finditer(body):
-            path = _segments(match.group("path"))
-            if path[0] == "nervix_primitives":
-                if path[:2] == ("nervix_primitives", "thread") and len(path) > 2:
-                    path = path[:3]
-                if not _loom_modeled(path):
-                    reject(match.start(), path)
-            elif path[0] in thread_aliases and path[1] not in LOOM_MODELED_THREAD:
-                reject(match.start(), ("nervix_primitives", "thread", path[1]))
+        if only_for_loom and not loom_only_file:
+            brace = module.end() - 1
+            blocks.append((brace, _end_of_block(file.code, brace)))
+    if loom_only_file:
+        blocks = [(0, len(file.code))]
+    for start, end in blocks:
+        _check_loom_block(file, start, end, violations)
     return violations
 
 
-def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
-    """Return the file's boundary violations, the unmodeled items it uses, and the confined
-    items it names that a permission may declare it an owner of."""
+def _check_loom_block(file: RustFile, start: int, end: int, violations: list[Site]) -> None:
+    """Reject every family Loom does not model that the code between `start` and `end` names."""
+
+    block = file.code[start:end]
+    thread_aliases: set[str] = set()
+
+    def reject(offset: int, path: Sequence[str]) -> None:
+        violations.append(
+            file.site(
+                start + offset,
+                f"{RULE}: Loom model code names `{'::'.join(path)}`, which a Loom build takes "
+                "from the ordinary library, outside every model; a Loom model uses only "
+                "atomics, the threads it spawns, joins, parks and yields, thread-local storage, "
+                "shared ownership and permitted unmodeled primitives",
+            )
+        )
+
+    use_spans: list[tuple[int, int]] = []
+    for match in _USE_ITEM.finditer(block):
+        use_spans.append((match.start(), match.end()))
+        try:
+            leaves = use_leaves(match.group("tree"))
+        except UseTreeError:
+            continue
+        for leaf in leaves:
+            path = leaf.path
+            if path[:1] != ("nervix_primitives",):
+                continue
+            if path == ("nervix_primitives", "thread"):
+                thread_aliases.add(leaf.alias or "thread")
+                continue
+            if not _loom_modeled(path):
+                reject(match.start(), path)
+    outside_uses = list(block)
+    for use_start, use_end in use_spans:
+        for index in range(use_start, use_end):
+            if outside_uses[index] != "\n":
+                outside_uses[index] = " "
+    body = "".join(outside_uses)
+    for match in _QUALIFIED_PATH.finditer(body):
+        path = _segments(match.group("path"))
+        if path[0] == "nervix_primitives":
+            if path[:2] == ("nervix_primitives", "thread") and len(path) > 2:
+                path = path[:3]
+            if not _loom_modeled(path):
+                reject(match.start(), path)
+        elif path[0] in thread_aliases and path[1] not in LOOM_MODELED_THREAD:
+            reject(match.start(), ("nervix_primitives", "thread", path[1]))
+
+
+def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Site], FileUses]:
+    """Return the file's boundary violations, the unmodeled items it uses, and the confined items it
+    names that a permission may declare it an owner of. `loom_only_file` says a `mod` declaration
+    compiled only for Loom brought the whole file in."""
 
     violations: list[Site] = []
     uses = FileUses()
@@ -820,9 +1073,8 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
     code = file.code
     use_spans: list[tuple[int, int]] = []
     sync_aliases: set[str] = set()
-    sync_module_aliases: set[str] = set()
-    # Names this file binds to a partly governed module, and to a boundary module holding a confined
-    # item, each with the module's path.
+    # Names this file binds to a `sync` module or a partly governed module, and to a boundary module
+    # holding a confined item, each with the module's path.
     module_aliases: dict[str, tuple[str, ...]] = {}
     confining_aliases: dict[str, tuple[str, ...]] = {}
 
@@ -912,7 +1164,7 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             if path in (("std", "sync"), ("core", "sync")):
                 sync_aliases.add(leaf.alias or "sync")
             if path in SYNC_MODULES:
-                sync_module_aliases.add(leaf.alias or "sync")
+                module_aliases[leaf.alias or "sync"] = path
                 continue
             if path in PARTLY_GOVERNED_MODULES and leaf.alias is None:
                 module_aliases[path[-1]] = path
@@ -1030,15 +1282,6 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             if item is not None:
                 confine(match.start(), item)
                 continue
-        if root in sync_module_aliases and path[1] not in SYNC_UNGOVERNED:
-            violations.append(
-                file.site(
-                    match.start(),
-                    f"{RULE}: `{'::'.join(path)}` reaches thread-blocking synchronization through "
-                    f"an imported `sync` module; use `{'::'.join(BLOCKING + path[1:])}`",
-                )
-            )
-            continue
         if root in module_aliases:
             module = module_aliases[root]
             routed = route_of(module + path[1:])
@@ -1084,8 +1327,177 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             continue
         uses.items.setdefault("::".join(item), file.line_of(match.start()))
     violations.extend(check_statics(file, names))
-    violations.extend(check_loom_models(file))
+    violations.extend(check_loom_models(file, loom_only_file))
+    violations.extend(check_mode_cfgs(file))
+    violations.extend(check_analysis_cfg(file))
     return violations, uses
+
+
+def _end_of_group(code: str, start: int) -> int:
+    """The offset just past the parenthesis that closes the one at `start`."""
+
+    depth = 0
+    for index in range(start, len(code)):
+        if code[index] == "(":
+            depth += 1
+        elif code[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(code)
+
+
+def check_mode_cfgs(file: RustFile) -> list[Site]:
+    """Reject an execution mode selected through a bare `cfg` rather than a feature.
+
+    A cfg such as `loom` is global: `--cfg loom` reaches every crate of the build, and Tokio and
+    other dependencies read the same name and change their own behavior. A mode is selected only
+    through the primitive boundary's feature, which each package forwards, so a bare mode cfg in a
+    predicate is a second, global selection path.
+    """
+
+    violations: list[Site] = []
+    for match in _CFG_PREDICATE.finditer(file.code):
+        opening = match.end() - 1
+        predicate = file.code[opening : _end_of_group(file.code, opening)]
+        for name in _MODE_CFG_NAME.finditer(predicate):
+            mode = name.group("name")
+            violations.append(
+                file.site(
+                    opening + name.start(),
+                    f"{RULE}: `cfg({mode})` selects an execution mode through a global cfg that "
+                    f"every crate of the build reads, Tokio's included; select it with "
+                    f'`feature = "{mode}"`, which the package forwards to {OWNER}',
+                )
+            )
+    return violations
+
+
+def _arguments(group: str) -> list[tuple[int, str]]:
+    """The comma-separated arguments of the parenthesized `group`, each with its offset in it."""
+
+    end = len(group) - 1 if group.endswith(")") else len(group)
+    arguments: list[tuple[int, str]] = []
+    depth = 0
+    start = 1
+    for index in range(1, end):
+        character = group[index]
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        elif character == "," and depth == 0:
+            arguments.append((start, group[start:index]))
+            start = index + 1
+    arguments.append((start, group[start:end]))
+    return arguments
+
+
+def check_analysis_cfg(file: RustFile) -> list[Site]:
+    """Hold the analysis cfg to gating lint annotations.
+
+    The synchronization analysis driver alone sets `nervix_lint`, to read the contracts and
+    expectations written beside the code. It is not a mode, and the analysis must read the code a
+    product build compiles, so the cfg never selects code: a `cfg` or `cfg!` predicate that names it
+    is rejected, and a `cfg_attr` it gates holds only `nervix::` contracts and lint levels, never an
+    attribute that changes what is compiled.
+    """
+
+    violations: list[Site] = []
+    for match in _CFG_USE.finditer(file.code):
+        opening = match.end() - 1
+        group = file.code[opening : _end_of_group(file.code, opening)]
+        if match.group("kind") == "cfg":
+            name = _ANALYSIS_CFG_NAME.search(group)
+            if name is not None:
+                violations.append(
+                    file.site(
+                        opening + name.start(),
+                        f"{RULE}: `cfg({ANALYSIS_CFG})` selects code for the analysis build alone, "
+                        "so the analysis would read other code than a product build compiles; the "
+                        f"analysis cfg only gates `{ANALYSIS_TOOL}::` contracts and lint "
+                        "expectations through `cfg_attr`",
+                    )
+                )
+            continue
+        arguments = _arguments(group)
+        if _ANALYSIS_CFG_NAME.search(arguments[0][1]) is None:
+            continue
+        for offset, attribute in arguments[1:]:
+            path = _ATTRIBUTE_PATH.match(attribute)
+            if path is None:
+                continue
+            segments = _segments(path.group("path"))
+            if len(segments) > 1 and segments[0] == ANALYSIS_TOOL:
+                continue
+            if len(segments) == 1 and segments[0] in LINT_LEVELS:
+                continue
+            violations.append(
+                file.site(
+                    opening + offset + path.start("path"),
+                    f"{RULE}: `cfg_attr({ANALYSIS_CFG}, {'::'.join(segments)})` changes what the "
+                    "analysis build compiles, so the analysis would read other code than a product "
+                    f"build compiles; the analysis cfg only gates `{ANALYSIS_TOOL}::` contracts "
+                    "and lint expectations",
+                )
+            )
+    return violations
+
+
+def _module_directory(declaring: PurePosixPath) -> PurePosixPath:
+    """The directory in which the modules a file declares out of line live."""
+
+    if declaring.name in _MODULE_ROOT_FILES or declaring.parent.name in _CRATE_ROOT_DIRECTORIES:
+        return declaring.parent
+    return declaring.parent / declaring.stem
+
+
+def declared_modules(file: RustFile, sources: frozenset[str]) -> Iterator[tuple[str, bool]]:
+    """Each source file that `file` declares as an out-of-line module, and whether its declaration
+    compiles it only for Loom. A declaration whose file is not among `sources` is skipped, and one
+    whose `cfg` cannot be read counts as ordinary code: `check_loom_models` rejects it."""
+
+    declaring = PurePosixPath(file.path)
+    directory = _module_directory(declaring)
+    for match in _MODULE_DECLARATION.finditer(file.literals):
+        attributes = match.group("attributes")
+        path_attribute = _PATH_ATTRIBUTE.search(attributes)
+        if path_attribute is not None:
+            candidates = [declaring.parent / path_attribute.group("path")]
+        else:
+            name = match.group("name")
+            candidates = [directory / f"{name}.rs", directory / name / "mod.rs"]
+        for candidate in candidates:
+            normalized = posixpath.normpath(str(candidate))
+            if normalized in sources:
+                try:
+                    only_for_loom = _loom_only(attributes)
+                except CfgError:
+                    only_for_loom = False
+                yield normalized, only_for_loom
+                break
+
+
+def loom_only_files(files: Mapping[str, RustFile]) -> frozenset[str]:
+    """The files a `mod` declaration compiled only for Loom brings in, with every module they
+    declare in turn."""
+
+    sources = frozenset(files)
+    declared = {path: list(declared_modules(file, sources)) for path, file in files.items()}
+    pending: list[str] = []
+    for children in declared.values():
+        for child, only_for_loom in children:
+            if only_for_loom:
+                pending.append(child)
+    loom_only: set[str] = set()
+    while pending:
+        path = pending.pop()
+        if path in loom_only:
+            continue
+        loom_only.add(path)
+        for child, _ in declared.get(path, ()):
+            pending.append(child)
+    return frozenset(loom_only)
 
 
 @dataclass(frozen=True)
@@ -1095,6 +1507,14 @@ class Permission:
     owner: str
     reason: str
     limit: str
+
+
+def _is_one_rust_file(path: str) -> bool:
+    """Whether `path` names a single Rust file relative to the repository root."""
+
+    if not path.endswith(".rs") or path.startswith("/") or any(char in path for char in "*?[]"):
+        return False
+    return ".." not in PurePosixPath(path).parts
 
 
 def parse_permissions(text: str) -> list[Permission]:
@@ -1114,6 +1534,17 @@ def parse_permissions(text: str) -> list[Permission]:
         for key in ("path", "owner", "reason", "limit"):
             if not isinstance(table[key], str) or not table[key].strip():
                 raise ValueError(f"{context} needs a non-empty `{key}`")
+        if not _is_one_rust_file(table["path"]):
+            raise ValueError(
+                f"{context} names `{table['path']}`; a permission covers one Rust file, never a "
+                "directory, a glob or a path outside the repository"
+            )
+        for item in items:
+            if tuple(item.split("::")) not in UNMODELED_ITEMS:
+                raise ValueError(
+                    f"{context} lists `{item}`, which is not an item of "
+                    f"`{'::'.join(UNMODELED_ROOT)}`"
+                )
         if table["path"] in seen:
             raise ValueError(f"{context} repeats {table['path']}")
         seen.add(table["path"])
@@ -1135,7 +1566,11 @@ def parse_permissions(text: str) -> list[Permission]:
 def check_permissions(
     uses: Mapping[str, FileUses], permissions: Sequence[Permission]
 ) -> list[str]:
-    """Match every unmodeled use against a permission, and every permission against a use."""
+    """Match every unmodeled use against a permission, and every permission against a use.
+
+    `uses` holds every file the source rules read, so a permission for any other path, such as a
+    deleted file, the boundary's own sources or guest code, permits nothing.
+    """
 
     problems: list[str] = []
     by_path = {permission.path: permission for permission in permissions}
@@ -1158,7 +1593,13 @@ def check_permissions(
                 )
     for permission in permissions:
         used = uses.get(permission.path)
-        used_items = set(used.items) if used is not None else set()
+        if used is None:
+            problems.append(
+                f"{PERMISSIONS}: stale permission: {permission.path} is not a Rust file the "
+                "boundary governs"
+            )
+            continue
+        used_items = set(used.items)
         if not used_items:
             problems.append(
                 f"{PERMISSIONS}: stale permission: {permission.path} uses no unmodeled item"
@@ -1259,12 +1700,29 @@ def check_blocking_permissions(
 
 
 @dataclass(frozen=True)
+class Dependency:
+    """One dependency entry of a manifest: the name the package's code uses, and the package."""
+
+    key: str
+    package: str
+    kind: str
+    entry: object
+
+
+@dataclass(frozen=True)
 class Package:
     name: str
     manifest: str
+    # The package's directory relative to the repository root, with a trailing slash, or an empty
+    # string for the root package.
+    directory: str
     features: Mapping[str, Sequence[str]]
     normal: frozenset[str]
     every_kind: Mapping[str, Mapping[str, object]]
+    dependencies: tuple[Dependency, ...]
+    crate_types: frozenset[str]
+    # The binaries the manifest declares, each with its crate root when the manifest names one.
+    declared_binaries: tuple[tuple[str, str | None], ...]
 
 
 def _dependency_tables(document: Mapping[str, object]) -> Iterator[tuple[str, Mapping[str, object]]]:
@@ -1295,33 +1753,183 @@ def _package_of(key: str, entry: object, workspace: Mapping[str, object]) -> str
     return key
 
 
-def load_packages(root: Path) -> list[Package]:
-    document = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
-    workspace = document.get("workspace", {})
-    workspace_dependencies = workspace.get("dependencies", {})
+def tracked_files(root: Path) -> list[str]:
+    """Every tracked file, and every new file Git does not ignore, outside Cargo's build
+    directories.
+
+    Cargo tags each build directory it creates with a `CACHEDIR.TAG`, so a nested one, such as the
+    target directory of an isolated tooling workspace, is recognized wherever it is, whatever it is
+    named and whether or not Git ignores it. What a build wrote there is not authored source.
+    """
+
+    completed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    entries: list[str] = []
+    for entry in completed.stdout.split("\0"):
+        if entry and (root / entry).is_file():
+            entries.append(entry)
+    build_directories: list[str] = []
+    for entry in entries:
+        tag = PurePosixPath(entry)
+        if tag.name != CACHE_TAG or tag.parent == PurePosixPath("."):
+            continue
+        content = (root / entry).read_text(encoding="utf-8", errors="replace")
+        if content.startswith(CACHE_TAG_SIGNATURE):
+            build_directories.append(f"{tag.parent}/")
+    excluded = tuple(build_directories)
+    return sorted(entry for entry in entries if not entry.startswith(excluded))
+
+
+def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
+    """Every package a tracked or new manifest declares: the workspace members, including new ones,
+    and the standalone packages that have a workspace of their own."""
+
+    root_document = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    root_dependencies = root_document.get("workspace", {}).get("dependencies", {})
     packages: list[Package] = []
-    for member in workspace.get("members", []):
-        manifest = PurePosixPath(member) / "Cargo.toml"
-        member_document = tomllib.loads((root / manifest).read_text(encoding="utf-8"))
-        name = member_document["package"]["name"]
+    for manifest in files:
+        manifest_path = PurePosixPath(manifest)
+        if manifest_path.name != "Cargo.toml":
+            continue
+        document = tomllib.loads((root / manifest).read_text(encoding="utf-8"))
+        package_table = document.get("package")
+        if not isinstance(package_table, dict):
+            continue
+        # A standalone package inherits from the workspace its own manifest declares.
+        own_workspace = document.get("workspace")
+        if isinstance(own_workspace, dict) and manifest != "Cargo.toml":
+            workspace_dependencies = own_workspace.get("dependencies", {})
+        else:
+            workspace_dependencies = root_dependencies
         normal: set[str] = set()
         every_kind: dict[str, dict[str, object]] = {}
-        for kind, table in _dependency_tables(member_document):
+        dependencies: list[Dependency] = []
+        for kind, table in _dependency_tables(document):
             for key, entry in table.items():
                 package = _package_of(key, entry, workspace_dependencies)
                 every_kind.setdefault(package, {})[kind] = entry
+                dependencies.append(Dependency(key=key, package=package, kind=kind, entry=entry))
                 if kind == "dependencies":
                     normal.add(package)
+        library = document.get("lib", {})
+        crate_types = library.get("crate-type", []) if isinstance(library, dict) else []
+        declared_binaries: list[tuple[str, str | None]] = []
+        for binary in document.get("bin", []):
+            if isinstance(binary, dict) and isinstance(binary.get("name"), str):
+                binary_path = binary.get("path")
+                declared_binaries.append(
+                    (binary["name"], binary_path if isinstance(binary_path, str) else None)
+                )
+        parent = str(manifest_path.parent)
         packages.append(
             Package(
-                name=name,
-                manifest=str(manifest),
-                features=member_document.get("features", {}),
+                name=package_table["name"],
+                manifest=manifest,
+                directory="" if parent == "." else f"{parent}/",
+                features=document.get("features", {}),
                 normal=frozenset(normal),
                 every_kind=every_kind,
+                dependencies=tuple(dependencies),
+                crate_types=frozenset(crate_types),
+                declared_binaries=tuple(declared_binaries),
             )
         )
     return packages
+
+
+def binary_roots(package: Package, files: frozenset[str]) -> dict[str, str]:
+    """Every binary of `package`, by name, with the crate root Cargo builds it from: the ones its
+    manifest declares, `src/main.rs`, and each file in `src/bin`."""
+
+    roots: dict[str, str] = {}
+    for name, path in package.declared_binaries:
+        if path is not None:
+            roots[name] = package.directory + path
+        elif package.directory + f"src/bin/{name}.rs" in files:
+            roots[name] = package.directory + f"src/bin/{name}.rs"
+        else:
+            roots[name] = package.directory + "src/main.rs"
+    claimed = set(roots.values())
+    main = package.directory + "src/main.rs"
+    if main in files and main not in claimed:
+        roots.setdefault(package.name, main)
+    for path in sorted(files):
+        candidate = PurePosixPath(path)
+        if path.startswith(package.directory + "src/bin/") and candidate.suffix == ".rs":
+            if path not in claimed and candidate.parent == PurePosixPath(package.directory + "src/bin"):
+                roots.setdefault(candidate.stem, path)
+    return roots
+
+
+def check_release_binaries(
+    root: Path, packages: Sequence[Package], files: Sequence[str]
+) -> list[str]:
+    """Hold every binary the release image builds to ordinary execution.
+
+    A build that selects an execution mode is a test artifact, so every binary the release build
+    compiles declares itself a product binary with `nervix_primitives::product_binary!`, which
+    fails to compile in a modeled build.
+    """
+
+    release = root / RELEASE_BUILD
+    if not release.is_file():
+        return []
+    released: dict[str, int] = {}
+    for number, line in enumerate(release.read_text(encoding="utf-8").splitlines(), start=1):
+        if "cargo" not in line or " build " not in f" {line} " or "--release" not in line:
+            continue
+        for match in _RELEASE_PACKAGE.finditer(line):
+            released.setdefault(match.group("package"), number)
+    problems: list[str] = []
+    by_name = {package.name: package for package in packages}
+    sources = frozenset(files)
+    for name, number in sorted(released.items()):
+        package = by_name.get(name)
+        if package is None:
+            problems.append(
+                f"{RELEASE_BUILD}:{number}: {RULE}: the release build names package `{name}`, "
+                "which no manifest declares"
+            )
+            continue
+        for binary, path in sorted(binary_roots(package, sources).items()):
+            text = (root / path).read_text(encoding="utf-8") if path in sources else ""
+            declared = {match.group("name") for match in _PRODUCT_BINARY.finditer(text)}
+            if binary not in declared:
+                problems.append(
+                    f"{path}: {RULE}: the release image ships `{binary}`, so its crate root "
+                    f'declares `nervix_primitives::product_binary!("{binary}")`, which refuses a '
+                    "build that selects an execution mode"
+                )
+    return problems
+
+
+def guest_directories(packages: Sequence[Package]) -> tuple[str, ...]:
+    """The directories of guest code: the WASM guest SDK, and every guest library built on it."""
+
+    directories: list[str] = []
+    for package in packages:
+        is_sdk = package.name == GUEST_SDK
+        is_guest = GUEST_SDK in package.every_kind and "cdylib" in package.crate_types
+        if (is_sdk or is_guest) and package.directory:
+            directories.append(package.directory)
+    return tuple(sorted(directories))
+
+
+def _crate_name(package: str) -> str:
+    return package.replace("-", "_")
+
+
+# The packages whose paths the source rules read, by crate name: a manifest that renames one hides
+# those paths behind a name the rules do not know.
+GOVERNED_CRATES = (
+    GOVERNED_ROOTS
+    | {_crate_name(OWNER)}
+    | {_crate_name(package) for package in OWNER_ONLY_PACKAGES}
+) - {"std", "core", "alloc"}
 
 
 def check_manifests(packages: Sequence[Package]) -> list[str]:
@@ -1333,6 +1941,15 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
                 problems.append(
                     f"{package.manifest}: {RULE}: only {OWNER} depends on `{dependency}`, whose "
                     "family it selects for the execution mode; take the family from it instead"
+                )
+            for dependency in package.dependencies:
+                crate = _crate_name(dependency.package)
+                if crate not in GOVERNED_CRATES or _crate_name(dependency.key) == crate:
+                    continue
+                problems.append(
+                    f"{package.manifest}: {RULE}: the {dependency.kind} entry `{dependency.key}` "
+                    f"renames `{dependency.package}`, which hides its governed paths from the "
+                    "source rules; depend on it by its own name"
                 )
         loom = package.every_kind.get("loom")
         if loom is not None:
@@ -1393,10 +2010,41 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
     return problems
 
 
-def check_tokio_unstable(root: Path) -> list[str]:
-    """Hold Tokio's unstable runtime controls to the Turmoil recipes."""
+def _global_cfgs(text: str) -> Iterator[str]:
+    """The name of every cfg `text` passes to a whole build, as a flag or from a build script."""
+
+    for match in _GLOBAL_CFG.finditer(text):
+        yield match.group("name") or match.group("emitted")
+
+
+def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
+    """Hold Tokio's unstable runtime controls to the Turmoil recipes, every execution mode to its
+    feature, and the analysis cfg to the analysis driver.
+
+    A cfg a build passes reaches every crate in it. `tokio_unstable` changes how Tokio schedules
+    and reports, so only a Turmoil recipe passes it. An execution mode is never a global cfg: Tokio
+    and other dependencies read the same names and would change their own behavior, so `--cfg
+    loom`, `--cfg shuttle` and `--cfg turmoil` fail in every recipe, configuration, workflow and
+    build script. `--cfg nervix_lint` fails there too: only the synchronization analysis driver,
+    which registers the tool its annotations name, sets it for the crates it analyzes.
+    """
 
     problems: list[str] = []
+
+    def reject_analysis(location: str) -> None:
+        problems.append(
+            f"{location}: {RULE}: `--cfg {ANALYSIS_CFG}` would enable the analysis annotations in "
+            "every crate of a build; only the synchronization analysis driver sets it, for the "
+            "crates it analyzes"
+        )
+
+    def reject_mode(location: str, mode: str) -> None:
+        problems.append(
+            f"{location}: {RULE}: `--cfg {mode}` selects an execution mode for every crate of a "
+            f"build, Tokio's included; select it with the `{mode}` feature a package forwards to "
+            f"{OWNER}"
+        )
+
     justfile = root / JUSTFILE
     if justfile.is_file():
         recipe: str | None = None
@@ -1404,58 +2052,68 @@ def check_tokio_unstable(root: Path) -> list[str]:
             header = _RECIPE.match(line)
             if header is not None:
                 recipe = header.group("name")
-            if line.lstrip().startswith("#") or not TOKIO_UNSTABLE.search(line):
+            if line.lstrip().startswith("#"):
                 continue
-            if recipe is None or TURMOIL not in recipe:
-                problems.append(
-                    f"{JUSTFILE}:{number}: {RULE}: `--cfg tokio_unstable` changes how Tokio "
-                    f"schedules and reports, so only a Turmoil recipe passes it, and "
-                    f"`{recipe}` is not one"
-                )
+            for name in _global_cfgs(line):
+                if name in MODES:
+                    reject_mode(f"{JUSTFILE}:{number}", name)
+                elif name == ANALYSIS_CFG:
+                    reject_analysis(f"{JUSTFILE}:{number}")
+                elif name == TOKIO_UNSTABLE and (recipe is None or TURMOIL not in recipe):
+                    problems.append(
+                        f"{JUSTFILE}:{number}: {RULE}: `--cfg tokio_unstable` changes how Tokio "
+                        f"schedules and reports, so only a Turmoil recipe passes it, and "
+                        f"`{recipe}` is not one"
+                    )
     for pattern in CONFIGURATION_GLOBS:
         for path in sorted(root.glob(pattern)):
             if not path.is_file():
                 continue
             relative = path.relative_to(root)
             for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                if line.lstrip().startswith("#") or not TOKIO_UNSTABLE.search(line):
+                if line.lstrip().startswith("#"):
                     continue
+                for name in _global_cfgs(line):
+                    if name in MODES:
+                        reject_mode(f"{relative}:{number}", name)
+                    elif name == ANALYSIS_CFG:
+                        reject_analysis(f"{relative}:{number}")
+                    elif name == TOKIO_UNSTABLE:
+                        problems.append(
+                            f"{relative}:{number}: {RULE}: `--cfg tokio_unstable` would change how "
+                            "Tokio schedules and reports in every build this configures; only a "
+                            "Turmoil recipe passes it"
+                        )
+    for path in files:
+        if PurePosixPath(path).name != "build.rs":
+            continue
+        for name in sorted(set(_global_cfgs((root / path).read_text(encoding="utf-8")))):
+            if name in MODES:
+                reject_mode(path, name)
+            elif name == ANALYSIS_CFG:
+                reject_analysis(path)
+            elif name == TOKIO_UNSTABLE:
                 problems.append(
-                    f"{relative}:{number}: {RULE}: `--cfg tokio_unstable` would change how Tokio "
-                    f"schedules and reports in every build this configures; only a Turmoil recipe "
-                    "passes it"
+                    f"{path}: {RULE}: a build script that sets `tokio_unstable` changes how Tokio "
+                    "schedules and reports in every build; only a Turmoil recipe passes it"
                 )
     return problems
 
 
-def rust_sources(root: Path) -> list[str]:
-    completed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    return sorted(
-        entry
-        for entry in completed.stdout.split("\0")
-        if entry.endswith(".rs") and (root / entry).is_file()
-    )
-
-
 def check(root: Path) -> list[str]:
     problems: list[str] = []
-    uses: dict[str, FileUses] = {}
-    for path in rust_sources(root):
-        source = (root / path).read_text(encoding="utf-8")
-        if PurePosixPath(path).name == "build.rs" and TOKIO_UNSTABLE.search(source):
-            problems.append(
-                f"{path}: {RULE}: a build script that sets `tokio_unstable` changes how Tokio "
-                "schedules and reports in every build; only a Turmoil recipe passes it"
-            )
-        if path.startswith(OWNER_SOURCES):
+    files = tracked_files(root)
+    packages = load_packages(root, files)
+    guests = guest_directories(packages)
+    governed: dict[str, RustFile] = {}
+    for path in files:
+        if not path.endswith(".rs") or path.startswith(OWNER_SOURCES) or path.startswith(guests):
             continue
-        file = RustFile(path, source)
-        violations, file_uses = check_source(file)
+        governed[path] = RustFile(path, (root / path).read_text(encoding="utf-8"))
+    loom_only = loom_only_files(governed)
+    uses: dict[str, FileUses] = {}
+    for path, file in governed.items():
+        violations, file_uses = check_source(file, loom_only_file=path in loom_only)
         problems.extend(site.render() for site in violations)
         uses[path] = file_uses
     permissions_file = root / PERMISSIONS
@@ -1470,8 +2128,9 @@ def check(root: Path) -> list[str]:
     except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
         return [*problems, f"{BLOCKING_PERMISSIONS}: {RULE}: {error}"]
     problems.extend(check_blocking_permissions(uses, blocking))
-    problems.extend(check_manifests(load_packages(root)))
-    problems.extend(check_tokio_unstable(root))
+    problems.extend(check_manifests(packages))
+    problems.extend(check_global_cfgs(root, files))
+    problems.extend(check_release_binaries(root, packages, files))
     return problems
 
 

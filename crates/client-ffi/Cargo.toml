@@ -25,7 +25,6 @@ nervix-models = { workspace = true, features = ["arrow"] }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }

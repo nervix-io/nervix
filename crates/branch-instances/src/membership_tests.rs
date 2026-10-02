@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroUsize, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::Timestamp;
-use triomphe::Arc;
+use nervix_primitives::sync::{Arc, StdArc};
 
 use super::{BranchAdmission, BranchMembership, BranchPresence, OwnedBranches};
 

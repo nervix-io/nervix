@@ -10,8 +10,6 @@
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
 
-use std::sync::Arc;
-
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
@@ -19,7 +17,7 @@ use nervix_models::{
     DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
     PlacementPolicy, ResolvedCodecWireFormat, SchemaName, Timestamp,
 };
-use nervix_primitives::publication::ArcSwap;
+use nervix_primitives::{publication::ArcSwap, sync::StdArc};
 
 use super::{
     BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle, EmitterPublishBatch,
@@ -54,14 +52,14 @@ where
 }
 
 /// A `tenant` string and an I64 `value`, the shape both drivers carry.
-fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
+fn benchmark_schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
     let field = |name: &str, ty: ParseAsType| nervix_models::SchemaField {
         name: identifier::<FieldName>(name),
         ty,
         optional: false,
         sensitive: false,
     };
-    triomphe::Arc::new(compile_schema(&CreateSchema {
+    nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
         name: identifier::<SchemaName>("admitted_work_benchmark"),
         fields: vec![
             field("tenant", ParseAsType::String),
@@ -72,7 +70,7 @@ fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
 
 /// `rows` rows spread evenly over `branches` tenants, one relay batch per tenant, in tenant order.
 fn tenant_batches(
-    schema: &triomphe::Arc<CompiledSchema>,
+    schema: &nervix_primitives::sync::Arc<CompiledSchema>,
     rows: usize,
     branches: usize,
 ) -> Vec<RelayRecordBatch> {
@@ -93,15 +91,15 @@ fn tenant_batches(
         let record_batch = arrow_array::RecordBatch::try_new(
             schema.arrow_schema(),
             vec![
-                std::sync::Arc::new(arrow_array::StringArray::from(vec![
+                nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec![
                     tenant.as_str();
                     per_branch
                 ])),
-                std::sync::Arc::new(arrow_array::Int64Array::from(values)),
+                nervix_primitives::sync::StdArc::new(arrow_array::Int64Array::from(values)),
             ],
         )
         .assured("the columns are built here for the schema declared beside them");
-        let runtime_batch = triomphe::Arc::new(
+        let runtime_batch = nervix_primitives::sync::Arc::new(
             RuntimeRecordBatch::from_record_batch(schema.arrow_schema(), record_batch)
                 .assured("the batch was built for this schema"),
         );
@@ -111,7 +109,7 @@ fn tenant_batches(
             messages.push(RelayMessage {
                 key: Some(key.clone()),
                 record: RuntimeRow::new(
-                    triomphe::Arc::clone(&runtime_batch),
+                    nervix_primitives::sync::Arc::clone(&runtime_batch),
                     row,
                     RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
                 )
@@ -120,7 +118,7 @@ fn tenant_batches(
             });
         }
         batches.push(
-            RelayRecordBatch::from_messages(triomphe::Arc::clone(schema), messages)
+            RelayRecordBatch::from_messages(nervix_primitives::sync::Arc::clone(schema), messages)
                 .assured("every message of one tenant shares its key and the schema"),
         );
     }
@@ -167,7 +165,7 @@ impl BranchedInputBenchmark {
 pub struct TransformedEncodingBenchmark {
     runtime: nervix_primitives::runtime::Runtime,
     context: EmitterSinkContext,
-    codec: triomphe::Arc<CompiledCodec>,
+    codec: nervix_primitives::sync::Arc<CompiledCodec>,
     batch: EmitterPublishBatch,
     rows: Vec<usize>,
 }
@@ -191,7 +189,7 @@ impl TransformedEncodingBenchmark {
                 schema: identifier("admitted_work_benchmark"),
                 encoding_rules: Vec::new(),
             },
-            triomphe::Arc::clone(&schema),
+            nervix_primitives::sync::Arc::clone(&schema),
             ResolvedCodecWireFormat::JaqNative {
                 format: CodecJaqFormat::Json,
                 transformations: &transformations,
@@ -227,7 +225,7 @@ impl TransformedEncodingBenchmark {
         Self {
             runtime: benchmark_runtime(),
             context: EmitterSinkContext {
-                routing: Arc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+                routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
                 metrics_dirty: runtime.branch_metrics_mark(&domain, ModelKind::Emitter, &emitter),
                 status: runtime.emitter_status(&key),
                 confirmation_waits: runtime.emitter_confirmation_counter(&key),
@@ -253,7 +251,7 @@ impl TransformedEncodingBenchmark {
     /// Encode every row of the batch once, and answer how many payloads were produced.
     pub fn encode(&self) -> usize {
         let encoded = self.runtime.block_on(encode_pending_broker_payloads(
-            triomphe::Arc::clone(&self.codec),
+            nervix_primitives::sync::Arc::clone(&self.codec),
             &self.context,
             &self.batch,
             self.rows.clone(),

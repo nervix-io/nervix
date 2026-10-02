@@ -21,13 +21,7 @@
 //! loses an outcome or the batch: [`Producer::pending_submissions`] lists it, and a producer whose
 //! application stops reading outcomes stops being granted credit for new batches.
 
-use std::{
-    collections::BTreeMap,
-    fmt,
-    num::NonZeroU64,
-    sync::{Arc as StdArc, Weak},
-    time::Duration,
-};
+use std::{collections::BTreeMap, fmt, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 use arch_into::ArchInto as _;
@@ -45,10 +39,9 @@ use nervix_models::{
     ClientProducerLimits, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
     IngestorName, SchemaField,
 };
-use nervix_primitives::sync::{blocking::Mutex as SyncMutex, oneshot, watch};
+use nervix_primitives::sync::{Arc, StdArc, StdWeak, blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},
@@ -262,8 +255,8 @@ pub(crate) struct ProducerRegistry {
 struct ProducerRegistryState {
     producers: HashMap<ProducerKey, RegisteredProducer>,
     /// Handles are weak so dropping a client application handle releases its desired entry.
-    desired: BTreeMap<usize, Weak<ProducerInner>>,
-    current: HashMap<ProducerKey, Weak<ProducerInner>>,
+    desired: BTreeMap<usize, StdWeak<ProducerInner>>,
+    current: HashMap<ProducerKey, StdWeak<ProducerInner>>,
 }
 
 /// A producer of one exchange. Request identities restart with every exchange, so the exchange is
@@ -347,7 +340,11 @@ impl ProducerRegistry {
     pub(crate) fn restorable(&self) -> Vec<StdArc<ProducerInner>> {
         let mut state = self.state.lock();
         state.desired.retain(|_, handle| handle.strong_count() > 0);
-        state.desired.values().filter_map(Weak::upgrade).collect()
+        state
+            .desired
+            .values()
+            .filter_map(StdWeak::upgrade)
+            .collect()
     }
 
     pub(crate) fn admission(&self, generation: &Arc<()>, changed: ProducerAdmissionChanged) {
@@ -416,7 +413,7 @@ impl ProducerRegistry {
             state
                 .desired
                 .values()
-                .filter_map(Weak::upgrade)
+                .filter_map(StdWeak::upgrade)
                 .collect::<Vec<_>>()
         };
         for removed in ended {
@@ -1407,8 +1404,9 @@ mod arrow_batch {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use nervix_model_harness::shuttle::check_random_and_pct;
+
     use super::*;
-    use crate::shuttle_test::check_random_and_pct;
 
     #[test]
     fn shuttle_close_fences_a_producer_restore_started_on_the_same_exchange() {

@@ -22,14 +22,16 @@ use nervix_client_wire::{
     UploadReply, UploadStart, VerifiedFrame,
 };
 use nervix_models::{DomainName, ResourceName};
-use nervix_primitives::time::{Instant, timeout};
+use nervix_primitives::{
+    sync::Arc,
+    time::{Instant, timeout},
+};
 use serde::{Deserialize, Serialize};
 use tikv_jemalloc_ctl::{epoch, stats};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message as WebSocketMessage, client::IntoClientRequest as _, http::HeaderValue},
 };
-use triomphe::Arc;
 use uuid::Uuid;
 
 use super::{

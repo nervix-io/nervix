@@ -6,13 +6,14 @@
 //! - **Depends on.** The columnar JSON engine, Arrow, Criterion and serde.
 //! - **Must not know.** Nervix graph plans, connector lifecycle or cluster state.
 
-use std::{hint::black_box, sync::Arc};
+use std::hint::black_box;
 
 use arrow_array::{ArrayRef, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{Field, Schema};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls};
+use nervix_primitives::sync::StdArc;
 use serde::Serialize;
 
 const ROWS: usize = 1_024;
@@ -38,18 +39,18 @@ fn input_batch() -> RecordBatch {
         })
         .collect::<Vec<_>>();
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::from_iter_values(
+        StdArc::new(UInt64Array::from_iter_values(
             0..u64::try_from(ROWS).assured("benchmark row count fits u64"),
         )),
-        Arc::new(StringArray::from_iter_values(clean)),
-        Arc::new(StringArray::from_iter_values(escaped)),
+        StdArc::new(StringArray::from_iter_values(clean)),
+        StdArc::new(StringArray::from_iter_values(escaped)),
     ];
     let fields = [
         Field::new("id", columns[0].data_type().clone(), false),
         Field::new("clean", columns[1].data_type().clone(), false),
         Field::new("escaped", columns[2].data_type().clone(), false),
     ];
-    RecordBatch::try_new(Arc::new(Schema::new(fields.to_vec())), columns)
+    RecordBatch::try_new(StdArc::new(Schema::new(fields.to_vec())), columns)
         .assured("benchmark columns have equal row counts and declared Arrow types")
 }
 
