@@ -120,8 +120,6 @@ A C API program links the archive and executes a generated ONNX model before ins
 builds also initialize and load the packaged CUDA provider before running CPU inference. This
 check can run without a GPU.
 
-The CUDA group-query attention source compiles from a copy with the member-template
-disambiguator required by LLVM.
 The pinned runtime forces warnings to errors on its core and CUDA targets. Release builds pass
 CMake's `--compile-no-warning-as-error` switch so newer LLVM diagnostics remain visible warnings.
 Actual compiler errors still fail the build. This setting participates in the artifact identity.
