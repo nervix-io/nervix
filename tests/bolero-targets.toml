@@ -164,6 +164,7 @@ domain_version = 1
 features = []
 id = "nspl-expression-text"
 invariant = "Edited expression text reads as the same expression through a statement and every standalone expression reader, or none of them reads it as one."
+manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-nspl"
 random_iterations = 256
