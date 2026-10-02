@@ -56,7 +56,7 @@ use nervix_checkpoint_replication::{
     Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
 };
 use nervix_dns::DnsResolver;
-use nervix_execution::{ChargedBytes, Executor};
+use nervix_execution::{ChargedBytes, Executor, QueueAdmission};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -419,7 +419,7 @@ pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestDispatch, decode_ingested_payload,
+    PayloadDecodeFailure, RawIngestAcceptance, RawIngestDispatch, decode_ingested_payload,
     prepare_branched_entrypoint_input,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;

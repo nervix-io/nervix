@@ -86,6 +86,20 @@ impl PayloadDecodeFailure {
         }
         Self::NotAdmitted(error.change_context(UnfoldingNotAdmitted))
     }
+
+    /// The failure `ingestor`'s group reports for a payload that did not decode: the codec's
+    /// report beneath the payload's decode failure, or the refusal beneath the unfolding the node
+    /// did not admit.
+    pub(super) fn into_group_error(self, ingestor: &IngestorName) -> Report<IngestGroupError> {
+        match self {
+            Self::Codec(report) => report.change_context(IngestGroupError::DecodePayload {
+                ingestor: ingestor.clone(),
+            }),
+            Self::NotAdmitted(report) => report.change_context(IngestGroupError::Execution {
+                operation: IngestGroupAdmittedOperation::UnfoldPayload,
+            }),
+        }
+    }
 }
 
 /// The node's bounded execution did not take a payload's unfolding now.
@@ -377,6 +391,20 @@ pub(super) struct RawIngestDispatch<'a> {
     pub(super) flush: bool,
 }
 
+/// The payloads of one [`BufferedIngestPayload`] that decoded into their ingest group, which the
+/// group now accepts. None of them carries an acknowledgement of its own: each message takes a
+/// share of a root the group tracks.
+pub(super) struct RawIngestAcceptance<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
+    pub(super) domain: &'a DomainName,
+    pub(super) ingestor: &'a IngestorName,
+    pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
+    pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    pub(super) payload: &'a BufferedIngestPayload,
+    pub(super) collector: &'a mut IngestRouteCollector,
+}
+
 /// Columnar ingest group state.
 ///
 /// Record columns and the shared ingest-metadata view are selected together. ACKs remain
@@ -433,6 +461,7 @@ impl PendingIngestGroup {
 
     /// Decodes one payload into the group's record builder, opened for the codec's schema on the
     /// first payload the group decodes, and holds its messages until the source accepts it.
+    /// `admission` says what an unfolding does when the node's extension workers have no room.
     ///
     /// A payload that fails to decode leaves the group's rows exactly as they were. When the group
     /// then holds no row at all, its builder is dropped, so the rows a rejected payload abandoned do
@@ -440,6 +469,7 @@ impl PendingIngestGroup {
     pub(super) async fn decode_payload(
         &mut self,
         executor: &Executor,
+        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
     ) -> Result<(), PayloadDecodeFailure> {
@@ -447,7 +477,16 @@ impl PendingIngestGroup {
         let records = self
             .records
             .get_or_insert_with(|| codec.schema().batch_builder(row_bound));
-        match decode_ingested_payload(executor, codec, payload, &mut self.decoder, records).await {
+        let decoded = decode_ingested_payload(
+            executor,
+            admission,
+            codec,
+            payload,
+            &mut self.decoder,
+            records,
+        )
+        .await;
+        match decoded {
             Ok(messages) => {
                 self.undispatched_payloads.push_back(messages);
                 Ok(())
@@ -733,7 +772,8 @@ impl IngestRouteCollector {
         }
     }
 
-    /// Decodes one source payload into the group's record builder.
+    /// Decodes one source payload into the group's record builder, its unfolding admitted to the
+    /// node's extension workers as `admission` says.
     ///
     /// The builder belongs to the group, so consecutive payloads share one set of Arrow columns,
     /// and every message a payload unfolds into is appended there. A payload that fails to decode
@@ -741,10 +781,13 @@ impl IngestRouteCollector {
     pub(super) async fn decode_payload(
         &mut self,
         executor: &Executor,
+        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
     ) -> Result<(), PayloadDecodeFailure> {
-        self.pending.decode_payload(executor, codec, payload).await
+        self.pending
+            .decode_payload(executor, admission, codec, payload)
+            .await
     }
 
     /// Drops decoded payloads a caller could not accept, so a failed dispatch leaves no stray row.
@@ -1191,10 +1234,12 @@ pub(super) async fn prepare_branched_entrypoint_input(
 /// unfolding runs on the node's extension workers and hands back the messages the append consumes,
 /// charged twice the payload's bytes for the parsed document and the messages it unfolds into. The
 /// append itself always runs here, which keeps the builder on the task that owns it, and it keeps
-/// all of a payload's messages or none of them. A node that cannot take the unfolding now refuses
-/// it without judging the payload.
+/// all of a payload's messages or none of them. When the extension workers have no room,
+/// `admission` decides: a payload whose sender can present it again is refused without being
+/// judged, and one the node keeps waits for a place.
 pub(super) async fn decode_ingested_payload(
     executor: &Executor,
+    admission: QueueAdmission,
     codec: &Arc<CompiledCodec>,
     payload: &[u8],
     decoder: &mut JsonDecoder,
@@ -1224,8 +1269,9 @@ pub(super) async fn decode_ingested_payload(
     let unfolding_codec = codec.clone();
     let payload = Bytes::copy_from_slice(payload);
     let unfolded = executor
-        .run_cpu(
+        .run_cpu_with(
             CpuClass::Extension,
+            admission,
             reservation,
             move |_charge, cancellation| {
                 if let Err(cancelled) = cancellation.check() {
@@ -2019,11 +2065,72 @@ impl Runtime {
             .await
     }
 
+    /// Decodes every payload `payload` holds into `collector`'s open group, their unfoldings
+    /// admitted as `admission` says.
+    ///
+    /// The payloads are delivered together or not at all, so a payload that fails to decode takes
+    /// the payloads decoded before it back out of the group. A caller that drops this future before
+    /// it completes discards what it decoded itself.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the retained payload exposes its selected message iterator \
                                    for one admitted batch")
     )]
+    pub(in crate::runtime) async fn decode_raw_ingest_payload(
+        &self,
+        collector: &mut IngestRouteCollector,
+        admission: QueueAdmission,
+        codec: &Arc<CompiledCodec>,
+        payload: &BufferedIngestPayload,
+    ) -> Result<(), PayloadDecodeFailure> {
+        for source_payload in payload.payloads() {
+            nervix_primitives::task::consume_budget().await;
+            if let Err(failure) = collector
+                .decode_payload(self.executor(), admission, codec, source_payload)
+                .await
+            {
+                collector.discard_undispatched_payloads();
+                return Err(failure);
+            }
+        }
+        Ok(())
+    }
+
+    /// Accepts payloads that decoded into their group, giving every message the metadata row of
+    /// the payload it came from.
+    pub(in crate::runtime) async fn accept_raw_ingest_payload(
+        &self,
+        acceptance: RawIngestAcceptance<'_>,
+    ) -> error_stack::Result<(), IngestGroupError> {
+        let RawIngestAcceptance {
+            handles,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            payload,
+            collector,
+        } = acceptance;
+        let metadata = payload.metadata_rows();
+        self.dispatch_ingested_records(IngestGroupDispatch {
+            handles,
+            collector,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            metadata: &metadata,
+            ingested_at: payload.observed_at(),
+            acks: vec![AckSet::empty(); payload.len()],
+        })
+        .await
+    }
+
+    /// Decodes and dispatches the payloads a source loop was just handed. An unfolding the
+    /// extension workers have no room for is refused, and the dispatch fails for the loop to
+    /// handle as its source's contract says.
     pub(in crate::runtime) async fn dispatch_raw_ingest_payload(
         &self,
         dispatch: RawIngestDispatch<'_>,
@@ -2041,42 +2148,21 @@ impl Runtime {
             collector,
             flush,
         } = dispatch;
-        for source_payload in payload.payloads() {
-            nervix_primitives::task::consume_budget().await;
-            // A request carries all of its payloads or none of them, so a payload that fails to
-            // decode takes the payloads decoded before it back out of the group.
-            if let Err(failure) = collector
-                .decode_payload(self.executor(), &codec, source_payload)
-                .await
-            {
-                collector.discard_undispatched_payloads();
-                let error = match failure {
-                    PayloadDecodeFailure::Codec(report) => {
-                        report.change_context(IngestGroupError::DecodePayload {
-                            ingestor: ingestor.clone(),
-                        })
-                    }
-                    PayloadDecodeFailure::NotAdmitted(report) => {
-                        report.change_context(IngestGroupError::Execution {
-                            operation: IngestGroupAdmittedOperation::UnfoldPayload,
-                        })
-                    }
-                };
-                return Err(error);
-            }
+        let decoded = self
+            .decode_raw_ingest_payload(collector, QueueAdmission::RefuseWhenFull, &codec, payload)
+            .await;
+        if let Err(failure) = decoded {
+            return Err(failure.into_group_error(ingestor));
         }
-        let metadata = payload.metadata_rows();
-        self.dispatch_ingested_records(IngestGroupDispatch {
+        self.accept_raw_ingest_payload(RawIngestAcceptance {
             handles,
-            collector,
             domain,
             ingestor,
             timestamp_source,
             output_routes,
             filter_where,
-            metadata: &metadata,
-            ingested_at: payload.observed_at(),
-            acks: vec![AckSet::empty(); payload.len()],
+            payload,
+            collector: &mut *collector,
         })
         .await?;
         if flush {

@@ -346,6 +346,16 @@ The host runs three source loop families, with a listener using the broker loop:
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
 | Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
 
+The broker, paced and request-scoped loops each drain what their instance's quiesce buffer
+retained once the ingestor resumes, oldest first. A retained payload stays in its buffer, counted
+with its bytes, until its messages enter their ingest group, and the buffer hands out nothing
+behind it until then. Its sender was already answered and its source has moved past it, so the
+host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
+than to be refused, ahead of work that asks afterwards; the unfolding of a live payload is refused
+when they are full, and the source's own contract handles that failure. A shutdown or a new quiesce
+ends the wait and returns the payload to the front of its buffer, so a drain delays neither. A
+payload its codec rejects leaves the buffer and is reported.
+
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
 timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
