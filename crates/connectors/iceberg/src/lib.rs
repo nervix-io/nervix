@@ -743,6 +743,11 @@ impl SinkLifecycle for IcebergSink {
         self.staged_rows
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "external Iceberg SDK commit and error formatting own their \
+                                   effects; no internal runtime ownership is inferred")
+    )]
     async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
         if self.staged_batches.is_empty() {
             self.commit_deadline.clear();
@@ -962,6 +967,10 @@ impl IcebergSinkClient {
         Ok(IcebergPreparedCommit::new(data_files))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the external Iceberg catalog owns commit and request effects")
+    )]
     async fn commit_prepared(&mut self, prepared: &IcebergPreparedCommit) -> SinkPublishResult<()> {
         let commit_failure = |error: &dyn std::fmt::Display| {
             Report::new(SinkPublishError::Commit { sink: ICEBERG })

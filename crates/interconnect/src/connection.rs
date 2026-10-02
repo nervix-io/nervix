@@ -7,11 +7,19 @@
 //! - **Depends on.** Certificate identity, bounded rkyv codecs, and execution admission.
 //! - **Must not know.** Runtime graphs, scheduling decisions, or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "connection and peer registration install or retire concrete transport \
+                  lifetimes; recurring transport operations override this default"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::poll_fn,
     hash::RandomState,
-    io::Write as _,
     net::SocketAddr,
     ops::Deref,
     time::Duration,
@@ -20,8 +28,8 @@ use std::{
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
-use h2::{Ping, PingPong, Reason, RecvStream, SendStream, client, server};
-use http::{Method, Request, Response, StatusCode, Version};
+use h2::{Ping, PingPong, Reason, RecvStream, client, server};
+use http::{Method, Request, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::ConnectionBudget;
 use nervix_execution::{
@@ -65,12 +73,14 @@ use crate::{
     },
 };
 
+mod body;
 mod dial;
 mod duplex;
 mod relay;
 mod stream;
 pub(crate) mod stream_slots;
 
+use body::{read_body, read_body_into, send_body, send_response, send_static_error};
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
@@ -129,6 +139,13 @@ struct SlotControl {
     cancel: CancellationToken,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct CancelOnDrop {
     token: CancellationToken,
     armed: bool,
@@ -158,6 +175,13 @@ impl Drop for CancelOnDrop {
 /// and connections by reference instead of assembling a key for every operation. The keys name the
 /// endpoint, not an address, so a new DNS answer for the same endpoint changes only where the next
 /// connection is dialled and never retires a connection that is already established.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
@@ -274,6 +298,13 @@ fn increment(total: usize, addition: usize) -> usize {
         .assured("configured connection, stream and slot limits are far inside usize")
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 pub(crate) struct StreamLease {
     connection: Arc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
@@ -360,6 +391,13 @@ struct OutboundRelayKey {
 /// The attempt holds its channel's key, so the channel bookkeeping an attempt touches never
 /// rebuilds that key.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayAttemptKey {
     channel: RelayChannelKey,
     sequence: u64,
@@ -383,6 +421,13 @@ struct RelayChannelKey {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
@@ -426,6 +471,13 @@ impl RelayChannelWatermark {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 enum RelayAttemptEntry {
     Active(StdArc<RelayAdmissionRecord>),
     CancellationFence,
@@ -468,6 +520,15 @@ enum RelayAdmissionState {
     Cancelled,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one inbound admission record",
+        bound = "one terminal transition per reserved grant and retained admission permit",
+        reason = "admission records own the exact grant and its terminal resolution"
+    )
+)]
 struct RelayAdmissionRecord {
     attempt: RelayAttemptKey,
     admission_key: RelayAdmissionKey,
@@ -485,6 +546,13 @@ struct RelayAdmissionRecord {
     _terminal: OwnedSemaphorePermit,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayBodyCompletionGuard {
     admission: StdArc<RelayAdmissionRecord>,
     complete: bool,
@@ -513,10 +581,28 @@ impl Drop for RelayBodyCompletionGuard {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "the intake retains its exact grant record through the terminal transition",
+        key = "one admitted relay grant",
+        bound = "one synchronous status transition under its retained record; no guard crosses \
+                 await"
+    )
+)]
 pub struct RelayAdmission {
     record: StdArc<RelayAdmissionRecord>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport services each admitted body and resolves its exact cancellation \
+                  guard"
+    )
+)]
 pub struct RelayCancellationGuard {
     state: TransportState,
     peer_node_id: ClusterNodeName,
@@ -862,9 +948,11 @@ impl TransportState {
         &self.node_id
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     pub(crate) fn next_coordination_identity(
         &self,
     ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
+        #[allow(deprecated)] // until try_update is stabilized
         let sequence = self
             .next_coordination_sequence
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1126,6 +1214,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn ensure_class_slots(&self, target: &OutboundTarget, class: PoolClass) {
         for key in target.slot_keys(class) {
             self.ensure_slot(key);
@@ -1138,6 +1234,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn ensure_slot(&self, key: &ConnectionSlotKey) {
         if self.admission_closed.is_cancelled() {
             return;
@@ -1145,10 +1249,20 @@ impl TransportState {
         // Every lease passes through here, and in the steady state its slot is already running. A
         // shared lookup confirms that, so only a missing slot takes the exclusive entry and builds
         // an owned key.
-        if self.slots.contains_key(key) {
+        if nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.slots.contains_key(key)
+        ) {
             return;
         }
-        match self.slots.entry(key.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.slots.entry(key.clone())
+        ) {
             Entry::Occupied(_) => {}
             Entry::Vacant(entry) => {
                 let cancel = CancellationToken::new();
@@ -1158,7 +1272,13 @@ impl TransportState {
                 let state = self.clone();
                 let key = key.clone();
                 self.tasks.spawn(async move {
-                    state.run_slot(key, cancel).await;
+                    nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "Typed Ratchet 03 (86bc9eqjv): a missing retained transport slot installs \
+                         its one supervised connection task",
+                        state.run_slot(key, cancel)
+                    )
+                    .await;
                 });
             }
         }
@@ -1194,6 +1314,14 @@ impl TransportState {
         self.connection_changed.notify_waiters();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
         let mut backoff = self.options.reconnect_backoff;
         loop {
@@ -1525,6 +1653,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     pub(crate) async fn lease(
         &self,
         node_id: &ClusterNodeName,
@@ -1567,19 +1703,37 @@ impl TransportState {
     /// Lease a free stream on an established connection of `class` to `node_id`, starting any of
     /// the peer's slots in that class that are not running. On an established pool every step reads
     /// shared state, so the lease takes no exclusive lock.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
+    #[allow(deprecated)] // until try_update is stabilized
     fn try_lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
     ) -> Option<StreamLease> {
-        let target = self
-            .targets
-            .get(node_id)
-            .map(|target| Arc::clone(target.value()))?;
-        self.ensure_class_slots(&target, class);
+        let target = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.targets.get(node_id)
+        )
+        .map(|target| Arc::clone(target.value()))?;
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
+             recurring lease attempts",
+            self.ensure_class_slots(&target, class)
+        );
 
         let slot_keys = target.slot_keys(class);
+        #[allow(deprecated)] // until try_update is stabilized
         let start = self
             .next_connection
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1589,7 +1743,13 @@ impl TransportState {
             % slot_keys.len();
         let (before_start, from_start) = slot_keys.split_at(start);
         for key in from_start.iter().chain(before_start) {
-            let Some(connection) = self.connections.get(key).map(|item| item.clone()) else {
+            let Some(connection) = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected \
+                 connection slot instead of reaching the shared registry per request",
+                self.connections.get(key)
+            )
+            .map(|item| item.clone()) else {
                 continue;
             };
             let Some(permit) = connection.stream_slots.try_lease(subquota) else {
@@ -1607,6 +1767,14 @@ impl TransportState {
         None
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) async fn send(
         &self,
         node_id: &ClusterNodeName,
@@ -1625,10 +1793,13 @@ impl TransportState {
                     peer_node_id: node_id.clone(),
                     registration: ack.registration.clone(),
                 };
-                let record = self
-                    .relay_admissions
-                    .get(&key)
-                    .map(|record| StdArc::clone(record.value()));
+                let record = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain pending request \
+                     ownership through the terminal response",
+                    self.relay_admissions.get(&key)
+                )
+                .map(|record| StdArc::clone(record.value()));
                 if let Some(record) = &record {
                     if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
                         record.reject(reason.clone());
@@ -1792,6 +1963,14 @@ impl TransportState {
             .map_err(|_| Report::new(TransportError::IncomingQueueFull))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn deliver_terminal_incoming(
         &self,
         peer_addr: SocketAddr,
@@ -2689,6 +2868,14 @@ impl ClientConnection {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn request_raw(
         &self,
         state: &TransportState,
@@ -2787,6 +2974,14 @@ impl ClientConnection {
 }
 
 impl StreamLease {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn request_raw(
         &self,
         state: &TransportState,
@@ -2794,177 +2989,4 @@ impl StreamLease {
     ) -> Result<ChargedBytes, Report<TransportError>> {
         self.connection.request_raw(state, request).await
     }
-}
-
-async fn send_body(
-    stream: &mut SendStream<Bytes>,
-    body: ChargedBytes,
-) -> Result<(), Report<TransportError>> {
-    let mut offset = 0;
-    while offset < body.len() {
-        nervix_primitives::task::consume_budget().await;
-        let remaining = body
-            .len()
-            .checked_sub(offset)
-            .verified("the send offset never advances beyond the body");
-        let wanted = remaining.min(BODY_CHUNK_BYTES);
-        stream.reserve_capacity(wanted);
-        let assigned = poll_fn(|context| stream.poll_capacity(context))
-            .await
-            .ok_or_else(|| {
-                TransportError::Decode(
-                    "HTTP/2 stream closed while assigning send capacity".to_string(),
-                )
-            })?
-            .map_err(TransportError::from)?;
-        let ready = assigned.min(wanted);
-        if ready == 0 {
-            continue;
-        }
-        let end = offset
-            .checked_add(ready)
-            .verified("assigned capacity is bounded by the remaining body");
-        let chunk = body
-            .slice(offset, end)
-            .verified("the chunk bounds were checked against the body");
-        offset = end;
-        let end_stream = offset == body.len();
-        stream
-            .send_data(Bytes::from_owner(chunk), end_stream)
-            .map_err(TransportError::from)?;
-        if end_stream {
-            break;
-        }
-    }
-    stream.reserve_capacity(0);
-    Ok(())
-}
-
-async fn send_response(
-    mut respond: server::SendResponse<Bytes>,
-    status: StatusCode,
-    body: Option<ChargedBytes>,
-    progress_timeout: Duration,
-) -> Result<(), Report<TransportError>> {
-    let response = Response::builder()
-        .status(status)
-        .version(Version::HTTP_2)
-        .body(())
-        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Http))?;
-    let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
-    let mut stream = respond
-        .send_response(response, end_stream)
-        .map_err(TransportError::from)?;
-    if let Some(body) = body
-        && !body.is_empty()
-    {
-        timeout(progress_timeout, send_body(&mut stream, body))
-            .await
-            .map_err(|_| TransportError::ProgressTimeout {
-                timeout: progress_timeout,
-            })??;
-    }
-    Ok(())
-}
-
-async fn send_static_error(
-    respond: &mut server::SendResponse<Bytes>,
-    status: StatusCode,
-    message: &str,
-    progress_timeout: Duration,
-) -> Result<(), Report<TransportError>> {
-    let response = Response::builder()
-        .status(status)
-        .version(Version::HTTP_2)
-        .body(())
-        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Http))?;
-    let mut stream = respond
-        .send_response(response, false)
-        .map_err(TransportError::from)?;
-    timeout(progress_timeout, async {
-        let body = Bytes::copy_from_slice(message.as_bytes());
-        let mut offset = 0;
-        while offset < body.len() {
-            nervix_primitives::task::consume_budget().await;
-            let remaining = body
-                .len()
-                .checked_sub(offset)
-                .verified("the send offset never advances beyond the static error body");
-            let wanted = remaining.min(BODY_CHUNK_BYTES);
-            stream.reserve_capacity(wanted);
-            let assigned = poll_fn(|context| stream.poll_capacity(context))
-                .await
-                .ok_or_else(|| {
-                    TransportError::Decode(
-                        "HTTP/2 stream closed while assigning send capacity".to_string(),
-                    )
-                })?
-                .map_err(TransportError::from)?;
-            let ready = assigned.min(wanted);
-            if ready == 0 {
-                continue;
-            }
-            let end = offset
-                .checked_add(ready)
-                .verified("assigned capacity is bounded by the remaining static error body");
-            let chunk = body.slice(offset..end);
-            offset = end;
-            let end_stream = offset == body.len();
-            stream
-                .send_data(chunk, end_stream)
-                .map_err(TransportError::from)?;
-            if end_stream {
-                break;
-            }
-        }
-        stream.reserve_capacity(0);
-        Ok::<(), Report<TransportError>>(())
-    })
-    .await
-    .map_err(|_| TransportError::ProgressTimeout {
-        timeout: progress_timeout,
-    })?
-}
-
-async fn read_body(
-    executor: &Executor,
-    class: MemoryClass,
-    limit: u64,
-    progress_timeout: Duration,
-    body: RecvStream,
-) -> Result<ChargedBytes, Report<TransportError>> {
-    let initial = limit.min(4 * 1024);
-    let reservation = executor
-        .reserve(class, initial)
-        .await
-        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
-    read_body_into(&mut buffer, progress_timeout, body).await?;
-    Ok(ChargedBytes::from_buffer(buffer))
-}
-
-async fn read_body_into(
-    buffer: &mut BudgetedBuffer,
-    progress_timeout: Duration,
-    mut body: RecvStream,
-) -> Result<(), Report<TransportError>> {
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let chunk = timeout(progress_timeout, body.data()).await.map_err(|_| {
-            TransportError::ProgressTimeout {
-                timeout: progress_timeout,
-            }
-        })?;
-        let Some(chunk) = chunk else {
-            break;
-        };
-        let chunk = chunk.map_err(TransportError::from)?;
-        buffer.write_all(&chunk).map_err(|error| {
-            TransportError::with_cause(Report::new(error), TransportError::Decode)
-        })?;
-        body.flow_control()
-            .release_capacity(chunk.len())
-            .map_err(TransportError::from)?;
-    }
-    Ok(())
 }

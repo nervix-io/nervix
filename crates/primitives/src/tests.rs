@@ -38,6 +38,7 @@ fn is_same_type<Selected: 'static, Expected: 'static>() -> bool {
 }
 
 /// Every operation of the atomic surface, each with the result the standard library defines.
+#[allow(deprecated)] // until try_update is released to stable
 fn exercise_the_atomic_surface() {
     let counter = AtomicU64::new(5);
     assert_eq!(counter.load(Ordering::Acquire), 5);

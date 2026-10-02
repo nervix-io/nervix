@@ -1036,6 +1036,16 @@ columns with Arrow identity, slice, take, and concatenate. Guest execution, isol
 belong to [WASM Processor Guests](./wasm-processor-guests.md) and
 [WASM State And Recovery](./wasm-state.md).
 
+`FunctionInjector` and retained window accumulator traits declare recurring compiler contracts,
+so their implementations and dynamic callers retain the VM callback frequency across crate
+metadata. UDF result builders document the retained column and admitted execution bound; external
+Arrow, formatting and operator callback effects are declared at their owning callable. Paired
+Rust API doctests verify that injection accepts the domain timestamp with its selected-row error
+mask and rejects an unrelated scalar time. The annotations do not replace executor admission,
+selected-row validation or the concurrency checks.
+[Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns compiler contract syntax
+and diagnostics.
+
 ## Window Aggregates And Sketches
 
 ### Planning

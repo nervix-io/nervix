@@ -464,6 +464,14 @@ pub struct SinkRetryDelay(pub Duration);
 
 /// Lifecycle policy shared by record and row sinks.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkLifecycle: Send {
     async fn finish(&mut self, _deadline: Instant) -> SinkPublishResult<()> {
         Ok(())
@@ -514,6 +522,14 @@ pub trait SinkLifecycle: Send {
 
 /// A connector that writes codec-encoded records.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait RecordSink: SinkLifecycle {
     /// Writes `records` and answers for each of them by its identity.
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId>;
@@ -521,6 +537,14 @@ pub trait RecordSink: SinkLifecycle {
 
 /// A connector that sends one prepared HTTP request for each record.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait HttpRequestSink: SinkLifecycle {
     /// Sends `requests` in the order they are handed over and answers for each of them by its
     /// identity. A request the connector leaves unanswered stays with the host, which sends it
@@ -530,6 +554,14 @@ pub trait HttpRequestSink: SinkLifecycle {
 
 /// A connector that encodes values directly from host-projected Arrow columns.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait RowSink: SinkLifecycle {
     /// Writes the selected rows and answers for each of them by its source position.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition>;
@@ -542,6 +574,14 @@ pub trait RowSink: SinkLifecycle {
 /// came from, so an attempt that follows an unknown outcome, such as a lost response or a timeout,
 /// sends exactly what the first attempt sent, even through a connector the host reopened in between.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait RowRequestSink: SinkLifecycle {
     /// Prepares the requests that carry the selected rows, and refuses the rows it cannot carry. A
     /// failure prepares nothing, and the host prepares the same rows again on its next attempt.
@@ -557,6 +597,14 @@ pub trait RowRequestSink: SinkLifecycle {
 }
 
 /// Operations the host owns for acknowledgements retained by a sink.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkAcknowledgementServices: Send + Sync + 'static {
     fn acknowledge(&self);
     fn keep_alive(&self);
@@ -601,33 +649,81 @@ impl SinkAcknowledgements {
 }
 
 /// Transient-error status a connector may update while it retains a live client.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkTransientErrorStatus: Send + Sync + 'static {
     fn record_transient_error(&self, reason: String, retry_after: Duration);
     fn clear_transient_error(&self);
 }
 
 /// Runtime event reporting available to a connector background task.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkEventReporter: Send + Sync + 'static {
     fn report_error(&self, message: String);
 }
 
 /// The directory in which a connector may stage local files before external publication.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkStagingDirectory: Send + Sync + 'static {
     fn staging_directory(&self) -> PathBuf;
 }
 
 /// Node-wide general-error handling for acknowledgements a connector retained.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkGeneralErrorHandler: Send + Sync + 'static {
     fn handle_general_error(&self, acks: &SinkAcknowledgements, reason: String);
 }
 
 /// The node's bounded executor, through which a connector admits the synchronous filesystem work
 /// it does itself, such as writing and reading the files it stages.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkBoundedExecution: Send + Sync + 'static {
     fn executor(&self) -> Executor;
 }
 
 /// Every service exposed through one sink host handle.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkHostServices:
     SinkTransientErrorStatus
     + SinkEventReporter

@@ -771,6 +771,10 @@ pub(super) struct WasmRouteDispatchContext<'a> {
     pub(super) execution_now: Timestamp,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the admitted expression executor owns its generic effects")
+)]
 pub(super) async fn dispatch_wasm_output_route(
     context: WasmRouteDispatchContext<'_>,
     mut decoded: WasmDecodedOutputBatch,

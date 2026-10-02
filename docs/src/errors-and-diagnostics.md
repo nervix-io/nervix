@@ -23,7 +23,7 @@ delivery can fail during schedule application.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. The unfolding of a payload a quiesce buffer retained is not refused at all: nothing could present it again, so it waits for a place. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. |
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -581,8 +581,10 @@ the answering node, unavailable there, temporarily not ready, or executed and fa
 can use class and subject for routing, retry, and recovery without parsing text. Only an executed
 failure carries the answering node's opaque operator description. That text is an explicit wire
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
-replication and materialized-snapshot description use this envelope, and local errors retain the
-remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
+replication, a replica's branch checkpoint listing included, and materialized-snapshot description
+use this envelope, and local errors retain the remote class alongside their target and placement. A
+listing that arrives but names a branch key that does not decode is a failure of its own, distinct
+from a failed request. [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
 forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
@@ -739,6 +741,14 @@ defines the available metrics and their aggregation.
 
 ## Recovery, Panics, And Enforcement
 
+The compiler synchronization gate owns typed tooling failures for invalid source contracts,
+conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
+argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
+diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
+owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
+zero debt count. These are repository validation errors and add no runtime failure variants.
+[Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
+
 Some outcomes are intentionally not propagated. `discarded` records why an already handled or
 irrelevant result owes no further action. `reported` is used when the recovering call is the only
 witness; it logs the failed operation at `debug`. A channel send with no receiver means shutdown
@@ -778,6 +788,15 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+The isolated architecture compiler emits ordinary Rust tool diagnostics:
+`nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
+`nervix::invalid_contract`. Source contracts and narrow reason-bearing expectations own the
+architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+compiler reports and changed inputs fail the repository command; they are tooling failures, with
+no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
+warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
+states the rule boundary and the claims the compiler does not make.
 
 ## Connector Status Observation
 

@@ -1,20 +1,39 @@
+set minimum-version := "1.56.0"
+set unstable
+set lists
+
+export RUSTUP_AUTO_INSTALL := "0"
+
 rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
+default_jobs := num_jobs() || "4"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
 help:
     just --list
+
+# Start one bounded invocation and retain the caller's repository variable overrides.
+[private]
+run-with-jobs recipe jobs:
+    {{ quote(just_executable()) }} --justfile {{ quote(justfile()) }} --jobs {{ quote(jobs) }} \
+        rust_toolchain_version={{ quote(rust_toolchain_version) }} \
+        rustflags={{ quote(rustflags) }} \
+        build_mode={{ quote(build_mode) }} \
+        release_flag={{ quote(release_flag) }} \
+        cargo_target_dir={{ quote(cargo_target_dir) }} \
+        turmoil_failures={{ quote(turmoil_failures) }} \
+        {{ quote(recipe) }}
 
 # Install the qualified CLI version with only the libFuzzer engine.
 install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="":
+test-bolero filter="": build-web-console
     python3 scripts/bolero.py test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
@@ -41,16 +60,19 @@ fuzz-reduce target failure:
 validate-bolero:
     python3 scripts/bolero.py validate
 
-# Check the dedicated PR and campaign workflow with the pinned Actions linter.
-validate-bolero-workflow:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
+# Check the dedicated Bolero workflow with the pinned Actions linter.
+validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
+
+# Check selected Actions workflows, or all workflows when no paths are supplied.
+validate-workflows *workflows:
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 {{ workflows }}
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
 qualify-bolero:
     python3 scripts/bolero.py qualify
 
 # Exercise the inventory and runner's validation and failure paths.
-test-bolero-runner:
+test-bolero-runner: build-web-console
     python3 -m unittest scripts.tests.test_bolero
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
@@ -63,7 +85,7 @@ coverage-bolero-runner:
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect runner line coverage while exercising real libFuzzer and its failure qualification.
-# The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
+# The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
 coverage-bolero duration="2":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -117,7 +139,12 @@ test: tests-deps
         --package nervix-model-harness \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
+    just test-capability-docs
     just test-turmoil
+
+# Check capability examples with rustdoc, including runtime exports enabled only for tests.
+test-capability-docs: build-web-console
+    cargo test --package nervix-server --package nervix-roto --features nervix-server/testing --doc
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -608,7 +635,7 @@ test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --features testing --test runtime_state_capabilities
+    cargo test --features testing --package nervix-server --doc runtime::
 
 # Validate the small unsafe boundary used by deduplicator expiration tracking.
 test-expiry-map:
@@ -657,8 +684,8 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
-    # These server targets cover every server test except the scenario suite and the compile-fail
-    # capability checks, which run in their own jobs.
+    # These server targets cover every server test except the scenario suite, which runs in its
+    # own job.
     cargo llvm-cov --no-report --lib --bins --benches --test harness_liveness \
         --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
@@ -670,7 +697,7 @@ test-coverage: tests-deps
         --package nervix-model-harness \
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
-    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --workspace --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -684,7 +711,7 @@ test-scenarios-coverage: tests-deps
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
-    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --workspace --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -697,7 +724,11 @@ coverage-clean-workspace:
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
 coverage-report-workspace *args:
-    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --workspace --lcov --output-path lcov.info {{ args }}
+
+# Check the same merged workspace coverage and complexity limit locally as CI does.
+check-coverage report="lcov-workspace.info":
+    cargo crap --lcov {{ quote(report) }} --min 30 --threshold 30
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
@@ -1011,18 +1042,13 @@ coverage-turmoil output:
 # writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
 # target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
 # Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
-coverage-native-extras *producers: llvm-tools
+coverage-native-extras *producers:
     python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
 
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
-test-native-coverage: llvm-tools
+test-native-coverage:
     NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
-
-# Add the LLVM tools that read coverage profiles to the toolchain rust-toolchain.toml pins, which
-# must be the compiler's own: a toolchain installed under another name does not provide them.
-llvm-tools:
-    rustup component add llvm-tools
 
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
@@ -1234,7 +1260,7 @@ taplo-format:
     taplo format
 
 [parallel]
-fmt: cargo-fmt taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
+fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
 
 cargo-fmt-check:
     cargo +nightly fmt --check
@@ -1243,7 +1269,7 @@ taplo-format-check:
     taplo format --check
 
 [parallel]
-fmt-check: cargo-fmt-check taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
+fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
 
 gherkin-fmt:
     ghokin fmt replace tests/features
@@ -1272,128 +1298,257 @@ autoinherit-check:
     cargo autoinherit
     git diff --exit-code
 
-cargo-clippy-all:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
-    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    # Execution-mode builds require their runner, Shuttle's deliberately omits Tokio's process and
-    # runtime-builder APIs, and the modes cannot be enabled together. Lint the packages that own a
-    # mode in ordinary mode, then lint each modeled build separately: the Shuttle libraries and the
-    # Turmoil targets here, the Shuttle checks in `cargo-clippy-shuttle-checks`, and the Loom builds
-    # in `cargo-clippy-loom`.
-    mode_packages=(
-        nervix-client-core
-        'nervix-connector*'
-        nervix-consensus
-        nervix-execution
-        nervix-interconnect
-        nervix-model-harness
-        nervix-primitives
-        nervix-server
-        nervix-wasm
-    )
-    workspace_exclusions=()
-    for package in "${mode_packages[@]}"; do
-        workspace_exclusions+=(--exclude "${package}")
-    done
-    cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
-    cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
-    cargo clippy --all-targets --features autocomplete --package nervix-client-core
-    cargo clippy --all-targets --package 'nervix-connector*'
-    cargo clippy --all-targets --features testing --package nervix-consensus
-    cargo clippy --all-targets \
-        --package nervix-execution \
-        --package nervix-interconnect \
-        --package nervix-model-harness \
-        --package nervix-wasm
-    cargo clippy --all-targets --features native --package nervix-primitives
-    cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
-    cargo clippy --lib --features 'shuttle testing' \
-        --package nervix-client-core \
-        --package 'nervix-connector*' \
-        --package nervix-consensus \
-        --package nervix-execution \
-        --package nervix-interconnect \
-        --package nervix-server \
-        --package nervix-wasm
-    cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
-    cargo clippy --all-targets --features turmoil \
-        --package nervix-execution \
-        --package nervix-interconnect
-    cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
+# Each package/configuration is a separate parallel dependency. The one Cargo recipe below
+# hashes its arguments and toolchain into an isolated directory, and `just --jobs N` bounds it.
+clippy_all_features_packages := [
+    "nervix-approx-into",
+    "nervix-arbitrary",
+    "nervix-backup",
+    "nervix-benchmark",
+    "nervix-bounded-write",
+    "nervix-branch-instances",
+    "nervix-checkpoint-replication",
+    "nervix-cli",
+    "nervix-client-ffi",
+    "nervix-client-wire",
+    "nervix-columnar-json",
+    "nervix-dataflow-graph",
+    "nervix-dns",
+    "nervix-expiry-map",
+    "nervix-jaq",
+    "nervix-models",
+    "nervix-nspl",
+    "nervix-nspl-format",
+    "nervix-primitives-macros",
+    "nervix-recovery",
+    "nervix-roto",
+    "nervix-simd-kernels",
+    "nervix-test-environment",
+    "nervix-vm",
+    "nervix-wasm-protocol",
+    "nervix-wasm-sdk",
+    "nervix-web-console",
+]
 
-# Lint every Loom build, each in its own invocation: the models and their harness, the primitive
-# boundary, and the server and consensus libraries as they ship and in test mode, where the Loom
-# models of their owners are built. Their integration tests and binaries never run a model, and
-# consensus unit tests build with `testing`, whose fault controls only the server's tests use.
-cargo-clippy-loom:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
-    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    cargo clippy --all-targets --features loom \
-        --package nervix-execution \
-        --package nervix-model-harness
-    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
-    cargo clippy --lib --features loom \
-        --package nervix-consensus \
-        --package nervix-server
-    cargo clippy --lib --profile test --features loom --package nervix-server
-    cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
+clippy_connector_packages := [
+    "nervix-connector",
+    "nervix-connector-clickhouse",
+    "nervix-connector-http",
+    "nervix-connector-iceberg",
+    "nervix-connector-kafka",
+    "nervix-connector-mongodb",
+    "nervix-connector-mqtt",
+    "nervix-connector-mysql",
+    "nervix-connector-nats",
+    "nervix-connector-otel",
+    "nervix-connector-postgres",
+    "nervix-connector-prometheus",
+    "nervix-connector-pulsar",
+    "nervix-connector-rabbitmq",
+    "nervix-connector-redis",
+    "nervix-connector-sentry",
+    "nervix-connector-sqs",
+    "nervix-connector-syslog",
+    "nervix-connector-websockets",
+    "nervix-connector-zeromq",
+]
+
+clippy_shuttle_packages := [
+    "nervix-client-core",
+    "nervix-connector",
+    "nervix-connector-clickhouse",
+    "nervix-connector-http",
+    "nervix-connector-iceberg",
+    "nervix-connector-mongodb",
+    "nervix-connector-mqtt",
+    "nervix-connector-mysql",
+    "nervix-connector-nats",
+    "nervix-connector-otel",
+    "nervix-connector-postgres",
+    "nervix-connector-pulsar",
+    "nervix-connector-rabbitmq",
+    "nervix-connector-redis",
+    "nervix-connector-sentry",
+    "nervix-connector-sqs",
+    "nervix-connector-syslog",
+    "nervix-connector-zeromq",
+    "nervix-execution",
+    "nervix-interconnect",
+    "nervix-wasm",
+]
+
+# The packages whose library test targets hold the Shuttle checks: the packages of the Shuttle
+# inventory, which scripts/tests/test_shuttle_checks.py holds this list to.
+clippy_shuttle_check_packages := [
+    "nervix-client-core",
+    "nervix-execution",
+    "nervix-interconnect",
+    "nervix-server",
+]
+
+[private, parallel]
+clippy-targets: ordinary-clippy-targets shuttle-clippy-targets shuttle-check-clippy-targets turmoil-clippy-targets loom-clippy-targets
+
+[private, parallel]
+ordinary-clippy-targets: \
+    *(clippy-target *clippy_all_features_packages ["--all-features", "--all-targets"]) \
+    *(clippy-target *clippy_connector_packages ["--all-targets"]) \
+    *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm"] ["--all-targets"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--features", "benchmarks testing"]) \
+    (clippy-target "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
+    (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
+    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
+    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
+
+[private, parallel]
+shuttle-clippy-targets: \
+    *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
+    *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
+    *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"])
 
 # Lint the Shuttle checks, built exactly as `test-shuttle` builds them: the library test target of
 # every package in the Shuttle inventory, with Shuttle's primitives selected. The library-only
-# Shuttle lane of `cargo-clippy-all` compiles none of them.
-cargo-clippy-shuttle-checks:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
-    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    mapfile -t packages < <(python3 -m scripts.shuttle_checks packages)
-    selection=()
-    for package in "${packages[@]}"; do
-        selection+=(--package "${package}")
-    done
-    cargo clippy --lib --profile test --features shuttle "${selection[@]}"
+# Shuttle targets compile none of them. The full validation matrix runs the same dependencies.
+cargo-clippy-shuttle-checks jobs=default_jobs: (run-with-jobs "shuttle-check-clippy-targets" jobs)
 
-# Lint one workspace package and all of its targets with warnings denied, sharing the workspace
-# lint build directory. Extra arguments are forwarded to Cargo.
-cargo-clippy-package package *args:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy --package {{ package }} --all-targets {{ args }}
+[private, parallel]
+shuttle-check-clippy-targets: *(clippy-target *clippy_shuttle_check_packages ["--lib", "--profile", "test", "--features", "shuttle"])
 
-cargo-clippy-server:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-server" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-server -q
+[private, parallel]
+turmoil-clippy-targets: \
+    *(clippy-target *["nervix-execution", "nervix-interconnect"] ["--all-targets", "--features", "turmoil"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "turmoil native"])
 
-cargo-clippy-client:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-cli -q
+# Lint the Loom models and harness, the primitive boundary, and each library as it ships and
+# in test mode. The same parallel dependencies run in the full validation matrix.
+cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
-cargo-clippy-nspl-format:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-nspl-format" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-nspl-format -q
+[private, parallel]
+loom-clippy-targets: \
+    *(clippy-target *["nervix-execution", "nervix-model-harness"] ["--all-targets", "--features", "loom"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
+    *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
+    (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
+    (clippy-target "nervix-consensus" ["--lib", "--profile", "test", "--features", "loom testing"])
 
-cargo-clippy-web-console:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-web-console" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-web-console -q
+# The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
+# profile and toolchain differences identify separate build directories. Keep kache configured.
+[private]
+clippy-target package args toolchain="":
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
 
-# The browser console decodes session frames, so the wire crate must build for the browser target.
-cargo-clippy-client-wire-wasm:
-    CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
+# Lint one package and all of its targets; extra arguments retain their boundaries.
+cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
 
-[parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-shuttle-checks cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+# Lint every product Clippy target, with four concurrent processes by default.
+cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
 
-[parallel]
-lint-inner: cargo-clippy
+[private, parallel]
+lint-inner: clippy-targets typed-ratchet-clippy-targets
 
-lint: build-web-console lint-inner
+# Lint the product and compiler tooling in one bounded invocation.
+lint jobs=default_jobs: (run-with-jobs "lint-targets" jobs)
+
+[private]
+lint-targets: build-web-console lint-inner
 
 audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args:
-    python3 scripts/ratchet.py {{ args }}
+ratchet *args: typed-ratchet-build
+    python3 -m scripts.ratchet {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
+# Focused regression checks for the debt gate and its shared Rust source scanner.
+test-ratchet-units:
+    python3 -m unittest scripts.tests.test_ratchet
+
+typed-ratchet-build:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+
+typed-ratchet *args: typed-ratchet-build
+    python3 -m scripts.typed_ratchet {{ args }}
+
+typed-ratchet-turmoil *args:
+    RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}" python3 -m scripts.typed_ratchet {{ args }}
+
+test-typed-ratchet-compiler:
+    just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
+    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
+
+test-typed-ratchet-contracts: typed-ratchet-build
+    python3 -m unittest scripts.tests.compiler_contract_checks
+
+test-typed-ratchet: test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
+
+test-typed-ratchet-ordinary:
+    just test-typed-ratchet-reports
+    just test-typed-ratchet-compiler
+    just test-typed-ratchet-contracts
+    just test-typed-ratchet-docs
+
+test-typed-ratchet-modeled:
+    just typed-ratchet --fixture-mode shuttle --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-shuttle.json
+    just typed-ratchet --fixture-mode loom --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-loom.json
+    just typed-ratchet --fixture-mode turmoil --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-turmoil.json
+    python3 -m unittest scripts.tests.compiler_fixture_checks.ModeledFixtureTests
+
+test-typed-ratchet-docs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    doctest_flags="${RUSTDOCFLAGS:-} -Z unstable-options --persist-doctests {{ cargo_target_dir }}/typed-ratchet/doctests"
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        doctest_flags+=" -C instrument-coverage"
+    fi
+    RUSTDOCFLAGS="$doctest_flags" CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/docs \
+        cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
+
+# Current API examples compile alongside their compile_fail counterparts on the product toolchain.
+test-typed-ratchet-product-docs:
+    cargo +1.99 test --package nervix-primitives --doc expect_lint
+    cargo +1.99 test --package nervix-vm --doc FunctionInjector
+    RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
+
+qualify-typed-ratchet-cache: typed-ratchet-build
+    python3 -m scripts.tests.qualify_typed_ratchet_cache
+
+test-typed-ratchet-reports:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
+
+fmt-typed-ratchet:
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
+
+fmt-check-typed-ratchet:
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
+
+# Tooling packages use the same bounded scheduler and command, with their pinned compiler.
+lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
+
+[private]
+typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
+
+[private, parallel]
+typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
+
+coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-modeled
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero
+    "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
+    "${coverage[@]}" report
+
+# Format and validate, with four concurrent recipe bodies by default.
+validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
+
+[private]
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1490,17 +1645,22 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
+# Check formatting and validate with the same concurrency default as local validation.
+validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
+
+[private]
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
 # primitives, shared ownership and the `futures` crates' synchronization included; a manifest that
-# renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; a selected atomic
-# held by a static or constructed in a const context; a family Loom does not model in Loom model
-# code; an unmodeled primitive without its permission; a stale or misplaced permission; a `loom`
-# dependency outside its owner and harness; and a mode feature that is not forwarded. Guest code
-# compiled into user WASM guests is outside the source rules. The check's own tests run first, so a
-# rule that stopped rejecting its bypass fails here too.
+# renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; the analysis cfg
+# selecting code or set by a build; a selected atomic held by a static or constructed in a const
+# context; a family Loom does not model in Loom model code; an unmodeled primitive without its
+# permission; a stale or misplaced permission; a `loom` dependency outside its owner and harness;
+# and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
+# the source rules, and so is what a build wrote into a Cargo build directory. The check's own
+# tests run first, so a rule that stopped rejecting its bypass fails here too.
 validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
@@ -1598,6 +1758,10 @@ validate-clock-boundaries:
 validate-typed-errors:
     python3 -m scripts.check_typed_errors
 
+toolchains-install:
+    rustup toolchain install
+    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
+
 # Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
 test-nspl *args:
@@ -1607,6 +1771,10 @@ test-nspl *args:
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
+
+# Check the shared R2 configuration used by native CI jobs and Docker builds.
+test-kache-ci:
+    uv run --locked python -m unittest scripts.tests.test_kache_ci
 
 test-docs:
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
@@ -2011,7 +2179,7 @@ coverage-task-handles output="target/task-handles.lcov" report="target/task-hand
     cargo llvm-cov --bench task_handles --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
 
 # Inspect a benchmark harness from an existing successful instrumented run without rebuilding it.
-coverage-task-handles-export executable profile output="target/task-handles-benchmark.lcov": llvm-tools
+coverage-task-handles-export executable profile output="target/task-handles-benchmark.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
@@ -54,26 +55,26 @@ HOST = "x86_64-unknown-linux-gnu"
 RUNNER = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER"
 SHOW_ENV = """\
 export LLVM_PROFILE_FILE='/repo/target/nervix-%p-%24m.profraw'
-export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage --cfg=trybuild_no_target'
+export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage'
 export CARGO_LLVM_COV=1
 export CARGO_LLVM_COV_SHOW_ENV=1
 export CARGO_LLVM_COV_TARGET_DIR=/repo/target/native-coverage-build
 """
 VERBOSE_VERSION = f"""\
-rustc 1.98.1 (48a229cea 2026-09-01)
+rustc 1.99.0 (48a229cea 2026-09-01)
 binary: rustc
 commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
 commit-date: 2026-09-01
 host: {HOST}
-release: 1.98.1
+release: 1.99.0
 LLVM version: 22.1.8
 """
 
 
 def toolchain(tools: Path = Path("/toolchain/bin")) -> Toolchain:
     return Toolchain(
-        version="rustc 1.98.1 (48a229cea 2026-09-01)",
-        release="1.98.1",
+        version="rustc 1.99.0 (48a229cea 2026-09-01)",
+        release="1.99.0",
         commit="48a229ceaefd4985c50990b14116b6d856af0985",
         host=HOST,
         llvm="22.1.8",
@@ -103,17 +104,14 @@ class InventoryTests(unittest.TestCase):
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
                 native_coverage.validate_composition(producer, recipes)
-        # The setup action installs the toolchain under its patch release, not under the channel
-        # rust-toolchain.toml pins, so the recipes add the compiler's own LLVM tools themselves.
-        for collector in ("coverage-native-extras", "test-native-coverage"):
-            with self.subTest(recipe=collector):
-                self.assertEqual(native_coverage.dependency_names(recipes[collector]), ["llvm-tools"])
-        self.assertEqual(recipes["llvm-tools"]["body"], [["rustup component add llvm-tools"]])
+        # Coverage profiles must be read with the selected compiler's own LLVM tools.
+        toolchain = tomllib.loads((REPOSITORY / "rust-toolchain.toml").read_text())["toolchain"]
+        self.assertIn("llvm-tools", toolchain["components"])
 
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.PRODUCERS],
-            ["bench-smoke", "test-primitives", "nspl-completion-walk"],
+            ["test-typed-ratchet", "bench-smoke", "test-primitives", "nspl-completion-walk"],
         )
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.mode, "ordinary")
@@ -171,7 +169,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(native_coverage.select_producers([], producers), list(producers))
         self.assertEqual(
             native_coverage.select_producers(["nspl-completion-walk", "bench-smoke"], producers),
-            [producers[2], producers[0]],
+            [next(producer for producer in producers if producer.name == "nspl-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
         )
         with self.assertRaisesRegex(RunnerError, "no producer `bench`; the producers are"):
             native_coverage.select_producers(["bench"], producers)
@@ -218,8 +216,7 @@ class InstrumentationTests(unittest.TestCase):
         self.assertEqual(exported["CARGO_LLVM_COV"], "1")
         self.assertEqual(
             exported["RUSTFLAGS"],
-            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage "
-            "--cfg=trybuild_no_target",
+            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage",
         )
         with self.assertRaisesRegex(RunnerError, "unexpected line"):
             native_coverage.parse_exports("RUSTFLAGS=-Cinstrument-coverage\n")
@@ -294,9 +291,9 @@ class InstrumentationTests(unittest.TestCase):
 
 class ToolchainTests(unittest.TestCase):
     def test_the_verbose_version_names_the_compiler_and_its_llvm_tools(self) -> None:
-        parsed = Toolchain.parse(VERBOSE_VERSION, "/home/user/.rustup/toolchains/1.98\n")
-        self.assertEqual(parsed, toolchain(Path(f"/home/user/.rustup/toolchains/1.98/lib/rustlib/{HOST}/bin")))
-        self.assertEqual(parsed.label(), "rust-1.98.1")
+        parsed = Toolchain.parse(VERBOSE_VERSION, "/home/user/.rustup/toolchains/1.99\n")
+        self.assertEqual(parsed, toolchain(Path(f"/home/user/.rustup/toolchains/1.99/lib/rustlib/{HOST}/bin")))
+        self.assertEqual(parsed.label(), "rust-1.99.0")
         self.assertEqual(parsed.describe()["llvm"], "22.1.8")
         with self.assertRaisesRegex(RunnerError, "did not report LLVM version"):
             Toolchain.parse(VERBOSE_VERSION.replace("LLVM version: 22.1.8\n", ""), "/sysroot")
@@ -312,7 +309,7 @@ class ToolchainTests(unittest.TestCase):
             tools.mkdir(parents=True)
             for name in ("llvm-profdata", "llvm-cov"):
                 (tools / name).write_text("")
-            matching = VersionCommands(sysroot, "LLVM version 22.1.8-rust-1.98.1-stable")
+            matching = VersionCommands(sysroot, "LLVM version 22.1.8-rust-1.99.0-stable")
             self.assertEqual(native_coverage.load_toolchain(matching).tools, tools)
             other = VersionCommands(sysroot, "LLVM version 21.1.0")
             with self.assertRaisesRegex(RunnerError, "rustc was built with LLVM 22.1.8"):
@@ -459,6 +456,14 @@ class BuildIdTests(unittest.TestCase):
             located = native_coverage.locate(build, {BUILD_ID.hex(), bytes(32).hex()})
         self.assertEqual(located, {BUILD_ID.hex(): build / "debug" / "deps" / "child-123"})
         self.assertEqual(native_coverage.locate(Path(directory) / "missing", {"x"}), {})
+
+    def test_compiler_loaded_macros_in_nested_cargo_build_outputs_are_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            output = build / "typed-ratchet/driver/debug/build/macro/hash/out/libmacro.so"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(elf([(note(GNU, 3, BUILD_ID, 4, 0), 4)]))
+            self.assertEqual(native_coverage.locate(build, {BUILD_ID.hex()}), {BUILD_ID.hex(): output})
 
 
 def execution(path: Path, identifier: str, *arguments: str) -> Execution:
@@ -939,14 +944,17 @@ class CollectTests(unittest.TestCase):
         )
 
     def collect(
-        self, commands: FakeCommands, exported: Exported | BaseException | None = None
+        self,
+        commands: FakeCommands,
+        exported: Exported | BaseException | None = None,
+        producer: Producer = PRODUCER,
     ) -> native_coverage.Collected:
         with mock.patch.object(
             native_coverage,
             "export",
             side_effect=[exported if exported is not None else self.exported()],
         ):
-            return native_coverage.collect(commands, self.context, PRODUCER)
+            return native_coverage.collect(commands, self.context, producer)
 
     def record(self, collected: native_coverage.Collected) -> dict[str, object]:
         return json.loads(collected.record.path.read_text())
@@ -963,7 +971,7 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(collected.status, 0)
         self.assertEqual(
             collected.attempt,
-            self.root / "target/native-coverage/check/ordinary/rust-1.98.1/github-100-1",
+            self.root / "target/native-coverage/check/ordinary/rust-1.99.0/github-100-1",
         )
         record = self.record(collected)
         self.assertEqual(record["verdict"], "complete")
@@ -977,7 +985,7 @@ class CollectTests(unittest.TestCase):
             {"provider": "github", "run": "100", "attempt": "1", "job": "extra-tests"},
         )
         self.assertEqual(record["attempt"], "github-100-1")
-        self.assertEqual(record["toolchain"]["rustc"], "rustc 1.98.1 (48a229cea 2026-09-01)")
+        self.assertEqual(record["toolchain"]["rustc"], "rustc 1.99.0 (48a229cea 2026-09-01)")
         self.assertEqual(
             record["recipes"],
             {"prepare": ["prepare"], "instrumented": "instrumented", "finish": ["finish"]},
@@ -1024,6 +1032,77 @@ class CollectTests(unittest.TestCase):
                 self.assertEqual(record["failure"], {"stage": stage, "detail": detail})
                 self.assertIn("finished_at", record)
         self.assertIn("sources", record)
+
+    def test_preparation_installs_the_selected_compiler_and_llvm_tools_before_resolution(self) -> None:
+        producer = Producer(
+            "check", "ordinary", ("prepare",), "instrumented", ("finish",), "nightly-2026-09-17"
+        )
+        sysroot = self.root / "installed-toolchain"
+        tools = sysroot / "lib" / "rustlib" / HOST / "bin"
+
+        def install() -> int:
+            record = json.loads(next(self.root.rglob("completion.json")).read_text())
+            self.assertEqual(record["verdict"], "running")
+            self.assertEqual(record["toolchain"], {"requested": producer.toolchain})
+            tools.mkdir(parents=True)
+            for name in ("llvm-profdata", "llvm-cov"):
+                (tools / name).write_text("")
+            return 0
+
+        commands = FakeCommands(self.root, {"prepare": install})
+        capture = commands.capture
+        versions = VersionCommands(sysroot, "LLVM version 22.1.8")
+
+        def installed_capture(arguments, *, environment=None):
+            if arguments[0] == "rustc" or str(arguments[0]).startswith(str(tools)):
+                self.assertTrue(tools.is_dir(), "the selected compiler is installed by preparation")
+                if arguments[0] == "rustc":
+                    self.assertEqual(environment["RUSTUP_TOOLCHAIN"], producer.toolchain)
+                return versions.capture(arguments, environment=environment)
+            return capture(arguments, environment=environment)
+
+        with mock.patch.object(commands, "capture", side_effect=installed_capture):
+            collected = self.collect(commands, producer=producer)
+        self.assertEqual(collected.status, 0, self.record(collected).get("failure"))
+        self.assertEqual(self.record(collected)["toolchain"], toolchain(tools).describe())
+        self.assertEqual(collected.attempt.parent.name, "rust-nightly-2026-09-17")
+        prepare, instrumented, finish = (streamed.environment for streamed in commands.streamed)
+        self.assertEqual(prepare, {"RUSTC_WRAPPER": "kache"})
+        self.assertEqual(instrumented["RUSTUP_TOOLCHAIN"], producer.toolchain)
+        self.assertEqual(finish, {"RUSTC_WRAPPER": "kache", "RUSTUP_TOOLCHAIN": producer.toolchain})
+
+    def test_failed_or_interrupted_toolchain_preparation_keeps_its_completion_record(self) -> None:
+        producer = Producer(
+            "check", "ordinary", ("prepare",), "instrumented", (), "nightly-2026-09-17"
+        )
+        cases = ((2, 2, "failed"), (Interrupted(signal.SIGTERM), 143, "interrupted"))
+        for outcome, status, verdict in cases:
+            with self.subTest(verdict=verdict):
+                self.setUp()
+                with mock.patch.object(native_coverage, "load_toolchain") as load:
+                    collected = self.collect(
+                        FakeCommands(self.root, {"prepare": outcome}), producer=producer
+                    )
+                load.assert_not_called()
+                record = self.record(collected)
+                self.assertEqual(collected.status, status)
+                self.assertEqual(record["verdict"], verdict)
+                self.assertEqual(record["failure"]["stage"], "prepare")
+                self.assertEqual(record["toolchain"], {"requested": producer.toolchain})
+
+    def test_unavailable_selected_compiler_fails_preparation_without_instrumentation(self) -> None:
+        producer = Producer(
+            "check", "ordinary", (), "instrumented", (), "nightly-2026-09-17"
+        )
+        commands = FakeCommands(self.root)
+        with mock.patch.object(
+            native_coverage, "load_toolchain", side_effect=RunnerError("compiler unavailable")
+        ):
+            collected = self.collect(commands, producer=producer)
+        record = self.record(collected)
+        self.assertEqual(collected.status, 1)
+        self.assertEqual(record["failure"], {"stage": "prepare", "detail": "compiler unavailable"})
+        self.assertEqual(commands.streamed, [])
 
     def test_a_failed_export_fails_the_collection(self) -> None:
         collected = self.collect(

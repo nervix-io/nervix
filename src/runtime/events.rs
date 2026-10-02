@@ -45,6 +45,10 @@ impl RuntimeEvents {
     /// down. Nothing is left to observe the event in that window, so it is logged at `warn`
     /// instead. A delivered event is traced at `debug`, because the observers are the report and
     /// many of these failures are per-message.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the event message conversion")
+    )]
     pub(crate) fn report_error(&self, message: impl Into<String>) {
         let message = message.into();
         debug!(error = %message, "reported runtime error to observers");

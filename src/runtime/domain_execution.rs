@@ -7,6 +7,15 @@
 //!
 //! The installed revision owns the planned nodes, placement and executable decisions together.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "domain execution creation and routing publication install retained branch \
+                  services"
+    )
+)]
+
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
 use super::{domain_rebuild::ActivatedDomainSurfaces, *};
@@ -201,11 +210,22 @@ impl Runtime {
     /// Resolves the stable publication handle for a domain. Data-plane tasks call this once when
     /// they are created and retain a `DomainRoutingCache`; lifecycle and observability callers may
     /// resolve it directly because they are not batch paths.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) fn domain_routing(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
-        self.inner
-            .domain_routings
-            .get(domain)
-            .map(|routing| routing.value().clone())
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain domain routing on the \
+             execution owner",
+            self.inner.domain_routings.get(domain)
+        )
+        .map(|routing| routing.value().clone())
     }
 
     pub(super) fn stage_domain_routing(
@@ -219,6 +239,14 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(crate) fn domain_routing_cache(&self, domain: &DomainName) -> Option<DomainRoutingCache> {
         self.domain_routing(domain).map(DomainRoutingCache::new)
     }

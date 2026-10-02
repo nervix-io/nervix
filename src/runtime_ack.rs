@@ -44,6 +44,15 @@ pub struct AckCompletion {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "acknowledgement root",
+        bound = "take one terminal sender from the root; the guard never crosses await",
+        reason = "all shares retain the exact root whose completion they resolve"
+    )
+)]
 pub struct AckHandle(Arc<AckState>);
 
 #[derive(Debug, Clone, Default)]
@@ -576,6 +585,11 @@ impl AckHandle {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a typed reason or an iterator of \
+                                   retained acknowledgement handles")
+    )]
     pub fn no_ack(&self, reason: impl Into<String>) {
         self.complete(AckOutcome::NoAck(reason.into()));
     }
@@ -623,6 +637,13 @@ impl Drop for OwnershipHandoffTrackerReservation<'_> {
 }
 
 impl AckRequiredWaitGuard {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies iteration over acknowledgement sets for this admitted \
+                      terminal obligation"
+        )
+    )]
     pub(crate) fn new<'a>(sets: impl IntoIterator<Item = &'a AckSet>) -> Self {
         let mut handles = Vec::new();
         for set in sets {
@@ -730,6 +751,11 @@ impl AckSet {
         AckRequiredWaitGuard::new([self])
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a typed reason or an iterator of \
+                                   retained acknowledgement handles")
+    )]
     pub fn merged<I>(sets: I) -> Self
     where
         I: IntoIterator<Item = Self>,
@@ -753,6 +779,11 @@ impl AckSet {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a typed reason or an iterator of \
+                                   retained acknowledgement handles")
+    )]
     pub fn no_ack(&self, reason: impl Into<String>) {
         let reason = reason.into();
         for handle in &self.handles {

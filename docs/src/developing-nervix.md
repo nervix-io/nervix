@@ -18,7 +18,7 @@ ONNX Runtime build for the host and stop on any other.
 Install:
 
 - Rust via `rustup`
-- `just`
+- `just` (latest release)
 - `zellij`
 
 ## Start The Server
@@ -191,6 +191,24 @@ For repository-wide validation:
 just validate
 ```
 
+CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
+`just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
+Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to select another
+limit. `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling
+Clippy recipes in one invocation, so they share the same limit.
+
+Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
+The `[parallel]` groups map package lists onto that recipe, including the packages checked with
+`--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
+stay separate, so mutually exclusive execution modes never share a Cargo invocation.
+
+Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
+`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
+so each configuration has its own build directory lock. `just cargo-clippy-package <package>
+[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
+builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
+wrapper. Cargo's compiler job limit applies separately within each invocation.
+
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
 are intentionally not complete NSPL scripts; the fence remains identified as NSPL in the rendered
@@ -205,7 +223,14 @@ just test
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
-`just fuzz <target> [duration]`. `just help` lists the recipes.
+`just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
+discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
+
+Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Bolero and
+extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker points to
+`scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
+`CARGO_ENCODED_RUSTFLAGS` supplied by coverage, simulation or sanitizer tooling. Browser targets
+use their own linker. `just validate-workflows` checks the Actions workflow definitions.
 
 Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
 `nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
@@ -214,6 +239,59 @@ passed to the test binaries, so a test name filter narrows the run:
 ```bash
 just test-connectors <filter>
 ```
+
+### Compiler synchronization gate
+
+`just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
+synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
+remain stable. Tooling, analysis and product artifacts occupy separate target directories.
+Prepare the ordinary server build prerequisites, including `just build-web-console`.
+
+```bash
+just ratchet
+just typed-ratchet --show
+just typed-ratchet --configuration shuttle --inventory
+just test-typed-ratchet
+just test-typed-ratchet-docs
+just qualify-typed-ratchet-cache
+```
+
+Declare `#[cfg_attr(nervix_lint, nervix::context(...))]` at the source's owning execution boundary.
+Choose recurring, lifecycle, observer, outside or bounded; every kind requires a reason, and
+bounded protocols also require their identity key and bound. Trait/type/module inheritance and
+local call relationships supply defaults. Hot callers of lifecycle-only helpers, unknown dispatch,
+invalid annotations and recurring acquisitions produce ordinary Rust diagnostics. Use a narrow
+`nervix_primitives::expect_lint!` with a meaningful reason and owning repair task for retained debt.
+An expectation covering multiple operations or no operation fails. See
+[Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
+contract, inheritance, supported call effects and limitations.
+
+The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
+compiled configurations and generated/external exclusions. It is generated evidence under
+`target/`, not an approval database. Partial selections are inventories; the required diagnostic
+gate needs the complete matrix and complete current compiler/Cargo evidence, including zero.
+
+The workspace wrapper nests beneath configured kache. Completion identities cover current source,
+annotations, rule code, compiler, driver, validator, dependencies, Cargo configuration and flags.
+Cargo-fresh artifacts reuse matching complete side reports. Missing reports establish analysis
+using `KACHE_KEY_SALT` and rebuild only isolated authored artifacts. `--fresh` reruns Cargo;
+`--recompile` discards those authored artifacts to execute the callback. Every path preserves
+`RUSTC_WRAPPER`. Changing a caller, callee, annotation or source location needs only a new run.
+
+Cache qualification exercises fresh and Cargo-fresh analysis, an actual kache dependency hit,
+changed source/annotation/rule/dependency/configuration inputs, missing and interrupted output,
+fixture doctests twice, and cross-worktree rejection in two isolated worktrees. Kache 0.28 runs
+workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
+validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
+cross-crate metadata.
+
+### Capability doctests
+
+`just test-capability-docs` checks runtime state handles, logical and physical deadlines,
+subscription predicates, and the UDF execution context with `compile_fail` doctests beside their
+APIs. Paired compiling examples check that the imports and current signatures remain valid. These
+checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
+the runtime examples require the `testing` feature, which the recipe enables.
 
 ### Deterministic concurrency checks
 
@@ -283,7 +361,8 @@ requires its model to fail.
 
 Every execution-sensitive primitive comes from `nervix-primitives`, and every mode is its own build.
 `just validate` runs the checks that keep it that way: `just validate-primitive-boundary` for import
-origin, permissions, manifests, global cfgs and release binaries,
+origin, permissions, manifests, global cfgs, the analysis cfg and release binaries, over every
+authored source including the isolated analysis workspace,
 `just validate-execution-mode-dependencies` for the ordinary and portable dependency graphs of the
 workspace and of every package, and `just validate-execution-mode-conflicts` for the diagnostics of
 combined modes, of a mode or the native capability requested for the browser's target, and of a
@@ -346,25 +425,25 @@ limits, the scenario matrix, and how to investigate a failure.
 
 ### Source coverage of the native extra checks
 
-The extra checks that execute Nervix code natively in ordinary mode, the benchmark bodies, the
-primitive boundary's ordinary conformance and the NSPL completion walk, also measure which source
+The extra checks that execute Nervix code natively in ordinary mode, the compiler synchronization
+fixtures, benchmark bodies, primitive boundary conformance and NSPL completion walk, also measure which source
 lines they execute. Run them the way CI does:
 
 ```bash
 just coverage-native-extras
 ```
 
-Name producers to run only those, one or more of `bench-smoke`, `test-primitives` and
+Name producers to run only those, one or more of `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
 `nspl-completion-walk`:
 
 ```bash
 just coverage-native-extras nspl-completion-walk
 ```
 
-A producer runs its check exactly as `just <producer>` does and fails when the check fails. The
-recipe first adds the `llvm-tools` component to the toolchain `rust-toolchain.toml` pins, with
-`just llvm-tools`, because only the compiler's own LLVM tools read its profiles. What the check
-needs first, such as the web console the server benches link, is built normally. The recipe
+A producer runs its check exactly as `just <producer>` does and fails when the check fails.
+`rust-toolchain.toml` includes the `llvm-tools` component because only the compiler's own LLVM
+tools read its profiles. What the check needs first, such as the web console the server benches
+link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a
@@ -387,8 +466,10 @@ another run's directory, so no run can count another's counters. The directory h
 Cargo runs each instrumented executable through the collector as its runner, which records the
 execution and points the counters of the executable, and of every process it starts, at `profiles/`,
 one file per process and module. Build scripts and procedural macros execute only when a crate is
-compiled rather than served from the cache, so their counters are discarded, and a fresh build and a
-cached one select the same executions. The report is exported with the toolchain's own
+compiled rather than served from the cache, so their ordinary build-time counters are discarded.
+The compiler fixture is itself an executed check: its loaded procedural macro objects are retained
+by build ID, including those in nested Cargo output directories. The producer uses its pinned
+compiler's LLVM tools. The report is exported with the toolchain's own
 `llvm-profdata` and `llvm-cov` from exactly the executables that ran and the children they started.
 It keeps the files inside the repository and leaves out dependencies, harness code below a `tests`,
 `examples` or `benches` directory, and code generated below a Cargo target directory.
@@ -412,7 +493,7 @@ them run, such as an inlined dependency function, the copies that never ran can 
 hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
 executables that ran it.
 
-CI's extra-tests job runs the three checks only through this command and uploads the `lcov.info`,
+CI's extra-tests job runs the four checks through this command and uploads the `lcov.info`,
 `completion.json`, `executions.jsonl` and `export.log` of every collection as the
 `coverage-native-extras` artifact, whatever the verdict. The benchmark bodies run instrumented, so
 their Criterion test mode shows that each body executes and measures nothing. The collector itself,
@@ -422,6 +503,12 @@ is tested with:
 ```bash
 just test-native-coverage
 ```
+
+The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
+selected. CI merges those reports with the native extra reports, checks complexity against that
+complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+CLI and console for focused inspection; it does not replace the workspace export.
+Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
 ### The scenario suite's execution budget
 

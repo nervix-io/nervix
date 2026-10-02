@@ -7,6 +7,14 @@
 //! - **Depends on.** `fjall` for storage and the domain state for validation.
 //! - **Must not know.** How a runtime change is applied.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "durable Model mutation belongs to the control-plane decision boundary"
+    )
+)]
+
 use std::{path::Path, str::FromStr};
 
 use ahash::{HashMap, HashSet};

@@ -79,6 +79,13 @@ implementation in another language needs only the schema. The Rust client additi
 language edge, which it uses to split a request into statements and to recognize the statements it
 serves itself, such as `USE`; everything it knows about the cluster arrives over the protocol.
 
+The Rust client and CLI declare their edge ownership in gated compiler source contracts. Their
+session maps remain client-owned synchronization outside the server record-path acquisition rule.
+Server relay subscription fan-out remains recurring data-plane execution with its own source
+contracts and exact-operation repair expectations. The annotations change no session framing,
+recovery or delivery guarantee. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
+owns this compiler boundary.
+
 ## Wire Format
 
 ### One Schema, Eight Frame Roots
@@ -1843,6 +1850,7 @@ counts are exported by the node that executes the client ingestor, not per sessi
 A subscription generation retains its domain lifecycle when delivery starts. Filtered batches read
 the currently installed clock through that capability, including a domain started after the
 subscription opened. Unavailable-clock skipped-row outcomes remain unchanged.
+Predicate execution receives the serving node's bounded executor separately from the retained clock.
 Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
 public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
 These internal ownership rules change neither session framing nor client recovery behavior.

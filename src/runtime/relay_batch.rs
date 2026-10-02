@@ -460,6 +460,11 @@ impl RelayRecordBatch {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "Arrow and the retained relay payload supply row iteration \
+                                   for the selected batch")
+    )]
     pub(crate) fn try_into_messages(
         self,
     ) -> Result<Vec<RelayMessage>, Box<RelayRecordBatchFailure<Self>>> {

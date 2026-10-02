@@ -5,6 +5,14 @@
 //! - **Depends on.** Clock capabilities, domain lifecycle vocabulary and publication snapshots.
 //! - **Must not know.** Connector drivers, graph planning or task scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "domain start, pause and stop change the installed execution lifetime"
+    )
+)]
+
 use error_stack::Report;
 use nervix_models::{DomainName, DomainState};
 

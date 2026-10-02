@@ -283,6 +283,13 @@ struct Subdivision<O, F> {
 /// front — and re-encoded, because a smaller candidate may encode larger. A single member that
 /// still reaches the limit ends as oversize. A candidate of `n` members therefore takes at most
 /// `⌈log2(n)⌉ + 1` encodings.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the external writer callback measures selected sub-batches; local callbacks \
+                  remain checked"
+    )
+)]
 fn subdivide<M, O, F>(
     members: &[M],
     max_messages: NonZeroUsize,

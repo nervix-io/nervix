@@ -42,6 +42,13 @@ so is `--cfg loom`, `--cfg shuttle` or `--cfg turmoil` in any `justfile` recipe,
 configuration, workflow or build script. Tokio's unstable runtime controls belong to the Turmoil
 build alone: `--cfg tokio_unstable` may appear only in a `justfile` recipe whose name names Turmoil.
 
+The analysis cfg, `nervix_lint`, is tooling only. The synchronization analysis driver alone sets
+it, to read the contracts written beside the code, and the analysis must read the code a product
+build compiles. So `--cfg nervix_lint` is rejected in every recipe, configuration, workflow and
+build script; a `cfg` or `cfg!` predicate that names it is rejected, because it would select code;
+and a `cfg_attr` it gates holds only `nervix::` contracts and lint levels. The rules above read
+what an annotation gates like any other source.
+
 A selected atomic belongs to one model execution, so it never lives in a `static`, which outlives
 every execution, and it is never constructed in a const context, which Loom's atomics do not
 support. The static rules reject a `static`, including one a `thread_local!` declares, whose
@@ -63,6 +70,11 @@ naming the one Rust file, the items it uses by their paths below `unmodeled`, it
 and the verification limit. A use without a permission, an item the permission does not list, a
 permission for a directory, a glob or a file the boundary does not govern, an item the unmodeled path
 does not have, and a permission nothing uses all fail. A real atomic may live in a `static`.
+
+The source and manifest rules read every tracked file and every new file Git does not ignore, in
+the workspace and in the isolated tooling workspaces beside it, with their fixtures and fixture
+macros. What a build wrote is not authored source: Cargo tags each build directory it creates with a
+`CACHEDIR.TAG`, and nothing below a tagged directory is read, wherever it is nested.
 
 The manifest rules keep mode selection in one place, in every tracked or new manifest, whether or
 not the workspace lists it. Only the owner selects Loom, and the harness runs it, so no other
@@ -342,6 +354,15 @@ _GLOBAL_CFG = re.compile(
     r"|rustc-cfg=(?P<emitted>[A-Za-z_][A-Za-z0-9_]*)"
 )
 TOKIO_UNSTABLE = "tokio_unstable"
+# The cfg the synchronization analysis driver sets to read the contracts written beside the code,
+# the tool namespace those contracts live in, and the lint levels an expectation may use.
+ANALYSIS_CFG = "nervix_lint"
+ANALYSIS_TOOL = "nervix"
+LINT_LEVELS = frozenset({"allow", "deny", "expect", "forbid", "warn"})
+# Cargo tags every build directory it creates with this file, whose content starts with the
+# signature of the cache-directory convention.
+CACHE_TAG = "CACHEDIR.TAG"
+CACHE_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
 # The build of the release image, and the packages it builds for release.
 RELEASE_BUILD = "Dockerfile.debian"
 _RELEASE_PACKAGE = re.compile(r"(?<![A-Za-z0-9_-])--package\s+(?P<package>[A-Za-z0-9_-]+)")
@@ -416,6 +437,12 @@ _MODULE_ROOT_FILES = frozenset({"build.rs", "lib.rs", "main.rs", "mod.rs"})
 _CRATE_ROOT_DIRECTORIES = frozenset({"bin", "benches", "examples", "tests"})
 _CFG_PREDICATE = re.compile(r"(?<![A-Za-z0-9_])cfg(?:_attr)?\s*!?\s*\(")
 _MODE_CFG_NAME = re.compile(r"(?<![A-Za-z0-9_])(?P<name>loom|shuttle|turmoil)(?![A-Za-z0-9_])")
+# A conditional-compilation form, told apart by whether it selects code or attaches attributes.
+_CFG_USE = re.compile(r"(?<![A-Za-z0-9_])(?P<kind>cfg_attr|cfg)\s*!?\s*\(")
+_ANALYSIS_CFG_NAME = re.compile(rf"(?<![A-Za-z0-9_]){ANALYSIS_CFG}(?![A-Za-z0-9_])")
+_ATTRIBUTE_PATH = re.compile(
+    r"\s*(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)"
+)
 # One token of a `cfg` predicate: an option name, a string literal, or its punctuation.
 _CFG_TOKEN = re.compile(
     r"\s*(?:(?P<name>[A-Za-z_][A-Za-z0-9_]*)|(?P<string>\"(?:[^\"\\]|\\.)*\")|(?P<symbol>[(),=]))"
@@ -1286,6 +1313,7 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
     violations.extend(check_statics(file, names))
     violations.extend(check_loom_models(file, loom_only_file))
     violations.extend(check_mode_cfgs(file))
+    violations.extend(check_analysis_cfg(file))
     return violations, uses
 
 
@@ -1324,6 +1352,77 @@ def check_mode_cfgs(file: RustFile) -> list[Site]:
                     f"{RULE}: `cfg({mode})` selects an execution mode through a global cfg that "
                     f"every crate of the build reads, Tokio's included; select it with "
                     f'`feature = "{mode}"`, which the package forwards to {OWNER}',
+                )
+            )
+    return violations
+
+
+def _arguments(group: str) -> list[tuple[int, str]]:
+    """The comma-separated arguments of the parenthesized `group`, each with its offset in it."""
+
+    end = len(group) - 1 if group.endswith(")") else len(group)
+    arguments: list[tuple[int, str]] = []
+    depth = 0
+    start = 1
+    for index in range(1, end):
+        character = group[index]
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        elif character == "," and depth == 0:
+            arguments.append((start, group[start:index]))
+            start = index + 1
+    arguments.append((start, group[start:end]))
+    return arguments
+
+
+def check_analysis_cfg(file: RustFile) -> list[Site]:
+    """Hold the analysis cfg to gating lint annotations.
+
+    The synchronization analysis driver alone sets `nervix_lint`, to read the contracts and
+    expectations written beside the code. It is not a mode, and the analysis must read the code a
+    product build compiles, so the cfg never selects code: a `cfg` or `cfg!` predicate that names it
+    is rejected, and a `cfg_attr` it gates holds only `nervix::` contracts and lint levels, never an
+    attribute that changes what is compiled.
+    """
+
+    violations: list[Site] = []
+    for match in _CFG_USE.finditer(file.code):
+        opening = match.end() - 1
+        group = file.code[opening : _end_of_group(file.code, opening)]
+        if match.group("kind") == "cfg":
+            name = _ANALYSIS_CFG_NAME.search(group)
+            if name is not None:
+                violations.append(
+                    file.site(
+                        opening + name.start(),
+                        f"{RULE}: `cfg({ANALYSIS_CFG})` selects code for the analysis build alone, "
+                        "so the analysis would read other code than a product build compiles; the "
+                        f"analysis cfg only gates `{ANALYSIS_TOOL}::` contracts and lint "
+                        "expectations through `cfg_attr`",
+                    )
+                )
+            continue
+        arguments = _arguments(group)
+        if _ANALYSIS_CFG_NAME.search(arguments[0][1]) is None:
+            continue
+        for offset, attribute in arguments[1:]:
+            path = _ATTRIBUTE_PATH.match(attribute)
+            if path is None:
+                continue
+            segments = _segments(path.group("path"))
+            if len(segments) > 1 and segments[0] == ANALYSIS_TOOL:
+                continue
+            if len(segments) == 1 and segments[0] in LINT_LEVELS:
+                continue
+            violations.append(
+                file.site(
+                    opening + offset + path.start("path"),
+                    f"{RULE}: `cfg_attr({ANALYSIS_CFG}, {'::'.join(segments)})` changes what the "
+                    "analysis build compiles, so the analysis would read other code than a product "
+                    f"build compiles; the analysis cfg only gates `{ANALYSIS_TOOL}::` contracts "
+                    "and lint expectations",
                 )
             )
     return violations
@@ -1622,7 +1721,13 @@ def _package_of(key: str, entry: object, workspace: Mapping[str, object]) -> str
 
 
 def tracked_files(root: Path) -> list[str]:
-    """Every tracked file, and every new file Git does not ignore."""
+    """Every tracked file, and every new file Git does not ignore, outside Cargo's build
+    directories.
+
+    Cargo tags each build directory it creates with a `CACHEDIR.TAG`, so a nested one, such as the
+    target directory of an isolated tooling workspace, is recognized wherever it is, whatever it is
+    named and whether or not Git ignores it. What a build wrote there is not authored source.
+    """
 
     completed = subprocess.run(
         ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -1630,9 +1735,20 @@ def tracked_files(root: Path) -> list[str]:
         check=True,
         text=True,
     )
-    return sorted(
-        entry for entry in completed.stdout.split("\0") if entry and (root / entry).is_file()
-    )
+    entries: list[str] = []
+    for entry in completed.stdout.split("\0"):
+        if entry and (root / entry).is_file():
+            entries.append(entry)
+    build_directories: list[str] = []
+    for entry in entries:
+        tag = PurePosixPath(entry)
+        if tag.name != CACHE_TAG or tag.parent == PurePosixPath("."):
+            continue
+        content = (root / entry).read_text(encoding="utf-8", errors="replace")
+        if content.startswith(CACHE_TAG_SIGNATURE):
+            build_directories.append(f"{tag.parent}/")
+    excluded = tuple(build_directories)
+    return sorted(entry for entry in entries if not entry.startswith(excluded))
 
 
 def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
@@ -1869,17 +1985,25 @@ def _global_cfgs(text: str) -> Iterator[str]:
 
 
 def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
-    """Hold Tokio's unstable runtime controls to the Turmoil recipes, and every execution mode to
-    its feature.
+    """Hold Tokio's unstable runtime controls to the Turmoil recipes, every execution mode to its
+    feature, and the analysis cfg to the analysis driver.
 
     A cfg a build passes reaches every crate in it. `tokio_unstable` changes how Tokio schedules
     and reports, so only a Turmoil recipe passes it. An execution mode is never a global cfg: Tokio
     and other dependencies read the same names and would change their own behavior, so `--cfg
     loom`, `--cfg shuttle` and `--cfg turmoil` fail in every recipe, configuration, workflow and
-    build script.
+    build script. `--cfg nervix_lint` fails there too: only the synchronization analysis driver,
+    which registers the tool its annotations name, sets it for the crates it analyzes.
     """
 
     problems: list[str] = []
+
+    def reject_analysis(location: str) -> None:
+        problems.append(
+            f"{location}: {RULE}: `--cfg {ANALYSIS_CFG}` would enable the analysis annotations in "
+            "every crate of a build; only the synchronization analysis driver sets it, for the "
+            "crates it analyzes"
+        )
 
     def reject_mode(location: str, mode: str) -> None:
         problems.append(
@@ -1900,6 +2024,8 @@ def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
             for name in _global_cfgs(line):
                 if name in MODES:
                     reject_mode(f"{JUSTFILE}:{number}", name)
+                elif name == ANALYSIS_CFG:
+                    reject_analysis(f"{JUSTFILE}:{number}")
                 elif name == TOKIO_UNSTABLE and (recipe is None or TURMOIL not in recipe):
                     problems.append(
                         f"{JUSTFILE}:{number}: {RULE}: `--cfg tokio_unstable` changes how Tokio "
@@ -1917,6 +2043,8 @@ def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
                 for name in _global_cfgs(line):
                     if name in MODES:
                         reject_mode(f"{relative}:{number}", name)
+                    elif name == ANALYSIS_CFG:
+                        reject_analysis(f"{relative}:{number}")
                     elif name == TOKIO_UNSTABLE:
                         problems.append(
                             f"{relative}:{number}: {RULE}: `--cfg tokio_unstable` would change how "
@@ -1929,6 +2057,8 @@ def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
         for name in sorted(set(_global_cfgs((root / path).read_text(encoding="utf-8")))):
             if name in MODES:
                 reject_mode(path, name)
+            elif name == ANALYSIS_CFG:
+                reject_analysis(path)
             elif name == TOKIO_UNSTABLE:
                 problems.append(
                     f"{path}: {RULE}: a build script that sets `tokio_unstable` changes how Tokio "

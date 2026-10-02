@@ -150,6 +150,7 @@ extern crate self as nervix_primitives;
 
 #[cfg(feature = "native")]
 pub mod collections;
+mod lint;
 #[cfg(feature = "native")]
 pub mod net;
 #[cfg(feature = "native")]

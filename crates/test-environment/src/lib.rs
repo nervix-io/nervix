@@ -8,6 +8,14 @@
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "this harness provisions and observes external test services"
+    )
+)]
+
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},

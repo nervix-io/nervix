@@ -55,7 +55,7 @@ use nervix_checkpoint_replication::{
     Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
 };
 use nervix_dns::DnsResolver;
-use nervix_execution::{ChargedBytes, Executor};
+use nervix_execution::{ChargedBytes, Executor, QueueAdmission};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -195,6 +195,7 @@ use crate::{
 pub mod admitted_work_benchmark;
 mod branch_aggregated_state;
 mod branch_buffering;
+mod branch_checkpoint_catalog;
 mod branch_key;
 mod branch_lifecycle_state;
 mod branch_lru_state;
@@ -417,7 +418,7 @@ pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestDispatch, decode_ingested_payload,
+    PayloadDecodeFailure, RawIngestAcceptance, RawIngestDispatch, decode_ingested_payload,
     prepare_branched_entrypoint_input,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
@@ -533,7 +534,7 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateReplicaSync, PreparedForcedRuntimeStateRecovery,
+    DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
     PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
 };
 pub(in crate::runtime) use state_store::{
@@ -549,19 +550,20 @@ pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 use test_fixtures::{
     EntrypointTestDomain, OptionalTestField, TOO_LONG_DURATION_TEXT,
     TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster, batch_value,
-    bind_ingestor_route_for_test, branch_model, branched_by, concrete_branch_key, construction,
-    domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
-    install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
-    key_label, named, nonzero_capacity, paced_domain_state, planned_entrypoints_for_test,
-    processor_branched_by, publish_state_identity, quiesce_test_batch, row_value, scheduled_model,
-    string_branch_key, test_branching, test_domain_clock, test_domain_clock_authority,
-    test_execution_revision, test_ingestor_quiesce_control, test_named_branching,
-    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
-    unbranched_subscription_definition, unpaced_domain_state, validate_wasm_test_output_groups,
-    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
-    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
-    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
-    window_aggregate, window_outputs, window_plan, with_inherit_all,
+    bind_ingestor_route_for_test, branch_lifecycle_snapshot, branch_model, branched_by,
+    concrete_branch_key, construction, domain, execute_filter_map_for_test, expression,
+    ingest_metadata_for_test, install_test_domain_execution, install_unpaced_test_domain,
+    junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
+    planned_entrypoints_for_test, processor_branched_by, publish_state_identity,
+    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_branching,
+    test_domain_clock, test_domain_clock_authority, test_execution_revision,
+    test_ingestor_quiesce_control, test_named_branching, test_optional_schema,
+    test_relay_boundary_services, test_schema, u32_branch_key, unbranched_subscription_definition,
+    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
+    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
+    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
+    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
+    window_outputs, window_plan, with_inherit_all,
 };
 #[cfg(test)]
 pub(crate) use test_fixtures::{FilledCpuClass, single_worker_executor};
@@ -638,7 +640,7 @@ mod wasm_checkpoint;
 pub mod wasm_checkpoint_benchmark;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
-pub use state_replication::benchmark::StateReplicationBenchmark;
+pub use state_replication::benchmark::{ReplicaCatchUpBenchmark, StateReplicationBenchmark};
 mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
@@ -656,8 +658,103 @@ pub(crate) use domain_clock::{
     DomainExecutionSnapshot,
 };
 pub(crate) use domain_execution::LookupRuntime;
-/// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
-/// operations are absent from each capability.
+/// Opaque runtime state capabilities used by paired API examples.
+/// Each capability is retained independently; cloning preserves its authority.
+///
+/// ```
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
+/// fn retain(value: &KafkaOffsetStateRead) -> KafkaOffsetStateRead { value.clone() }
+/// ```
+///
+/// ```
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateOriginator;
+/// fn retain(value: &KafkaOffsetStateOriginator) -> KafkaOffsetStateOriginator { value.clone() }
+/// ```
+///
+/// ```
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetSnapshotInstaller;
+/// fn retain(value: &KafkaOffsetSnapshotInstaller) -> KafkaOffsetSnapshotInstaller { value.clone() }
+/// ```
+///
+/// ```
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead;
+/// fn retain(value: &MaterializedRelayStateRead) -> MaterializedRelayStateRead { value.clone() }
+/// ```
+///
+/// ```
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateOriginator;
+/// fn retain(value: &MaterializedRelayStateOriginator) -> MaterializedRelayStateOriginator { value.clone() }
+/// ```
+///
+/// ```
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelaySnapshotInstaller;
+/// fn retain(value: &MaterializedRelaySnapshotInstaller) -> MaterializedRelaySnapshotInstaller { value.clone() }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetSnapshotInstaller;
+///
+/// fn forbidden(installer: &KafkaOffsetSnapshotInstaller) {
+///     let _ = installer.apply_committed_offset("events", 0, 1);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateOriginator;
+///
+/// fn forbidden(originator: &KafkaOffsetStateOriginator) {
+///     let _ = originator.install_snapshot(1, &[]);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
+///
+/// fn forbidden(reader: &KafkaOffsetStateRead) {
+///     let _ = reader.install_snapshot(1, &[]);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
+///
+/// fn forbidden(reader: &KafkaOffsetStateRead) {
+///     let _ = reader.apply_committed_offset("events", 0, 1);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelaySnapshotInstaller;
+///
+/// fn forbidden(installer: &MaterializedRelaySnapshotInstaller) {
+///     let _ = installer.remove_key(&None);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateOriginator;
+///
+/// fn forbidden(originator: &MaterializedRelayStateOriginator) {
+///     let _ = originator.install(());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead;
+///
+/// fn forbidden(reader: &MaterializedRelayStateRead) {
+///     let _ = reader.install(());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateRead;
+///
+/// fn forbidden(reader: &MaterializedRelayStateRead) {
+///     let _ = reader.remove_key(&None);
+/// }
+/// ```
+///
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod state_capability_compile_tests {
@@ -672,16 +769,85 @@ pub mod state_capability_compile_tests {
     };
 }
 
-/// Opaque logical clock and deadline capabilities exposed only so compile-fail tests can prove
-/// that they cannot be interchanged with the physical deadlines of the connector contract.
+/// Opaque domain clock capabilities used by paired logical and physical deadline examples.
+///
+/// ```
+/// use nervix_server::runtime::clock_capability_compile_tests::{DomainClock, LogicalDeadline};
+/// use nervix_primitives::sync::CancellationToken;
+///
+/// async fn forbidden(clock: &DomainClock, deadline: LogicalDeadline) {
+///     drop(clock.wait_until(deadline, &CancellationToken::new()).await);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_connector::physical_time::PhysicalDeadline;
+/// use nervix_server::runtime::clock_capability_compile_tests::{DomainClock, LogicalDeadline};
+/// use nervix_primitives::sync::CancellationToken;
+///
+/// async fn forbidden(clock: &DomainClock, deadline: PhysicalDeadline) {
+///     let deadline: LogicalDeadline = deadline;
+///     drop(clock.wait_until(deadline, &CancellationToken::new()).await);
+/// }
+/// ```
+///
+/// ```
+/// use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
+///
+/// async fn forbidden(capability: PhysicalDeadlineCapability, deadline: PhysicalDeadline) {
+///     capability.wait_until(deadline).await;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
+/// use nervix_server::runtime::clock_capability_compile_tests::LogicalDeadline;
+///
+/// async fn forbidden(capability: PhysicalDeadlineCapability, deadline: LogicalDeadline) {
+///     let deadline: PhysicalDeadline = deadline;
+///     capability.wait_until(deadline).await;
+/// }
+/// ```
+///
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod clock_capability_compile_tests {
     pub use super::domain_clock::{DomainClock, LogicalDeadline};
 }
 
-/// The opaque subscription predicate exposed only so compile-fail tests can prove that general VM
-/// programs and predicates compiled with a different input context cannot be substituted.
+/// Opaque compiled subscription predicates retain their validated input context.
+///
+/// ```
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+/// fn retain(predicate: CompiledSubscriptionPredicate) -> CompiledSubscriptionPredicate { predicate }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+/// use nervix_vm::CompiledProgram;
+///
+/// fn forbidden(program: CompiledProgram) -> CompiledSubscriptionPredicate {
+///     program.into()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+///
+/// fn forbidden(predicate: CompiledSubscriptionPredicate) {
+///     let _ = predicate.predicate;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use nervix_server::runtime::subscription_predicate_capability_compile_tests::CompiledSubscriptionPredicate;
+/// use nervix_vm::CompiledPredicate;
+///
+/// fn forbidden(predicate: CompiledPredicate) -> CompiledSubscriptionPredicate {
+///     predicate.into()
+/// }
+/// ```
+///
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod subscription_predicate_capability_compile_tests {

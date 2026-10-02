@@ -76,6 +76,13 @@ impl RelayInteractionError {
 }
 
 /// Commands classify whether already accepted relay input must be handled before the command.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the installed relay loop handles each admitted command and drain transition"
+    )
+)]
 pub(super) trait RelayInteractionCommand: Send {
     fn drain_inputs_before_handling(&self) -> bool {
         false
@@ -496,6 +503,11 @@ impl RelayInteractionInputs {
             .collect()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained relay collection invokes its provided take \
+                                   callback; local callback bodies remain checked")
+    )]
     fn take_collection(
         &mut self,
         mut take: impl FnMut(

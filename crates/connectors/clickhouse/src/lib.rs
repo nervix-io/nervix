@@ -145,6 +145,10 @@ impl ClickHouseWriteError {
     ///
     /// Those causes describe the connection, never a row, and carry no credentials. A response from
     /// ClickHouse is not described this way, because its text can repeat values of the rows.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "formats the typed external ClickHouse transport cause")
+    )]
     fn transport_failure(&self) -> Option<String> {
         let Self::Driver(ClickHouseError::Network(error)) = self else {
             return None;

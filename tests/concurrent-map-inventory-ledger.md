@@ -14,6 +14,20 @@ The inventory was traced at revision `edc1c8f9`, the parent of the relay presenc
 covers the runtime, the connector contract and connector crates, the interconnect, metrics, the
 authored primitive wrappers, and the application, consensus and client maps next to them.
 
+The compiler synchronization gate derives execution contracts and operation-specific exceptions
+from current source annotations. This inventory supplies the ownership review; executable policy
+belongs at the owning function, trait, type, module or exact exceptional operation.
+[Typed Ratchet 02A](https://app.clickup.com/t/86bcau18u) delivers generated calibration and
+qualification evidence, and [Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review)
+states the current compiler contract. The executor-saturation lookup is testing fault control.
+Replica catch-up retains the entity's lifecycle handle and the replica task's own record of each
+branch (see [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes)); Typed
+Ratchet 15 owns the remaining state-replication frame, synchronization, listing and announcer
+reads, including the lifecycle lookup those requests share. The primary's synchronization request
+handler remains recurring debt. Source readiness marking
+also reaches its registry from polling and remains debt for Typed Ratchet 03. This tooling cutover
+changes no runtime map, access cadence or ownership protocol.
+
 ## How accesses are classified
 
 A `DashMap` synchronizes on every access. `get`, `contains_key`, `len` and iteration take a shard's
@@ -53,6 +67,12 @@ Dispositions:
 - **[Typed Ratchet 13](https://app.clickup.com/t/86bc9v77p)** — gave state-replication progress and
   checkpoint notifications bounded owners; see
   [Checkpoint replication](#checkpoint-replication-the-repair-typed-ratchet-13-makes).
+- **[Typed Ratchet 14](https://app.clickup.com/t/86bca1wch)** — caught replica branch states up once
+  per entity from the owner's catalog of branch checkpoints instead of once per branch; see
+  [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes).
+- **[Typed Ratchet 15](https://app.clickup.com/t/86bca1web)** — resolve state-replication frames,
+  synchronization and listing requests, and announcer steps through retained, generation-fenced
+  handles instead of node-wide registry reads.
 - **retain: bounded protocol** — the access is an ordering fence or bounded protocol with the named
   requirement.
 - **retain: lifecycle registry**, **retain: observer**, **retain: single owner** — no recurring
@@ -114,6 +134,37 @@ replica's synchronization task, and it retires with the state, ending its announ
 | a replica's copy of a branch checkpoint | a full payload clone under the `passive_runtime_state_snapshots` write guard | a revision comparison and a move under the guard |
 | `ReplicatedBranchAggregatedState::replica_progress` and its notification | written per acknowledgement and never read | deleted |
 
+## Replica catch-up: the repair Typed Ratchet 14 makes
+
+Before this repair, a replica's poll task walked every branch its entity's lifecycle named once
+every replication poll interval. For each branch it resolved the placement through
+`state_placement`, a read of `state_identities`, read the revision it held through
+`passive_state_replica_lsm`, a read of `passive_runtime_state_snapshots` and a storage read when it
+held nothing, and sent one synchronization request whether or not the branch changed. The owner
+answered each request by probing the deduplicator, Kafka offset, window, WASM and branch-aggregated
+registries in turn, and a window or WASM branch with nothing newer fell through to
+`replicated_branch_lifecycles` and a storage read. A replica also spawned one reconcile task per
+announced placement, keyed in `pending_state_replica_syncs`, which read the held revision and, to
+install a branch checkpoint, `state_identities` and `replicated_branch_lifecycles` again. With no
+branch changing, a replica's catch-up cost grew with the number of branches, not with the rate of
+change.
+
+Now one replica task per entity owns everything it learns of the entity's branch checkpoints and
+retains the entity's lifecycle handle. The owner catalogues the newest replicable revision of every
+branch state it owns with the entity's lifecycle, and a round reads only what changed after the
+cursor its previous read returned. Announcements are left with the entity's lifecycle and taken by
+the task in its next round, and `pending_state_replica_syncs` is deleted. See
+[Replica catch-up](../docs/src/data-plane-concurrency.md#replica-catch-up).
+
+| Access | Before | Now |
+| --- | --- | --- |
+| synchronization requests per round with no branch changing | one for the lifecycle and one per branch | one for the lifecycle and one catalog listing |
+| `state_identities` read per named branch per round | `state_placement` for every branch | none: a catalog entry names its state; once per task start for the lifecycle |
+| held revision per branch per round | `passive_runtime_state_snapshots` get, or a storage read | none: the task's own record, read once per branch it looks at |
+| lifecycle discovery per round and per installation | `replicated_branch_lifecycles` get, and get or `entry` on installation | none: the handle the task retains |
+| owner answer to a synchronization request | up to five registry probes, then the lifecycle registry and storage | the one registry of the placement's kind; storage only without state |
+| announcement of a branch checkpoint or lifecycle | `entry` in `pending_state_replica_syncs` and a reconcile task per placement | one short entity-scoped lock on the lifecycle's pending announcements |
+
 ## Recurring sites and their dispositions
 
 | Map | Hottest access | Delivery |
@@ -138,13 +189,16 @@ replica's synchronization task, and it retires with the state, ending its announ
 | `RuntimeInner::emitter_statuses` | sinks and their event tasks retain one failure/retry publication; healthy clears read it; task teardown removes its registration | retain: lifecycle registry |
 | `RuntimeInner::pool_waits` | register/remove once per pooled sink; only a borrow returning Pending publishes its retained wait slot, cleared on completion or cancellation | retain: lifecycle registry |
 | `RuntimeInner::emitter_confirmation_waits` | counters resolve at emitter spawn and are removed with the task; flush/commit guards use the retained counter | retain: lifecycle registry |
-| `RuntimeInner::replicated_branch_aggregated_states` | tasks bind a placement dirty mark beside their metric series; recurring marks reach only that retained state | retain: lifecycle registry |
+| `RuntimeInner::replicated_branch_aggregated_states` | tasks bind a placement dirty mark beside their metric series; recurring marks reach only that retained state, while incoming replica frames still resolve the registry | registration retained; Typed Ratchet 15 owns frame routing |
 | `RuntimeInner::frozen_ownership_handoff_entities` | tasks bind one entity publication; watches register before reading it and handoff release publishes before waking | retain: lifecycle registry |
 | `RuntimeInner::domains` | task startup binds the lifecycle allocation; ingestion reads pause and clock from one publication, Kafka reads its generation, and generators use their retained clock | retain: lifecycle registry |
 | `RuntimeInner::executions` | processor, relay-state and subscription clocks bind at startup; WASM states retain assignment publication; error handlers use retained routing snapshots; checkpoint announcer assignment reads remain | Typed Ratchet 15 owns announcer reads; other consumers retain publications |
 | `DomainForceFlush::state` mutex | participant idle and claimed polls read their readiness hint; an available obligation acquires the coordinator for its authoritative generation claim | retain: bounded generation protocol |
 | Prometheus `MetricVec` children | client outcome children, quiesce payload counters/gauges and subscription drop counters resolve once with their owner | retain: lifecycle registry |
 | `RuntimeInner::endpoint_intake_routes` | one immutable publication; borrowed host/path resolution per HTTP request, retained route per WebSocket connection | completed publication: Typed Ratchet 12 |
+| replicated-state registries, `RuntimeInner::replicated_branch_lifecycles` | borrowed get per replica ACK, checkpoint-available frame, synchronization request and catalog listing | Typed Ratchet 15 |
+| `RuntimeInner::executions`, `state_identities` | assignment validation per checkpoint frame and per branch checkpoint a replica fetches or installs; execution get per announcer step, repeated every 100 ms while a replica lags | Typed Ratchet 15 |
+| `RuntimeInner::passive_runtime_state_snapshots` | full retain when a received branch lifecycle prunes branches | Typed Ratchet 15 |
 
 ## Inventory by owner
 
@@ -164,17 +218,18 @@ replica's synchronization task, and it retires with the state, ending its announ
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
 | `ReplicatedMaterializedRelayState::entries` | `get_mut` replace or first insert per record; `record` per dependency read; `capture` for snapshots, handoff, `SHOW` and remote reads | per record | one originator per assignment; assignment fence, branch generation, installed fence | `capture` holds the barrier over iteration and sort | Typed Ratchet 04 |
-| `RuntimeInner::replicated_materialized_stream_states` | get-then-insert at placement; get per dependency read; iteration per generator tick; borrowed read per replica acknowledgement and checkpoint announcement of a materialized snapshot | per batch | writers retain; readers resolve each time; assignment generation | cloned out | Typed Ratchet 04 |
+| `RuntimeInner::replicated_materialized_stream_states` | get-then-insert at placement; get per dependency read; iteration per generator tick; borrowed read per replica acknowledgement and checkpoint announcement of a materialized snapshot | per batch, per remote frame | writers retain; readers resolve each time; assignment generation | cloned out | Typed Ratchet 04 (materialized reads), Typed Ratchet 15 (replication frames) |
 | `RuntimeInner::relay_branch_presences` | get-or-insert at domain build under the schedule lock; get per materialized visibility check | per batch, per generated record | shares the relay's presence across rebuilds; placement carries the schema fingerprint | `Ref` over one lock-free load | Typed Ratchet 04 (the reader's placement lookup) |
 | `RuntimeInner::restored_materialized_stream_states` | insert after an asynchronous open; take at build | lifecycle | schedule application | short | retain: lifecycle registry |
 | `RuntimeInner::relay_state_epochs` | occupied `entry` per branch relay dispatch; bumped at schedule application | per batch | branch caches only the number | dropped after clone | Typed Ratchet 04 |
-| `RuntimeInner::state_identities` | schedule installation replaces each retained assignment slot; state placement binds it; WASM callbacks read it directly | lifecycle, observer; materialized reads per batch and replica placement checks per frame | one entity publication contains identity and checkpoint owners; removal publishes absence | no callback registry guard | registry retained; Typed Ratchet 04 owns materialized resolution; Typed Ratchet 15 owns replica placement resolution |
-| `RuntimeInner::replicated_deduplicator_states`, `replicated_window_processor_states`, `replicated_wasm_processor_states`, `replicated_kafka_offset_states` | get-then-insert at branch or source start; synchronization requests, replica acknowledgements and checkpoint announcements find their placement's state with a borrowed read | lifecycle; per remote frame (borrowed read) | tasks retain their state, and with it its replication; fingerprint, incarnation or generation | the Kafka sync `Ref` spans the barrier and encode | retain: lifecycle registry |
-| `RuntimeInner::replicated_branch_aggregated_states` | registration, snapshot synchronization, acknowledgement, announcement and observation; tasks retain dirty marks | lifecycle, observer; per remote frame | exact metric placement retained with its series | synchronization guards stay on snapshot paths | retain: lifecycle registry |
+| `RuntimeInner::state_identities` | schedule installation replaces each retained assignment slot; state placement binds it; WASM callbacks read it directly | lifecycle, observer; materialized reads per batch and replica placement checks per frame and per branch checkpoint a replica fetches or installs | one entity publication contains identity and checkpoint owners; removal publishes absence | no callback registry guard | registry retained; Typed Ratchet 04 owns materialized resolution; Typed Ratchet 15 owns replica placement resolution |
+| `RuntimeInner::replicated_deduplicator_states`, `replicated_window_processor_states`, `replicated_wasm_processor_states`, `replicated_kafka_offset_states` | get-then-insert at branch or source start; a synchronization request reads the one registry of its placement's kind; replica acknowledgements and checkpoint announcements find their placement's state with a borrowed read | lifecycle; per remote frame (borrowed read) | tasks retain their state, and with it its replication and catalog entry; fingerprint, incarnation or generation | values cloned out before an encode | installation: lifecycle; recurring reads: Typed Ratchet 15 |
+| `RuntimeInner::replicated_branch_aggregated_states` | registration, snapshot synchronization, acknowledgement, announcement and observation; tasks retain dirty marks | lifecycle, observer; per remote frame | exact metric placement retained with its series | synchronization guards stay on snapshot paths | registration: lifecycle; frame routing: Typed Ratchet 15 |
 | Each replicated state's `CheckpointReplication` (not a map: one placement's replica progress and announcement) | the originator offers per checkpoint or commit; one announcer steps every 100 ms while a replica lags; acknowledgements record; waits register before they read | per batch, per ACK | owned by the replicated state, which retires it and ends its announcer | one lock scoped to the placement, never held across an await; WASM 10 s, Kafka 5 s and reset deadlines | retain: bounded protocol (one placement's announcement and replica progress) |
-| `RuntimeInner::pending_state_replica_syncs` | `entry` per frame; removed by the reconcile task | per remote frame | one reconcile task per placement; monotonic target | 100 ms retry | retain: bounded protocol (single reconcile task per placement) |
-| `RuntimeInner::passive_runtime_state_snapshots` | `entry` per replica installation of a branch checkpoint, comparing revisions and moving the newer one in; taken when a replica is promoted; pruned when a branch lifecycle drops a branch | per remote frame | LSM-monotonic | the guard covers one comparison and a move | retain: bounded protocol (LSM-monotonic single-winner installation) |
-| `RuntimeInner::replicated_branch_lifecycles` | get-or-insert when an owner publishes a lifecycle or a replica poll task starts; borrowed reads by acknowledgements, announcements, synchronization requests and branch-keyed installations | lifecycle; per remote frame (borrowed read) | the replica poll task retains its handle; each lifecycle checkpoint decodes its branches once | readers load the handle's published checkpoint | retain: lifecycle registry |
+| `RuntimeInner::passive_runtime_state_snapshots` | `entry` per replica installation of a branch checkpoint, comparing revisions and moving the newer one in; get once per branch the entity's replica task first looks at; taken when a replica is promoted; full retain when a branch lifecycle drops a branch | per installed branch checkpoint; per installed lifecycle (retain) | LSM-monotonic; the replica task keeps what it learned | the entry guard covers one comparison and a move | entry: bounded protocol (LSM-monotonic single-winner installation); first read per branch: lifecycle; retain: Typed Ratchet 15 |
+| `RuntimeInner::replicated_branch_lifecycles` | get-or-insert when an owner publishes a lifecycle or catalogues a branch state, or a replica task starts; borrowed reads by acknowledgements, announcements, lifecycle synchronization requests and catalog listing requests | lifecycle; per remote frame (borrowed read) | the replica task retains its handle and installs through it; each owned branch state retains its catalog entry; each lifecycle checkpoint decodes its branches once | readers load the handle's published checkpoint | registration: lifecycle; frame routing: Typed Ratchet 15 |
+| Each entity's `BranchCheckpointCatalog` (not a map: one published immutable catalog) | each owned branch state registers at creation, records every revision it offers its replicas, and leaves when it is dropped; a catalog listing loads it | per branch publication or WASM checkpoint (record); per remote frame (load) | owned by the entity's lifecycle handle; a registration fences a replaced branch state; an epoch fences another catalog's cursor | one read-copy-update per change, lock-free loads; at most 1,024 removals kept | retain: bounded protocol (one entity's catalog; a change never waits for a reader) |
+| `ReplicatedBranchLifecycle::announcements` mutex | an owner's announcement of the entity's lifecycle or of a branch checkpoint adds the newest per branch; the entity's replica task takes all at the start of each round | per remote frame | one replica task per entity takes them | never held across an await; one entry per branch | retain: bounded protocol (one entity's pending announcements) |
 | `RuntimeInner::prepared_runtime_state_handoffs`, `activated_runtime_state_handoffs`, `prepared_forced_runtime_state_recoveries`, `prepared_runtime_state_snapshots` | handoff and recovery protocol steps | lifecycle | coordination and handoff identities | the prepare `entry` spans payload comparison and store writes | retain: lifecycle registry |
 | `RaisedWasmStateRecoveries::raised` | claim per refused restore; released by the coordinator | failure path, per batch | generation in the key | ≤33 entries | retain: bounded protocol (one outstanding recovery per refused lifetime) |
 | `PendingGuestWasmStateResets::requests` | insert per fenced batch; drained by the coordinator | failure path, per batch | generation in the value | one request per fenced branch | retain: bounded protocol (its per-batch `info!` belongs at `debug`) |
@@ -187,7 +242,8 @@ replica's synchronization task, and it retires with the state, ending its announ
 | `RuntimeInner::domain_routings` | inserted at install; read at task start and by the sites above | per batch, per record | one stable publication handle per domain | cloned out | map: retain: lifecycle registry; recurring sites: Typed Ratchet 03 |
 | `RuntimeInner::domains` | committed lifecycle installation and task binding | lifecycle, observer | pause, generation and start point publish with clock installation | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
 | `RuntimeInner::message_error_routes` | `entry` per buffered failed record; removed at domain stop | per record (failure path) | plan pointer identity | write guard spans route construction | Typed Ratchet 03 |
-| `RuntimeInner::ingestors`, `ingestor_quiescence`, `ingestor_readiness`, `client_ingestors` | start, stop and swap; drain polls and `DESCRIBE` | lifecycle, observer | hosts keep their control and command handles | short | retain: lifecycle registry |
+| `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; drain polls and `DESCRIBE` | lifecycle, observer | hosts keep their control and command handles | short | retain: lifecycle registry |
+| `RuntimeInner::ingestor_readiness` | source poll success and suspension mark the current source instance ready/unready through `get_mut`; observers read status | per successful poll, source transition, observer | retain the readiness publication with the source host and its exact incarnation | one short shard write, no await | recurring marking: Typed Ratchet 03; installation/observation: lifecycle/observer |
 | `RuntimeInner::ingestor_statuses` | sources retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | one status per ingestor, shared by its instances | task preparation installs the slot; stop removes it | retain: lifecycle registry |
 | `RuntimeInner::emitter_statuses` | sinks retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | sink and event-loop readers share status; retry remains drain work even without buffered messages | task registration and teardown; no recurring map guard | retain: lifecycle registry |
 | `RuntimeInner::emitter_confirmation_waits` | resolve at emitter spawn; guards increment/decrement the retained scalar | lifecycle, observer | registration follows emitter task lifetime | removed at task end with pointer identity | retain: lifecycle registry |
@@ -200,7 +256,7 @@ replica's synchronization task, and it retires with the state, ending its announ
 | `RuntimeInner::frozen_ownership_handoff_entities` | register watches and engage/release handoffs; observation reads retained publication | lifecycle, observer | slot stays stable through repeated freezes; domain removal drops registry interest | register-before-read; publish-before-wake | retain: lifecycle registry |
 | `RuntimeInner::endpoint_intake_routes` (`ArcSwap`) and each `EndpointBindingLifetime::intake` (`ArcSwapOption`) | definitions replaced at domain install/teardown; exact lifetimes bound at source start and ended before unbind | one table load per HTTP request or WebSocket upgrade; one borrowed intake lease per payload | request retains its route; WebSocket retains its route and signaling protocol; an admitted request retains its intake lease | whole-table RCU preserves unrelated writers; ended lifetimes refuse later intake through retained tables | retain: immutable publication, Typed Ratchet 12 |
 | `RuntimeInner::compiled_domain_udfs`, `compiled_wasm_modules`, `domain_instantiation_errors` | domain installation; observers | lifecycle, observer | content identity | short | retain: lifecycle registry |
-| `IngestorQuiesceControl::buffers` (`Mutex<HashMap>`) | locked only after the published decision selects buffering; replay | per record, only while quiesced | instance tasks and endpoints | `MAX SIZE` per instance | retain: bounded protocol (retained-payload buffer) |
+| `IngestorQuiesceControl::buffers` (`Mutex<HashMap>`) | locked only after the published decision selects buffering; a drain locks it to take the oldest payload out for delivery and again to end that delivery | per record, only while quiesced or draining what a quiesce retained | instance tasks and endpoints; a delivery borrows the control until it ends | `MAX SIZE` per instance, counting a payload out for delivery; no guard crosses an await | retain: bounded protocol (retained-payload buffer) |
 | `RelayConsumerQueue::batches` (`ConcurrentQueue`) | one push per batch per consumer; one receiver pops | per batch | receiver owns its queue | lock-free, bounded by admitted count | retain: bounded protocol (relay fan-out queue) |
 | `DeduplicatorKeyspace::recent_keys` (`ExpiryMap`), `BranchInstanceRegistry`, `WasmAckMap` | their one task mutates them through `&mut self` | per record, single owner | branch or task owner | no locks | retain: single owner |
 
@@ -252,7 +308,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | session service maps, command execution locks, retained backups and restore archives | per command, control plane; 250 ms sweeps | retain: lifecycle registry |
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
 | client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
-| `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
+| `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit occupancy, saturation and release controls | test-only |
+| Other `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
 
 ### Rust client attachment recovery
 
@@ -363,7 +420,7 @@ as completed fuzz execution.
 ### Same-host routing measurement
 
 `just bench-endpoint-routing` ran before and after on the same Intel Core i9-14900HX host with
-Rust 1.98.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
+Rust 1.99.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
 Each run used five samples of 10,000 operations against the same live endpoint ingestor, with
 per-thread jemalloc allocated-byte counters and the cooperative budget inside the loop. The request
 case measures endpoint selection and intake admission; the retained case measures intake admission

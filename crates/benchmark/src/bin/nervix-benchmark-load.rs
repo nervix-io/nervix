@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "the load harness owns measurement and client coordination outside the product \
+                  graph"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,

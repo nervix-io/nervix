@@ -133,6 +133,7 @@ impl DrainObservation {
             !self.has_begun(),
             "the {subquota:?} subquota leased a slot after the drain began"
         );
+        #[allow(deprecated)] // until try_update is stabilized
         let granted =
             self.outstanding
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
@@ -142,6 +143,7 @@ impl DrainObservation {
     }
 
     fn lease_returned(&self) {
+        #[allow(deprecated)] // until try_update is stabilized
         let returned =
             self.outstanding
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {

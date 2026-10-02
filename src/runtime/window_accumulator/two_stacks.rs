@@ -14,6 +14,13 @@ use meticulous::OptionExt as _;
 ///
 /// Merging is associative up to floating-point rounding, and nothing is ever removed from a merged
 /// aggregate: a window forgets a row by recomputing the aggregate of the rows that survive it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each branch-owned aggregate combines or splits admitted row runs"
+    )
+)]
 pub(in crate::runtime) trait MergeableAggregate: Copy {
     /// The aggregate of no rows, which every merge leaves unchanged.
     const EMPTY: Self;
@@ -60,6 +67,11 @@ impl<A: MergeableAggregate> TwoStacks<A> {
     /// Forget the `count` oldest of the window's `retained` rows. When the front is exhausted,
     /// `runs` yields the surviving typed runs from newest to oldest. `refold_run` appends one
     /// suffix aggregate per row of that run, newest first, and returns its oldest suffix.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a branch-retained run iterator for \
+                                   rebuilding the aggregate")
+    )]
     pub(super) fn retract_oldest_runs<R, I>(
         &mut self,
         count: usize,

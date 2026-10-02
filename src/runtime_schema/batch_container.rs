@@ -234,6 +234,11 @@ impl CompiledCodec {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the external JSON, Arrow and payload writer interfaces \
+                                   encode one admitted batch")
+    )]
     fn write_batch(
         &self,
         members: &[&BatchMember],

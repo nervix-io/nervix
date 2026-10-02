@@ -9,6 +9,15 @@
 //! - **Must not know.** Domains, graphs, schedules or the runtime. Cluster topology and current
 //!   application health are the whole answers it gives.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "gossip membership and management health coordinate topology outside record \
+                  processing"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,

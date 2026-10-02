@@ -10,6 +10,8 @@
 
 [[package]]
 checks = [
+  "tests::shuttle_checks::shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge",
+  "tests::shuttle_checks::shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place",
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
   "tests::shuttle_checks::shuttle_full_wait_queue_is_exact_typed_backpressure",
   "tests::shuttle_checks::shuttle_occupied_bulk_execution_leaves_control_execution_untouched",
@@ -54,6 +56,8 @@ checks = [
   "application::shutdown::shuttle_tests::shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline",
   "application::termination_signals::shuttle_tests::shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal",
   "application::termination_signals::shuttle_tests::shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process",
+  "runtime::branch_lifecycle_state::shuttle_tests::shuttle_an_announced_branch_racing_the_replica_round_is_never_missed",
+  "runtime::branch_lifecycle_state::shuttle_tests::shuttle_announcements_of_one_branch_keep_the_newest_pending",
   "runtime::client_emitter::shuttle_tests::shuttle_competing_consumer_grants_never_exceed_the_node_budget",
   "runtime::client_emitter::shuttle_tests::shuttle_consumer_loss_and_ack_race_release_one_retained_delivery",
   "runtime::client_emitter::shuttle_tests::shuttle_publish_cancellation_and_ack_race_release_one_reservation",
@@ -93,6 +97,8 @@ checks = [
   "runtime::force_flush::shuttle_tests::shuttle_published_generation_wakes_a_waiting_participant",
   "runtime::force_flush::shuttle_tests::shuttle_stale_completions_never_clear_a_newer_generation",
   "runtime::force_flush::shuttle_tests::shuttle_two_participant_generation_waits_for_every_obligation",
+  "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room",
+  "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads",
   "runtime::ingestors::source::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",

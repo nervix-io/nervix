@@ -78,9 +78,24 @@ pub type KafkaDomainOffsetResult<T> = Result<T, Report<KafkaDomainOffsetError>>;
 
 /// Runtime services used only by Kafka's domain-owned offset mode.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained host service is invoked by each admitted driver operation"
+    )
+)]
 pub trait KafkaDomainOffsetServices: Send + Sync + 'static {
     fn generation(&self) -> Option<u64>;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a resumed Kafka driver resolves its initial assigned offsets before \
+                      consuming records"
+        )
+    )]
     async fn initialization(
         &self,
         partitions: &[i32],
@@ -118,7 +133,13 @@ impl KafkaDomainOffsetHost {
         &self,
         partitions: &[i32],
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
-        self.inner.services.initialization(partitions).await
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Kafka resume installs its exact domain-offset placement before polling; the source \
+             retains the resulting position",
+            self.inner.services.initialization(partitions)
+        )
+        .await
     }
 
     pub async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
@@ -784,6 +805,13 @@ fn topic_partitions(
         .collect())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the Kafka driver owns timestamp lookup and its caller-supplied partition \
+                  iterator"
+    )
+)]
 fn offsets_for_partitions_by_timestamp<I>(
     consumer: &StreamConsumer,
     topic: &str,

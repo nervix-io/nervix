@@ -387,6 +387,12 @@ struct OtelRecordError {
 }
 
 impl OtelRecordError {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies typed name and error conversions at the OTEL boundary"
+        )
+    )]
     fn new(key: impl Into<String>, reason: impl Into<String>) -> Report<Self> {
         Report::new(Self {
             key: key.into(),
@@ -394,6 +400,12 @@ impl OtelRecordError {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies typed name and error conversions at the OTEL boundary"
+        )
+    )]
     fn from_value(key: impl Into<String>, error: Report<OtelValueError>) -> Report<Self> {
         let reason = error.current_context().to_string();
         error.change_context(Self {
@@ -464,6 +476,12 @@ fn invalid_configuration(reason: impl std::fmt::Display) -> Report<SinkStartErro
 }
 
 /// A failed export the host retries on its declared backoff.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the caller supplies typed name and error conversions at the OTEL boundary"
+    )
+)]
 fn publish_failure(reason: impl std::fmt::Display) -> Report<SinkPublishError> {
     Report::new(SinkPublishError::Publish { sink: OTEL }).attach_printable(reason.to_string())
 }
@@ -477,6 +495,12 @@ fn publish_failure_after(
 }
 
 /// A refused export that no retry would change, such as a receiver that rejects this endpoint.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the caller supplies typed name and error conversions at the OTEL boundary"
+    )
+)]
 fn misconfigured(reason: impl std::fmt::Display) -> Report<SinkPublishError> {
     Report::new(SinkPublishError::Misconfigured { sink: OTEL }).attach_printable(reason.to_string())
 }
@@ -594,6 +618,12 @@ impl OtelClientSettings {
 }
 
 impl OtelSink {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies typed name and error conversions at the OTEL boundary"
+        )
+    )]
     pub fn new(config: OtelSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let OtelSinkConfig {
             config,
@@ -958,6 +988,11 @@ impl RowRequestSink for OtelSink {
     /// An accepted request is delivered and a request the receiver refused is rejected. The first
     /// request whose outcome is unknown ends the write, which leaves it and every request after it
     /// unanswered for the host to hand over again.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "external OTEL conversion and SDK publication own their \
+                                   callback effects; no internal runtime ownership is inferred")
+    )]
     async fn publish(&mut self, requests: Vec<SinkRowRequest>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(requests.len());
         for request in requests {

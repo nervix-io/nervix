@@ -277,10 +277,6 @@ impl PacedSourceHostServices for ChannelHost {
         Ok(true)
     }
 
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        self.replay_buffered().await
-    }
-
     fn should_skip_poll(&self) -> bool {
         self.quiesce.should_skip_poll()
     }

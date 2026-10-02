@@ -8,6 +8,15 @@
 //! the participant clears its outstanding obligation, while dropping an unhandled completion
 //! makes the same generation deliverable again.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "force-flush registration resolves retained participants; the generation \
+                  protocol and ACK tracking declare narrower contracts"
+    )
+)]
+
 use std::collections::BTreeMap;
 
 use nervix_primitives::sync::{Arc, atomic::AtomicU8, blocking::Mutex, watch};
@@ -27,6 +36,14 @@ struct ForceFlushParticipantState {
 /// claim data; this atomic publishes no other location. Watch registration supplies wakeups.
 /// The private byte encoding is idle=0, available=1, closed=2.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a running source publishes its flush readiness and tracks admitted \
+                  acknowledgement roots"
+    )
+)]
 struct ForceFlushReadiness(AtomicU8);
 
 #[derive(Clone, Copy)]
@@ -75,6 +92,16 @@ struct DomainForceFlushState {
 
 /// Coordinates force-flush generations for one runtime domain.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "domain flush generation and participant identity",
+        bound = "one active request generation and one claimed obligation per participant",
+        reason = "the participant retains the generation protocol instead of looking it up for \
+                  every flush"
+    )
+)]
 pub(super) struct DomainForceFlush {
     state: Mutex<DomainForceFlushState>,
     #[cfg(test)]
@@ -310,6 +337,15 @@ impl DomainForceFlush {
 
 /// One live task participating in domain force flushes.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "domain flush generation and participant identity",
+        bound = "one claimed obligation per participant and generation",
+        reason = "completion and claim release act on the exact retained flush participant"
+    )
+)]
 pub(super) struct DomainForceFlushParticipant {
     readiness: Arc<ForceFlushReadiness>,
     coordinator: Arc<DomainForceFlush>,
@@ -380,6 +416,14 @@ impl Drop for DomainForceFlushCompletion {
 /// An ingestor resolves this pair once and holds it, so cloning it is two refcount bumps and
 /// never a lookup in the shared in-flight maps.
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a running source publishes its flush readiness and tracks admitted \
+                  acknowledgement roots"
+    )
+)]
 pub(in crate::runtime) struct IngestorAckRootTrackers {
     domain: Arc<AckRootTracker>,
     ingestor: Arc<AckRootTracker>,
@@ -407,6 +451,14 @@ impl IngestorAckRootTrackers {
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "a running source publishes its flush readiness and tracks admitted \
+                      acknowledgement roots"
+        )
+    )]
     pub(in crate::runtime) fn tracked_ack_root(
         &self,
         domain: &DomainName,
@@ -414,12 +466,23 @@ impl Runtime {
         AckSet::tracked_root(self.domain_ack_root_tracker(domain))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn domain_ack_root_tracker(&self, domain: &DomainName) -> Arc<AckRootTracker> {
-        self.inner
-            .in_flight_by_domain
-            .entry(domain.clone())
-            .or_insert_with(|| Arc::new(AckRootTracker::default()))
-            .clone()
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain acknowledgement root \
+             tracking before admitting relay work",
+            self.inner.in_flight_by_domain.entry(domain.clone())
+        )
+        .or_insert_with(|| Arc::new(AckRootTracker::default()))
+        .clone()
     }
 
     pub(in crate::runtime) fn ingestor_ack_root_trackers(
@@ -460,6 +523,14 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(in crate::runtime) fn force_flush_participant(
         &self,
         domain: &DomainName,

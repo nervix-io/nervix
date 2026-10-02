@@ -14,6 +14,15 @@
 //! them through the bulk pool in bounded chunks, so a snapshot larger than the node's
 //! transfer-memory budget moves without either side holding it whole.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "sealed snapshot transfer installs a state generation during recovery or \
+                  ownership handoff"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
@@ -40,6 +49,13 @@ use super::{
 const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "admitted materialized dependency reads fetch the selected sealed generation"
+    )
+)]
 pub(in crate::runtime) enum MaterializedSnapshotExchangeError {
     #[error("the remote dispatcher is unavailable while fetching {placement} from '{target}'")]
     DispatcherUnavailable {
@@ -202,6 +218,13 @@ impl Runtime {
     /// The bytes are staged on disk as they arrive and accepted only when their length and digest
     /// match what the owner declared, so a cancelled, truncated or corrupted transfer leaves the
     /// caller with nothing to install rather than with part of a generation.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "admitted materialized dependency reads fetch the selected sealed generation"
+        )
+    )]
     pub(in crate::runtime) async fn fetch_sealed_materialized_snapshot(
         &self,
         target_node_id: &ClusterNodeName,

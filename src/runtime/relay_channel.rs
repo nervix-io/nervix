@@ -30,6 +30,16 @@ use nervix_primitives::{
 use tracing::debug;
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "relay pause and quiescence generation",
+        bound = "one gate state per channel; finite admitted and retained counters and the \
+                 engagement deadline",
+        reason = "dispatch retains the exact channel gate and its generation"
+    )
+)]
 pub(in crate::runtime) struct RelayDispatchGate {
     closed: AtomicBool,
     in_flight_dispatches: AtomicUsize,
@@ -108,6 +118,13 @@ impl RelayDispatchGate {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     pub(super) fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
         let mut state = self.state.lock();
         loop {
@@ -336,6 +353,8 @@ impl RelayDispatchGate {
         self.in_flight_dispatches.load(Ordering::SeqCst)
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
+    #[allow(deprecated)] // until try_update is stabilized
     fn increment_in_flight_dispatches(&self) {
         self.in_flight_dispatches
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
@@ -345,6 +364,7 @@ impl RelayDispatchGate {
     }
 
     fn decrement_in_flight_dispatches(&self) {
+        #[allow(deprecated)] // until try_update is stabilized
         let previous = self
             .in_flight_dispatches
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
@@ -397,6 +417,13 @@ impl RelayDispatchGateEngagement {
 }
 
 impl RelayDispatchGateLease {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     pub(in crate::runtime) fn engage(
         gate: Arc<RelayDispatchGate>,
         deadline: Instant,
@@ -443,6 +470,13 @@ mod gate_tests {
 
     use super::{RelayDispatchGate, RelayDispatchGateLease};
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     fn engage(
         gate: &Arc<RelayDispatchGate>,
         deadline: Instant,
@@ -764,6 +798,7 @@ impl<T> RelayFanout<T> {
             registered.push(consumer.clone());
             registered
         });
+        #[allow(deprecated)] // until try_update is stabilized
         self.receiver_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_add(1)
@@ -783,6 +818,7 @@ impl<T> RelayFanout<T> {
             }
             remaining
         });
+        #[allow(deprecated)] // until try_update is stabilized
         self.receiver_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
@@ -801,7 +837,9 @@ impl<T> RelayConsumerQueue<T> {
     }
 
     /// Reserves one admission, or reports that this consumer already holds `capacity`.
+    #[allow(deprecated)] // until try_update is stabilized
     fn try_admit(&self, capacity: usize) -> bool {
+        #[allow(deprecated)] // until try_update is stabilized
         let admission =
             self.admitted
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
@@ -834,7 +872,9 @@ impl<T> RelayConsumerQueue<T> {
         Ok(batch)
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     fn release_admission(&self) {
+        #[allow(deprecated)] // until try_update is stabilized
         self.admitted
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
                 admitted.checked_sub(1)
@@ -847,6 +887,13 @@ impl<T: Clone> RelayConsumerQueue<T> {
     /// Delivers `batch` to each admitted consumer, cloning it for every consumer but the last.
     ///
     /// Returns the batch when there is no consumer to deliver it to.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
     fn deliver_each<'consumer>(
         consumers: impl IntoIterator<Item = &'consumer Arc<Self>>,
         batch: T,
@@ -868,7 +915,9 @@ impl<T: Clone> RelayConsumerQueue<T> {
 }
 
 impl<'fanout, T> RelayAdmissionWait<'fanout, T> {
+    #[allow(deprecated)] // until try_update is stabilized
     fn begin(fanout: &'fanout RelayFanout<T>) -> Self {
+        #[allow(deprecated)] // until try_update is stabilized
         fanout
             .waiting_publishers
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
@@ -880,7 +929,9 @@ impl<'fanout, T> RelayAdmissionWait<'fanout, T> {
 }
 
 impl<T> Drop for RelayAdmissionWait<'_, T> {
+    #[allow(deprecated)] // until try_update is stabilized
     fn drop(&mut self) {
+        #[allow(deprecated)] // until try_update is stabilized
         self.fanout
             .waiting_publishers
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {

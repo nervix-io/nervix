@@ -75,6 +75,13 @@ pub(super) struct FilterMapOutcomeInputs<'a> {
     pub(super) side_inputs: &'a HashMap<String, RuntimeValue>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn evaluate_filter_map_on_batch(
     executor: &Executor,
     processor_kind: &str,
@@ -336,6 +343,13 @@ pub(super) fn expression_reads_sensitive_source(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn plan_filter_map_messages(
     run: ProgramRun<'_>,
     processor_kind: &str,
@@ -625,6 +639,12 @@ pub(super) struct EmitterFilterMapPlan {
     pub(super) message_errors: Vec<PlannedMessageError>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the VM iterator maps selected output rows to the admitted input batch"
+    )
+)]
 pub(super) async fn plan_emitter_filter_map_batch(
     executor: &Executor,
     emitter: &EmitterName,
@@ -849,6 +869,13 @@ impl VmUninitializedInput {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn execute_prepared_filter_map(
     run: ProgramRun<'_>,
     processor_kind: &str,
@@ -899,6 +926,13 @@ pub(super) struct FilterMapBatchInputs<'a> {
     pub(super) ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn execute_filter_map_program_on_batch(
     run: ProgramRun<'_>,
     processor_kind: &str,
@@ -992,6 +1026,13 @@ pub(super) async fn execute_filter_map_program_on_batch(
     .await
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn evaluate_output_branch_program(
     run: ProgramRun<'_>,
     node: impl Into<ModelName>,
@@ -1369,6 +1410,13 @@ pub(super) fn append_filter_map_datetime(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) fn append_filter_map_nested_value(
     builder: &mut dyn ArrayBuilder,
     data_type: &ArrowDataType,

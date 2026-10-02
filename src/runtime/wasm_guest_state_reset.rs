@@ -240,6 +240,16 @@ impl Runtime {
     ///
     /// The branch fences itself before it asks, so the request it leaves here is the whole of what
     /// it still expects from this node.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "a guest reset request ends that branch callback lifetime before handover",
+            key = "guest branch and state generation",
+            bound = "one outstanding request per fenced guest branch; taking requests drains the \
+                     bounded handover"
+        )
+    )]
     pub(super) fn request_guest_wasm_state_reset(&self, request: GuestWasmStateResetRequest) {
         let pending = &self.inner.guest_wasm_state_resets;
         pending
@@ -256,6 +266,16 @@ impl Runtime {
     }
 
     /// Take every guest-requested state reset this node is holding.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "a guest reset request ends that branch callback lifetime before handover",
+            key = "guest branch and state generation",
+            bound = "one outstanding request per fenced guest branch; taking requests drains the \
+                     bounded handover"
+        )
+    )]
     pub(crate) fn take_guest_wasm_state_resets(&self) -> Vec<GuestWasmStateResetRequest> {
         let pending = &self.inner.guest_wasm_state_resets;
         let branches = pending

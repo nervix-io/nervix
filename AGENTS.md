@@ -334,9 +334,11 @@ choose a backend.
   and `Weak`, `Instant` and sockets, Shuttle's and Loom's primitives, and the Shuttle wrapper crates
   are rejected however they are spelled, and only `nervix-primitives` depends on the libraries whose
   families it selects. No manifest renames a governed crate, and every tracked or new manifest is
-  checked. A duration is a value: it is the standard library's `Duration`. Tokio's I/O traits,
-  filesystem, process and signal modules, and the pure polling combinators of Tokio and of the
-  `futures` crates, are real in every mode and not governed.
+  checked. The isolated analysis workspace under `tools/nervix-lint`, with its driver, fixtures
+  and fixture macros, is authored source under the same rules; what a build wrote into a Cargo
+  build directory is not. A duration is a value: it is the standard library's `Duration`. Tokio's
+  I/O traits, filesystem, process and signal modules, and the pure polling combinators of Tokio and
+  of the `futures` crates, are real in every mode and not governed.
 - The boundary supplies mechanisms, never policy. A node resolves names through its own resolver
   in `nervix-dns`; `tokio::net::lookup_host` and the `ToSocketAddrs` traits are rejected, and the
   boundary offers a lookup only in the Turmoil build, where it answers from the simulated host's
@@ -352,7 +354,11 @@ choose a backend.
   such as a UDF call or a JAQ transformation, takes the extension class, and password hashing
   takes the credentials class. A refusal from the
   executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
-  stays retryable rather than becoming a decode, encode or authentication failure.
+  stays retryable rather than becoming a decode, encode or authentication failure. A class whose
+  wait queue is full refuses work that answers a request, because its sender can present it again.
+  Work the node already accepted and keeps, which nothing can present again, such as a payload a
+  quiesce buffer retained, states `QueueAdmission::WaitForPlace` and waits for a place instead; its
+  owner lets shutdown and a new quiesce end that wait, and keeps the work where it was until then.
   `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other
   file that names it needs a permission in `crates/primitives/blocking-permissions.toml` stating
   its owner, why that owner stays outside the executor, and what bounds its work instead, such as
@@ -366,6 +372,11 @@ choose a backend.
   workflow or a build script. Turmoil is also a runner: beside `nervix-primitives`, a package whose
   harness drives a simulation may depend on it only as an optional dependency its own `turmoil`
   feature enables.
+- The analysis cfg, `nervix_lint`, is tooling only and selects nothing. Only the synchronization
+  analysis driver sets it, and the analysis reads the code a product build compiles: `--cfg
+  nervix_lint` in any recipe, Cargo configuration, workflow or build script, a `cfg` or `cfg!`
+  predicate that names it, and a `cfg_attr` under it that holds anything but `nervix::` contracts
+  and lint levels are rejected. An annotation hides nothing from the boundary's other rules.
 - A real primitive that must stay outside every model comes from `nervix_primitives::unmodeled`, and
   each use needs a permission in `crates/primitives/unmodeled-permissions.toml` naming the one Rust
   file, the items by their paths below `unmodeled`, the owner, why a real primitive is required, and
@@ -838,7 +849,8 @@ build and the existing tests, and nothing in it changes behavior.
   `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
   features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
   production path and complete assertion in ordinary randomized/corpus and coverage-guided
-  libFuzzer runs. Registration and both CI modes are mandatory even while other work is concurrent.
+  libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent;
+  CI runs the sanitizer mode only for PRs labeled `fuzz`.
   Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
   features and model-checker dependencies out of ordinary and fuzz builds.
 - For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for
@@ -849,6 +861,10 @@ build and the existing tests, and nothing in it changes behavior.
   before changing product code.
 - Parser-only work requires positive parse tests, negative parse tests, and completion-context tests
   that guard against grammar-branch leakage. Composed language phrases require completion coverage.
+- Use Rustdoc `compile_fail` doctests beside the owning API for compile-time rejection checks.
+  Do not use `trybuild` or add its dependencies, harnesses, fixtures, or diagnostic snapshots.
+  Pair rejection examples with compiling examples of the current imports and supported signatures,
+  and run the doctests in the normal test commands and CI.
 - Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
   test fixture, including to assert that loading it fails. See
   [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
@@ -975,8 +991,10 @@ build and the existing tests, and nothing in it changes behavior.
 - Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
   `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
   `just fuzz-all [duration]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
-  `just fuzz-reduce` for saved exact inputs. `just validate-bolero` enforces inventory and
-  scoped compiled discovery. A random seed identifies one generated case, not an entire
+  `just fuzz-reduce` for saved exact inputs. Bolero commands and the dedicated Bolero workflow
+  enforce inventory and scoped compiled discovery; `just validate-bolero` runs that check alone.
+  Do not add Bolero checks to `just validate`, `just validate-ci`, or the Check workflow's
+  validation job. A random seed identifies one generated case, not an entire
   entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
   before cleanup.
 - Use `just validate` for formatting and validation.
@@ -986,12 +1004,31 @@ build and the existing tests, and nothing in it changes behavior.
   API, control flow written as `Option` and `Result` combinator chains, signatures returning a
   Nervix error without `Report`, node identities carried as `String`, struct fields gated on
   `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
-  in the data plane. It also records `data_plane_lock_acquisitions` for lock and
-  `DashMap::entry` acquisitions in data-plane files, and `write_once_rwlock_fields` for names and
-  shared references held as `RwLock<Option<...>>` fields. CI fails when a count is above
-  `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run
-  `just ratchet --update` and commit the baseline in the same change; `just ratchet --show <count>`
-  lists the sites behind one count.
+  in the data plane. It records `write_once_rwlock_fields` for names and shared references held as
+  `RwLock<Option<...>>` fields. CI fails when a structural count exceeds `debt-baseline.json`.
+  A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
+  and commit the baseline; `just ratchet --show <count>` lists its sites.
+- Synchronization uses real Nervix compiler diagnostics across the complete declared configuration
+  matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
+  beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual
+  recurring, lifecycle, observer, outside or bounded execution, with reasons and bounded identities.
+  Use normal reason-bearing expectations on one operation, including `expect_lint!`; retained debt
+  names its owning repair task. Blanket allow, broad/undocumented/unfulfilled expectations and an
+  expectation widened to cover another operation fail. Generated reports are outputs under target,
+  never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
+- Supported local helper/callback edges are re-evaluated, and callee/trait contracts cross compiler
+  metadata boundaries. A hot caller of a lifecycle-only helper is diagnosed. Unknown dispatch needs
+  a callable source contract or a diagnostic, not an inherited cold module classification. Preserve
+  disjoint structural and primitive provenance checks, including inactive cfg and authored macros.
+  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#source-contracts) owns the annotation,
+  inheritance, exception and supported-effect contract; no universal ownership proof is claimed.
+- The synchronization driver and isolated artifacts use `nightly-2026-09-17`; product builds stay
+  stable. Its workspace wrapper composes beneath configured kache. Current source, annotations,
+  rule/dependency/configuration inputs and complete declared target evidence are required, including
+  zero findings. Missing evidence rebuilds only isolated authored artifacts in a supported cache
+  namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify diagnostics,
+  current paired API doctests and completion/cache behavior. Tooling Bolero targets use the shared
+  inventory and current ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
   benchmarks, cache troubleshooting, or retries.
@@ -1035,8 +1072,9 @@ build and the existing tests, and nothing in it changes behavior.
   `just cargo-clippy-loom` every Loom build, including the server and consensus libraries as they
   ship and in test mode.
 - `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
-  natively in ordinary mode, `bench-smoke`, `test-primitives` and `nspl-completion-walk`, exactly as
-  their recipes do but under LLVM source instrumentation, and CI's extra-tests job runs them only
+  natively in ordinary mode, `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
+  `nspl-completion-walk`, exactly as their recipes do but under LLVM source instrumentation, and
+  CI's extra-tests job runs them only
   that way. Each run writes `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
   fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
   beside a `complete` completion record; a failed, interrupted or incomplete collection never is

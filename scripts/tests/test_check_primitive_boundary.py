@@ -1551,6 +1551,187 @@ class ModeCfgTests(CheckTestCase):
         self.assertIn("crates/engine/build.rs: primitive boundary: `--cfg loom`", report)
 
 
+class AnalysisCfgTests(CheckTestCase):
+    """The analysis cfg gates lint annotations, never selects code, and only the driver sets it."""
+
+    def test_contracts_and_expectations_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "#![cfg_attr(\n"
+                    "    nervix_lint,\n"
+                    '    nervix::context(lifecycle, reason = "installs, once per domain")\n'
+                    ")]\n"
+                    '#[cfg_attr(nervix_lint, nervix::context(recurring, reason = "each batch"))]\n'
+                    "fn process() {}\n"
+                    "#[cfg_attr(\n"
+                    "    nervix_lint,\n"
+                    '    nervix::dispatch(reason = "the callback (bounded), called once"),\n'
+                    '    expect(nervix::sync_acquisition, reason = "retained debt"),\n'
+                    ")]\n"
+                    "fn dispatch() {}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_the_cfg_selecting_code_fails(self) -> None:
+        report = self.assert_rejected(
+            "#[cfg(nervix_lint)]\nfn analyzed_only() {}\n"
+            "#[cfg(not(nervix_lint))]\nfn shipped_only() {}\n"
+            "fn f() -> bool { cfg!(all(test, nervix_lint)) }\n",
+            "crates/engine/src/lib.rs:1: primitive boundary: `cfg(nervix_lint)` selects code for "
+            "the analysis build alone",
+            "the analysis cfg only gates `nervix::` contracts and lint expectations through "
+            "`cfg_attr`",
+        )
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+        self.assertIn("crates/engine/src/lib.rs:5", report)
+
+    def test_an_attribute_that_changes_the_compiled_code_fails(self) -> None:
+        report = self.assert_rejected(
+            '#[cfg_attr(nervix_lint, path = "analyzed.rs")]\nmod selected;\n'
+            "#[cfg_attr(not(nervix_lint), derive(Debug))]\nstruct Shipped;\n"
+            '#[cfg_attr(nervix_lint, nervix::context(recurring, reason = "x"), cfg(any()))]\n'
+            "fn hidden() {}\n",
+            "crates/engine/src/lib.rs:1: primitive boundary: `cfg_attr(nervix_lint, path)` changes "
+            "what the analysis build compiles",
+            "`cfg_attr(nervix_lint, derive)`",
+            "`cfg_attr(nervix_lint, cfg)`",
+        )
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+        self.assertIn("crates/engine/src/lib.rs:5", report)
+
+    def test_a_bypass_behind_an_annotation_is_still_rejected(self) -> None:
+        self.assert_rejected(
+            '#[cfg_attr(nervix_lint, nervix::context(lifecycle, reason = "installs"))]\n'
+            "fn install() { let _lock = std::sync::Mutex::new(0); }\n",
+            "crates/engine/src/lib.rs:2: primitive boundary: `std::sync::Mutex::new` bypasses the "
+            "boundary",
+        )
+
+    def test_a_build_that_sets_the_cfg_fails(self) -> None:
+        status, report = self.check(
+            {"crates/engine/build.rs": 'fn main() { println!("cargo::rustc-cfg=nervix_lint"); }\n'},
+            manifests={
+                "justfile": 'lint:\n    RUSTFLAGS="--cfg nervix_lint" cargo clippy\n',
+                ".cargo/config.toml": '[build]\nrustflags = ["--cfg", "nervix_lint"]\n',
+                ".github/workflows/check.yaml": (
+                    "jobs:\n  checks:\n    env:\n      RUSTFLAGS: --cfg=nervix_lint\n"
+                ),
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "justfile:2: primitive boundary: `--cfg nervix_lint` would enable the analysis "
+            "annotations in every crate of a build; only the synchronization analysis driver sets "
+            "it",
+            report,
+        )
+        self.assertIn(".cargo/config.toml:2: primitive boundary: `--cfg nervix_lint`", report)
+        self.assertIn(
+            ".github/workflows/check.yaml:4: primitive boundary: `--cfg nervix_lint`", report
+        )
+        self.assertIn("crates/engine/build.rs: primitive boundary: `--cfg nervix_lint`", report)
+
+    def test_the_driver_passing_the_cfg_to_the_compiler_it_wraps_passes(self) -> None:
+        status, report = self.check(
+            {
+                "tools/lint/driver/src/main.rs": (
+                    "fn analysis_arguments() -> [&'static str; 2] {\n"
+                    '    ["--cfg=nervix_lint", "--check-cfg=cfg(nervix_lint)"]\n'
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+
+class AuthoredSourceSurfaceTests(CheckTestCase):
+    """An isolated tooling workspace is authored source; what a build wrote is not."""
+
+    CACHE_TAG = (
+        "Signature: 8a477f597d28d172789f06886806bc55\n"
+        "# This file is a cache directory tag created by cargo.\n"
+    )
+    GENERATED = {
+        "tools/lint/fixture-macros/target/debug/build/macros-1/out/generated.rs": (
+            "use std::sync::Mutex;\n"
+        ),
+    }
+    PACKAGED = {
+        "tools/lint/fixture-macros/target/package/macros-0.1.0/Cargo.toml": (
+            '[package]\nname = "packaged-macros"\n\n[dependencies]\ntriomphe = "0.1"\n'
+        ),
+    }
+
+    def test_an_isolated_tooling_workspace_is_held_to_the_boundary(self) -> None:
+        status, report = self.check(
+            {
+                "tools/lint/driver/src/main.rs": "use triomphe::Arc;\n",
+                "tools/lint/fixture-macros/src/lib.rs": "use std::sync::atomic::AtomicBool;\n",
+                "tools/lint/fixtures/tests/semantics/case.rs": "use std::sync::Arc;\n",
+            },
+            manifests={
+                "tools/lint/Cargo.toml": '[workspace]\nmembers = ["driver"]\nresolver = "3"\n',
+                "tools/lint/driver/Cargo.toml": (
+                    '[package]\nname = "lint-driver"\n\n[dependencies]\ntriomphe = "0.1"\n'
+                ),
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "tools/lint/driver/src/main.rs:1: primitive boundary: `triomphe::Arc`", report
+        )
+        self.assertIn("tools/lint/fixture-macros/src/lib.rs:1: primitive boundary:", report)
+        self.assertIn(
+            "tools/lint/fixtures/tests/semantics/case.rs:1: primitive boundary: `std::sync::Arc`",
+            report,
+        )
+        self.assertIn(
+            "tools/lint/driver/Cargo.toml: primitive boundary: only nervix-primitives depends on "
+            "`triomphe`",
+            report,
+        )
+
+    def test_a_nested_cargo_build_directory_is_not_authored_source(self) -> None:
+        status, report = self.check(
+            {
+                "tools/lint/fixture-macros/target/CACHEDIR.TAG": self.CACHE_TAG,
+                **self.GENERATED,
+            },
+            manifests=self.PACKAGED,
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_directory_cargo_did_not_tag_is_authored_source(self) -> None:
+        status, report = self.check(
+            {
+                "tools/lint/fixture-macros/target/CACHEDIR.TAG": "an authored note\n",
+                **self.GENERATED,
+            },
+            manifests=self.PACKAGED,
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "tools/lint/fixture-macros/target/debug/build/macros-1/out/generated.rs:1: primitive "
+            "boundary: `std::sync::Mutex`",
+            report,
+        )
+        self.assertIn(
+            "tools/lint/fixture-macros/target/package/macros-0.1.0/Cargo.toml: primitive boundary: "
+            "only nervix-primitives depends on `triomphe`",
+            report,
+        )
+
+    def test_a_tag_at_the_repository_root_excludes_nothing(self) -> None:
+        status, report = self.check(
+            {"CACHEDIR.TAG": self.CACHE_TAG, "crates/engine/src/lib.rs": "use triomphe::Arc;\n"}
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("crates/engine/src/lib.rs:1: primitive boundary: `triomphe::Arc`", report)
+
+
 class PermissionScopeTests(CheckTestCase):
     """A permission covers one governed Rust file and names real items of the unmodeled path."""
 

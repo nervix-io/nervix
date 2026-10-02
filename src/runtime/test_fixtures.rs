@@ -240,6 +240,26 @@ pub(super) fn u32_branch_key(field: &str, value: u32) -> Option<BranchKey> {
     branch_key([(named(field), RuntimeValue::U32(value))])
 }
 
+/// A branch lifecycle checkpoint at `lsm` naming `branches`.
+pub(super) fn branch_lifecycle_snapshot(
+    lsm: u64,
+    branches: &[Option<BranchKey>],
+) -> PersistedRuntimeStateEntry {
+    let mut entries = Vec::new();
+    for key in branches {
+        entries.push(BranchInstanceSnapshotEntry {
+            key: key.clone(),
+            last_ingestion: Timestamp::from_unix_nanos(1),
+            incarnation: 1,
+        });
+    }
+    PersistedRuntimeStateEntry {
+        lsm,
+        payload: encode_branch_lru_snapshot(&entries)
+            .expect("a current branch lifecycle checkpoint encodes"),
+    }
+}
+
 pub(super) fn key_label(key: &Option<BranchKey>) -> &str {
     key.as_ref().expect("test branch key must exist").as_str()
 }
