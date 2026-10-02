@@ -290,14 +290,26 @@ class NativeToolchainTests(unittest.TestCase):
                 #endif
                 """))
             original_headers = {path: path.read_bytes() for path in (traits, nullability, attributes)}
+            runtime = root / "onnxruntime"
+            linear_attention = runtime / "contrib_ops/cuda/bert/linear_attention_impl.cu"
+            linear_attention.parent.mkdir(parents=True)
+            linear_attention.write_text(dedent("""\
+                using Status = int;
+                void launch() {
+                  auto launch_col = [&](auto dk_tag) -> Status { return 0; };
+                  auto launch_decode = [&](auto dk_tag) -> Status { return 0; };
+                  auto launch_fixed = [&](auto dk_tag, auto dv_tag) -> Status { return 0; };
+                }
+                """))
             (root / "empty.cc").write_text("int value = 0;\n")
             (root / "CMakeLists.txt").write_text(dedent(f"""\
                 cmake_minimum_required(VERSION 3.29)
                 project(nervix_cuda_headers LANGUAGES CXX)
+                set(ONNXRUNTIME_ROOT "{runtime}")
                 set(abseil_cpp_SOURCE_DIR "{abseil}")
                 add_library(onnxruntime STATIC empty.cc)
                 add_library(onnxruntime_providers_shared SHARED empty.cc)
-                add_library(onnxruntime_providers_cuda SHARED empty.cc)
+                add_library(onnxruntime_providers_cuda SHARED empty.cc "{linear_attention}")
                 """))
             build = root / "build"
             result = subprocess.run([
@@ -344,6 +356,191 @@ class NativeToolchainTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             for path, content in original_headers.items():
                 self.assertEqual(path.read_bytes(), content)
+
+    @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
+                         "requires CMake, Ninja, and installed Clang")
+    def test_cuda_linear_attention_launches_use_the_specialized_device_stubs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "onnxruntime"
+            source = runtime / "contrib_ops/cuda/bert/linear_attention_impl.cu"
+            source.parent.mkdir(parents=True)
+            # Reduced NVCC host output: its stub specializations follow the launcher instantiation.
+            source.write_text(dedent("""\
+                #include <type_traits>
+                struct Status { int value; };
+                namespace {
+                template<typename T, int DK> void device_stub(T*& value) {}
+                template<typename T, int DK> void kernel(T* value) { device_stub<T, DK>(value); }
+                }
+                template<typename T> Status launch(T* value) {
+                  auto launch_col = [&](auto dk_tag) -> Status {
+                    kernel<T, decltype(dk_tag)::value>(value);
+                    return Status{64};
+                  };
+                  auto launch_decode = [&](auto dk_tag) -> Status {
+                    kernel<T, decltype(dk_tag)::value>(value);
+                    return Status{128};
+                  };
+                  auto launch_fixed = [&](auto dk_tag, auto dv_tag) -> Status {
+                    kernel<T, decltype(dk_tag)::value + decltype(dv_tag)::value>(value);
+                    return Status{256};
+                  };
+                  auto col = launch_col(std::integral_constant<int, 64>{});
+                  auto decode = launch_decode(std::integral_constant<int, 128>{});
+                  auto fixed = launch_fixed(std::integral_constant<int, 128>{}, std::integral_constant<int, 128>{});
+                  return Status{col.value + decode.value + fixed.value};
+                }
+                template Status launch<float>(float*);
+                namespace {
+                template<> void device_stub<float, 64>(float*& value) { *value += 64; }
+                template<> void device_stub<float, 128>(float*& value) { *value += 128; }
+                template<> void device_stub<float, 256>(float*& value) { *value += 256; }
+                }
+                int main() {
+                  float value = 0;
+                  Status result = launch(&value);
+                  return value == 448 && result.value == 448 ? 0 : 1;
+                }
+                """))
+            original_source = source.read_bytes()
+            abseil = root / "abseil"
+            for name, guard in (
+                ("meta/type_traits.h", "#if ABSL_HAVE_BUILTIN(__builtin_is_cpp_trivially_relocatable)"),
+                ("base/nullability.h", "#if ABSL_HAVE_FEATURE(nullability_on_classes)"),
+                ("base/attributes.h", "#if ABSL_HAVE_CPP_ATTRIBUTE(clang::lifetimebound)"),
+            ):
+                header = abseil / "absl" / name
+                header.parent.mkdir(parents=True, exist_ok=True)
+                header.write_text(guard + "\n#endif\n")
+            (root / "empty.cc").write_text("int value = 0;\n")
+            (root / "CMakeLists.txt").write_text(dedent(f"""\
+                cmake_minimum_required(VERSION 3.29)
+                project(nervix_cuda_launches LANGUAGES CXX)
+                set(ONNXRUNTIME_ROOT "{runtime}")
+                set(abseil_cpp_SOURCE_DIR "{abseil}")
+                add_library(onnxruntime STATIC empty.cc)
+                add_library(onnxruntime_providers_shared SHARED empty.cc)
+                add_library(onnxruntime_providers_cuda SHARED empty.cc "{source}")
+                file(GENERATE OUTPUT "${{CMAKE_BINARY_DIR}}/cuda-sources.txt"
+                  CONTENT "$<JOIN:$<TARGET_PROPERTY:onnxruntime_providers_cuda,SOURCES>,\n>")
+                """))
+            build = root / "build"
+            result = subprocess.run([
+                "cmake", "-S", str(root), "-B", str(build), "-G", "Ninja",
+                f"-DCMAKE_CXX_COMPILER={CLANG_CXX}", "-Donnxruntime_USE_CUDA=ON",
+                f"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES={ROOT}/scripts/onnxruntime/aggregate.cmake",
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            sources = (build / "cuda-sources.txt").read_text().splitlines()
+            self.assertIn("empty.cc", sources)
+            cuda_sources = [path for path in sources if path.endswith(".cu")]
+            self.assertEqual(len(cuda_sources), 1)
+            executable = root / "probe"
+            result = subprocess.run([
+                CLANG_CXX, "-std=c++20", "-x", "c++", cuda_sources[0], "-o", str(executable),
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(source.read_bytes(), original_source)
+
+    @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
+                         "requires CMake, Ninja, and installed Clang")
+    def test_xqa_fp8_conversion_preserves_both_lanes_and_the_scalar_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "onnxruntime"
+            xqa = runtime / "contrib_ops/cuda/bert/xqa"
+            xqa.mkdir(parents=True)
+            (xqa.parent / "linear_attention_impl.cu").write_text(dedent("""\
+                using Status = int;
+                void launch() {
+                  auto launch_col = [&](auto dk_tag) -> Status { return 0; };
+                  auto launch_decode = [&](auto dk_tag) -> Status { return 0; };
+                  auto launch_fixed = [&](auto dk_tag, auto dv_tag) -> Status { return 0; };
+                }
+                """))
+            (xqa / "types.h").write_text(dedent("""\
+                #include <cstdint>
+                struct float2 { float x, y; };
+                struct __nv_fp8_e4m3 { float value; explicit operator float() const { return value; } };
+                struct __nv_fp8x2_e4m3 {
+                  __nv_fp8_e4m3 x, y;
+                  explicit operator float2() const { return {x.value, y.value}; }
+                };
+                template<class T, uint32_t size> struct Vec {
+                  T values[size];
+                  T& operator[](uint32_t i) { return values[i]; }
+                  T const& operator[](uint32_t i) const { return values[i]; }
+                };
+                """))
+            (xqa / "utils.cuh").write_text(dedent("""\
+                template<uint32_t size> Vec<float, size> convert(Vec<__nv_fp8_e4m3, size> const& src) {
+                  Vec<float, size> dst;
+                  for (uint32_t i = 0; i < size - 1; i += 2) {
+                    reinterpret_cast<float2&>(dst[i]) = float2(reinterpret_cast<__nv_fp8x2_e4m3 const&>(src[i]));
+                  }
+                  if constexpr (size % 2 != 0) { dst[size - 1] = float(src[size - 1]); }
+                  return dst;
+                }
+                """))
+            (xqa / "mhaUtils.cuh").write_text('#include "utils.cuh"\n')
+            source = xqa / "xqa_loader_bf16_128.cu"
+            source.write_text(dedent("""\
+                #include "types.h"
+                // NVCC rewrites functional aggregate casts to brace initialization in host output.
+                #define float2(...) float2{__VA_ARGS__}
+                #include "mhaUtils.cuh"
+                int main() {
+                  Vec<__nv_fp8_e4m3, 3> odd{{{1.25f}, {-2.5f}, {7.0f}}};
+                  Vec<__nv_fp8_e4m3, 2> even{odd[0], odd[1]};
+                  auto odd_result = convert(odd);
+                  auto even_result = convert(even);
+                  return odd_result[0] == 1.25f && odd_result[1] == -2.5f && odd_result[2] == 7.0f &&
+                    even_result[0] == 1.25f && even_result[1] == -2.5f ? 0 : 1;
+                }
+                """))
+            original_files = {path: path.read_bytes() for path in xqa.iterdir()}
+            abseil = root / "abseil"
+            for name, guard in (
+                ("meta/type_traits.h", "#if ABSL_HAVE_BUILTIN(__builtin_is_cpp_trivially_relocatable)"),
+                ("base/nullability.h", "#if ABSL_HAVE_FEATURE(nullability_on_classes)"),
+                ("base/attributes.h", "#if ABSL_HAVE_CPP_ATTRIBUTE(clang::lifetimebound)"),
+            ):
+                header = abseil / "absl" / name
+                header.parent.mkdir(parents=True, exist_ok=True)
+                header.write_text(guard + "\n#endif\n")
+            (root / "empty.cc").write_text("int value = 0;\n")
+            (root / "CMakeLists.txt").write_text(dedent(f"""\
+                cmake_minimum_required(VERSION 3.29)
+                project(nervix_xqa_conversion LANGUAGES CXX)
+                set(ONNXRUNTIME_ROOT "{runtime}")
+                set(abseil_cpp_SOURCE_DIR "{abseil}")
+                add_library(onnxruntime STATIC empty.cc)
+                add_library(onnxruntime_providers_shared SHARED empty.cc)
+                add_library(onnxruntime_providers_cuda SHARED empty.cc
+                  "{xqa.parent / 'linear_attention_impl.cu'}" "{source}")
+                file(GENERATE OUTPUT "${{CMAKE_BINARY_DIR}}/cuda-sources.txt"
+                  CONTENT "$<JOIN:$<TARGET_PROPERTY:onnxruntime_providers_cuda,SOURCES>,\n>")
+                """))
+            build = root / "build"
+            result = subprocess.run([
+                "cmake", "-S", str(root), "-B", str(build), "-G", "Ninja",
+                f"-DCMAKE_CXX_COMPILER={CLANG_CXX}", "-Donnxruntime_USE_CUDA=ON",
+                f"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES={ROOT}/scripts/onnxruntime/aggregate.cmake",
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            sources = (build / "cuda-sources.txt").read_text().splitlines()
+            selected = next(path for path in sources if Path(path).name == source.name)
+            executable = root / "probe"
+            result = subprocess.run([
+                CLANG_CXX, "-std=c++20", "-x", "c++", selected, "-o", str(executable),
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual({path: path.read_bytes() for path in xqa.iterdir()}, original_files)
 
     @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
                          "requires CMake, Ninja, and installed Clang")

@@ -128,6 +128,15 @@ class nullability annotations, and lifetime annotations from NVCC compilations. 
 compilation retains those features. The fetched dependencies remain unchanged, and the
 corrections are part of the build identity.
 
+The CUDA provider also compiles a generated copy of `linear_attention_impl.cu` whose three
+generic launch lambdas deduce their `Status` return types. This prevents Clang from instantiating
+NVCC's host wrappers before their generated specializations are declared. Kernel bodies and
+launch parameters are unchanged; the fetched runtime source remains unchanged.
+
+XQA sources and headers are also copied into the build tree so their packed FP8-to-`float2`
+conversion can explicitly select CUDA's conversion operator. This prevents NVCC from emitting
+invalid aggregate initialization in the host code while preserving both packed values.
+
 Every Linux package is built with CUDA 13 enabled. Linux amd64 and
 [arm64 SBSA](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-installation-guide-linux/index.html#system-requirements)
 source builds automatically prepare CUDA 13.2 and cuDNN 9.20 when suitable SDKs are unavailable.
