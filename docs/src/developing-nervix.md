@@ -369,8 +369,8 @@ authored source including the isolated analysis workspace,
 `just validate-execution-mode-dependencies` for the ordinary and portable dependency graphs of the
 workspace and of every package, and `just validate-execution-mode-conflicts` for the diagnostics of
 combined modes, of a mode or the native capability requested for the browser's target, and of a
-modeled product binary. `just lint` lints each mode in its own build, including the Shuttle checks
-in `just cargo-clippy-shuttle-checks` and the Loom builds in `just cargo-clippy-loom`.
+modeled product binary. `just lint` lints each mode in its own build, including the Shuttle builds
+and checks in `just cargo-clippy-shuttle` and the Loom builds in `just cargo-clippy-loom`.
 
 `just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
 checks: which backend each mode selects, the same contract scripts of every family against the

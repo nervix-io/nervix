@@ -911,7 +911,7 @@ native targets and none of them is compiled there.
 | `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Real: the standard library's, outside every model |
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
 | Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
-| `block_in_place` | `task` | Tokio's | Unavailable | Real: Tokio's, outside every model |
+| Blocking the runtime worker thread that calls it: the declared owners outside the executor | `task::block_in_place` | Tokio's | Unavailable | Real: Tokio's, outside every model |
 | Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Running a job on the blocking pool itself: the executor's storage jobs, and the declared owners outside the executor | `task::spawn_blocking` | Tokio's blocking pool | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | Tokio's, following the clock of the runtime that polls them: the operating system's, a test's paused clock, or the simulated host's under Turmoil | Shuttle's: a sleep or an interval's tick is one scheduling point that takes no time, and a timeout expires only when a check triggers it; `Instant::now` reads the operating system's clock | Real: Tokio's, outside every model |
@@ -967,14 +967,15 @@ keep the owners `scripts/check_clock_boundaries.py` declares, and a logical dead
 domain clock's coordinate, as [Domain Clock](./domain-clock.md) describes. `task::spawn_cpu` belongs
 to the bounded executor, which admits, charges and cancels every job; the boundary check rejects it
 in any file but the executor's worker pools, so it is no way around admission. `task::spawn_blocking`
-is the runtime's blocking pool, which the executor's storage workers run on. Work a node runs off
-its async workers goes through the executor instead, so the check rejects the pool in any other file
-unless a permission in `crates/primitives/blocking-permissions.toml` declares that file's owner, why
-the owner stays outside the executor, and what bounds its work there instead, as
-[Blocking work outside the executor](#blocking-work-outside-the-executor) lists. `pause`, `advance`
-and `resume` exist only with the `test-util` capability, which ordinary tests of elapsed-time
-behavior enable and no production graph has, because a clock that can be paused is checked on every
-read.
+is the runtime's blocking pool, which the executor's storage workers run on, and
+`task::block_in_place` blocks the runtime worker thread that calls it, which no file owns by
+default. Work a node runs off its async workers goes through the executor instead, so the check
+rejects either in any other file unless a permission in `crates/primitives/blocking-permissions.toml`
+lists it for that file, with the owner, why the owner stays outside the executor, and what bounds
+its work instead, as [Blocking work outside the executor](#blocking-work-outside-the-executor)
+lists. `pause`, `advance` and `resume` exist only with the `test-util` capability, which ordinary
+tests of elapsed-time behavior enable and no production graph has, because a clock that can be
+paused is checked on every read.
 
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
@@ -1030,14 +1031,15 @@ name the node's resolver instead. It also rejects an unmodeled use without its p
 or misplaced permission, a dependency on a library whose family the boundary selects from any
 package but the boundary, a manifest entry that renames a governed crate, `task::spawn_cpu` in
 any file but the executor's worker pools, `task::spawn_blocking` in any file but those pools and
-the owners a blocking permission declares, and a blocking permission for a file that no longer
-names the pool. The source and manifest rules read every tracked file and every new file Git does
-not ignore, whether or not the workspace lists its package: the isolated analysis workspace under
-`tools/nervix-lint`, with its driver, fixtures and fixture macros, is authored source like any crate.
-What a build wrote is not: Cargo tags each build directory it creates with a `CACHEDIR.TAG`, and the
-check reads nothing below a tagged directory, wherever it is nested. Turmoil is a runner as well as the network the boundary selects, so beside the boundary, a
-package whose harness drives a simulation may depend on it, only as an optional dependency its own
-`turmoil` feature enables.
+the owners a blocking permission declares, `task::block_in_place` in any file but the owners a
+blocking permission declares, and a blocking permission that lists an item its file no longer
+names. The source and manifest rules read every tracked file and every new file Git does not
+ignore, whether or not the workspace lists its package: the isolated analysis workspace under
+`tools/nervix-lint`, with its driver, fixtures and fixture macros, is authored source like any
+crate. What a build wrote is not: Cargo tags each build directory it creates with a `CACHEDIR.TAG`,
+and the check reads nothing below a tagged directory, wherever it is nested. Turmoil is a runner as
+well as the network the boundary selects, so beside the boundary, a package whose harness drives a
+simulation may depend on it, only as an optional dependency its own `turmoil` feature enables.
 
 An execution mode is a feature of the boundary, never a global cfg: `--cfg loom` would reach every
 crate of a build, and Tokio and other dependencies read the same names. The check rejects a bare
@@ -1078,7 +1080,7 @@ one invocation:
 | Mode | Lint | Tests | Coverage |
 | --- | --- | --- | --- |
 | Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`, `just coverage-native-extras` |
-| Shuttle | The Shuttle library targets of `just cargo-clippy`, and the Shuttle checks, built as `just test-shuttle` builds them, in `just cargo-clippy-shuttle-checks` | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
+| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
 | Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, the Loom part of `just test-primitives-modeled` | Not collected: a model is evidence of an ordering, not of product coverage |
 | Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, the Turmoil part of `just test-primitives-modeled` | `just coverage-turmoil` |
 
@@ -1107,21 +1109,25 @@ between its bounded units. Operator-supplied code the node cannot bound, a Roto 
 transformation, takes the extension class, so a program that never returns holds only that class's
 workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
 listener spends only those, and saturated data, extension or bulk work never delays a login. The
-executor's storage workers are the one built-in owner of the runtime's blocking pool.
+executor's storage workers are the one built-in owner of the runtime's blocking pool, and no file
+owns `task::block_in_place`, which blocks the runtime worker thread that calls it.
 
 Everything else that blocks a thread is a declared owner in
-`crates/primitives/blocking-permissions.toml`, which names the file, the owner, why it stays outside
-the executor, and what bounds its work instead:
+`crates/primitives/blocking-permissions.toml`, which names the file, the blocking items the owner
+names there by their paths below `nervix_primitives`, the owner, why it stays outside the executor,
+and what bounds its work instead. A permission declares its file for exactly the items it lists, so
+a file whose owners block in different ways, such as the CLI's, has a permission for each:
 
-| Owner | Why it stays outside the executor | What bounds it |
-| --- | --- | --- |
-| The resolver's configuration load in `nervix-dns` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
-| The Kafka sink's final producer-queue drain and the Kafka source's partition inspection | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, and a five-second metadata timeout per request |
-| The Rust client's backup download and restore upload, and the CLI's event printer | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
-| The benchmark driver and the scenario harness | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
+| Owner | Blocks through | Why it stays outside the executor | What bounds it |
+| --- | --- | --- | --- |
+| The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
+| The Kafka sink's final producer-queue drain and the Kafka source's partition inspection | `task::spawn_blocking` | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, and a five-second metadata timeout per request |
+| The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
+| The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
+| The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
 
-The boundary check rejects the pool in any other file, and a permission for a file that no longer
-names it.
+The boundary check rejects either item in a file no permission lists it for, and a listed item its
+file no longer names.
 
 ## Deterministic Concurrency Verification
 
@@ -1225,6 +1231,9 @@ complete. `just test-shuttle <filter>` selects the checks whose full name contai
 every package; a package with no match is fine, and a filter that selects nothing at all fails. The
 recipe uses the repository's kache-backed build and prepares the server's test dependencies; `just
 test` continues to run the ordinary suite.
+`just cargo-clippy-shuttle`, whose package checks also run in `just lint`, lints every Shuttle
+build with warnings denied, including these four packages in test mode, where their checks are
+compiled, so a check that compiles with a warning fails validation.
 
 A failed check leaves `target/shuttle-failures/<package>/<fully-qualified-test-name>/`: the schedule
 Shuttle persisted for the failing execution, the run's output, and metadata naming the check, the

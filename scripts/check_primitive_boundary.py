@@ -31,10 +31,13 @@ resolver instead. The boundary's CPU-job mechanism, `nervix_primitives::task::sp
 the bounded executor, which admits, charges and cancels every job it runs; any other file that names
 it is rejected, so the mechanism gives no caller a way around admission. The runtime's blocking
 pool, `nervix_primitives::task::spawn_blocking`, belongs to the executor too, which runs its storage
-jobs there. Work a node runs off its async workers goes through the executor instead, so any other
-file that names the pool needs a permission in `crates/primitives/blocking-permissions.toml` naming
-the file, its owner, why that owner stays outside the executor, and what bounds its work instead. A
-use without a permission and a permission nothing uses both fail.
+jobs there, and `nervix_primitives::task::block_in_place`, which blocks the runtime worker thread
+that calls it, has no built-in owner at all. Work a node runs off its async workers goes through the
+executor instead, so any other file that names either needs a permission in
+`crates/primitives/blocking-permissions.toml` naming the file, the items it names by their paths
+below `nervix_primitives`, its owner, why that owner stays outside the executor, and what bounds its
+work instead. A use no permission lists for its file and a listed item the file does not name both
+fail.
 
 An execution mode is a feature of the boundary and never a global cfg, which every crate of a build
 reads, Tokio's included. A bare `loom`, `shuttle` or `turmoil` in a `cfg` predicate is rejected, and
@@ -110,7 +113,7 @@ OWNER = "nervix-primitives"
 OWNER_SOURCES = "crates/primitives/"
 PERMISSIONS = PurePosixPath("crates/primitives/unmodeled-permissions.toml")
 BLOCKING_PERMISSIONS = PurePosixPath("crates/primitives/blocking-permissions.toml")
-BLOCKING_PERMISSION_FIELDS = ("path", "owner", "reason", "bound")
+BLOCKING_PERMISSION_FIELDS = ("path", "items", "owner", "reason", "bound")
 HARNESS = "nervix-model-harness"
 MODES = ("loom", "shuttle", "turmoil")
 SELECTED = ("nervix_primitives", "sync", "atomic")
@@ -333,6 +336,7 @@ class Confinement:
 
 EXECUTOR_WORKERS = "crates/execution/src/workers.rs"
 BLOCKING_POOL = ("nervix_primitives", "task", "spawn_blocking")
+BLOCK_IN_PLACE = ("nervix_primitives", "task", "block_in_place")
 # Items of the boundary only their owners may name.
 CONFINED = {
     ("nervix_primitives", "task", "spawn_cpu"): Confinement(
@@ -345,6 +349,18 @@ CONFINED = {
         meaning="the runtime's blocking pool, which the bounded executor runs its storage jobs on",
         declared_in=BLOCKING_PERMISSIONS,
     ),
+    BLOCK_IN_PLACE: Confinement(
+        owners=frozenset(),
+        meaning="the runtime's way to block the worker thread that calls it",
+        declared_in=BLOCKING_PERMISSIONS,
+    ),
+}
+# The confined items a blocking permission may declare, by their paths below `nervix_primitives`. A
+# permission lists items by these paths.
+BLOCKING_ITEMS = {
+    "::".join(item[1:]): item
+    for item, confinement in CONFINED.items()
+    if confinement.declared_in == BLOCKING_PERMISSIONS
 }
 # A cfg passed to every crate of a build: a `--cfg` flag, in any of the spellings a recipe, Cargo
 # configuration or workflow uses, or one a build script emits. Only Tokio's unstable runtime
@@ -1599,10 +1615,11 @@ def check_permissions(
 
 @dataclass(frozen=True)
 class BlockingPermission:
-    """A file that runs work on the runtime's blocking pool itself: who owns that work, why it stays
-    outside the bounded executor, and what bounds it there instead."""
+    """A file whose own work blocks a thread outside the bounded executor: the blocking items it
+    names, who owns that work, why it stays outside the executor, and what bounds it instead."""
 
     path: str
+    items: frozenset[tuple[str, ...]]
     owner: str
     reason: str
     bound: str
@@ -1611,21 +1628,35 @@ class BlockingPermission:
 def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
     document = tomllib.loads(text)
     permissions: list[BlockingPermission] = []
-    seen: set[str] = set()
+    # Each file declares each blocking item once, so exactly one owner answers for it.
+    seen: set[tuple[str, str]] = set()
     for index, table in enumerate(document.get("permission", [])):
         context = f"{BLOCKING_PERMISSIONS} permission #{index + 1}"
-        for key in BLOCKING_PERMISSION_FIELDS:
+        for key in ("path", "owner", "reason", "bound"):
             if not isinstance(table.get(key), str) or not table[key].strip():
                 raise ValueError(f"{context} needs a non-empty `{key}`")
         unknown = sorted(set(table) - set(BLOCKING_PERMISSION_FIELDS))
         if unknown:
             raise ValueError(f"{context} has unknown keys: {', '.join(unknown)}")
-        if table["path"] in seen:
-            raise ValueError(f"{context} repeats {table['path']}")
-        seen.add(table["path"])
+        path = table["path"]
+        names = table.get("items")
+        if not isinstance(names, list) or not names:
+            raise ValueError(f"{context} lists no items")
+        items: set[tuple[str, ...]] = set()
+        for name in names:
+            if not isinstance(name, str) or name not in BLOCKING_ITEMS:
+                known = " or ".join(f"`{item}`" for item in sorted(BLOCKING_ITEMS))
+                raise ValueError(
+                    f"{context} lists `{name}`; a blocking permission declares only {known}"
+                )
+            if (path, name) in seen:
+                raise ValueError(f"{context} repeats `{name}` for {path}")
+            seen.add((path, name))
+            items.add(BLOCKING_ITEMS[name])
         permissions.append(
             BlockingPermission(
-                path=table["path"],
+                path=path,
+                items=frozenset(items),
                 owner=table["owner"],
                 reason=table["reason"],
                 bound=table["bound"],
@@ -1640,29 +1671,31 @@ def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
 def check_blocking_permissions(
     uses: Mapping[str, FileUses], permissions: Sequence[BlockingPermission]
 ) -> list[str]:
-    """Match every file that names the blocking pool outside the executor against a permission, and
-    every permission against such a file."""
+    """Match every blocking item a file names outside its built-in owners against a permission that
+    lists it for that file, and every item a permission lists against a file that names it."""
 
     problems: list[str] = []
-    item = "::".join(BLOCKING_POOL)
-    meaning = CONFINED[BLOCKING_POOL].meaning
-    declared = {permission.path for permission in permissions}
+    declared: set[tuple[str, tuple[str, ...]]] = set()
+    for permission in permissions:
+        for item in permission.items:
+            declared.add((permission.path, item))
     for path, file_uses in sorted(uses.items()):
-        line = file_uses.declared.get(BLOCKING_POOL)
-        if line is None or path in declared:
-            continue
-        problems.append(
-            f"{path}:{line}: {RULE}: `{item}` is {meaning}; admit this work through the bounded "
-            f"executor in nervix-execution, or declare its owner, reason and bound in "
-            f"{BLOCKING_PERMISSIONS}"
-        )
+        for item, line in sorted(file_uses.declared.items()):
+            if (path, item) in declared:
+                continue
+            problems.append(
+                f"{path}:{line}: {RULE}: `{'::'.join(item)}` is {CONFINED[item].meaning}; admit "
+                f"this work through the bounded executor in nervix-execution, or declare its "
+                f"owner, reason and bound in {BLOCKING_PERMISSIONS}"
+            )
     for permission in permissions:
         used = uses.get(permission.path)
-        if used is None or BLOCKING_POOL not in used.declared:
-            problems.append(
-                f"{BLOCKING_PERMISSIONS}: stale permission: {permission.path} does not name "
-                f"`{item}`"
-            )
+        for item in sorted(permission.items):
+            if used is None or item not in used.declared:
+                problems.append(
+                    f"{BLOCKING_PERMISSIONS}: stale permission: {permission.path} does not name "
+                    f"`{'::'.join(item)}`"
+                )
     return problems
 
 
@@ -2121,8 +2154,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}, and "
             "no selected atomic lives in a static; a real primitive outside every model comes from "
             f"{'::'.join(UNMODELED_ROOT)} with a permission in {PERMISSIONS}, and work outside the "
-            f"bounded executor reaches the blocking pool only with a permission in "
-            f"{BLOCKING_PERMISSIONS}.",
+            f"bounded executor blocks a thread, on the blocking pool or in place, only with a "
+            f"permission in {BLOCKING_PERMISSIONS}.",
             file=sys.stderr,
         )
         return 1

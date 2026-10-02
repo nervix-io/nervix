@@ -102,6 +102,7 @@ fn count(executions: &AtomicUsize) {
 BLOCKING_PERMISSION = """
 [[permission]]
 path = "crates/engine/src/client.rs"
+items = ["task::spawn_blocking"]
 owner = "The engine's client tool."
 reason = "The client is not a node and has no executor."
 bound = "One read of a file the operator named."
@@ -109,6 +110,21 @@ bound = "One read of a file the operator named."
 
 CLIENT = """
 fn read(path: Path) { let _read = nervix_primitives::task::spawn_blocking(move || read(path)); }
+"""
+
+PROMPT_PERMISSION = """
+[[permission]]
+path = "crates/engine/src/prompt.rs"
+items = ["task::block_in_place"]
+owner = "The engine's completion prompt."
+reason = "The prompt is a client tool that asks for one completion at a time."
+bound = "One completion request, which ends by the client's retry deadline."
+"""
+
+PROMPT = """
+fn complete(handle: Handle) -> Vec<String> {
+    nervix_primitives::task::block_in_place(|| handle.block_on(suggest()))
+}
 """
 
 
@@ -1026,7 +1042,164 @@ class BlockingPoolTests(CheckTestCase):
             {}, blocking_permissions=BLOCKING_PERMISSION + BLOCKING_PERMISSION
         )
         self.assertEqual(status, 1)
-        self.assertIn("repeats crates/engine/src/client.rs", report)
+        self.assertIn(
+            "permission #2 repeats `task::spawn_blocking` for crates/engine/src/client.rs", report
+        )
+
+
+class BlockInPlaceTests(CheckTestCase):
+    """Blocking a runtime worker thread in place belongs to no file but the owners a permission
+    declares."""
+
+    EXECUTOR = "crates/execution/src/workers.rs"
+    PROMPT_PATH = "crates/engine/src/prompt.rs"
+    IN_PLACE = (
+        "`nervix_primitives::task::block_in_place` is the runtime's way to block the worker thread "
+        "that calls it"
+    )
+
+    def test_a_declared_owner_may_block_in_place(self) -> None:
+        status, report = self.check(
+            {self.PROMPT_PATH: PROMPT}, blocking_permissions=BLOCKING_PERMISSION + PROMPT_PERMISSION
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_an_undeclared_caller_fails_however_it_names_block_in_place(self) -> None:
+        report = self.assert_rejected(
+            PROMPT,
+            self.IN_PLACE,
+            "admit this work through the bounded executor in nervix-execution, or declare its "
+            "owner, reason and bound in crates/primitives/blocking-permissions.toml",
+        )
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+        for source in (
+            "use nervix_primitives::task::block_in_place;\n",
+            "use nervix_primitives::{runtime::Handle, task::{spawn, block_in_place}};\n",
+            "use nervix_primitives::task::block_in_place as wait_here;\n",
+            "use nervix_primitives::task;\nfn f() { task::block_in_place(suggest); }\n",
+            "use nervix_primitives::task as tasks;\nfn f() { tasks::block_in_place(suggest); }\n",
+            "use nervix_primitives::task::*;\n",
+        ):
+            with self.subTest(source=source):
+                self.assert_rejected(source, self.IN_PLACE)
+
+    def test_the_executor_is_no_owner_of_block_in_place(self) -> None:
+        status, report = self.check({self.EXECUTOR: PROMPT})
+        self.assertEqual(status, 1)
+        self.assertIn(f"{self.EXECUTOR}:3: primitive boundary: {self.IN_PLACE}", report)
+
+    def test_a_permission_for_a_file_that_no_longer_blocks_in_place_is_stale(self) -> None:
+        status, report = self.check(
+            {self.PROMPT_PATH: "fn complete() {}\n"},
+            blocking_permissions=BLOCKING_PERMISSION + PROMPT_PERMISSION,
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/primitives/blocking-permissions.toml: stale permission: "
+            "crates/engine/src/prompt.rs does not name `nervix_primitives::task::block_in_place`",
+            report,
+        )
+
+
+class BlockingItemTests(CheckTestCase):
+    """A blocking permission declares its file for exactly the blocking items it lists."""
+
+    PERMISSION_FOR_BOTH = BLOCKING_PERMISSION.replace(
+        'items = ["task::spawn_blocking"]', 'items = ["task::spawn_blocking", "task::block_in_place"]'
+    )
+    PROMPT_IN_CLIENT = PROMPT_PERMISSION.replace(
+        "crates/engine/src/prompt.rs", "crates/engine/src/client.rs"
+    )
+
+    def client_that_also_blocks_in_place(self) -> dict[str, str]:
+        return {"crates/engine/src/client.rs": CLIENT + PROMPT}
+
+    def test_a_permission_does_not_declare_an_item_it_does_not_list(self) -> None:
+        status, report = self.check(self.client_that_also_blocks_in_place())
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/engine/src/client.rs:5: primitive boundary: "
+            "`nervix_primitives::task::block_in_place` is the runtime's way to block the worker "
+            "thread that calls it",
+            report,
+        )
+        self.assertNotIn("is the runtime's blocking pool", report)
+        self.assertNotIn("stale permission", report)
+
+    def test_each_item_of_one_file_may_have_its_own_owner(self) -> None:
+        status, report = self.check(
+            self.client_that_also_blocks_in_place(),
+            blocking_permissions=BLOCKING_PERMISSION + self.PROMPT_IN_CLIENT,
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_one_permission_may_list_several_items(self) -> None:
+        status, report = self.check(
+            self.client_that_also_blocks_in_place(), blocking_permissions=self.PERMISSION_FOR_BOTH
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_listed_item_the_file_does_not_name_is_stale(self) -> None:
+        status, report = self.check({}, blocking_permissions=self.PERMISSION_FOR_BOTH)
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/primitives/blocking-permissions.toml: stale permission: "
+            "crates/engine/src/client.rs does not name `nervix_primitives::task::block_in_place`",
+            report,
+        )
+        self.assertNotIn("does not name `nervix_primitives::task::spawn_blocking`", report)
+
+    def test_an_item_one_file_declares_twice_fails(self) -> None:
+        for permissions in (
+            BLOCKING_PERMISSION
+            + self.PROMPT_IN_CLIENT.replace("task::block_in_place", "task::spawn_blocking"),
+            BLOCKING_PERMISSION.replace(
+                'items = ["task::spawn_blocking"]',
+                'items = ["task::spawn_blocking", "task::spawn_blocking"]',
+            ),
+        ):
+            with self.subTest(permissions=permissions):
+                status, report = self.check({}, blocking_permissions=permissions)
+                self.assertEqual(status, 1)
+                self.assertIn(
+                    "repeats `task::spawn_blocking` for crates/engine/src/client.rs", report
+                )
+
+    def test_a_permission_without_items_fails(self) -> None:
+        for items in ("", "items = []\n", 'items = "task::spawn_blocking"\n'):
+            with self.subTest(items=items):
+                status, report = self.check(
+                    {},
+                    blocking_permissions=BLOCKING_PERMISSION.replace(
+                        'items = ["task::spawn_blocking"]\n', items
+                    ),
+                )
+                self.assertEqual(status, 1)
+                self.assertIn(
+                    "crates/primitives/blocking-permissions.toml permission #1 lists no items",
+                    report,
+                )
+
+    def test_an_item_no_blocking_permission_declares_fails(self) -> None:
+        for item in (
+            '"task::spawn_cpu"',
+            '"task::spawn"',
+            '"nervix_primitives::task::spawn_blocking"',
+            "1",
+        ):
+            with self.subTest(item=item):
+                status, report = self.check(
+                    {},
+                    blocking_permissions=BLOCKING_PERMISSION.replace(
+                        'items = ["task::spawn_blocking"]', f"items = [{item}]"
+                    ),
+                )
+                self.assertEqual(status, 1)
+                self.assertIn(
+                    "; a blocking permission declares only `task::block_in_place` or "
+                    "`task::spawn_blocking`",
+                    report,
+                )
 
 
 class TurmoilManifestTests(CheckTestCase):

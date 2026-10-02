@@ -311,6 +311,11 @@ test-primitives-compile:
     cargo test --package nervix-primitives --features native --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
+# The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
+# and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
+# this list to the inventory.
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-server"]
+
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
 # crates/model-harness/shuttle-inventory.toml registers each check by package and test; the whole
@@ -1377,17 +1382,8 @@ clippy_shuttle_packages := [
     "nervix-wasm",
 ]
 
-# The packages whose library test targets hold the Shuttle checks: the packages of the Shuttle
-# inventory, which scripts/tests/test_shuttle_checks.py holds this list to.
-clippy_shuttle_check_packages := [
-    "nervix-client-core",
-    "nervix-execution",
-    "nervix-interconnect",
-    "nervix-server",
-]
-
 [private, parallel]
-clippy-targets: ordinary-clippy-targets shuttle-clippy-targets shuttle-check-clippy-targets turmoil-clippy-targets loom-clippy-targets
+clippy-targets: ordinary-clippy-targets shuttle-clippy-targets turmoil-clippy-targets loom-clippy-targets
 
 [private, parallel]
 ordinary-clippy-targets: \
@@ -1402,20 +1398,20 @@ ordinary-clippy-targets: \
     *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
     (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
+# Lint every Shuttle build: each library under the mode, the primitive boundary, and each
+# package `test-shuttle` explores in test mode. The full validation matrix runs the same targets.
+cargo-clippy-shuttle jobs=default_jobs: (run-with-jobs "shuttle-clippy-targets" jobs)
+
+# The `--profile test` targets lint each package `test-shuttle` explores as the runner builds it,
+# with its checks compiled. The library targets never compile them, so a warning in a check would
+# otherwise pass validation and the Shuttle job alike.
 [private, parallel]
 shuttle-clippy-targets: \
     *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
     *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
     *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"])
-
-# Lint the Shuttle checks, built exactly as `test-shuttle` builds them: the library test target of
-# every package in the Shuttle inventory, with Shuttle's primitives selected. The library-only
-# Shuttle targets compile none of them. The full validation matrix runs the same dependencies.
-cargo-clippy-shuttle-checks jobs=default_jobs: (run-with-jobs "shuttle-check-clippy-targets" jobs)
-
-[private, parallel]
-shuttle-check-clippy-targets: *(clippy-target *clippy_shuttle_check_packages ["--lib", "--profile", "test", "--features", "shuttle"])
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
+    *(clippy-target *shuttle_test_packages ["--lib", "--profile", "test", "--features", "shuttle"])
 
 [private, parallel]
 turmoil-clippy-targets: \

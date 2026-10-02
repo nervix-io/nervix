@@ -406,17 +406,15 @@ class CommandTests(unittest.TestCase):
         self.assertIn("needs --target-dir", out.getvalue())
 
 
-class LintLaneTests(unittest.TestCase):
-    """The Shuttle-checks lint lane builds the packages `test-shuttle` builds."""
+class LintTargetTests(unittest.TestCase):
+    """The Shuttle lint targets build the packages `test-shuttle` builds."""
 
-    def test_the_lint_lane_lists_exactly_the_inventory_packages(self) -> None:
+    def test_the_lint_targets_list_exactly_the_inventory_packages(self) -> None:
         root = Path(__file__).resolve().parents[2]
         inventory = parse_inventory((root / INVENTORY_PATH).read_text(encoding="utf-8"))
         justfile = (root / "justfile").read_text(encoding="utf-8")
-        declared = re.search(
-            r"^clippy_shuttle_check_packages := \[\n(?P<items>.*?)^\]$", justfile, re.M | re.S
-        )
-        self.assertIsNotNone(declared, "the justfile declares clippy_shuttle_check_packages")
+        declared = re.search(r"^shuttle_test_packages := \[(?P<items>[^\]]*)\]$", justfile, re.M)
+        self.assertIsNotNone(declared, "the justfile declares shuttle_test_packages")
         packages = re.findall(r'"([^"]+)"', declared.group("items"))
         self.assertEqual(sorted(packages), sorted(inventory.packages()))
         self.assertEqual(len(packages), len(set(packages)))
