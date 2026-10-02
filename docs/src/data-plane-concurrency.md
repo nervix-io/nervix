@@ -1157,8 +1157,9 @@ package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses th
 kache-backed build and prepares the server's test dependencies; `just test` continues to run the
 ordinary suite. CI's dedicated `shuttle` job runs `just test-shuttle` and uploads
 `target/shuttle-failures` as the `shuttle-failures` artifact when a check fails.
-`just cargo-clippy-shuttle`, which `just lint` runs, lints the same packages' Shuttle builds in
-test mode with warnings denied, so a check that compiles with a warning fails validation.
+`just cargo-clippy-shuttle`, whose package checks also run in `just lint`, lints every Shuttle
+build with warnings denied, including these four packages in test mode, where their checks are
+compiled, so a check that compiles with a warning fails validation.
 `just test-shuttle <filter>` selects checks whose full name contains the filter. The
 runner stores a failing schedule under
 `target/shuttle-failures/<package>/<fully-qualified-test-name>/`; replay uses that path and exact
