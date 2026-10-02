@@ -280,6 +280,15 @@ outside the executor, bounded by the host's flush deadline and a per-request met
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
 
+The source and sink traits carry source-local compiler execution contracts. Polling, message/header
+access, acknowledgements, publish, retry, flush and commit callbacks are recurring. Source open and
+close are explicit lifetime boundaries; Kafka domain-offset initialization is a resume installation
+boundary. Implementations inherit the trait method's frequency. External driver, conversion and
+callback dispatch is documented at its owning callable, and local callback bodies remain checked.
+These annotations describe this chapter's existing lifecycle; they supply no runtime admission or
+ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
+syntax, inheritance, diagnostics and operation-specific repair expectations.
+
 ## Source boundary
 
 Each domain revision installs its ingestor plans with its schedule. Building a domain, swapping or
@@ -336,6 +345,16 @@ The host runs three source loop families, with a listener using the broker loop:
 | Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. |
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
 | Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
+
+The broker, paced and request-scoped loops each drain what their instance's quiesce buffer
+retained once the ingestor resumes, oldest first. A retained payload stays in its buffer, counted
+with its bytes, until its messages enter their ingest group, and the buffer hands out nothing
+behind it until then. Its sender was already answered and its source has moved past it, so the
+host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
+than to be refused, ahead of work that asks afterwards; the unfolding of a live payload is refused
+when they are full, and the source's own contract handles that failure. A shutdown or a new quiesce
+ends the wait and returns the payload to the front of its buffer, so a drain delays neither. A
+payload its codec rejects leaves the buffer and is reported.
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch

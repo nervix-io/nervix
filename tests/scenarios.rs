@@ -6636,6 +6636,15 @@ async fn given_runtime_state_replica_polling_is_paused(world: &mut ScenarioWorld
     world.fault_injection.pause_state_replica_polling();
 }
 
+#[given("runtime state checkpoint announcements are lost")]
+async fn given_runtime_state_checkpoint_announcements_are_lost(world: &mut ScenarioWorld) {
+    assert!(
+        world.cluster.is_none(),
+        "checkpoint announcements must be lost from cluster startup"
+    );
+    world.fault_injection.lose_state_checkpoint_announcements();
+}
+
 #[when("WASM guest-state checkpoints fail to reach stable storage on every node")]
 async fn when_wasm_checkpoints_fail_to_reach_stable_storage(world: &mut ScenarioWorld) {
     world.fault_injection.fail_wasm_checkpoint_storage();

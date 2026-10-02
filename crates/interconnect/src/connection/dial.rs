@@ -95,14 +95,25 @@ impl TransportState {
 
     /// How the slot's endpoint is dialled now. A slot whose endpoint has been replaced or removed is
     /// being cancelled, and its attempt ends here.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn current_dial(
         &self,
         key: &ConnectionSlotKey,
     ) -> Result<OutboundDial, Report<TransportError>> {
-        let current = self
-            .targets
-            .get(&key.node_id)
-            .map(|current| Arc::clone(current.value()));
+        let current = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain published connection \
+             slots instead of recurring shared registry lookup",
+            self.targets.get(&key.node_id)
+        )
+        .map(|current| Arc::clone(current.value()));
         let Some(current) = current else {
             return Err(Report::new(TransportError::Closed(key.endpoint.clone())));
         };

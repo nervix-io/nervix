@@ -226,6 +226,12 @@ impl EvaluatedOrderingGroups {
     /// The program selects each input row it evaluated, so a row it left out, a row whose
     /// evaluation recorded an error, and a row it produced no value for are the rows without a
     /// group.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the VM iterator maps selected output rows to the admitted input batch"
+        )
+    )]
     fn from_executed(
         emitter: &EmitterName,
         batch: &RelayRecordBatch,

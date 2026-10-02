@@ -239,10 +239,17 @@ impl Runtime {
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector =
             IngestRouteCollector::new(IngestMetadataKind::Headers, 1, binding.metrics.clone());
-        match collector
-            .decode_payload(self.executor(), &binding.codec, payload.payload())
-            .await
-        {
+        // The sender is answered, so a body the extension workers have no room for is refused
+        // rather than held.
+        let decoded = collector
+            .decode_payload(
+                self.executor(),
+                QueueAdmission::RefuseWhenFull,
+                &binding.codec,
+                payload.payload(),
+            )
+            .await;
+        match decoded {
             Ok(()) => {
                 let metadata = [payload.first_metadata_row()];
                 let dispatch_result = self

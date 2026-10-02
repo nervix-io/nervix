@@ -36,20 +36,30 @@ impl PooledSinkClient {
         client: &EmitterClientSpec,
         pool: PooledClientPlan,
     ) -> Result<Self, Report<SharedClientError>> {
-        let lease = context
-            .runtime
-            .lease_shared_client(&context.domain, client, pool)
-            .await?;
+        let lease = nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "sink initialization installs and retains one shared-client lease before publishing \
+             records",
+            context
+                .runtime
+                .lease_shared_client(&context.domain, client, pool)
+        )
+        .await?;
         Ok(Self {
             lease,
             client: client.name.clone(),
-            wait: context.runtime.register_pool_wait(
-                DomainNodeRef::node_in(
-                    context.domain.clone(),
-                    ModelKind::Emitter,
-                    context.emitter.clone(),
-                ),
-                client.name.clone(),
+            wait: nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "sink initialization installs and retains its one pool-wait publication before \
+                 borrowing connections",
+                context.runtime.register_pool_wait(
+                    DomainNodeRef::node_in(
+                        context.domain.clone(),
+                        ModelKind::Emitter,
+                        context.emitter.clone(),
+                    ),
+                    client.name.clone(),
+                )
             ),
         })
     }
@@ -112,11 +122,15 @@ impl EmitterSinkContext {
         &self,
         plan: &RedisSinkPlan,
     ) -> EmitterRuntimeResult<RedisPoolHandle> {
-        let lease = self
-            .runtime
-            .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
-            .await
-            .map_err(|error| emitter_init_error(error.to_string()))?;
+        let lease = nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "sink initialization installs and retains one shared-client lease before publishing \
+             records",
+            self.runtime
+                .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
+        )
+        .await
+        .map_err(|error| emitter_init_error(error.to_string()))?;
         let pool = lease
             .client()
             .redis(&plan.client.name)
@@ -125,13 +139,18 @@ impl EmitterSinkContext {
         Ok(RedisPoolHandle::new(LeasedRedisPool {
             _lease: lease,
             pool,
-            wait: self.runtime.register_pool_wait(
-                DomainNodeRef::node_in(
-                    self.domain.clone(),
-                    ModelKind::Emitter,
-                    self.emitter.clone(),
-                ),
-                plan.client.name.clone(),
+            wait: nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "sink initialization installs and retains its one pool-wait publication before \
+                 borrowing connections",
+                self.runtime.register_pool_wait(
+                    DomainNodeRef::node_in(
+                        self.domain.clone(),
+                        ModelKind::Emitter,
+                        self.emitter.clone(),
+                    ),
+                    plan.client.name.clone(),
+                )
             ),
         }))
     }

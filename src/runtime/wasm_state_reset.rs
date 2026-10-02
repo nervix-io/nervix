@@ -9,6 +9,14 @@
 //! - **Must not know.** NSPL text, consensus mutations, administrative protocols, or scheduling
 //!   policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "coordinated guest reset establishes a new state generation"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -122,6 +130,14 @@ impl BranchInstanceTemplate {
     /// Instantiate a selected branch without a saved state and capture the state its fresh guest
     /// reports. The returned bytes stay in memory until a new generation has been published; this
     /// method never writes them under the generation it is replacing.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "state-generation replacement constructs a fresh guest before checkpoint \
+                      publication"
+        )
+    )]
     pub(super) async fn prepare_fresh_wasm_state(
         &self,
         runtime: &Runtime,
@@ -338,6 +354,13 @@ impl Runtime {
     /// Make a fresh snapshot the first committed checkpoint of the selected branch's currently
     /// published generation. This uses the same local durability and replica-confirmation boundary
     /// as an ordinary callback checkpoint.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one replacement state generation installs and commits its initial checkpoint"
+        )
+    )]
     pub(super) async fn commit_wasm_state_reset_checkpoint(
         &self,
         domain: &DomainName,

@@ -73,6 +73,10 @@ and formatter, so a selection containing CLI scenarios needs no separate binary 
 CLI process coverage recipe exercises transaction inspection and the clock-following process
 scenarios.
 
+The CI `scenarios` job uses the shared native
+[CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI and scenario harness,
+including their instrumented builds. Coverage flags do not replace Wild linker selection.
+
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
 `--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `2`, so its
@@ -96,10 +100,11 @@ The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
 | --- | --- |
-| `tests` | Instrumented workspace build and all tests except the scenario target and `runtime_state_capabilities` |
+| `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server and CLI, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After both jobs, merge their workspace reports for CRAP, merge their public-scope reports for one Codecov upload |
-| `extra-tests` | Its Miri, mutation, benchmark, Shuttle, and completion checks plus `runtime_state_capabilities`, without coverage instrumentation |
+| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
+| `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
 seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
@@ -108,6 +113,14 @@ test failure, publishes a cache report, and diagnoses its five most expensive mi
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
 an upper bound, not a disk reservation. The runner's actual disk capacity remains the practical
 limit.
+
+The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
+first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
+`artifacts-pr` prefix, configured in the daemon's TOML file. This lets successive PR runs reuse
+their builds. Protected-branch pushes use only `artifacts`; scheduled and manually dispatched
+native jobs retain kache's read-only policy. Fork PRs still need credentials to access R2.
+Kache 0.28.1's `doctor` displays the generic read-only CI policy even when the PR prefix is
+enabled; actual uploads confirm that PR publication is active.
 
 CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
 name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its

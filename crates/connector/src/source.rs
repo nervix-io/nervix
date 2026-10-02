@@ -146,6 +146,14 @@ pub enum SourceBatch<M> {
 }
 
 /// A source message whose transport values remain owned by its connector.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SourceMessage: Send {
     type Position: Clone + Debug + Send + Sync + 'static;
 
@@ -185,9 +193,24 @@ pub type SourceResult<T> = Result<T, Report<SourceError>>;
 
 /// Lifecycle operations common to every source family.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SourceConnector: Send + Sized + 'static {
     type Plan: Send + Sync;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the host installs one driver before admitting source work"
+        )
+    )]
     async fn open(plan: &Self::Plan, instance_index: u64) -> SourceResult<Self>;
 
     fn needs_resume(&mut self) -> bool {
@@ -202,6 +225,13 @@ pub trait SourceConnector: Send + Sized + 'static {
         Ok(SourceResume::Ready)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the host ends the exact source lifetime after intake has stopped"
+        )
+    )]
     async fn close(&mut self) -> SourceResult<()> {
         Ok(())
     }
@@ -209,6 +239,14 @@ pub trait SourceConnector: Send + Sized + 'static {
 
 /// Broker operations the host drives between source lifecycle transitions.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait BrokerSourceConnector: SourceConnector {
     type Message: SourceMessage<Position = Self::Position>;
     type Position: Clone + Debug + Send + Sync + 'static;
@@ -241,6 +279,14 @@ pub struct SourcePoll {
 
 /// A source whose transport operation is scheduled by a host-owned domain cadence.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait PacedSourceConnector: SourceConnector {
     async fn poll(&mut self, scheduled_at: Timestamp) -> SourceResult<SourcePoll>;
 }
@@ -289,6 +335,14 @@ pub enum SourceAcknowledgementOutcome {
 
 /// The host implementation behind an opaque source acknowledgement.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SourceAcknowledgementServices: Send + 'static {
     async fn wait(self: Box<Self>, timeout: Duration) -> SourceAcknowledgementOutcome;
 }
@@ -317,6 +371,14 @@ pub struct SourceIntakeOutcome {
 
 /// Every runtime service exposed through one source host handle.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SourceHostServices: Send + 'static {
     async fn intake(
         &mut self,

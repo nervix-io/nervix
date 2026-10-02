@@ -69,6 +69,12 @@ impl UnfoldedPayload {
     ///
     /// Reading stops at the first failure, and a program that produces more than
     /// [`PAYLOAD_UNFOLD_LIMIT`] messages is stopped as soon as it exceeds the limit.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the admitted external JAQ extension owns its transformation effects"
+        )
+    )]
     fn unfold(
         codec: &CompiledCodec,
         program: &CompiledJaqProgram,

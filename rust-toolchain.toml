@@ -1,4 +1,4 @@
 [toolchain]
-channel = "1.98"
-components = ["clippy"]
+channel = "1.99"
+components = ["clippy", "llvm-tools"]
 targets = ["wasm32-unknown-unknown"]

@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "inferencer preparation resolves the retained compiled session before branch \
+                  processing"
+    )
+)]
+
 use std::path::{Path, PathBuf};
 
 use ahash::{HashMap, HashMapExt};
@@ -193,6 +202,16 @@ impl OnnxInferencerSession {
     /// Run the model over `batch` on the node's data workers, charged the bytes the batch's
     /// columns hold, which is the usual order of the tensors they become and the model returns.
     /// The run checks between model invocations whether its caller stopped waiting.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the branch retains its ONNX session while the admitted CPU job uses it",
+            key = "one branch inference session",
+            bound = "one admitted batch kernel call at a time; its memory charge precedes \
+                     execution and the guard never crosses await"
+        )
+    )]
     pub(super) async fn execute(
         &self,
         executor: &Executor,
