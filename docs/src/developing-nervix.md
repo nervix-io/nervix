@@ -59,6 +59,11 @@ for every file. Downloads verify the archive against the checked-in pin before e
 verify its manifest, target, and complete build identity before installation. Local reuse also
 requires the pinned checksum and package verification receipt.
 
+Artifact downloads show a progress bar on stderr with bytes transferred and transfer speed.
+When the server provides the archive size, the bar also shows percentage complete and estimated
+time remaining. Downloads without a size show a running byte count. Stdout remains the prepared
+library path for commands that consume it.
+
 The recipes use the shared stage root `~/.cache/nervix-build/onnxruntime`; `NERVIX_ONNXRUNTIME_DIR`
 overrides it. Every workspace reuses the same verified package when its build identity and
 checksum pin match, without another download. Completed packages are installed atomically under

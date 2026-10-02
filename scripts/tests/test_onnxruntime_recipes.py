@@ -234,6 +234,10 @@ sys.exit(0)
                         build = RuntimeBuild(BuildSpec.create("native", repo=repo), stage)
                         build.validate_package()
                         self.assertEqual(result.stdout.strip(), str(build.package_dir / "lib"))
+                        if repo == self.repo and _ == 0:
+                            self.assertIn(f"Downloading {spec.platform}", result.stderr)
+                            self.assertIn("100%", result.stderr)
+                            self.assertRegex(result.stderr, r"B/s")
         finally:
             server.shutdown()
             worker.join(timeout=10)

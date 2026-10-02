@@ -207,10 +207,19 @@ class R2Cache:
             raise BuildError(f"R2 artifact download failed: {url}: {error}") from error
         try:
             with body, tempfile.TemporaryFile() as stream:
+                from tqdm import tqdm
+
+                length = getattr(body, "headers", {}).get("Content-Length", "").strip()
+                size = int(length) if length.isdecimal() else None
                 digest = hashlib.sha256()
-                while chunk := body.read(1024 * 1024):
-                    digest.update(chunk)
-                    stream.write(chunk)
+                with tqdm(total=size, desc=f"Downloading {spec.platform}",
+                          unit="B", unit_scale=True, unit_divisor=1024,
+                          file=sys.stderr, dynamic_ncols=True,
+                          mininterval=0.2 if sys.stderr.isatty() else 5) as progress:
+                    while chunk := body.read(1024 * 1024):
+                        digest.update(chunk)
+                        stream.write(chunk)
+                        progress.update(len(chunk))
                 if digest.hexdigest() != expected:
                     raise BuildError(f"R2 package does not match its pinned SHA-256 checksum: expected {expected}, "
                                      f"received {digest.hexdigest()}")

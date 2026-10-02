@@ -114,6 +114,38 @@ class BuildCacheTests(unittest.TestCase):
         download.assert_called_once()
         restored.validate_package()
 
+    def test_public_download_reports_streamed_bytes_on_stderr(self) -> None:
+        from tqdm import tqdm
+
+        self.build_package()
+        payload = self.build.archive().read_bytes()
+        for name, headers in (
+            ("known", {"Content-Length": str(len(payload))}),
+            ("unknown", {}),
+            ("invalid", {"Content-Length": "unavailable"}),
+        ):
+            with self.subTest(length=name):
+                body = io.BytesIO(payload)
+                body.headers = headers
+                read = body.read
+                restored = RuntimeBuild(self.spec, self.root / name)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(body, "read", side_effect=lambda size: read(min(size, 37))) as chunks:
+                    with patch("scripts.build_onnxruntime.urlopen", return_value=body):
+                        with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                            restored.prepare()
+                self.assertGreater(chunks.call_count, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("Downloading linux/amd64", stderr.getvalue())
+                self.assertRegex(stderr.getvalue(), r"B/s")
+                if name == "known":
+                    self.assertIn("100%", stderr.getvalue())
+                else:
+                    self.assertIn(tqdm.format_sizeof(len(payload), suffix="B", divisor=1024), stderr.getvalue())
+                self.assertTrue(stderr.getvalue().endswith("\n"))
+                self.assertTrue(body.closed)
+                restored.validate_package()
+
     def test_ci_cache_miss_requires_a_published_package(self) -> None:
         remote = Mock(spec=R2Cache)
         pin_checksum(self.spec, "a" * 64)
@@ -365,6 +397,20 @@ class BuildCacheTests(unittest.TestCase):
                     with self.assertRaisesRegex(BuildError, "download or extraction failed: download interrupted"):
                         self.build.prepare()
         builder.assert_not_called()
+        self.assertTrue(body.closed)
+        self.assertFalse(self.build.package_dir.exists())
+
+    def test_interrupted_public_download_closes_its_progress_bar(self) -> None:
+        body = io.BytesIO(b"partial archive")
+        body.headers = {"Content-Length": "1024"}
+        pin_checksum(self.spec, "a" * 64)
+        stderr = io.StringIO()
+        with patch.object(body, "read", side_effect=[b"partial archive", OSError("download interrupted")]):
+            with patch("scripts.build_onnxruntime.urlopen", return_value=body), patch("sys.stderr", stderr):
+                with self.assertRaisesRegex(BuildError, "download or extraction failed: download interrupted"):
+                    self.build.prepare()
+        self.assertIn("Downloading linux/amd64", stderr.getvalue())
+        self.assertTrue(stderr.getvalue().endswith("\n"))
         self.assertTrue(body.closed)
         self.assertFalse(self.build.package_dir.exists())
 
