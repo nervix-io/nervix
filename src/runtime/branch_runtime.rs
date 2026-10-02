@@ -2182,6 +2182,14 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
 
 /// Offer the branch lifecycle of `instances` to the node's replicas at once, without writing it to
 /// storage: the periodic lifecycle snapshot persists it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "a branch that appears offers the entity's lifecycle to its replicas once, as \
+                  one branch lifetime begins"
+    )
+)]
 pub(super) fn publish_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &DomainName,

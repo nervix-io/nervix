@@ -337,15 +337,52 @@ that belongs to the one placement and is never held across an await. The placeme
 its one announcer and its replicas' acknowledgements are the only participants; unrelated
 placements never share it. An acknowledgement or an announcement names its placement, and the node
 that receives it finds the placement's state in the registry that already keeps that kind of state,
-through a borrowed read that creates nothing. An announcement of a placement a node holds no state
-for wakes nothing.
+through a borrowed read that creates nothing. On a replica, an announcement of a branch lifecycle or
+of the state of one of its branches finds the entity's lifecycle, which the entity's replica task
+retains. An announcement of a placement a node holds no state for wakes nothing.
 
 A replica installs a branch checkpoint only while the branch lifecycle it holds names the branch.
 Each lifecycle checkpoint a node holds is decoded once into the set of branches it names, so
-installing a branch checkpoint looks its branch up in that set, and the replica's synchronization
-task walks the same set, instead of copying and decoding the lifecycle each time. Holding a
-replica's copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its
-payload is never copied under the registry's guard.
+installing a branch checkpoint looks its branch up in that set, through the lifecycle handle the
+replica task retains, instead of copying and decoding the lifecycle each time. Holding a replica's
+copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its payload is
+never copied under the registry's guard.
+
+### Replica catch-up
+
+A replica keeps each branch-keyed entity it replicates current through one replica task: the
+entity's branch lifecycle and, for a deduplicator, window or WASM processor, the state of every
+branch. The task retains the entity's lifecycle handle and alone owns what it learned: the owner's
+catalog as far as it read it, the revision this node holds of each branch it looked at, and the
+branches it still has to fetch or acknowledge. Nothing else reads or changes that record, so it
+takes no lock.
+
+The owner keeps, with each entity's lifecycle, a catalog of the newest replicable revision of every
+branch state it owns. A branch state registers when it is created, records every revision it offers
+its replicas, each generation a deduplicator or window branch publishes and each WASM checkpoint on
+the owner's stable storage, and leaves the catalog when it goes away. A branch state that another
+one of the same branch replaced neither changes nor removes its successor's entry. The catalog is
+one immutable value that each change replaces by a read-copy-update, so recording a revision never
+waits for a reader and a reader never waits for a branch. Every change is numbered, and a replica
+asks for the changes after the cursor its previous read returned. A cursor of another catalog, a
+cursor older than the oldest removal the catalog kept, or no cursor at all restarts the listing
+from the catalog's beginning. A listing is paged, 256 changes at a time.
+
+A round runs when the task starts, when the owner announces a checkpoint, and once every replication
+poll interval. It synchronizes the lifecycle, reads the catalog's changes, and looks only at the
+branches that changed, that the lifecycle names for the first time, that the owner announced, or
+whose earlier step failed. The task reads what this node holds of a branch once, from its own copy,
+and keeps that current itself. A round in which no branch changed therefore sends two requests to
+the owner, reaches no shared map for any branch on either node, and does no work per branch, however
+many branches the entity has. The branches that changed are fetched and installed at most 16 at a
+time.
+
+The owner's announcements of the entity's lifecycle and branch checkpoints are left with the
+entity's lifecycle handle on the replica, the newest one of each, under a short lock that belongs to
+that one entity and is never held across an await, and each wakes the task. The task takes them all
+at the start of its next round, so an announcement that lands while a round runs is taken by the
+next one, and one of a revision the replica already holds is acknowledged again. An announcement
+that is lost delays a checkpoint by at most one poll interval.
 
 ### Relay branch presence
 
@@ -653,6 +690,9 @@ it:
   [Checkpoint replication](#checkpoint-replication)
 - a replica's copy of one branch checkpoint is held under the registry's guard for one revision
   comparison and a move, never a copy of its payload
+- the owner's announcements pending for one branch-keyed entity on a replica are added to under a
+  lock scoped to that entity, one newest announcement per branch, and taken all at once by the
+  entity's one replica task, never across an await; see [Replica catch-up](#replica-catch-up)
 - an ACK root locks only its single terminal sender transition
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
@@ -758,8 +798,9 @@ second operation fails even when Rust would regard the expectation as fulfilled.
 Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness
 registry reads during polling remain operation-specific debt for Typed Ratchet 03, alongside
 relay/channel selection. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
-owns remaining remote acknowledgement/admission discovery. Typed Ratchet 14 owns recurring branch
-catch-up discovery and Typed Ratchet 15 owns state-replication frame and announcer registry reads.
+owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
+lifecycle handle and its own record of each branch, and Typed Ratchet 15 owns state-replication
+frame, synchronization, listing and announcer registry reads.
 Bounded retained placement progress remains explicitly documented. Testing fault selectors name
 their exact emitter, ingestor, domain/branch, checkpoint window or acknowledgement link and finite
 read/removal steps; they release map guards before a scenario-controlled pause. These contracts
@@ -1141,6 +1182,7 @@ A family of names means each member runs independently through the recipe.
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. |
+| Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay

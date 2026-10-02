@@ -1004,10 +1004,15 @@ impl ProcessorWasmStateResetContext<'_> {
             instances.insert_changed(key, execution_now, task);
             branch.activated = true;
         }
-        publish_branch_instance_lru_snapshot(runtime, domain, template, instances)
-            .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
-                processor: processor.clone(),
-            })?;
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "a committed guest-state reset offers the recreated branch lifecycle to the replicas \
+             once, as the new generation begins",
+            publish_branch_instance_lru_snapshot(runtime, domain, template, instances)
+        )
+        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+            processor: processor.clone(),
+        })?;
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "explicit checkpoint cadence or terminal teardown captures one branch lifecycle \
@@ -1208,8 +1213,12 @@ pub(super) async fn dispatch_processor_node_input(
         // branch to them now, rather than on the next lifecycle snapshot, keeps the branch's first
         // checkpoint from waiting on that snapshot.
         if template.source_kind == ModelKind::WasmProcessor
-            && let Err(error) =
+            && let Err(error) = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "a new WASM branch offers the entity's lifecycle to its replicas once, when the \
+                 branch is created",
                 publish_branch_instance_lru_snapshot(runtime_handle, domain, template, instances)
+            )
         {
             warn!(
                 domain = domain.as_str(),

@@ -876,11 +876,29 @@ acknowledgements a guest checkpoint covers only once every replica the committed
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
 checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
-its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
-replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
-refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
-owner has evicted. [WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint
-these acknowledgements complete.
+its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
+owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
+checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.
+[WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint these
+acknowledgements complete.
+
+A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
+entity, through two replication-class requests. A state synchronization request names one placement
+and the revision the replica holds of it. The owner answers from the registry that keeps the
+placement's kind of state: with the checkpoint when it is newer, and with nothing otherwise. Only for
+a placement it holds no state for does the owner read its storage. A branch checkpoint listing
+request names the entity's branch lifecycle placement and the cursor the replica's previous listing
+returned. The owner answers with the next changes of its catalog of the entity's branch
+checkpoints, in the order they happened and at most 256 of them: each branch whose checkpoint
+changed, with the state that checkpoint belongs to and its newest revision, and each branch whose
+state went away, followed by the cursor after them and whether more changes follow. The listing
+restarts from the catalog's beginning when the replica has no cursor, when its cursor belongs to
+another catalog, such as one a replaced or restarted owner kept, and when it is older than the
+oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
+holds none. Both requests are answered only while the answering node is assigned the placement. A
+round synchronizes the lifecycle, reads the catalog's changes, and requests only the checkpoints of
+the branches that changed or were announced, so a round in which no branch changed sends two
+requests however many branches the entity has.
 
 The owner of a placement offers its newest checkpoint to the replicas the committed schedule
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
@@ -895,6 +913,10 @@ captured from live state, and the placements it fills from its storage or with a
 reach replicas through their own synchronization. A replica acts on an announcement by waking the
 task that keeps its copy of that placement current, which keeps the announcement until it next
 waits when it is busy; an announcement of a placement the replica holds no state for wakes nothing.
+The announcements of a branch-keyed entity's lifecycle and branch checkpoints wake the entity's one
+replica task, which takes the newest announcement of each at the start of its next round and
+fetches or acknowledges each announced revision then. The task also runs a round every replication
+poll interval, so a checkpoint whose announcement was lost reaches the replica within one interval.
 
 The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
 replica that installs that revision replaces the evicted branch's rows and sketch panes with the

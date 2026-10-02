@@ -581,8 +581,10 @@ the answering node, unavailable there, temporarily not ready, or executed and fa
 can use class and subject for routing, retry, and recovery without parsing text. Only an executed
 failure carries the answering node's opaque operator description. That text is an explicit wire
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
-replication and materialized-snapshot description use this envelope, and local errors retain the
-remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
+replication, a replica's branch checkpoint listing included, and materialized-snapshot description
+use this envelope, and local errors retain the remote class alongside their target and placement. A
+listing that arrives but names a branch key that does not decode is a failure of its own, distinct
+from a failed request. [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
 forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a

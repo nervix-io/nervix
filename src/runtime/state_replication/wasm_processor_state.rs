@@ -395,15 +395,16 @@ impl Runtime {
                 .stored_runtime_state_snapshot(&placement)
                 .map_err(|error| error.current_context().clone())?,
         };
-        let state = Arc::new(ReplicatedWasmProcessorState::new(
-            placement.clone(),
-            initial,
-            self.state_assignment(&DomainNodeRef::node_in(
-                placement.domain.clone(),
-                placement.kind,
-                placement.identifier.clone(),
-            )),
+        let catalog = self.branch_checkpoint_catalog(&placement);
+        let assignment = self.state_assignment(&DomainNodeRef::node_in(
+            placement.domain.clone(),
+            placement.kind,
+            placement.identifier.clone(),
         ));
+        let state = Arc::new(
+            ReplicatedWasmProcessorState::new(placement.clone(), initial, assignment)
+                .cataloged(&catalog),
+        );
         self.inner
             .replicated_wasm_processor_states
             .insert(placement, state.clone());

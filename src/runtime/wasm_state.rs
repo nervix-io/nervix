@@ -3,10 +3,11 @@
 //! Layer: data plane.
 //! - **Owns.** The committed and published checkpoints of one branch, the revisions they are
 //!   stamped with, the typed stages a checkpoint passes through, the boundary each checkpoint has
-//!   to reach, the progress of the latest checkpoint, and the replication through which each
-//!   replica reports its durable progress.
-//! - **Depends on.** Runtime-state placements, the revision sequence, cluster node names and
-//!   checkpoint replication.
+//!   to reach, the progress of the latest checkpoint, the replication through which each replica
+//!   reports its durable progress, and the catalog entry through which the replicas learn of each
+//!   checkpoint on this node's stable storage.
+//! - **Depends on.** Runtime-state placements, the revision sequence, cluster node names,
+//!   checkpoint replication and the branch checkpoint catalog.
 //! - **Must not know.** How a checkpoint reaches stable storage or a replica, guest execution, or
 //!   which acknowledgements a completed checkpoint releases.
 
@@ -22,6 +23,7 @@ use nervix_primitives::publication::{ArcSwap, ArcSwapOption};
 
 use super::{
     PersistedRuntimeStateEntry, RuntimeStatePlacement, SharedStateAssignment,
+    branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     lsm_sequence::LsmSequence,
 };
 
@@ -53,6 +55,9 @@ pub(super) struct ReplicatedWasmProcessorState {
     /// newest checkpoint to the replicas that lack it, and the wake-up of a checkpoint waiting for
     /// its replicas when one of them reports.
     replication: CheckpointReplication,
+    /// The entry of the entity's branch checkpoint catalog that every checkpoint reaching this
+    /// node's stable storage is recorded in, absent for a state that only checks a checkpoint.
+    catalog: Option<CatalogRegistration>,
 }
 
 /// The bytes a WASM processor guest returned when its state was saved, and the revision of that
@@ -290,7 +295,20 @@ impl ReplicatedWasmProcessorState {
             committed: ArcSwap::from(committed),
             latest: ArcSwapOption::empty(),
             replication: CheckpointReplication::new(),
+            catalog: None,
         }
+    }
+
+    /// These checkpoints as those of a branch this node owns, with every checkpoint that reaches
+    /// this node's stable storage recorded in `catalog`, so the entity's replicas learn of it.
+    pub(super) fn cataloged(mut self, catalog: &BranchCheckpointCatalog) -> Self {
+        let revision = self.published.load().revision;
+        self.catalog = Some(catalog.register(
+            self.placement.branch_key.clone(),
+            self.placement.state,
+            revision,
+        ));
+        self
     }
 
     /// The committed checkpoint, which a new guest instance restores from.
@@ -437,7 +455,11 @@ impl ReplicatedWasmProcessorState {
         captured: CapturedWasmCheckpoint,
     ) -> LocallyDurableWasmCheckpoint {
         let CapturedWasmCheckpoint { saved, boundary } = captured;
+        let revision = saved.revision;
         self.published.store(saved.clone());
+        if let Some(catalog) = &self.catalog {
+            catalog.record(revision);
+        }
         self.record_progress(WasmCheckpointProgress::LocallyDurable);
         LocallyDurableWasmCheckpoint { saved, boundary }
     }
