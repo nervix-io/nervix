@@ -275,29 +275,49 @@ arguments of a call, the elements of an `IN` set, and the elements of `[...]`.
 
 ### Reserved Words
 
-These words are reserved in expressions, including after a field scope such as `input.<field>`:
-`WHERE`, `SET`, `INHERIT`, `ALL`, `EXCEPT`, `LEAK`, `SENSITIVE`, `INVOKE`, `AS`, `TRY_CAST`,
-`JSON_VALUE`, `TRY_JSON_VALUE`, `JSON_EXISTS`, `AND`, `OR`, `NOT`, `TRUE`, `FALSE`, `NULL`, `IF`,
-`CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`, `DISTINCT`, `FROM`, and `UDF`. A schema
-may declare one of these field names, but an NSPL expression cannot reference it.
+These words are reserved in expressions: `WHERE`, `SET`, `INHERIT`, `ALL`, `EXCEPT`, `LEAK`,
+`SENSITIVE`, `INVOKE`, `AS`, `TRY_CAST`, `JSON_VALUE`, `TRY_JSON_VALUE`, `JSON_EXISTS`, `AND`, `OR`,
+`NOT`, `TRUE`, `FALSE`, `NULL`, `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`,
+`DISTINCT`, `FROM`, and `UDF`. Wherever a keyword could stand, a reserved word reads as that
+keyword, so a bare field, a call, or a `SET`, `DEFAULT` or `INHERIT` field named with one is written
+between backticks: `` SET `end` = input.end ``. After a field scope such as `input.` and after
+`udf::`, no keyword can stand, so the name is written as it is: `input.end`, `left.from` and
+`udf::case(input.value)` read without backticks.
+
+Every other word, including a statement keyword such as `to`, `on`, `by`, or `max`, is an ordinary
+name wherever an expression writes one: `SET to = input.to` writes a field named `to`.
+
+Inside an expression, a name between backticks may hold any character a name may, such as `-`, `~`,
+`.`, or a leading digit, which a bare word cannot: `` input.`user-id` ``. Canonical NSPL, as
+`SHOW CREATE` and `nervix-nspl-format` write it, puts a name between backticks exactly where the
+name would not read back otherwise. It also quotes a bare field named like an `ALTER` operation
+keyword, `ADD`, `DROP`, `ALTER`, `REPLACE`, or `RENAME`, because inside an `ALTER` statement a comma
+before such a word begins the next operation.
 
 ### Expressions Inside Statements
 
-A statement reads an expression it embeds up to the keyword that begins its next clause, such as
-`TO`, `MAX TIME`, or a correlator's `RIGHT FROM`, so an expression needs no parentheses to end. A
-builtin or a field scope whose name is also such a keyword belongs to the expression wherever it is
-written: followed by `(` it is a call, and followed by `.` it is the scope of a field, never the
-start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the first `max` is a call
-and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
-before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
-expression.
+A statement reads an expression it embeds for as long as the expression can go on, and the
+statement's next clause begins where it cannot, so an expression needs no parentheses to end. After
+`WHERE input.total > 10`, a `TO`, `MAX TIME`, or correlator `RIGHT FROM` continues no expression,
+so it begins the next clause. A word written where an operand, a call, or a field belongs is part of
+the expression, whatever keyword it spells: in `DEDUPLICATE ON max(input.readings), max MAX TIME 10m`
+the first `max` is a call, the second a field, and the third begins `MAX TIME`, and a correlator's
+left input can test `right(left.name, 2) = right` before its `RIGHT FROM`.
+
+When the expression goes on with a token and then cannot finish, as an `IN (` that is never closed
+cannot, the statement is rejected where the expression fails rather than read as a shorter
+expression. Inside an `ALTER` statement, a comma followed by a bare operation keyword begins the next
+operation, while a comma inside a call's parentheses never does, so
+`SET FILTER WHERE concat(input.kind, replace)` holds one expression.
 
 A statement reads the expression it embeds from its own words, with the same lexer and grammar that
 read an expression in a web console form, in `nervix-cli subscribe --where`, and through the client
 library. Keywords, literals, comments, and spacing therefore mean the same wherever an expression is
 written: text one of them accepts reads as the same expression in all of them, and text one of them
 rejects all of them reject. A rejected expression is reported at the word of the statement where it
-went wrong, with the message a web console form shows for the same text.
+went wrong. When the expression itself cannot finish, the message is the one a web console form shows
+for the same text; when a complete expression is followed by a word no clause of the statement
+expects, the statement names the clauses it expected there.
 
 ## Logical Operators
 

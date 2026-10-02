@@ -1,6 +1,6 @@
 //! Schemas, wire schemas and user-defined functions: the typed field lists Models declare.
 
-use std::{collections::BTreeSet, fmt::Debug, str::FromStr};
+use std::collections::BTreeSet;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -8,7 +8,7 @@ use nervix_models::{
     SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField, WireSchemaStrictness,
 };
 
-use crate::Arbitrary;
+use crate::{Arbitrary, text::GeneratedName};
 
 /// The most fields a generated schema or argument list declares.
 const FIELDS: usize = 5;
@@ -53,11 +53,41 @@ const AVRO_TYPES: [AvroType; 13] = [
 
 impl Arbitrary<'_> {
     /// Between `minimum` and `maximum` names, none repeated, in the order they were drawn.
-    pub fn distinct_names<N>(&mut self, minimum: usize, maximum: usize) -> Vec<N>
-    where
-        N: FromStr,
-        N::Err: Debug,
-    {
+    pub fn distinct_names<N: GeneratedName>(&mut self, minimum: usize, maximum: usize) -> Vec<N> {
+        self.distinct_names_refusing(minimum, maximum, &[])
+    }
+
+    /// Between `minimum` and `maximum` names, none repeated, that in the NSPL domain spell none of
+    /// `refused`, for a list whose position refuses more words than its kind of name does.
+    pub fn distinct_names_refusing<N: GeneratedName>(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+        refused: &[&str],
+    ) -> Vec<N> {
+        self.distinct_drawn(minimum, maximum, |arbitrary| {
+            arbitrary.name_text_refusing::<N>(refused)
+        })
+    }
+
+    /// Between `minimum` and `maximum` names, none repeated, as an expression or a route
+    /// construction writes them.
+    pub fn distinct_expression_names<N: GeneratedName>(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+    ) -> Vec<N> {
+        self.distinct_drawn(minimum, maximum, Self::expression_name_text::<N>)
+    }
+
+    /// Between `minimum` and `maximum` names whose text `draw` builds, none repeated, in the order
+    /// they were drawn.
+    fn distinct_drawn<N: GeneratedName>(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+        mut draw: impl FnMut(&mut Self) -> String,
+    ) -> Vec<N> {
         let extra = maximum
             .checked_sub(minimum)
             .assured("a list's minimum never exceeds its maximum");
@@ -67,7 +97,7 @@ impl Arbitrary<'_> {
         let mut seen = BTreeSet::new();
         let mut names = Vec::with_capacity(wanted);
         for _ in 0..wanted {
-            let drawn = self.name_text();
+            let drawn = draw(self);
             let text = if seen.contains(&drawn) {
                 Self::unused_name(&seen)
             } else {

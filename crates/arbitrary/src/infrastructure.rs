@@ -17,6 +17,10 @@ use crate::Arbitrary;
 /// The most items a generated list of hostnames, members, steps or programs holds.
 const ITEMS: usize = 3;
 
+/// The keywords that begin an `ALTER` operation. Inside an `ALTER`, a comma before one of them
+/// written bare begins the next operation.
+const ALTER_OPERATION_WORDS: [&str; 6] = ["add", "drop", "alter", "set", "replace", "rename"];
+
 impl Arbitrary<'_> {
     /// A relay of either branching, with its capacity and optional materialized state.
     pub fn create_relay(&mut self) -> CreateRelay {
@@ -236,10 +240,13 @@ impl Arbitrary<'_> {
     }
 
     /// A placement between two non-empty groups of runtime nodes, each member named once.
+    ///
+    /// `ALTER PLACEMENT` sets the same groups, and reads a comma before a bare operation keyword as
+    /// the next operation, so in the NSPL domain no member is named like one.
     pub fn create_placement(&mut self) -> CreatePlacement {
         let name = self.name();
-        let from = self.distinct_names::<ModelName>(1, ITEMS);
-        let to = self.distinct_names::<ModelName>(1, ITEMS);
+        let from = self.distinct_names_refusing::<ModelName>(1, ITEMS, &ALTER_OPERATION_WORDS);
+        let to = self.distinct_names_refusing::<ModelName>(1, ITEMS, &ALTER_OPERATION_WORDS);
         let policy = self.entropy.pick([
             PlacementPolicy::RequireColocation,
             PlacementPolicy::PreferColocation,

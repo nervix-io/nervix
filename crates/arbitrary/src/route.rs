@@ -159,9 +159,9 @@ impl Arbitrary<'_> {
     fn inheritance(&mut self) -> Inheritance {
         match self.entropy.byte() % 3 {
             0 => Inheritance::All,
-            1 => Inheritance::AllExcept(self.distinct_names::<FieldName>(1, ITEMS)),
+            1 => Inheritance::AllExcept(self.distinct_expression_names::<FieldName>(1, ITEMS)),
             _ => {
-                let fields = self.distinct_names::<FieldName>(1, ITEMS);
+                let fields = self.distinct_expression_names::<FieldName>(1, ITEMS);
                 let mut inherited = Vec::with_capacity(fields.len());
                 for field in fields {
                     inherited.push(InheritedField {
@@ -197,7 +197,7 @@ impl Arbitrary<'_> {
             };
             let target = AssignmentTarget {
                 scope,
-                field: self.name(),
+                field: self.expression_name(),
             };
             assignments.push(Assignment {
                 target,

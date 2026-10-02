@@ -16,9 +16,9 @@ use crate::{
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, Backup, BackupResources, BackupScope, BinaryOperator, BranchEviction,
-    BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget,
+    AssignmentTargetScope, AvroType, Backup, BackupResources, BackupScope, BinaryOperator,
+    BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
     ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
     CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
@@ -32,20 +32,20 @@ use crate::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
     DomainStartPoint, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, ExistingUserPolicy, Expression, FieldName, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode,
-    KafkaOffsetMode, Literal, MaterializedStateDependency, MaterializedStatePolicy,
-    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind,
-    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-    RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName, Restore, RestoreMode,
-    RestoreScope, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
-    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    EndpointIngestMode, ExistingUserPolicy, Expression, FieldScope, Float64Literal, FlushPolicy,
+    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
+    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
+    MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
+    Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, NamePosition, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
+    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
+    RelayBranching, RelayName, Restore, RestoreMode, RestoreScope, RetryPolicy, RouteConstruction,
+    SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName,
+    TransactionInspectionTarget, UnaryOperator, WebsocketsIngestMode, WindowBound,
+    WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -262,14 +262,18 @@ pub fn expression_to_nspl(
                 FieldScope::Branch => Some("branch".to_string()),
                 FieldScope::Left => Some("left".to_string()),
                 FieldScope::Right => Some("right".to_string()),
-                FieldScope::RelayState { relay } => Some(format!("relay_state.{}", relay.as_str())),
+                FieldScope::RelayState { relay } => Some(format!(
+                    "relay_state.{}",
+                    NamePosition::Qualified.spell(relay.as_str())
+                )),
                 FieldScope::Metadata => Some("metadata".to_string()),
                 FieldScope::PartialOutput => Some("partial_output".to_string()),
                 FieldScope::Error => Some("error".to_string()),
             };
+            let field = reference.field.as_str();
             Ok(match prefix {
-                Some(prefix) => format!("{prefix}.{}", reference.field.as_str()),
-                None => reference.field.as_str().to_string(),
+                Some(prefix) => format!("{prefix}.{}", NamePosition::Qualified.spell(field)),
+                None => NamePosition::Bare.spell(field).into_owned(),
             })
         }
         Expression::Unary {
@@ -383,7 +387,7 @@ pub fn expression_to_nspl(
             arguments,
         } => Ok(format!(
             "{}({})",
-            function.as_str(),
+            NamePosition::Called.spell(function.as_str()),
             arguments
                 .iter()
                 .map(expression_to_nspl)
@@ -395,7 +399,7 @@ pub fn expression_to_nspl(
             arguments,
         } => Ok(format!(
             "udf::{}({})",
-            function.as_str(),
+            NamePosition::Qualified.spell(function.as_str()),
             arguments
                 .iter()
                 .map(expression_to_nspl)
@@ -460,6 +464,22 @@ fn route_construction_to_nspl(
         .join(" "))
 }
 
+/// The field an assignment writes, as `SET` and `DEFAULT` spell it: the bare field, or its scope
+/// and the field.
+fn assignment_target_to_nspl(target: &AssignmentTarget) -> String {
+    let field = target.field.as_str();
+    let scope = match target.scope {
+        AssignmentTargetScope::Bare => None,
+        AssignmentTargetScope::Message => Some("message"),
+        AssignmentTargetScope::Output => Some("output"),
+        AssignmentTargetScope::Branch => Some("branch"),
+    };
+    match scope {
+        Some(scope) => format!("{scope}.{}", NamePosition::Qualified.spell(field)),
+        None => NamePosition::Bare.spell(field).into_owned(),
+    }
+}
+
 /// The clauses of a route's construction, in the order they must be written.
 fn route_construction_clauses(
     construction: &RouteConstruction,
@@ -472,7 +492,7 @@ fn route_construction_clauses(
                 "INHERIT ALL EXCEPT {}",
                 fields
                     .iter()
-                    .map(FieldName::as_str)
+                    .map(|field| NamePosition::Bare.spell(field.as_str()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -482,7 +502,7 @@ fn route_construction_clauses(
                     .iter()
                     .map(|field| format!(
                         "{}{}",
-                        field.field.as_str(),
+                        NamePosition::Bare.spell(field.field.as_str()),
                         if field.leak_sensitive {
                             " LEAK SENSITIVE"
                         } else {
@@ -502,15 +522,9 @@ fn route_construction_clauses(
                 .assignments
                 .iter()
                 .map(|assignment| {
-                    let prefix = match assignment.target.scope {
-                        AssignmentTargetScope::Bare => "",
-                        AssignmentTargetScope::Message => "message.",
-                        AssignmentTargetScope::Output => "output.",
-                        AssignmentTargetScope::Branch => "branch.",
-                    };
                     Ok(format!(
-                        "{prefix}{} = {}",
-                        assignment.target.field.as_str(),
+                        "{} = {}",
+                        assignment_target_to_nspl(&assignment.target),
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
@@ -531,7 +545,7 @@ fn route_construction_clauses(
                 .iter()
                 .map(|invocation| Ok(format!(
                     "{}({})",
-                    invocation.function.as_str(),
+                    NamePosition::Called.spell(invocation.function.as_str()),
                     invocation
                         .arguments
                         .iter()
@@ -1865,7 +1879,7 @@ fn message_error_policy_to_nspl(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment.target.field.as_str(),
+                        assignment_target_to_nspl(&assignment.target),
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
@@ -1893,7 +1907,7 @@ fn materialized_state_policy_to_nspl(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment.target.field.as_str(),
+                        assignment_target_to_nspl(&assignment.target),
                         expression_to_nspl(&assignment.value)?
                     ))
                 })

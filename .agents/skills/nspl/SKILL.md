@@ -218,6 +218,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
     literal;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
+  - a field, call, or `SET`/`INHERIT` target named like a reserved word (`end`, `from`, `in`, `all`,
+    `null`, ...) is written between backticks where it stands bare (`` `end` = input.end ``), while
+    `input.end` and `udf::case(...)` need none; a statement keyword such as `to`, `on`, or `by` is an
+    ordinary name;
   - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an
     operand that can fail, such as a division by a field that can be zero;
   - an optional result (`TRY_CAST`, JSON extraction, `nullif`, `LOOKUP_HASH_MAP`, `regexp_substr`,
