@@ -134,6 +134,7 @@ domain_version = 1
 features = []
 id = "client-ffi-host-columns"
 invariant = "Every column a host builds, of every scalar, text, bytes and nested list type, nullable or not, reads back level by level unchanged from the built batch and from the batch its canonical Arrow IPC stream decodes to."
+manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-client-ffi"
 random_iterations = 256
