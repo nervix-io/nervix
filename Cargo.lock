@@ -7523,6 +7523,7 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-rest",
  "iceberg-storage-opendal",
+ "imbl",
  "indexmap 2.14.2",
  "lapin",
  "meticulous",

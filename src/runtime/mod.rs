@@ -56,7 +56,7 @@ use nervix_checkpoint_replication::{
     Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
 };
 use nervix_dns::DnsResolver;
-use nervix_execution::{ChargedBytes, Executor};
+use nervix_execution::{ChargedBytes, Executor, QueueAdmission};
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
@@ -197,6 +197,7 @@ use crate::{
 pub mod admitted_work_benchmark;
 mod branch_aggregated_state;
 mod branch_buffering;
+mod branch_checkpoint_catalog;
 mod branch_key;
 mod branch_lifecycle_state;
 mod branch_lru_state;
@@ -419,7 +420,7 @@ pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestDispatch, decode_ingested_payload,
+    PayloadDecodeFailure, RawIngestAcceptance, RawIngestDispatch, decode_ingested_payload,
     prepare_branched_entrypoint_input,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
@@ -535,7 +536,7 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateReplicaSync, PreparedForcedRuntimeStateRecovery,
+    DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
     PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
 };
 pub(in crate::runtime) use state_store::{
@@ -551,19 +552,20 @@ pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 use test_fixtures::{
     EntrypointTestDomain, OptionalTestField, TOO_LONG_DURATION_TEXT,
     TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster, batch_value,
-    bind_ingestor_route_for_test, branch_model, branched_by, concrete_branch_key, construction,
-    domain, execute_filter_map_for_test, expression, ingest_metadata_for_test,
-    install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
-    key_label, named, nonzero_capacity, paced_domain_state, planned_entrypoints_for_test,
-    processor_branched_by, publish_state_identity, quiesce_test_batch, row_value, scheduled_model,
-    string_branch_key, test_branching, test_domain_clock, test_domain_clock_authority,
-    test_execution_revision, test_ingestor_quiesce_control, test_named_branching,
-    test_optional_schema, test_relay_boundary_services, test_schema, u32_branch_key,
-    unbranched_subscription_definition, unpaced_domain_state, validate_wasm_test_output_groups,
-    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
-    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
-    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
-    window_aggregate, window_outputs, window_plan, with_inherit_all,
+    bind_ingestor_route_for_test, branch_lifecycle_snapshot, branch_model, branched_by,
+    concrete_branch_key, construction, domain, execute_filter_map_for_test, expression,
+    ingest_metadata_for_test, install_test_domain_execution, install_unpaced_test_domain,
+    junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
+    planned_entrypoints_for_test, processor_branched_by, publish_state_identity,
+    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_branching,
+    test_domain_clock, test_domain_clock_authority, test_execution_revision,
+    test_ingestor_quiesce_control, test_named_branching, test_optional_schema,
+    test_relay_boundary_services, test_schema, u32_branch_key, unbranched_subscription_definition,
+    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
+    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
+    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
+    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
+    window_outputs, window_plan, with_inherit_all,
 };
 #[cfg(test)]
 pub(crate) use test_fixtures::{FilledCpuClass, single_worker_executor};
@@ -640,7 +642,7 @@ mod wasm_checkpoint;
 pub mod wasm_checkpoint_benchmark;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
-pub use state_replication::benchmark::StateReplicationBenchmark;
+pub use state_replication::benchmark::{ReplicaCatchUpBenchmark, StateReplicationBenchmark};
 mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;

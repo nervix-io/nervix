@@ -540,14 +540,6 @@ impl RuntimeSourceHost {
         Ok(true)
     }
 
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
-            return Ok(false);
-        };
-        self.dispatch_polled_payload(&payload).await?;
-        Ok(true)
-    }
-
     async fn dispatch_polled_payload(
         &mut self,
         payload: &BufferedIngestPayload,
@@ -775,7 +767,12 @@ impl RuntimeSourceHost {
         for message in batch.messages {
             nervix_primitives::task::consume_budget().await;
             if let Err(failure) = collector
-                .decode_payload(self.runtime.executor(), &self.codec, message.payload)
+                .decode_payload(
+                    self.runtime.executor(),
+                    QueueAdmission::RefuseWhenFull,
+                    &self.codec,
+                    message.payload,
+                )
                 .await
             {
                 collector.discard_undispatched_payloads();
@@ -890,11 +887,7 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
-        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
-            return Ok(false);
-        };
-        self.dispatch_buffered_payload(&payload).await?;
-        Ok(true)
+        self.deliver_retained().await
     }
 
     fn next_flush(&self) -> Option<Instant> {
@@ -1001,6 +994,84 @@ impl RuntimeSourceHost {
         }
         Ok(())
     }
+
+    /// Delivers the oldest payload this instance's quiesce buffer retained, and answers whether it
+    /// delivered one.
+    ///
+    /// Nothing can present a retained payload again: an endpoint already answered it and a source
+    /// already moved past it. Its unfolding therefore waits for a place on the node's extension
+    /// workers rather than being refused, and the payload stays retained, counted with its bytes,
+    /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
+    /// that wait and leaves the payload at the front of the buffer, so it is delivered first when
+    /// the buffer drains again. A payload its codec rejects leaves the buffer and is reported, as
+    /// any retained payload that fails is.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host delivers one retained payload on each loop turn while its \
+                      buffer drains"
+        )
+    )]
+    async fn deliver_retained(&mut self) -> SourceIntakeResult<bool> {
+        let Some(retained) = self.quiesce.take_buffered(self.instance_index) else {
+            return Ok(false);
+        };
+        let decode = self.runtime.decode_raw_ingest_payload(
+            &mut self.collector,
+            QueueAdmission::WaitForPlace,
+            &self.codec,
+            retained.payload(),
+        );
+        let decoded = retained.run_until_interrupted(&self.shutdown, decode).await;
+        let Some(decoded) = decoded else {
+            // The group keeps none of the payload's messages, and dropping the delivery puts the
+            // payload back at the front of the buffer.
+            self.collector.discard_undispatched_payloads();
+            return Ok(false);
+        };
+        match decoded {
+            Ok(()) => {}
+            Err(PayloadDecodeFailure::NotAdmitted(refusal)) => {
+                // A job that waits for a place is refused only by an executor that no longer
+                // admits work. The refusal judged nothing, so the payload stays retained.
+                debug!(
+                    domain = self.domain.as_str(),
+                    ingestor = self.ingestor.as_str(),
+                    error = ?refusal,
+                    "the node could not take a retained payload's unfolding"
+                );
+                return Ok(false);
+            }
+            Err(failure @ PayloadDecodeFailure::Codec(_)) => {
+                // Its codec rejected it, so it leaves the buffer and its failure is reported.
+                drop(retained.finish());
+                return Err(failure
+                    .into_group_error(&self.ingestor)
+                    .change_context(SourceIntakeError::Dispatch));
+            }
+        }
+        // The payload's messages are in the group, so it leaves the buffer before the group
+        // accepts them.
+        let payload = retained.finish();
+        self.runtime
+            .accept_raw_ingest_payload(RawIngestAcceptance {
+                handles: &self.handles,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                payload: &payload,
+                collector: &mut self.collector,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)?;
+        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+            self.flush().await?;
+        }
+        Ok(true)
+    }
 }
 
 #[async_trait]
@@ -1013,7 +1084,6 @@ impl RuntimeSourceHost {
 )]
 trait PacedSourceHostServices: SourceHostServices {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool>;
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool>;
     fn should_skip_poll(&self) -> bool;
     fn record_poll_error(&self, reason: String);
 }
@@ -1022,10 +1092,6 @@ trait PacedSourceHostServices: SourceHostServices {
 impl PacedSourceHostServices for RuntimeSourceHost {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
         RuntimeSourceHost::intake_poll(self, poll).await
-    }
-
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        RuntimeSourceHost::replay_buffered_poll(self).await
     }
 
     fn should_skip_poll(&self) -> bool {
@@ -1158,7 +1224,7 @@ async fn run_paced_source<C, H, D>(
             PacedSourceAction::Stop => break,
         }
 
-        match host.replay_buffered_poll().await {
+        match host.replay_buffered().await {
             Ok(true) => {
                 flush_paced_source(&mut host).await;
                 continue;
@@ -1980,10 +2046,6 @@ mod tests {
     impl PacedSourceHostServices for FakeHost {
         async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
             Ok(!poll.messages.is_empty())
-        }
-
-        async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-            Ok(false)
         }
 
         fn should_skip_poll(&self) -> bool {

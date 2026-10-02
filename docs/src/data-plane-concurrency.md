@@ -342,15 +342,52 @@ that belongs to the one placement and is never held across an await. The placeme
 its one announcer and its replicas' acknowledgements are the only participants; unrelated
 placements never share it. An acknowledgement or an announcement names its placement, and the node
 that receives it finds the placement's state in the registry that already keeps that kind of state,
-through a borrowed read that creates nothing. An announcement of a placement a node holds no state
-for wakes nothing.
+through a borrowed read that creates nothing. On a replica, an announcement of a branch lifecycle or
+of the state of one of its branches finds the entity's lifecycle, which the entity's replica task
+retains. An announcement of a placement a node holds no state for wakes nothing.
 
 A replica installs a branch checkpoint only while the branch lifecycle it holds names the branch.
 Each lifecycle checkpoint a node holds is decoded once into the set of branches it names, so
-installing a branch checkpoint looks its branch up in that set, and the replica's synchronization
-task walks the same set, instead of copying and decoding the lifecycle each time. Holding a
-replica's copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its
-payload is never copied under the registry's guard.
+installing a branch checkpoint looks its branch up in that set, through the lifecycle handle the
+replica task retains, instead of copying and decoding the lifecycle each time. Holding a replica's
+copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its payload is
+never copied under the registry's guard.
+
+### Replica catch-up
+
+A replica keeps each branch-keyed entity it replicates current through one replica task: the
+entity's branch lifecycle and, for a deduplicator, window or WASM processor, the state of every
+branch. The task retains the entity's lifecycle handle and alone owns what it learned: the owner's
+catalog as far as it read it, the revision this node holds of each branch it looked at, and the
+branches it still has to fetch or acknowledge. Nothing else reads or changes that record, so it
+takes no lock.
+
+The owner keeps, with each entity's lifecycle, a catalog of the newest replicable revision of every
+branch state it owns. A branch state registers when it is created, records every revision it offers
+its replicas, each generation a deduplicator or window branch publishes and each WASM checkpoint on
+the owner's stable storage, and leaves the catalog when it goes away. A branch state that another
+one of the same branch replaced neither changes nor removes its successor's entry. The catalog is
+one immutable value that each change replaces by a read-copy-update, so recording a revision never
+waits for a reader and a reader never waits for a branch. Every change is numbered, and a replica
+asks for the changes after the cursor its previous read returned. A cursor of another catalog, a
+cursor older than the oldest removal the catalog kept, or no cursor at all restarts the listing
+from the catalog's beginning. A listing is paged, 256 changes at a time.
+
+A round runs when the task starts, when the owner announces a checkpoint, and once every replication
+poll interval. It synchronizes the lifecycle, reads the catalog's changes, and looks only at the
+branches that changed, that the lifecycle names for the first time, that the owner announced, or
+whose earlier step failed. The task reads what this node holds of a branch once, from its own copy,
+and keeps that current itself. A round in which no branch changed therefore sends two requests to
+the owner, reaches no shared map for any branch on either node, and does no work per branch, however
+many branches the entity has. The branches that changed are fetched and installed at most 16 at a
+time.
+
+The owner's announcements of the entity's lifecycle and branch checkpoints are left with the
+entity's lifecycle handle on the replica, the newest one of each, under a short lock that belongs to
+that one entity and is never held across an await, and each wakes the task. The task takes them all
+at the start of its next round, so an announcement that lands while a round runs is taken by the
+next one, and one of a revision the replica already holds is acknowledged again. An announcement
+that is lost delays a checkpoint by at most one poll interval.
 
 ### Relay branch presence
 
@@ -632,8 +669,13 @@ capture merely holds the barrier, and never take that barrier.
 Some synchronization remains after a hot operation has selected a state that explicitly requires
 it:
 
-- a quiesced ingestor locks only the bounded retained-payload buffer selected by its declared
-  `MAX SIZE` policy
+- a quiesced ingestor, and one draining what it retained, locks only the bounded retained-payload
+  buffer selected by its declared `MAX SIZE` policy: to retain a payload, to take the oldest out for
+  delivery, and to end that delivery. No guard crosses an await.
+- a retained payload whose unfolding finds the extension class's wait queue full waits for a place
+  in that queue. The executor's semaphore hands a freed place to waiting jobs in the order they
+  asked, ahead of any job asking afterwards. The wait is scoped to the one class, holds no lock,
+  and ends when a place frees or when the ingestor's shutdown or a new quiesce interrupts it
 - one concrete processor branch serializes its own batches, while other branches remain
   independent
 - one already-resolved histogram series serializes its bounded accumulator update, once per
@@ -653,6 +695,9 @@ it:
   [Checkpoint replication](#checkpoint-replication)
 - a replica's copy of one branch checkpoint is held under the registry's guard for one revision
   comparison and a move, never a copy of its payload
+- the owner's announcements pending for one branch-keyed entity on a replica are added to under a
+  lock scoped to that entity, one newest announcement per branch, and taken all at once by the
+  entity's one replica task, never across an await; see [Replica catch-up](#replica-catch-up)
 - an ACK root locks only its single terminal sender transition
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
@@ -758,8 +803,9 @@ second operation fails even when Rust would regard the expectation as fulfilled.
 Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness
 registry reads during polling remain operation-specific debt for Typed Ratchet 03, alongside
 relay/channel selection. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
-owns remaining remote acknowledgement/admission discovery. Typed Ratchet 14 owns recurring branch
-catch-up discovery and Typed Ratchet 15 owns state-replication frame and announcer registry reads.
+owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
+lifecycle handle and its own record of each branch, and Typed Ratchet 15 owns state-replication
+frame, synchronization, listing and announcer registry reads.
 Bounded retained placement progress remains explicitly documented. Testing fault selectors name
 their exact emitter, ingestor, domain/branch, checkpoint window or acknowledgement link and finite
 read/removal steps; they release map guards before a scenario-controlled pause. These contracts
@@ -1124,9 +1170,9 @@ A family of names means each member runs independently through the recipe.
 | Protocol | Invariant and check |
 | --- | --- |
 | Waiter registration and cancellation (`crates/primitives/src/tests/shuttle_races.rs`) | `shuttle_reaches_a_notify_waiters_published_between_a_read_and_the_registration` and `shuttle_reaches_a_send_between_a_read_and_the_subscription` require a waiter that reads before it registers to deadlock in some schedule, which shows the scheduler reaches a publication between the read and the registration; `shuttle_registering_before_reading_never_misses_a_notify_waiters` and `shuttle_subscribing_before_reading_never_misses_a_send` require the correct order never to lose one. `shuttle_a_notify_one_between_a_read_and_the_registration_is_kept_as_the_permit` shows a single notification's permit makes the other order correct for `notify_one`, and `shuttle_a_waiter_cancelled_as_it_is_notified_passes_the_notification_on` requires the surviving waiter to complete however a cancellation and a notification interleave. |
-| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
+| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
-| Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. |
+| Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. |
 | Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
 | Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing a source ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. |
 | Assignment authority and state updates (`src/runtime/state_store_shuttle_tests.rs`, `materialized_state.rs`, `kafka_offset_state.rs`) | `shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes` and `shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind` fence admitted work even when generations reuse an even or odd counter. `shuttle_snapshot_installation_never_overlaps_origination_or_a_capture` keeps exclusive installation apart from originators and captures. `shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held` and `shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held` keep ordinary admitted updates independent of a capture's barrier. |
@@ -1141,6 +1187,7 @@ A family of names means each member runs independently through the recipe.
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. |
+| Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
