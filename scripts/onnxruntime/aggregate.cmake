@@ -118,11 +118,6 @@ function(nervix_static_artifacts)
   if(onnxruntime_USE_CUDA)
     nervix_llvm_group_query_attention()
     nervix_cuda_abseil()
-    # Upstream forces warnings to errors on this vendor target even in release consumer builds.
-    # Honor our development-mode setting so newer LLVM diagnostics remain visible warnings.
-    if(NOT onnxruntime_DEV_MODE)
-      set_property(TARGET onnxruntime_providers_cuda PROPERTY COMPILE_WARNING_AS_ERROR OFF)
-    endif()
     list(APPEND archives onnxruntime_providers_shared onnxruntime_providers_cuda)
   endif()
   add_custom_target(nervix_static_artifacts DEPENDS ${archives})

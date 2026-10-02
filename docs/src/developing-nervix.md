@@ -119,9 +119,9 @@ a copy using LLVM's `_tpause` intrinsic; the downloaded source checkout remains 
 correction participates in the artifact identity.
 The CUDA group-query attention source likewise compiles from a copy with the member-template
 disambiguator required by LLVM.
-The pinned CUDA provider forces warnings to errors even outside development mode. The build
-keeps that vendor target in release mode, with compiler warnings reported as warnings. This
-setting also participates in the artifact identity.
+The pinned runtime forces warnings to errors on its core and CUDA targets. Release builds pass
+CMake's `--compile-no-warning-as-error` switch so newer LLVM diagnostics remain visible warnings.
+Actual compiler errors still fail the build. This setting participates in the artifact identity.
 CUDA compilation uses a generated Abseil header that excludes a Clang-only relocation builtin
 from NVCC's device frontend. The fetched dependencies remain unchanged, and the correction is
 part of the build identity.

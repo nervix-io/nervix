@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
+from shutil import which
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -12,6 +15,7 @@ from scripts.tests.test_build_onnxruntime import construct_cuda_runtime
 
 
 ROOT = Path(__file__).resolve().parents[2]
+CLANG_CXX = which("clang++-23") or which("clang++-22") or which("clang++-21") or which("clang++")
 
 
 def tool_output(command: list[str], **kwargs: object) -> str:
@@ -230,6 +234,40 @@ class NativeToolchainTests(unittest.TestCase):
         with patch.dict(os.environ, {"CC": "clang-23", "CXX": "clang++-23"}):
             second = BuildSpec.create("linux/amd64", repo=ROOT)
         self.assertEqual(first.object_key, second.object_key)
+
+    @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
+                         "requires CMake, Ninja, and installed Clang")
+    def test_release_build_reports_warnings_and_rejects_compiler_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = RuntimeBuild(BuildSpec.create("linux/amd64", repo=ROOT), Path(temporary))
+            tools = HostToolchain.discover("linux/amd64")
+            build.tools = replace(tools, cxx=replace(tools.cxx, executable=CLANG_CXX))
+            source = build.source_dir / "cmake"
+            source.mkdir(parents=True)
+            (source / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.29)\n"
+                "project(nervix_warning_probe LANGUAGES CXX)\n"
+                "add_library(vendor OBJECT warning.cc)\n"
+                "set_property(TARGET vendor PROPERTY COMPILE_WARNING_AS_ERROR ON)\n"
+            )
+            warning = source / "warning.cc"
+            warning.write_text('#warning "nervix_vendor_warning"\nint value = 1;\n')
+            with patch("scripts.build_onnxruntime.run", side_effect=BuildError("configuration captured")) as command:
+                with self.assertRaisesRegex(BuildError, "configuration captured"):
+                    build.compile(Path(temporary) / "package")
+            # This fixture owns its target graph; retain the producer's other configure options.
+            configure = [argument for argument in command.call_args.args[0]
+                         if not argument.startswith("-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=")]
+            result = subprocess.run(configure, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            compile = ["cmake", "--build", str(build.build_dir)]
+            result = subprocess.run(compile, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("nervix_vendor_warning", result.stdout + result.stderr)
+            warning.write_text('#error "nervix_compile_error"\n')
+            result = subprocess.run(compile, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("nervix_compile_error", result.stdout + result.stderr)
 
     def test_cuda_host_sources_are_checked_before_compiling_gpu_kernels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

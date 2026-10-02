@@ -518,7 +518,7 @@ class RuntimeBuild:
         definitions = [
             "CMAKE_BUILD_TYPE=Release", "CMAKE_POSITION_INDEPENDENT_CODE=ON",
             "onnxruntime_BUILD_SHARED_LIB=OFF", "onnxruntime_BUILD_UNIT_TESTS=OFF",
-            "onnxruntime_ENABLE_LTO=OFF", "onnxruntime_DEV_MODE=OFF",
+            "onnxruntime_ENABLE_LTO=OFF",
             f"CMAKE_C_FLAGS={os.environ.get('CPPFLAGS', '')} {os.environ.get('CFLAGS', '')}",
             f"CMAKE_CXX_FLAGS={os.environ.get('CPPFLAGS', '')} {os.environ.get('CXXFLAGS', '')}",
             f"CMAKE_PROJECT_TOP_LEVEL_INCLUDES={self.spec.repo}/scripts/onnxruntime/aggregate.cmake",
@@ -547,7 +547,8 @@ class RuntimeBuild:
                 definitions += tools.cross.definitions(tools.cuda_home, tools.cudnn_home, tools.cuda_host)
                 definitions += tools.cc.definitions("ASM")
                 definitions.append(f"CMAKE_ASM_FLAGS={os.environ.get('ASMFLAGS', '')}")
-        run(["cmake", "-S", str(self.source_dir / "cmake"), "-B", str(self.build_dir),
+        # Match upstream's release build wrapper: vendor warnings remain visible as warnings.
+        run(["cmake", "--compile-no-warning-as-error", "-S", str(self.source_dir / "cmake"), "-B", str(self.build_dir),
              "-G", "Ninja", *[f"-D{definition}" for definition in definitions]])
         if self.spec.cuda_enabled:
             self._cuda_host_sources()
