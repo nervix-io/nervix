@@ -203,6 +203,12 @@ impl BranchCheckpointCatalog {
 
     /// Change the entry `registration` holds, when it still holds one, through `change`, which
     /// returns whether it changed anything.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the synchronous change to one catalog entry"
+        )
+    )]
     fn update_entry(
         &self,
         registration: &CatalogRegistration,

@@ -24,6 +24,13 @@ use super::*;
 /// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning a complete
 /// quota bundle to one reference-count operation.
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained stream quotas are charged for each admitted request"
+    )
+)]
 pub(super) struct StreamSlotQuotas {
     inner: Arc<StreamSlotQuotasInner>,
 }
@@ -38,6 +45,14 @@ struct StreamSlotQuotasInner {
     partition: StreamSlotPartition,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a retained stream partition admits and drains stream slots for recurring \
+                  requests"
+    )
+)]
 enum StreamSlotPartition {
     Management(ManagementStreamSlotQuotas),
     Replication(ReplicationStreamSlotQuotas),

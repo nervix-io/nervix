@@ -8,6 +8,14 @@
 //! - **Must not know.** Semantic emitter or client Models, connector-specific sink construction,
 //!   or placement decisions.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "sink supervision replaces and retires concrete sink task lifetimes"
+    )
+)]
+
 use super::*;
 
 pub(super) type EmitterReconfigureResult<T> = Result<T, Report<EmitterReconfigureError>>;

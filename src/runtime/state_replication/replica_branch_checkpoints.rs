@@ -153,7 +153,7 @@ impl ReplicaBranchCheckpoints {
     /// acknowledged even when this node already holds the announced revision.
     pub(super) fn take_announced(
         &mut self,
-        announced: impl IntoIterator<Item = (Option<BranchKey>, AnnouncedCheckpoint)>,
+        announced: HashMap<Option<BranchKey>, AnnouncedCheckpoint>,
     ) {
         for (branch, checkpoint) in announced {
             let announcement = OwnerCheckpoint {

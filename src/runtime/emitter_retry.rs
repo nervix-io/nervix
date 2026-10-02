@@ -88,6 +88,11 @@ impl EmitterRetrySchedule {
         self.retry_at.is_some()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the admitted retry converts its retained acknowledgement \
+                                   obligation through the caller-supplied Into contract")
+    )]
     fn schedule(
         &mut self,
         delay: Duration,
@@ -107,6 +112,11 @@ impl EmitterRetrySchedule {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the admitted retry combines its retained acknowledgement \
+                                   obligations through their Into contract")
+    )]
     pub(super) fn include_acks(&mut self, acks: impl Into<EmitterAcknowledgements>) {
         let acks = acks.into();
         if acks.is_empty() {

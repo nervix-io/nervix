@@ -6,6 +6,15 @@
 //! Must not know: how an owner answers a request or keeps its catalog, what a checkpoint holds,
 //! NSPL parsing, or control-plane transactions.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a replica task's catch-up round runs every replication poll interval and on \
+                  every announcement that wakes the task"
+    )
+)]
+
 use nervix_interconnect::{BranchCheckpointCursor, BranchCheckpointListingRequest};
 
 use super::*;
@@ -22,6 +31,14 @@ const REPLICA_CATCH_UP_PAGES_PER_ROUND: usize = 64;
 ///
 /// A replica task asks the owner over the interconnect. A benchmark reaches an owner runtime in the
 /// same process through the same calls, so what it measures is the replica's side of the exchange.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a replica task asks its owner for the lifecycle, the catalog's pages and the \
+                  checkpoints of every round"
+    )
+)]
 pub(in crate::runtime) trait StateOwner: Send + Sync {
     /// The node that owns the state.
     fn node(&self) -> &ClusterNodeName;
@@ -324,13 +341,21 @@ impl Runtime {
         }
         let held = match step.held {
             Some(held) => held,
-            None => match self.held_branch_checkpoint(&placement) {
-                Ok(held) => held,
-                Err(error) => {
-                    warn!(error = %error, "failed to read replicated branch state progress");
-                    return StepOutcome::Failed(None);
+            None => {
+                let held = nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "a replica task reads what this node holds of a branch once, when it first \
+                     looks at the branch, and keeps that record itself from then on",
+                    self.held_branch_checkpoint(&placement)
+                );
+                match held {
+                    Ok(held) => held,
+                    Err(error) => {
+                        warn!(error = %error, "failed to read replicated branch state progress");
+                        return StepOutcome::Failed(None);
+                    }
                 }
-            },
+            }
         };
         if held.covers(step.target) {
             if step.acknowledge

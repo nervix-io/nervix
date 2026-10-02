@@ -14,17 +14,19 @@ The inventory was traced at revision `edc1c8f9`, the parent of the relay presenc
 covers the runtime, the connector contract and connector crates, the interconnect, metrics, the
 authored primitive wrappers, and the application, consensus and client maps next to them.
 
-The compiler synchronization gate consumes these owner/frequency decisions through explicit
-per-acquisition scopes in `tools/nervix-lint/scopes.json`. Its generated calibration, configuration
-inventories and validation evidence are delivered to
-[Typed Ratchet 02](https://app.clickup.com/t/86bc9eqhf) in ClickUp;
-[Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review) states the gate's
-current contract. The executor-saturation lookup is testing fault control.
-Typed Ratchet 14 owns recurring branch catch-up lookups and
-Typed Ratchet 15 owns the remaining state-replication frame and announcer reads. Their scopes
-include helpers reached by both lifecycle and recurring callers and the primary's synchronization
-request handler, whose borrowed registry reads remain recurring debt.
-No runtime map or access frequency changes in this compiler-gate delivery.
+The compiler synchronization gate derives execution contracts and operation-specific exceptions
+from current source annotations. This inventory supplies the ownership review; executable policy
+belongs at the owning function, trait, type, module or exact exceptional operation.
+[Typed Ratchet 02A](https://app.clickup.com/t/86bcau18u) delivers generated calibration and
+qualification evidence, and [Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review)
+states the current compiler contract. The executor-saturation lookup is testing fault control.
+Replica catch-up retains the entity's lifecycle handle and the replica task's own record of each
+branch (see [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes)); Typed
+Ratchet 15 owns the remaining state-replication frame, synchronization, listing and announcer
+reads, including the lifecycle lookup those requests share. The primary's synchronization request
+handler remains recurring debt. Source readiness marking
+also reaches its registry from polling and remains debt for Typed Ratchet 03. This tooling cutover
+changes no runtime map, access cadence or ownership protocol.
 
 ## How accesses are classified
 
@@ -240,7 +242,8 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | `RuntimeInner::domain_routings` | inserted at install; read at task start and by the sites above | per batch, per record | one stable publication handle per domain | cloned out | map: retain: lifecycle registry; recurring sites: Typed Ratchet 03 |
 | `RuntimeInner::domains` | committed lifecycle installation and task binding | lifecycle, observer | pause, generation and start point publish with clock installation | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
 | `RuntimeInner::message_error_routes` | `entry` per buffered failed record; removed at domain stop | per record (failure path) | plan pointer identity | write guard spans route construction | Typed Ratchet 03 |
-| `RuntimeInner::ingestors`, `ingestor_quiescence`, `ingestor_readiness`, `client_ingestors` | start, stop and swap; drain polls and `DESCRIBE` | lifecycle, observer | hosts keep their control and command handles | short | retain: lifecycle registry |
+| `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; drain polls and `DESCRIBE` | lifecycle, observer | hosts keep their control and command handles | short | retain: lifecycle registry |
+| `RuntimeInner::ingestor_readiness` | source poll success and suspension mark the current source instance ready/unready through `get_mut`; observers read status | per successful poll, source transition, observer | retain the readiness publication with the source host and its exact incarnation | one short shard write, no await | recurring marking: Typed Ratchet 03; installation/observation: lifecycle/observer |
 | `RuntimeInner::ingestor_statuses` | sources retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | one status per ingestor, shared by its instances | task preparation installs the slot; stop removes it | retain: lifecycle registry |
 | `RuntimeInner::emitter_statuses` | sinks retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | sink and event-loop readers share status; retry remains drain work even without buffered messages | task registration and teardown; no recurring map guard | retain: lifecycle registry |
 | `RuntimeInner::emitter_confirmation_waits` | resolve at emitter spawn; guards increment/decrement the retained scalar | lifecycle, observer | registration follows emitter task lifetime | removed at task end with pointer identity | retain: lifecycle registry |
@@ -417,7 +420,7 @@ as completed fuzz execution.
 ### Same-host routing measurement
 
 `just bench-endpoint-routing` ran before and after on the same Intel Core i9-14900HX host with
-Rust 1.98.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
+Rust 1.99.0, the repository's kache wrapper, and the debug test profile (`testing,benchmarks`).
 Each run used five samples of 10,000 operations against the same live endpoint ingestor, with
 per-thread jemalloc allocated-byte counters and the cooperative budget inside the loop. The request
 case measures endpoint selection and intake admission; the retained case measures intake admission

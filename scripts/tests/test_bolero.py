@@ -38,7 +38,7 @@ class InventoryTests(unittest.TestCase):
             "backup-record-manifest",
             "client-processor-choice-request",
             "branch-membership",
-            "typed-report", "typed-catalog-scope", "typed-site-union",
+            "typed-report", "typed-source-contract", "typed-site-union",
             "nspl-statement",
             "nspl-statement-text",
             "nspl-format-document",

@@ -2,7 +2,7 @@ name: Bolero
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   schedule:
     - cron: "0 3 * * 0"
   workflow_dispatch:
@@ -31,14 +31,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk
+          tool: just@latest,toml-cli,trunk,wild-linker
 
       - name: Install server build dependencies
         run: |
@@ -61,7 +61,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Configure kache remote
@@ -95,12 +95,13 @@ jobs:
 
       - name: Run runner tests and every ordinary Bolero property
         run: |
-          just build-web-console
+          just toolchains-install
           just test-bolero-runner
           just test-bolero
 
   bolero-fuzz:
     name: bolero-fuzz
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz')
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # Include cold ordinary and sanitizer builds before all bounded target campaigns.
     timeout-minutes: 120
@@ -112,7 +113,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -124,7 +125,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk
+          tool: just@latest,toml-cli,trunk,wild-linker
 
       - name: Install server build dependencies
         run: |
@@ -150,7 +151,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Configure kache remote
@@ -187,13 +188,8 @@ jobs:
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |
-          just build-web-console
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            budget=30
-          else
-            budget=300
-          fi
-          just coverage-bolero "$budget"
+          just toolchains-install
+          just coverage-bolero 30
 
       - name: Upload runner coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -218,10 +214,15 @@ jobs:
     needs: [bolero-random, bolero-fuzz]
     runs-on: ubuntu-latest
     steps:
-      - name: Require both Bolero modes
+      - name: Require ordinary properties and requested fuzzing
         env:
           RANDOM_RESULT: ${{ needs.bolero-random.result }}
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
+          FUZZ_REQUIRED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz') }}
         run: |
           test "$RANDOM_RESULT" = success
-          test "$FUZZ_RESULT" = success
+          if [[ "$FUZZ_REQUIRED" == "true" ]]; then
+            test "$FUZZ_RESULT" = success
+          else
+            test "$FUZZ_RESULT" = skipped
+          fi

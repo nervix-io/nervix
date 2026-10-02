@@ -4,7 +4,8 @@
 
 `just coverage-native-extras [producer ...]` runs `run`. A producer is an extra check whose recipe
 executes Nervix code natively in ordinary mode: `test-typed-ratchet` qualifies compiler-resolved
-reports and fixtures, `bench-smoke` exercises every Criterion body once,
+source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
+compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
 walks the NSPL completion graph. Without names every producer runs, in that order. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
@@ -168,9 +169,9 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="test-typed-ratchet",
         mode="ordinary",
-        prepare=("typed-ratchet-setup",),
+        prepare=(),
         instrumented="test-typed-ratchet-ordinary",
-        finish=("test-typed-ratchet-modeled",),
+        finish=("test-typed-ratchet-product-docs", "test-typed-ratchet-modeled"),
         toolchain="nightly-2026-09-17",
     ),
     Producer(

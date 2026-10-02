@@ -202,13 +202,13 @@ fn an_announcement_of_another_state_never_hides_the_catalogued_checkpoint() {
     read_catalog(&mut replica, &catalog);
     replica.follow_lifecycle(None, &lifecycle);
 
-    replica.take_announced([(
+    replica.take_announced(HashMap::from_iter([(
         acme.clone(),
         AnnouncedCheckpoint {
             state: replaced,
             lsm: 40,
         },
-    )]);
+    )]));
 
     assert_eq!(
         replica.plan(&lifecycle),
@@ -229,13 +229,13 @@ fn an_announced_revision_is_acknowledged_even_when_already_held() {
         StepOutcome::Settled(Held::Revision(5)),
     );
 
-    replica.take_announced([(
+    replica.take_announced(HashMap::from_iter([(
         acme.clone(),
         AnnouncedCheckpoint {
             state: state(),
             lsm: 5,
         },
-    )]);
+    )]));
 
     assert_eq!(
         replica.plan(&lifecycle),
@@ -515,15 +515,15 @@ impl CatchUpProperty {
             }
         }
         let inbox = std::mem::take(&mut self.inbox);
-        let mut announcements = Vec::new();
+        let mut announcements = HashMap::default();
         for (branch, lsm) in inbox {
-            announcements.push((
+            announcements.insert(
                 self.branches[branch].clone(),
                 AnnouncedCheckpoint {
                     state: state(),
                     lsm,
                 },
-            ));
+            );
         }
         self.replica.take_announced(announcements);
         let lifecycle = self.named(&self.replica_lifecycle);

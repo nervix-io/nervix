@@ -3,6 +3,15 @@
 //! May depend on: runtime state carriers, the state store, interconnect, and vocabulary models.
 //! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "replica task and placement installation establish ownership-bound execution \
+                  lifetimes"
+    )
+)]
+
 use super::*;
 
 impl Runtime {
@@ -772,6 +781,18 @@ impl Runtime {
     /// Every other kind is placed under the schema fingerprint the schedule publishes for the node,
     /// and WASM guest state also in the generation it names for the branch, so neither can be
     /// placed for a node that no schedule has published them for.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed model-name conversion")
+    )]
     pub(in crate::runtime) fn state_placement(
         &self,
         domain: &DomainName,
@@ -791,11 +812,13 @@ impl Runtime {
             | RuntimeStateKind::WindowProcessor
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
-                let assignment = self
-                    .inner
-                    .state_identities
-                    .get(&node)
-                    .and_then(|slot| slot.load_full());
+                let assignment = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the published \
+                     state placement before recurring branch work",
+                    self.inner.state_identities.get(&node)
+                )
+                .and_then(|slot| slot.load_full());
                 let Some(assignment) = assignment else {
                     return Err(Report::new(
                         StateIdentityError::SchemaFingerprintUnpublished {
@@ -826,6 +849,14 @@ impl Runtime {
     }
 
     /// Whether `placement` still names the state the committed schedule keys this node's state by.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(in crate::runtime) fn runtime_state_placement_is_current(
         &self,
         placement: &RuntimeStatePlacement,
@@ -836,7 +867,12 @@ impl Runtime {
             placement.identifier.clone(),
         );
         let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-        let Some(identity) = self.inner.state_identities.get(&node) else {
+        let Some(identity) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current assignment \
+             generation for frame admission",
+            self.inner.state_identities.get(&node)
+        ) else {
             return false;
         };
         let Some(assignment) = identity.load_full() else {

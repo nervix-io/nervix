@@ -8,6 +8,15 @@
 //!   the authenticated interconnect.
 //! - **Must not know.** NSPL text, transactions, scheduling policy, or connector internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "remote relay delivery, admission and acknowledgements run per payload attempt \
+                  or frame"
+    )
+)]
+
 use super::*;
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
@@ -178,10 +187,12 @@ impl PendingRemoteAck {
 
     /// Counts one sweep that found no report, and answers whether the receiver has now been silent
     /// past the bound. An acknowledgement whose delivery was not admitted is never counted.
+    #[allow(deprecated)] // until try_update is stabilized
     fn swept(&self) -> bool {
         if !self.admitted.load(Ordering::Relaxed) {
             return false;
         }
+        #[allow(deprecated)] // until try_update is stabilized
         let previous = self
             .silent_sweeps
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {
@@ -218,14 +229,24 @@ impl RemoteDispatchRegistry {
 
     /// Holds `acks`, forwarded to `receiver` under `ack_id`, until the receiver resolves them.
     pub(super) fn register_ack(&self, ack_id: u64, receiver: ClusterNodeName, acks: AckSet) {
-        self.pending_acks
-            .insert(ack_id, PendingRemoteAck::new(receiver, acks));
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.pending_acks
+                .insert(ack_id, PendingRemoteAck::new(receiver, acks))
+        );
     }
 
     /// Starts waiting on the receiver's reports about the acknowledgement registered under
     /// `ack_id`, now that the receiver admitted the delivery that carried it.
     pub(super) fn admit_ack(&self, ack_id: u64) {
-        if let Some(pending) = self.pending_acks.get(&ack_id) {
+        if let Some(pending) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.pending_acks.get(&ack_id)
+        ) {
             pending.admit();
         }
     }
@@ -241,7 +262,12 @@ impl RemoteDispatchRegistry {
     /// Records the receiver's report that it still holds the acknowledgement registered under
     /// `ack_id`, and answers whether this node was still waiting for it.
     pub(super) fn report_ack(&self, ack_id: u64) -> bool {
-        let Some(pending) = self.pending_acks.get(&ack_id) else {
+        let Some(pending) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.pending_acks.get(&ack_id)
+        ) else {
             return false;
         };
         pending.report();
@@ -251,7 +277,12 @@ impl RemoteDispatchRegistry {
     /// Resolves the acknowledgement registered under `ack_id` with the receiver's terminal
     /// `outcome`, and answers whether this node was still waiting for it.
     pub(super) fn resolve_ack(&self, ack_id: u64, outcome: AckOutcome) -> bool {
-        let Some((_, pending)) = self.pending_acks.remove(&ack_id) else {
+        let Some((_, pending)) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.pending_acks.remove(&ack_id)
+        ) else {
             return false;
         };
         match outcome {
@@ -264,7 +295,12 @@ impl RemoteDispatchRegistry {
     /// Stops waiting for the acknowledgement registered under `ack_id` because its delivery
     /// failed. The caller resolves the acknowledgement itself.
     pub(super) fn clear_ack(&self, ack_id: u64) {
-        self.pending_acks.remove(&ack_id);
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.pending_acks.remove(&ack_id)
+        );
     }
 
     /// Whether this node still waits for the acknowledgement registered under `ack_id`.
@@ -278,16 +314,25 @@ impl RemoteDispatchRegistry {
     /// how many it failed for each receiver.
     pub(super) fn fail_silent_acks(&self) -> BTreeMap<ClusterNodeName, usize> {
         let mut silent = Vec::new();
-        for pending in self.pending_acks.iter() {
+        for pending in nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.pending_acks.iter()
+        ) {
             if pending.swept() {
                 silent.push(*pending.key());
             }
         }
         let mut failed = BTreeMap::new();
         for ack_id in silent {
-            let removed = self
-                .pending_acks
-                .remove_if(&ack_id, |_, pending| pending.is_silent());
+            let removed = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts \
+                 and acknowledgement owners through terminal delivery",
+                self.pending_acks
+                    .remove_if(&ack_id, |_, pending| pending.is_silent())
+            );
             let Some((_, pending)) = removed else {
                 continue;
             };
@@ -431,16 +476,26 @@ impl RemoteDispatcher {
     ) -> (RemoteAckRegistration, watch::Receiver<RelayAdmissionUpdate>) {
         let registration = self.next_registration();
         let (sender, receiver) = watch::channel(RelayAdmissionUpdate::Pending);
-        self.registry
-            .pending_relay_admissions
-            .insert(registration.ack_id, sender);
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.registry
+                .pending_relay_admissions
+                .insert(registration.ack_id, sender)
+        );
         (registration, receiver)
     }
 
     pub(super) fn clear_pending_relay_admission(&self, registration: &RemoteAckRegistration) {
-        self.registry
-            .pending_relay_admissions
-            .remove(&registration.ack_id);
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.registry
+                .pending_relay_admissions
+                .remove(&registration.ack_id)
+        );
     }
 
     pub(super) async fn request_with_timeout<M>(
@@ -695,6 +750,16 @@ impl RemoteDispatcher {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "subscription delivery keeps its ordering state in its selected outbound \
+                      channel",
+            key = "subscription channel incarnation",
+            bound = "one admitted subscription payload at a time per retained channel"
+        )
+    )]
     pub(super) async fn dispatch_subscription_fanout(
         &self,
         services: &RelayBoundaryServices,
@@ -1344,18 +1409,26 @@ impl Runtime {
         }
         let ack_id = registration.ack_id;
         if let RemoteAckOutcome::Alive = &outcome {
-            if let Some(admission) = self
-                .inner
-                .remote_dispatch
-                .pending_relay_admissions
-                .get(&ack_id)
-            {
+            if let Some(admission) = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts \
+                 and acknowledgement owners through terminal delivery",
+                self.inner
+                    .remote_dispatch
+                    .pending_relay_admissions
+                    .get(&ack_id)
+            ) {
                 if admission.is_closed() {
                     drop(admission);
-                    self.inner
-                        .remote_dispatch
-                        .pending_relay_admissions
-                        .remove(&ack_id);
+                    nervix_primitives::expect_lint!(
+                        nervix::sync_acquisition,
+                        "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload \
+                         attempts and acknowledgement owners through terminal delivery",
+                        self.inner
+                            .remote_dispatch
+                            .pending_relay_admissions
+                            .remove(&ack_id)
+                    );
                 } else {
                     admission.send_if_modified(|update| {
                         if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) =
@@ -1379,12 +1452,15 @@ impl Runtime {
             return;
         }
 
-        if let Some((_, admission)) = self
-            .inner
-            .remote_dispatch
-            .pending_relay_admissions
-            .remove(&ack_id)
-        {
+        if let Some((_, admission)) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery",
+            self.inner
+                .remote_dispatch
+                .pending_relay_admissions
+                .remove(&ack_id)
+        ) {
             let terminal_update = match outcome {
                 RemoteAckOutcome::Ack => RelayAdmissionUpdate::Admitted,
                 RemoteAckOutcome::NoAck(error) => RelayAdmissionUpdate::Rejected(error),
@@ -1537,6 +1613,11 @@ impl Runtime {
         });
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the typed revision supplies bounded iteration over its \
+                                   installed emitter and entrypoint plans")
+    )]
     pub(in crate::runtime) fn remote_runtime_consumers_for_revision(
         revision: &ExecutionRevision,
         local_node_id: &ClusterNodeName,

@@ -273,6 +273,11 @@ impl SyslogSink {
         Report::new(SinkStartError::Initialize { sink: SYSLOG }).attach_printable(error.to_string())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the generic external writer and driver error formatter own \
+                                   their effects; local callbacks remain analyzed")
+    )]
     fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
         Report::new(SinkPublishError::Publish { sink: SYSLOG }).attach_printable(error.to_string())
     }
@@ -310,6 +315,13 @@ impl RecordSink for SyslogSink {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the generic external writer and driver error formatter own their effects; local \
+                  callbacks remain analyzed"
+    )
+)]
 async fn write_stream_frame(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     framing: SyslogFraming,

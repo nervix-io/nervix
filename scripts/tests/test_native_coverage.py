@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
@@ -54,26 +55,26 @@ HOST = "x86_64-unknown-linux-gnu"
 RUNNER = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER"
 SHOW_ENV = """\
 export LLVM_PROFILE_FILE='/repo/target/nervix-%p-%24m.profraw'
-export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage --cfg=trybuild_no_target'
+export RUSTFLAGS='-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage'
 export CARGO_LLVM_COV=1
 export CARGO_LLVM_COV_SHOW_ENV=1
 export CARGO_LLVM_COV_TARGET_DIR=/repo/target/native-coverage-build
 """
 VERBOSE_VERSION = f"""\
-rustc 1.98.1 (48a229cea 2026-09-01)
+rustc 1.99.0 (48a229cea 2026-09-01)
 binary: rustc
 commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
 commit-date: 2026-09-01
 host: {HOST}
-release: 1.98.1
+release: 1.99.0
 LLVM version: 22.1.8
 """
 
 
 def toolchain(tools: Path = Path("/toolchain/bin")) -> Toolchain:
     return Toolchain(
-        version="rustc 1.98.1 (48a229cea 2026-09-01)",
-        release="1.98.1",
+        version="rustc 1.99.0 (48a229cea 2026-09-01)",
+        release="1.99.0",
         commit="48a229ceaefd4985c50990b14116b6d856af0985",
         host=HOST,
         llvm="22.1.8",
@@ -103,12 +104,9 @@ class InventoryTests(unittest.TestCase):
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
                 native_coverage.validate_composition(producer, recipes)
-        # The setup action installs the toolchain under its patch release, not under the channel
-        # rust-toolchain.toml pins, so the recipes add the compiler's own LLVM tools themselves.
-        for collector in ("coverage-native-extras", "test-native-coverage"):
-            with self.subTest(recipe=collector):
-                self.assertEqual(native_coverage.dependency_names(recipes[collector]), ["llvm-tools"])
-        self.assertEqual(recipes["llvm-tools"]["body"], [["rustup component add llvm-tools"]])
+        # Coverage profiles must be read with the selected compiler's own LLVM tools.
+        toolchain = tomllib.loads((REPOSITORY / "rust-toolchain.toml").read_text())["toolchain"]
+        self.assertIn("llvm-tools", toolchain["components"])
 
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
@@ -218,8 +216,7 @@ class InstrumentationTests(unittest.TestCase):
         self.assertEqual(exported["CARGO_LLVM_COV"], "1")
         self.assertEqual(
             exported["RUSTFLAGS"],
-            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage "
-            "--cfg=trybuild_no_target",
+            "-Clink-arg=--ld-path=wild -C instrument-coverage --cfg=coverage",
         )
         with self.assertRaisesRegex(RunnerError, "unexpected line"):
             native_coverage.parse_exports("RUSTFLAGS=-Cinstrument-coverage\n")
@@ -294,9 +291,9 @@ class InstrumentationTests(unittest.TestCase):
 
 class ToolchainTests(unittest.TestCase):
     def test_the_verbose_version_names_the_compiler_and_its_llvm_tools(self) -> None:
-        parsed = Toolchain.parse(VERBOSE_VERSION, "/home/user/.rustup/toolchains/1.98\n")
-        self.assertEqual(parsed, toolchain(Path(f"/home/user/.rustup/toolchains/1.98/lib/rustlib/{HOST}/bin")))
-        self.assertEqual(parsed.label(), "rust-1.98.1")
+        parsed = Toolchain.parse(VERBOSE_VERSION, "/home/user/.rustup/toolchains/1.99\n")
+        self.assertEqual(parsed, toolchain(Path(f"/home/user/.rustup/toolchains/1.99/lib/rustlib/{HOST}/bin")))
+        self.assertEqual(parsed.label(), "rust-1.99.0")
         self.assertEqual(parsed.describe()["llvm"], "22.1.8")
         with self.assertRaisesRegex(RunnerError, "did not report LLVM version"):
             Toolchain.parse(VERBOSE_VERSION.replace("LLVM version: 22.1.8\n", ""), "/sysroot")
@@ -312,7 +309,7 @@ class ToolchainTests(unittest.TestCase):
             tools.mkdir(parents=True)
             for name in ("llvm-profdata", "llvm-cov"):
                 (tools / name).write_text("")
-            matching = VersionCommands(sysroot, "LLVM version 22.1.8-rust-1.98.1-stable")
+            matching = VersionCommands(sysroot, "LLVM version 22.1.8-rust-1.99.0-stable")
             self.assertEqual(native_coverage.load_toolchain(matching).tools, tools)
             other = VersionCommands(sysroot, "LLVM version 21.1.0")
             with self.assertRaisesRegex(RunnerError, "rustc was built with LLVM 22.1.8"):
@@ -974,7 +971,7 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(collected.status, 0)
         self.assertEqual(
             collected.attempt,
-            self.root / "target/native-coverage/check/ordinary/rust-1.98.1/github-100-1",
+            self.root / "target/native-coverage/check/ordinary/rust-1.99.0/github-100-1",
         )
         record = self.record(collected)
         self.assertEqual(record["verdict"], "complete")
@@ -988,7 +985,7 @@ class CollectTests(unittest.TestCase):
             {"provider": "github", "run": "100", "attempt": "1", "job": "extra-tests"},
         )
         self.assertEqual(record["attempt"], "github-100-1")
-        self.assertEqual(record["toolchain"]["rustc"], "rustc 1.98.1 (48a229cea 2026-09-01)")
+        self.assertEqual(record["toolchain"]["rustc"], "rustc 1.99.0 (48a229cea 2026-09-01)")
         self.assertEqual(
             record["recipes"],
             {"prepare": ["prepare"], "instrumented": "instrumented", "finish": ["finish"]},

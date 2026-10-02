@@ -9,6 +9,14 @@
 //! - **Must not know.** The server. It speaks the session API through the client core and nothing
 //!   else.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "CLI session and terminal coordination belong to the client edge"
+    )
+)]
+
 use std::{
     collections::BTreeSet,
     io,
@@ -1321,12 +1329,14 @@ impl EventLineSender {
 
     /// Event readers never wait for a terminal. A full queue drops the new line and records the
     /// gap for the printer; every retained line has a fixed maximum byte length.
+    #[allow(deprecated)] // until try_update is stabilized
     fn push(&self, mut line: String) {
         if line.len() > EVENT_LINE_BYTES {
             let boundary = line.floor_char_boundary(EVENT_LINE_PREFIX_BYTES);
             line.truncate(boundary);
             line.push_str(EVENT_LINE_SUFFIX);
         }
+        #[allow(deprecated)] // until try_update is stabilized
         match self.sender.try_send(line) {
             Ok(()) => {}
             Err(nervix_primitives::sync::mpsc::error::TrySendError::Full(_)) => {

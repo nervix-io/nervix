@@ -202,6 +202,16 @@ impl ReplicatedBranchLifecycle {
     }
 
     /// The announcements not taken yet, locked for one short change that never crosses an await.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the entity's lifecycle handle keeps the owner's pending announcements for \
+                      the one replica task that takes them",
+            key = "one entity's branch lifecycle handle",
+            bound = "one synchronous insertion or take; the guard never crosses an await"
+        )
+    )]
     fn announcements(&self) -> MutexGuard<'_, AnnouncedCheckpoints> {
         self.announcements.lock()
     }

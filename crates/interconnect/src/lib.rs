@@ -1031,6 +1031,13 @@ pub enum TransportError {
 
 impl TransportError {
     /// Preserve a typed cause while retaining the transport's existing failure wording.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies a synchronous typed error classifier; no internal \
+                      runtime ownership is inferred"
+        )
+    )]
     pub(crate) fn with_cause<C: error_stack::Context>(
         cause: Report<C>,
         classify: impl FnOnce(String) -> Self,

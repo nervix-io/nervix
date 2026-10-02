@@ -18,6 +18,15 @@
 //! Separating the use cases from the adapters is a later move; every piece it is split into
 //! inherits the contract above.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "session, transaction, authentication and resource operations belong to the \
+                  control plane and its edges"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
