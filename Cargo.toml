@@ -367,9 +367,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [workspace.lints.clippy]
-as-conversions = "deny"
-disallowed-methods = "deny"
-disallowed-types = "deny"
+as_conversions = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
 
 [workspace.metadata.tooling]
 workspaces = ["tools/nervix-lint"]

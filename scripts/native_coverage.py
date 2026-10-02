@@ -169,7 +169,7 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="test-typed-ratchet",
         mode="ordinary",
-        prepare=("typed-ratchet-setup",),
+        prepare=(),
         instrumented="test-typed-ratchet-ordinary",
         finish=("test-typed-ratchet-product-docs", "test-typed-ratchet-modeled"),
         toolchain="nightly-2026-09-17",

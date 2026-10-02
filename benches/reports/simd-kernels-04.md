@@ -4,7 +4,7 @@
 
 The baseline was `658822567be472fc1c40ff2ce9f458e21c4613a6` (`origin/main` after the
 branch update); the candidate was this working tree. The A/B run was made on 2026-09-29 UTC on
-an Intel Core i9-14900HX with 32 logical CPUs and AVX2, x86-64 Linux, using rustc 1.98.0 and
+an Intel Core i9-14900HX with 32 logical CPUs and AVX2, x86-64 Linux, using rustc 1.99.0 and
 the repository's configured `target-cpu=native` build. Both server binaries were built in release
 mode with the configured kache compiler wrapper. The same benchmark harness interleaved three
 baseline and three candidate runs on this host.

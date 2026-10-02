@@ -161,7 +161,7 @@ jobs:
         run: docker logout ghcr.io
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -456,7 +456,7 @@ jobs:
             texlive-xetex
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 

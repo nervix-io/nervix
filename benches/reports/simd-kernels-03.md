@@ -5,7 +5,7 @@
 The Criterion baseline is `2444db5aba98e14527b9ba481b4f267f54ee4756`, the commit this change was
 written on; the end-to-end baseline is `54d99a63f1e3d8b9f9ceacc54e33490bd2a6a486`, the `main` commit
 it was merged onto. The candidate is this change. Measurements were made on 2026-09-28 UTC on a 24-logical-CPU AMD Ryzen AI 9 HX 370 (Zen 5, AVX-512F/DQ/VL/BW),
-x86-64 Linux, with rustc 1.98.1, LLVM 22.1.8, Arrow 58.4.0, hdrhistogram 7.6.0, prometheus 0.14.0,
+x86-64 Linux, with rustc 1.99.0, LLVM 22.1.8, Arrow 58.4.0, hdrhistogram 7.6.0, prometheus 0.14.0,
 and Criterion 0.5.1. Local builds on this host use `target-cpu=native`. Other worktrees were
 building and testing on the same host throughout (load average 19–30), so the timings below carry
 wide intervals and are compared only within one round.

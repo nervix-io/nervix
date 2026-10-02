@@ -7,7 +7,7 @@ tree that became commit `7b820504`, with `Cargo.lock` blob
 `a04beb718bdf5e62797c3c33aee7ebc7fe6abe75`. It preceded the merge from `main` and the
 subsequent change to error reporting on failure paths. Measurements
 were made on 2026-09-28 UTC on a 32-logical-CPU Intel Core i9-14900HX, x86-64 Linux, with rustc
-1.98.0, LLVM 22.1.8, Arrow 58.4.0, and Criterion 0.5.1. Other worktrees were building and
+1.99.0, LLVM 22.1.8, Arrow 58.4.0, and Criterion 0.5.1. Other worktrees were building and
 testing on the same host, so small timing differences require caution.
 
 ```bash

@@ -647,6 +647,7 @@ impl RelayConsumerFanout {
         permits
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     async fn engage_branch_dispatch_gate(
         &self,
         scope: WasmStateResetScope,
@@ -664,6 +665,7 @@ impl RelayConsumerFanout {
         if !publication_fence.wait_quiescent().await {
             return None;
         }
+        #[allow(deprecated)] // until try_update is stabilized
         let id = self
             .branch_dispatch_gates
             .next_id

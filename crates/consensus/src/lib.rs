@@ -4052,6 +4052,7 @@ impl SnapshotTransferIds {
 
     /// The identity of the next transfer this node sends.
     fn allocate(&self) -> io::Result<u64> {
+        #[allow(deprecated)] // until try_update is stabilized
         self.next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)

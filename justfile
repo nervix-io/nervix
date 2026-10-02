@@ -2,6 +2,8 @@ set minimum-version := "1.56.0"
 set unstable
 set lists
 
+export RUSTUP_AUTO_INSTALL := "0"
+
 rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
@@ -31,7 +33,7 @@ install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
-test-bolero filter="":
+test-bolero filter="": build-web-console
     python3 scripts/bolero.py test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
@@ -70,7 +72,7 @@ qualify-bolero:
     python3 scripts/bolero.py qualify
 
 # Exercise the inventory and runner's validation and failure paths.
-test-bolero-runner:
+test-bolero-runner: build-web-console
     python3 -m unittest scripts.tests.test_bolero
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
@@ -1385,8 +1387,8 @@ ordinary-clippy-targets: \
     (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
-    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["-q"]) \
-    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown", "-q"])
+    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
+    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
 [private, parallel]
 shuttle-clippy-targets: \
@@ -1416,7 +1418,7 @@ loom-clippy-targets: \
 # profile and toolchain differences identify separate build directories. Keep kache configured.
 [private]
 clippy-target package args toolchain="":
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }}
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
 
 # Lint one package and all of its targets; extra arguments retain their boundaries.
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
@@ -1437,16 +1439,12 @@ audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args: typed-ratchet-setup typed-ratchet-build
+ratchet *args: typed-ratchet-build
     python3 -m scripts.ratchet {{ args }}
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
 test-ratchet-units:
     python3 -m unittest scripts.tests.test_ratchet
-
-# The compiler driver and analyzed crates use this dated nightly; product builds remain stable.
-typed-ratchet-setup:
-    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
 
 typed-ratchet-build:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -1464,7 +1462,7 @@ test-typed-ratchet-compiler:
 test-typed-ratchet-contracts: typed-ratchet-build
     python3 -m unittest scripts.tests.compiler_contract_checks
 
-test-typed-ratchet: typed-ratchet-setup test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
+test-typed-ratchet: test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
 
 test-typed-ratchet-ordinary:
     just test-typed-ratchet-reports
@@ -1490,9 +1488,9 @@ test-typed-ratchet-docs:
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
-    cargo +1.98 test --package nervix-primitives --doc expect_lint
-    cargo +1.98 test --package nervix-vm --doc FunctionInjector
-    RUSTUP_TOOLCHAIN=1.98 just test-runtime-state-capabilities
+    cargo +1.99 test --package nervix-primitives --doc expect_lint
+    cargo +1.99 test --package nervix-vm --doc FunctionInjector
+    RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
     python3 -m scripts.tests.qualify_typed_ratchet_cache
@@ -1500,11 +1498,11 @@ qualify-typed-ratchet-cache: typed-ratchet-build
 test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
-fmt-typed-ratchet: typed-ratchet-setup
+fmt-typed-ratchet:
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
 
-fmt-check-typed-ratchet: typed-ratchet-setup
+fmt-check-typed-ratchet:
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
 
@@ -1512,12 +1510,12 @@ fmt-check-typed-ratchet: typed-ratchet-setup
 lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
 
 [private]
-typed-ratchet-clippy-targets: typed-ratchet-setup typed-ratchet-clippy-packages
+typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 
 [private, parallel]
 typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
-coverage-typed-ratchet-python: typed-ratchet-setup test-typed-ratchet-compiler test-typed-ratchet-modeled
+coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
@@ -1739,6 +1737,10 @@ validate-clock-boundaries:
 # baseline to raise: any occurrence fails and names the rule.
 validate-typed-errors:
     python3 -m scripts.check_typed_errors
+
+toolchains-install:
+    rustup toolchain install
+    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
 
 # Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.

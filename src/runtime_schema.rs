@@ -3884,7 +3884,7 @@ fn append_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -3920,7 +3920,7 @@ fn append_json_value_to_arrow(
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Bytes => {
-            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let encoded = value.as_str().ok_or_else(incompatible)?;
             let decoded = base64_simd::STANDARD
                 .decode_to_vec(encoded.as_bytes())
                 .map_err(|_| {
@@ -3947,7 +3947,7 @@ fn append_json_value_to_arrow(
         }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             if values.len() != len.get().arch_into() {
                 return Err(Report::new(
                     RuntimeSchemaError::RuntimeArrayLengthMismatch {
@@ -3981,7 +3981,7 @@ fn append_json_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder, expected, location,
@@ -4022,7 +4022,7 @@ fn append_borrowed_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -4058,15 +4058,15 @@ fn append_borrowed_json_value_to_arrow(
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Bytes => {
-            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let encoded = value.as_str().ok_or_else(incompatible)?;
             let builder = typed_arrow_builder::<BinaryBuilder>(builder, expected, location)?;
             append_base64_to_binary_builder(builder, encoded.as_bytes(), location)?;
             Ok(())
         }
         ParseAsType::Datetime => {
-            let value = value.as_str().ok_or_else(&incompatible)?;
+            let value = value.as_str().ok_or_else(incompatible)?;
             let value = DateTime::parse_from_rfc3339(value).map_err(|_| incompatible())?;
-            let value = value.timestamp_nanos_opt().ok_or_else(&incompatible)?;
+            let value = value.timestamp_nanos_opt().ok_or_else(incompatible)?;
             typed_arrow_builder::<TimestampNanosecondBuilder>(builder, expected, location)?
                 .append_value(value);
             Ok(())
@@ -4077,7 +4077,7 @@ fn append_borrowed_json_value_to_arrow(
         ),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
         ParseAsType::Array { element, len } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             if values.len() != len.get().arch_into() {
                 return Err(Report::new(
                     RuntimeSchemaError::RuntimeArrayLengthMismatch {
@@ -4111,7 +4111,7 @@ fn append_borrowed_json_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder, expected, location,
@@ -4194,7 +4194,7 @@ fn append_avro_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value(parsed);
             Ok(())

@@ -187,10 +187,12 @@ impl PendingRemoteAck {
 
     /// Counts one sweep that found no report, and answers whether the receiver has now been silent
     /// past the bound. An acknowledgement whose delivery was not admitted is never counted.
+    #[allow(deprecated)] // until try_update is stabilized
     fn swept(&self) -> bool {
         if !self.admitted.load(Ordering::Relaxed) {
             return false;
         }
+        #[allow(deprecated)] // until try_update is stabilized
         let previous = self
             .silent_sweeps
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {
