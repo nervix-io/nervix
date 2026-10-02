@@ -13,8 +13,10 @@
 
 use std::mem::ManuallyDrop;
 
+use meticulous::OptionExt as _;
 use nervix_client_core::{EmitterDelivery, EmitterSettlement};
 use nervix_primitives::sync::blocking::OnceLock;
+use nervix_recovery::Discarded as _;
 use triomphe::Arc;
 
 use crate::{
@@ -105,13 +107,24 @@ impl Delivery {
         &self.delivery.batch
     }
 
-    /// The batch the attempt carries, decoded once and held to its consumer's schema and its
-    /// member count.
+    /// The batch the attempt carries, decoded the first time it is read and held to its
+    /// consumer's schema and its member count. Every reader shares the batch that was kept.
     pub fn batch(&self) -> Result<&Arc<Batch>, Failure> {
-        let decoded = self.batch.get_or_init(|| {
-            let batch = Batch::delivered(&self.delivery, self.schema.clone())?;
-            Ok(Arc::new(batch))
-        });
+        let decoded = match self.batch.get() {
+            Some(decoded) => decoded,
+            None => {
+                let batch = match Batch::delivered(&self.delivery, self.schema.clone()) {
+                    Ok(batch) => Ok(Arc::new(batch)),
+                    Err(failure) => Err(failure),
+                };
+                self.batch.set(batch).discarded(
+                    "a reader that decoded the same delivery concurrently kept its batch first",
+                );
+                self.batch
+                    .get()
+                    .verified("this reader or a concurrent one kept the batch just above")
+            }
+        };
         match decoded {
             Ok(batch) => Ok(batch),
             Err(failure) => Err(failure.clone()),

@@ -23,6 +23,7 @@ meticulous = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow", "autocomplete"] }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 triomphe = { workspace = true }
 

@@ -172,7 +172,7 @@ What the binding copies on the way from a host's buffers to the session and back
 | A batch a host builds | Each builder call copies the buffer it receives before it returns. Finishing assembles the Arrow arrays from those copies without another, and submitting writes the canonical stream once. |
 | A stream a host writes | `nx_producer_submit_ipc` copies the stream once before it returns. |
 | A delivery's stream | None: `nx_delivery_ipc`, and `nx_batch_ipc` of its batch, borrow the stream the reply carried until the last reference is released. |
-| A delivery's columns | `nx_delivery_batch` decodes the stream once, and each read copies one whole level of a column into the host's buffer. |
+| A delivery's columns | `nx_delivery_batch` decodes the stream the first time it is called and keeps the batch, and each read copies one whole level of a column into the host's buffer. |
 
 ## The corpus
 

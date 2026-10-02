@@ -1680,10 +1680,11 @@ The binding's lifecycle follows from that choice:
   typed reason. The binding keeps no acknowledgement, credit or reconnect state of its own.
 - **Batches.** A producer's batch is built with `nx_batch_builder` from the host's columns, one
   level of a column's type at a time, and every buffer is copied before the call returns. A
-  delivered batch is decoded once, held to the consumer's schema and member count, and read the
-  same way. Every batch is its canonical Arrow IPC stream, which `nx_batch_ipc` and
-  `nx_delivery_ipc` borrow and `nx_producer_submit_ipc` accepts from a host's own Arrow tooling, so
-  the binding encodes nothing a second way and the observation API stays free of Arrow.
+  delivered batch is decoded the first time it is read, held to the consumer's schema and member
+  count, and read the same way. Every batch is its canonical Arrow IPC stream, which
+  `nx_batch_ipc` and `nx_delivery_ipc` borrow and `nx_producer_submit_ipc` accepts from a host's
+  own Arrow tooling, so the binding encodes nothing a second way and the observation API stays
+  free of Arrow.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
   a failed connection, a failed session, an uncertain outcome that carries the execution reference
   or leaves a settlement unconfirmed, a server refusal, a deadline, a cancellation, a protocol

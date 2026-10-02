@@ -482,11 +482,12 @@ exactly as described; the binding keeps no acknowledgement or reconnect state of
   it with `nx_producer_submit_ipc`, which copies it and leaves its checking to the server.
 - **Consuming.** `nx_consumer_next` returns a reference-counted `nx_delivery`: its identity,
   reference, source relay, branch fingerprint, member count and execution time, its stream,
-  borrowed with `nx_delivery_ipc`, and its batch, decoded once with `nx_delivery_batch`. A batch
-  is read one level of a column at a time: `nx_batch_states` for the rows, `nx_batch_offsets` for
-  each variable-length list level, and `nx_batch_fixed` or `nx_batch_varlen` for the values, each
-  in one call. `nx_delivery_ack`, `nx_delivery_retry` and `nx_delivery_reject` settle the attempt
-  and return the server's `nx_settlement`. Releasing a delivery settles nothing.
+  borrowed with `nx_delivery_ipc`, and its batch, which `nx_delivery_batch` decodes the first time
+  it is asked for and then shares. A batch is read one level of a column at a time:
+  `nx_batch_states` for the rows, `nx_batch_offsets` for each variable-length list level, and
+  `nx_batch_fixed` or `nx_batch_varlen` for the values, each in one call. `nx_delivery_ack`,
+  `nx_delivery_retry` and `nx_delivery_reject` settle the attempt and return the server's
+  `nx_settlement`. Releasing a delivery settles nothing.
 - **Interruption.** After a session ends, the next `nx_consumer_next` returns
   `NX_ERROR_INTERRUPTED` once, a delivery read before the gap fails to settle with
   `NX_ERROR_REJECTED`, a submission sent before it is `NX_UNCERTAINTY_SESSION_LOST`, and a

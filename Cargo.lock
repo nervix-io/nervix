@@ -6646,6 +6646,7 @@ dependencies = [
  "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "serde_json",
  "strum 0.26.3",
  "tonic 0.13.1",

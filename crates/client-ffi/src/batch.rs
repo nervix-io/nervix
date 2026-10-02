@@ -24,6 +24,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{EmitterDelivery, ProducerBatch};
 use nervix_models::{ParseAsType, SchemaField};
 use nervix_primitives::sync::blocking::OnceLock;
+use nervix_recovery::Discarded as _;
 use triomphe::Arc;
 
 use crate::{
@@ -181,23 +182,31 @@ impl Batch {
         &self.schema
     }
 
-    /// The canonical Arrow IPC stream of the batch.
+    /// The canonical Arrow IPC stream of the batch. A batch a host built is written the first
+    /// time its stream is read, and every reader borrows the stream that was kept.
     pub fn ipc(&self) -> Result<&[u8], Failure> {
-        match &self.ipc {
-            Ipc::Delivered(bytes) => Ok(bytes),
-            Ipc::Built(written) => {
-                let written = written.get_or_init(|| {
-                    let encoded = ProducerBatch::from_record_batch(&self.batch);
-                    match encoded {
-                        Ok(encoded) => Ok(encoded.arrow_ipc().clone()),
-                        Err(report) => Err(Failure::from(report)),
-                    }
-                });
-                match written {
-                    Ok(bytes) => Ok(bytes),
-                    Err(failure) => Err(failure.clone()),
-                }
+        let written = match &self.ipc {
+            Ipc::Delivered(bytes) => return Ok(bytes),
+            Ipc::Built(written) => written,
+        };
+        let stream = match written.get() {
+            Some(stream) => stream,
+            None => {
+                let encoded = match ProducerBatch::from_record_batch(&self.batch) {
+                    Ok(encoded) => Ok(encoded.arrow_ipc().clone()),
+                    Err(report) => Err(Failure::from(report)),
+                };
+                written.set(encoded).discarded(
+                    "a reader that wrote the same batch concurrently kept the same stream first",
+                );
+                written
+                    .get()
+                    .verified("this reader or a concurrent one kept the stream just above")
             }
+        };
+        match stream {
+            Ok(bytes) => Ok(bytes),
+            Err(failure) => Err(failure.clone()),
         }
     }
 

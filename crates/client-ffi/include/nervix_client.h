@@ -869,9 +869,9 @@ uint32_t nx_delivery_members(const nx_delivery *delivery);
 int64_t nx_delivery_execution_now(const nx_delivery *delivery);
 /* Borrows the canonical Arrow IPC stream the attempt carried, without a copy. */
 void nx_delivery_ipc(const nx_delivery *delivery, const uint8_t **ipc, size_t *ipc_len);
-/* The batch the stream holds, decoded once and held to the consumer's schema and to the rows
-   nx_delivery_members counts; a stream that differs fails with NX_ERROR_PROTOCOL. Every call
-   returns a new reference to the same batch. */
+/* The batch the stream holds, decoded the first time it is asked for and held to the consumer's
+   schema and to the rows nx_delivery_members counts; a stream that differs fails with
+   NX_ERROR_PROTOCOL. Every call returns a new reference to the same batch. */
 nx_error *nx_delivery_batch(const nx_delivery *delivery, nx_batch **out);
 
 /* Acknowledges the attempt: its batch is settled, and an attached producer's submission completes
