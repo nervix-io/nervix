@@ -29,6 +29,7 @@ domain_version = 1
 features = []
 id = "replica-catch-up"
 invariant = "Whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, a replica holds every branch its lifecycle names at its owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form unchanged."
+manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-server"
 random_iterations = 256
