@@ -881,7 +881,12 @@ impl IngestRouteCollector {
         domain: &DomainName,
     ) -> Result<StdArc<DomainRoutingSnapshot>, Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = runtime.domain_routing_cache(domain);
+            self.routing = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
+                 revision refresh instead of repeating its installation lookup",
+                runtime.domain_routing_cache(domain)
+            );
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -2066,6 +2071,11 @@ impl Runtime {
     /// The payloads are delivered together or not at all, so a payload that fails to decode takes
     /// the payloads decoded before it back out of the group. A caller that drops this future before
     /// it completes discards what it decoded itself.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained payload exposes its selected message iterator \
+                                   for one admitted batch")
+    )]
     pub(in crate::runtime) async fn decode_raw_ingest_payload(
         &self,
         collector: &mut IngestRouteCollector,

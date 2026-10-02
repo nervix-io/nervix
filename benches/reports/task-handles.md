@@ -3,7 +3,7 @@
 ## Reproduce
 
 Measured on 2026-09-30 UTC on `gleb-ryzer`, an Intel Core i9-14900HX with 32 logical CPUs,
-x86-64 Linux, rustc 1.98.0 and LLVM 22.1.8. The base revision is
+x86-64 Linux, rustc 1.99.0 and LLVM 22.1.8. The base revision is
 `b3ef3bdc0b450d5f52dcf2bb957509799a825723`; the candidate is the change containing this report.
 The repository's configured kache wrapper builds the release benchmark with native CPU tuning.
 Other worktrees were compiling on the same host, so the timings describe these warmed owner

@@ -6,6 +6,15 @@
 //! Must not know: what a checkpoint holds, how a replica installs it, NSPL parsing, or
 //! control-plane transactions.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "replica frames and steady checkpoint-announcer steps resolve placement state \
+                  repeatedly"
+    )
+)]
+
 use super::*;
 
 impl Runtime {
@@ -96,7 +105,12 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         local_node_id: &ClusterNodeName,
     ) -> BTreeSet<ClusterNodeName> {
-        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+        let Some(execution) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current state \
+             assignment and its replication handle",
+            self.inner.executions.get(&placement.domain)
+        ) else {
             return BTreeSet::new();
         };
         let Some(node) = execution
@@ -114,6 +128,12 @@ impl Runtime {
 
     /// Hand `use_replication` the replication of the state this node holds for `placement`, when it
     /// holds one. Each kind of state is found in the registry that keeps it; nothing is created.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies a synchronous action on its retained replication handle"
+        )
+    )]
     pub(in crate::runtime) fn with_placement_replication(
         &self,
         placement: &RuntimeStatePlacement,
@@ -121,47 +141,78 @@ impl Runtime {
     ) {
         match placement.state.kind() {
             RuntimeStateKind::BranchAggregated => {
-                if let Some(state) = self
-                    .inner
-                    .replicated_branch_aggregated_states
-                    .get(placement)
-                {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner
+                        .replicated_branch_aggregated_states
+                        .get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::BranchLru => {
-                if let Some(lifecycle) = self.inner.replicated_branch_lifecycles.get(placement) {
+                if let Some(lifecycle) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_branch_lifecycles.get(placement)
+                ) {
                     use_replication(lifecycle.replication());
                 }
             }
             // Correlator buffers are not replicated runtime state.
             RuntimeStateKind::Correlator => {}
             RuntimeStateKind::Deduplicator => {
-                if let Some(state) = self.inner.replicated_deduplicator_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_deduplicator_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::KafkaOffset => {
-                if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_kafka_offset_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::MaterializedRelay => {
-                if let Some(state) = self
-                    .inner
-                    .replicated_materialized_stream_states
-                    .get(placement)
-                {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner
+                        .replicated_materialized_stream_states
+                        .get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::WasmProcessor => {
-                if let Some(state) = self.inner.replicated_wasm_processor_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_wasm_processor_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::WindowProcessor => {
-                if let Some(state) = self.inner.replicated_window_processor_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_window_processor_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }

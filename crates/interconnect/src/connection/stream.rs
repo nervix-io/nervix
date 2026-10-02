@@ -32,6 +32,14 @@ use crate::{
 
 /// A bounded, flow-controlled response body. Dropping it cancels the HTTP/2 stream and releases
 /// its bulk slot; each returned chunk holds its own memory charge until the caller drops it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained response stream consumes each admitted chunk under its progress \
+                  deadline"
+    )
+)]
 pub struct IncomingByteStream {
     body: RecvStream,
     lease: StreamLease,

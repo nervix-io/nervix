@@ -107,6 +107,12 @@ impl DurabilityBarrier {
     /// barrier runs at most one round at a time and lets every caller waiting meanwhile share the
     /// next one. A round that fails with [`RuntimePersistenceError::Synchronize`] refuses this and
     /// every later durability promise.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external storage driver owns the admitted durability action"
+        )
+    )]
     async fn synchronize<Round, Synchronized>(
         &self,
         round: Round,
@@ -158,6 +164,12 @@ impl RuntimeStateStore {
     ///
     /// Callers waiting at the same time share synchronizations, and a synchronization runs on the
     /// storage workers, never on the async worker that awaits it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external storage driver owns the admitted durability action"
+        )
+    )]
     pub(in crate::runtime) async fn synchronize(
         &self,
     ) -> error_stack::Result<(), RuntimePersistenceError> {

@@ -82,7 +82,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just@latest,toml-cli
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -161,14 +161,14 @@ jobs:
         run: docker logout ghcr.io
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,wild-linker
+          tool: just@latest,toml-cli,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -456,14 +456,14 @@ jobs:
             texlive-xetex
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk
+          tool: just@latest,toml-cli,trunk
 
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the

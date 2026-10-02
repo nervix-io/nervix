@@ -3,7 +3,9 @@
 """Collect LLVM source coverage from the extra checks during the runs CI already makes of them.
 
 `just coverage-native-extras [producer ...]` runs `run`. A producer is an extra check whose recipe
-executes Nervix code natively in ordinary mode: `bench-smoke` exercises every Criterion body once,
+executes Nervix code natively in ordinary mode: `test-typed-ratchet` qualifies compiler-resolved
+source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
+compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
 walks the NSPL completion graph. Without names every producer runs, in that order. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
@@ -17,6 +19,9 @@ coverage instrumentation, the configured compiler wrapper stays in place so kach
 build, and the build goes to `<target>/native-coverage-build`, so ordinary builds are not
 invalidated. The finish recipes complete the check outside instrumentation: compile-only checks,
 browser builds and modeled modes, whose coverage this command does not claim.
+When a producer selects a compiler, its prepare recipes install that toolchain before the
+collector resolves the compiler and validates its LLVM tools. Its attempt directory uses the
+requested toolchain's name, and the record gains the installed compiler identity after preparation.
 
 Each producer collects into a fresh directory,
 `<target>/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`, that no other run reads,
@@ -151,6 +156,7 @@ class Producer:
     prepare: tuple[str, ...]
     instrumented: str
     finish: tuple[str, ...]
+    toolchain: str | None = None
 
     def rerun(self) -> str:
         return f"just coverage-native-extras {self.name}"
@@ -160,6 +166,14 @@ class Producer:
 
 
 PRODUCERS: tuple[Producer, ...] = (
+    Producer(
+        name="test-typed-ratchet",
+        mode="ordinary",
+        prepare=(),
+        instrumented="test-typed-ratchet-ordinary",
+        finish=("test-typed-ratchet-product-docs", "test-typed-ratchet-modeled"),
+        toolchain="nightly-2026-09-17",
+    ),
     Producer(
         name="bench-smoke",
         mode="ordinary",
@@ -394,9 +408,9 @@ class Toolchain:
         }
 
 
-def load_toolchain(commands: Commands) -> Toolchain:
-    verbose = commands.capture(["rustc", "-vV"])
-    sysroot = commands.capture(["rustc", "--print", "sysroot"])
+def load_toolchain(commands: Commands, environment: Mapping[str, str] | None = None) -> Toolchain:
+    verbose = commands.capture(["rustc", "-vV"], environment=environment)
+    sysroot = commands.capture(["rustc", "--print", "sysroot"], environment=environment)
     if verbose.status != 0 or sysroot.status != 0:
         raise RunnerError(f"rustc could not describe itself: {verbose.stderr or sysroot.stderr}")
     toolchain = Toolchain.parse(verbose.stdout, sysroot.stdout)
@@ -475,13 +489,13 @@ class Workspace:
     def build(self) -> Path:
         return self.target / BUILD_DIRECTORY
 
-    def new_attempt(self, producer: Producer, toolchain: Toolchain, name: str) -> Path:
+    def new_attempt(self, producer: Producer, toolchain: str, name: str) -> Path:
         directory = (
             self.target
             / COLLECTION_DIRECTORY
             / producer.name
             / producer.mode
-            / toolchain.label()
+            / toolchain
             / name
         )
         directory.parent.mkdir(parents=True, exist_ok=True)
@@ -685,15 +699,16 @@ def executable_candidates(build: Path) -> Iterator[Path]:
 
     if not build.is_dir():
         return
-    for profile in sorted(build.iterdir()):
-        if not profile.is_dir():
-            continue
-        for directory in (profile, profile / "deps", profile / "examples"):
-            if not directory.is_dir():
+    # Tooling uses nested Cargo target directories, and Cargo can place procedural macro shared
+    # objects under build/<package>/<hash>/out. Those are loaded by the compiler being checked.
+    for directory, subdirectories, names in os.walk(build):
+        subdirectories[:] = sorted(name for name in subdirectories if not name.startswith((".", "incremental")))
+        for name in sorted(names):
+            if name.startswith(("build-script-build", "build_script_build")):
                 continue
-            for entry in sorted(directory.iterdir()):
-                if entry.is_file() and not entry.is_symlink() and is_elf(entry):
-                    yield entry
+            entry = Path(directory) / name
+            if entry.is_file() and not entry.is_symlink() and is_elf(entry):
+                yield entry
 
 
 def locate(build: Path, identifiers: set[str]) -> dict[str, Path]:
@@ -982,7 +997,18 @@ def load_packages(commands: Commands) -> Packages:
     metadata = commands.capture(["cargo", "metadata", "--no-deps", "--format-version", "1"])
     if metadata.status != 0:
         raise RunnerError(f"cargo metadata failed: {metadata.stderr.strip()}")
-    return Packages.from_metadata(json.loads(metadata.stdout))
+    combined = json.loads(metadata.stdout)
+    workspace_metadata = combined.get("metadata")
+    if workspace_metadata is None:
+        workspace_metadata = {}
+    for tooling in workspace_metadata.get("tooling", {}).get("workspaces", []):
+        extra = commands.capture(["cargo", "metadata", "--manifest-path", str(commands.root / tooling / "Cargo.toml"), "--no-deps", "--format-version", "1"])
+        if extra.status != 0:
+            raise RunnerError(f"tooling metadata failed: {extra.stderr.strip()}")
+        isolated = json.loads(extra.stdout)
+        combined["packages"].extend(isolated["packages"])
+        combined["workspace_members"].extend(isolated["workspace_members"])
+    return Packages.from_metadata(combined)
 
 
 @dataclass
@@ -1184,7 +1210,10 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
     """Run one producer's check with its native executions collected, and write its record."""
 
     workspace = context.workspace
-    attempt = workspace.new_attempt(producer, context.toolchain, context.run.attempt_name())
+    toolchain = context.toolchain
+    environment = dict(context.environment)
+    label = f"rust-{producer.toolchain}" if producer.toolchain else toolchain.label()
+    attempt = workspace.new_attempt(producer, label, context.run.attempt_name())
     record = Record(
         attempt / RECORD,
         {
@@ -1196,7 +1225,9 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
             "run": context.run.describe(),
             "attempt": attempt.name,
             "started_at": timestamp(context.clock()),
-            "toolchain": context.toolchain.describe(),
+            "toolchain": (
+                {"requested": producer.toolchain} if producer.toolchain else toolchain.describe()
+            ),
             "recipes": {
                 "prepare": list(producer.prepare),
                 "instrumented": producer.instrumented,
@@ -1214,9 +1245,15 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
                 return Collected(status, attempt, record)
 
+        if producer.toolchain:
+            environment["RUSTUP_TOOLCHAIN"] = producer.toolchain
+            toolchain = load_toolchain(commands, environment)
+            record.content["toolchain"] = toolchain.describe()
+            record.write()
+
         stage = Stage.INSTRUMENT
         instrumented = instrumentation(
-            commands, workspace, context.toolchain, attempt, context.environment
+            commands, workspace, toolchain, attempt, environment
         )
         record.content["instrumentation"] = instrumented.describe(workspace)
         record.write()
@@ -1231,7 +1268,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
                 return Collected(status, attempt, record)
             stage = Stage.EXPORT
-            exported = export(commands, workspace, context.toolchain, context.packages, attempt)
+            exported = export(commands, workspace, toolchain, context.packages, attempt)
         record.content["selection"] = exported.selection.describe(workspace)
         record.content["profiles"] = exported.selection.describe_profiles()
         record.content["export_warnings"] = list(exported.warnings)
@@ -1241,7 +1278,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
 
         stage = Stage.FINISH
         for recipe in producer.finish:
-            status = commands.stream(["just", recipe], environment=context.environment)
+            status = commands.stream(["just", recipe], environment=environment)
             if status != 0:
                 detail = f"`just {recipe}` exited with status {status}"
                 record.fail(Verdict.FAILED, stage, detail, context.clock())

@@ -5,6 +5,15 @@
 //! - **Depends on.** Typed ingestor policy, observed input timestamps and runtime task handles.
 //! - **Must not know.** NSPL parsing, consensus decisions or persisted payload state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "source control and readiness publication are installed or withdrawn with the \
+                  exact source instance"
+    )
+)]
+
 use std::future::Future;
 
 use nervix_connector::{IngestMetadataRow, RetainedIngestHeaders};
@@ -125,6 +134,14 @@ struct IngestorQuiesceModes {
 /// Each variant settles polling, endpoint admission and intake together, so those verdicts cannot
 /// disagree and reading any of them is a match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task checks its retained quiesce state before each admitted payload \
+                  or poll"
+    )
+)]
 enum IngestorQuiesceHandling {
     /// The source stops taking payloads, and a payload it already received still dispatches.
     Suspend,
@@ -229,6 +246,14 @@ impl IngestorQuiesceHandling {
 
 /// What intake does under one publication of an ingestor's quiesce reasons and modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task checks its retained quiesce state before each admitted payload \
+                  or poll"
+    )
+)]
 enum IngestorQuiesceDecision {
     /// No reason is engaged: sources poll, endpoints admit and every payload dispatches.
     Open,
@@ -275,6 +300,14 @@ impl IngestorQuiesceDecision {
 /// Every engagement, release and declared-mode change publishes a replacement whole, so a reader
 /// never sees reasons, modes and a decision that came from different changes.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task checks its retained quiesce state before each admitted payload \
+                  or poll"
+    )
+)]
 struct IngestorQuiescePublication {
     reasons: IngestorQuiesceReasons,
     modes: IngestorQuiesceModes,
@@ -358,6 +391,14 @@ impl BufferedIngestMetadata {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task checks its retained quiesce state before each admitted payload \
+                  or poll"
+    )
+)]
 pub(in crate::runtime) struct BufferedIngestPayload {
     pub(super) payloads: Vec<Vec<u8>>,
     /// Row-aligned with `payloads`.
@@ -440,6 +481,14 @@ impl BufferedIngestPayload {
 /// retained: it stays counted in `bytes`, overflow cannot evict it, and nothing behind it is handed
 /// out until its delivery ends, so payloads drain in the order they arrived.
 #[derive(Debug, Default)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task checks its retained quiesce state before each admitted payload \
+                  or poll"
+    )
+)]
 pub(super) struct IngestorQuiesceBuffer {
     pub(super) payloads: VecDeque<BufferedIngestPayload>,
     /// Every retained payload's bytes, including those of a payload out for delivery.
@@ -552,6 +601,14 @@ enum RetentionOverflow {
 /// dropped before then returns it to the front, so a delivery that was interrupted, refused, or
 /// ended with its task leaves the buffer exactly as it was.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task delivers one retained payload on each loop turn while its \
+                  buffer drains"
+    )
+)]
 pub(in crate::runtime) struct RetainedDelivery<'control> {
     control: &'control IngestorQuiesceControl,
     instance: u64,
@@ -615,6 +672,16 @@ pub(in crate::runtime) enum IngestorQuiesceIntake {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "source instance and retained payload",
+        bound = "configured MAX SIZE per source instance, counting a payload out for delivery; \
+                 replay and termination fences; no guard across an await",
+        reason = "the source retains its quiescence control for the exact intake lifetime"
+    )
+)]
 pub(in crate::runtime) struct IngestorQuiesceControl {
     /// Loaded without a lock by every message, poll and admission. Every change replaces it
     /// through `rcu`, deriving the replacement from the publication it replaces, so concurrent
@@ -1199,6 +1266,14 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source task checks its retained quiesce state before each admitted \
+                      payload or poll"
+        )
+    )]
     pub(in crate::runtime) fn mark_ingestor_instance_ready(
         &self,
         domain: &DomainName,
@@ -1206,11 +1281,24 @@ impl Runtime {
         instance_idx: u64,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = self.inner.ingestor_readiness.get_mut(&key) {
+        if let Some(mut readiness) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 (86bc9eqjv): retain the source instance readiness publication \
+             instead of finding its registry slot during polling",
+            self.inner.ingestor_readiness.get_mut(&key)
+        ) {
             readiness.ready_instances.insert(instance_idx);
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source task checks its retained quiesce state before each admitted \
+                      payload or poll"
+        )
+    )]
     pub(in crate::runtime) fn mark_ingestor_instance_unready(
         &self,
         domain: &DomainName,
@@ -1218,7 +1306,12 @@ impl Runtime {
         instance_idx: u64,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = self.inner.ingestor_readiness.get_mut(&key) {
+        if let Some(mut readiness) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 (86bc9eqjv): retain the source instance readiness publication \
+             instead of finding its registry slot during polling",
+            self.inner.ingestor_readiness.get_mut(&key)
+        ) {
             readiness.ready_instances.remove(&instance_idx);
         }
     }
@@ -1248,6 +1341,14 @@ impl Runtime {
             .is_none_or(|readiness| readiness.is_ready())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source task checks its retained quiesce state before each admitted \
+                      payload or poll"
+        )
+    )]
     pub(in crate::runtime) async fn wait_if_ingestor_faulted(
         &self,
         status: &task_status::TaskStatus<RuntimeReconnectStatus>,

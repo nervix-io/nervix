@@ -5,6 +5,14 @@
 //! - **Depends on.** Bound route plans, relay services and the domain clock.
 //! - **Must not know.** Scheduled Models, error-route selection or VM compilation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "message-error route installation binds its retained execution handle"
+    )
+)]
+
 use nervix_models::DomainName;
 use nervix_primitives::collections::dash_map::Entry as DashMapEntry;
 
@@ -15,6 +23,13 @@ pub(super) struct MessageErrorRouteTarget {
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a routed message error retains and observes its own acknowledgement roots"
+    )
+)]
 pub(super) struct MessageErrorDelivery {
     pub(super) batch: RelayRecordBatch,
     pub(super) source_acks: Vec<AckSet>,
@@ -63,6 +78,13 @@ struct MessageErrorRouteTask {
 }
 
 impl MessageErrorRouteRuntime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "install or terminate the retained message error route task"
+        )
+    )]
     fn new(runtime: Runtime, plan: Arc<BoundMessageErrorRoute>) -> Arc<Self> {
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -96,6 +118,13 @@ impl MessageErrorRouteRuntime {
         route_runtime
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "install or terminate the retained message error route task"
+        )
+    )]
     async fn shutdown(&self) {
         self.shutdown.send_replace(true);
         let task = self.task.lock().take();
@@ -325,13 +354,26 @@ impl MessageErrorRouteTask {
         self.flush_all().await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the retained message error route processes each admitted error delivery and \
+                      flush poll"
+        )
+    )]
     async fn run(
         mut self,
         mut input: mpsc::Receiver<MessageErrorDelivery>,
         mut shutdown_rx: watch::Receiver<bool>,
         mut force_flush: DomainForceFlushParticipant,
     ) {
-        let domain_clock = match self.runtime.bind_domain_clock(&self.route.domain) {
+        let domain_clock = match nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "this task or concrete branch transition attaches its retained domain clock before \
+             executing in the selected lifetime",
+            self.runtime.bind_domain_clock(&self.route.domain)
+        ) {
             Ok(clock) => clock,
             Err(error) => {
                 self.runtime.events().report_error(format!(
@@ -412,6 +454,13 @@ impl MessageErrorRouteTask {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a routed message error retains and observes its own acknowledgement roots"
+    )
+)]
 async fn await_message_error_ack_alive<F>(acks: &AckSet, future: F) -> F::Output
 where
     F: std::future::Future,
@@ -429,6 +478,14 @@ where
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) async fn enqueue_message_error_delivery(
         &self,
         plan: Arc<BoundMessageErrorRoute>,
@@ -436,25 +493,49 @@ impl Runtime {
     ) -> error_stack::Result<(), MessageErrorHandlingError> {
         let route = plan.key.clone();
         let failure_route = route.clone();
-        let (route_runtime, replaced) = match self.inner.message_error_routes.entry(route) {
+        let (route_runtime, replaced) = match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the message error route \
+             before admitting deliveries",
+            self.inner.message_error_routes.entry(route)
+        ) {
             DashMapEntry::Occupied(mut entry) => {
                 if Arc::ptr_eq(&entry.get().plan, &plan) {
                     (entry.get().clone(), None)
                 } else {
-                    let route_runtime = MessageErrorRouteRuntime::new(self.clone(), plan);
+                    let route_runtime = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "Typed Ratchet 03 (86bc9eqjv): a missing or replaced message-error route \
+                         installs its one concrete retained task lifetime",
+                        MessageErrorRouteRuntime::new(self.clone(), plan)
+                    );
                     let replaced = entry.insert(route_runtime.clone());
                     (route_runtime, Some(replaced))
                 }
             }
             DashMapEntry::Vacant(entry) => {
-                let route_runtime = MessageErrorRouteRuntime::new(self.clone(), plan);
+                let route_runtime = nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "Typed Ratchet 03 (86bc9eqjv): a missing or replaced message-error route \
+                     installs its one concrete retained task lifetime",
+                    MessageErrorRouteRuntime::new(self.clone(), plan)
+                );
                 entry.insert(route_runtime.clone());
                 (route_runtime, None)
             }
         };
         let source_acks = delivery.merged_source_acks();
         if let Some(replaced) = replaced {
-            await_message_error_ack_alive(&source_acks, replaced.shutdown()).await;
+            await_message_error_ack_alive(
+                &source_acks,
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "a replaced message-error route ends its exact retained task lifetime; Typed \
+                     Ratchet 03 (86bc9eqjv) retains route handles",
+                    replaced.shutdown()
+                ),
+            )
+            .await;
         }
         await_message_error_ack_alive(&source_acks, route_runtime.sender.send(delivery))
             .await
