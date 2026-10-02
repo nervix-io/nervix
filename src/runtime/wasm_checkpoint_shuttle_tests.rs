@@ -12,7 +12,6 @@
 // scheduling step as the operation it records.
 use std::sync::Arc as StdArc;
 
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint,
     WasmCheckpointStage, WasmStateGeneration,

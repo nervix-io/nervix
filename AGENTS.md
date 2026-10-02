@@ -351,11 +351,14 @@ choose a backend.
   Work the node already accepted and keeps, which nothing can present again, such as a payload a
   quiesce buffer retained, states `QueueAdmission::WaitForPlace` and waits for a place instead; its
   owner lets shutdown and a new quiesce end that wait, and keeps the work where it was until then.
-  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other
-  file that names it needs a permission in `crates/primitives/blocking-permissions.toml` stating
-  its owner, why that owner stays outside the executor, and what bounds its work instead, such as
-  a client tool that is not a node or an external driver that waits on the network. A use without
-  a permission and a permission nothing uses both fail.
+  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers, and
+  `nervix_primitives::task::block_in_place`, which blocks the runtime worker thread that calls it,
+  belongs to no file by default. Any other file that names either needs a permission in
+  `crates/primitives/blocking-permissions.toml` listing the items it names and stating its owner,
+  why that owner stays outside the executor, and what bounds its work instead, such as a client
+  tool that is not a node or an external driver that waits on the network. A permission declares
+  its file for exactly the items it lists, so an item no permission lists for its file and a listed
+  item the file no longer names both fail.
 - Tokio's unstable runtime controls belong to the Turmoil build: only a Turmoil recipe in the
   `justfile` passes `--cfg tokio_unstable`, never Cargo configuration, a workflow or a build
   script. Turmoil is also a runner: beside `nervix-primitives`, a package whose harness drives a
@@ -1024,6 +1027,9 @@ build and the existing tests, and nothing in it changes behavior.
   registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
   independently of the ordinary tests. `just cargo-clippy-loom`, part of `just lint`, keeps every
   Loom build compiling, including the server and consensus libraries as they ship and in test mode.
+  `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with warnings
+  denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
+  fails validation.
 - `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
   natively in ordinary mode, `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
   `nspl-completion-walk`, exactly as their recipes do but under LLVM source instrumentation, and

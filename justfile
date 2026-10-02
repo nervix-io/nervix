@@ -311,6 +311,10 @@ test-primitives-compile:
     cargo test --package nervix-primitives --features native --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
+# The packages whose `shuttle_` checks `test-shuttle` explores and whose test builds
+# `shuttle-clippy-targets` lints.
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-server"]
+
 # Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
 # randomized schedules to detect uncontrolled nondeterminism in every check. The former Loom
 # recipe is retired: acknowledgement races, the relay dispatch gate and the relay fan-out exercise
@@ -318,7 +322,7 @@ test-primitives-compile:
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    shuttle_packages=(nervix-execution nervix-interconnect nervix-client-core nervix-server)
+    shuttle_packages=({{ quote(shuttle_test_packages) }})
     for shuttle_package in "${shuttle_packages[@]}"; do
         just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
         SHUTTLE_CHECK_NONDETERMINISM=1 \
@@ -1390,12 +1394,20 @@ ordinary-clippy-targets: \
     *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
     (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
+# Lint every Shuttle build: each library under the mode, the primitive boundary, and each
+# package `test-shuttle` explores in test mode. The full validation matrix runs the same targets.
+cargo-clippy-shuttle jobs=default_jobs: (run-with-jobs "shuttle-clippy-targets" jobs)
+
+# The `--profile test` targets lint each package `test-shuttle` explores as the runner builds it,
+# with its checks compiled. The library targets never compile them, so a warning in a check would
+# otherwise pass validation and the Shuttle job alike.
 [private, parallel]
 shuttle-clippy-targets: \
     *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
     *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
     *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"])
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
+    *(clippy-target *shuttle_test_packages ["--lib", "--profile", "test", "--features", "shuttle"])
 
 [private, parallel]
 turmoil-clippy-targets: \

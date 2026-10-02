@@ -420,7 +420,7 @@ impl<T> EventQueue<T> {
     }
 
     /// Whether the generation the queue belongs to has ended.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "shuttle")))]
     pub(crate) fn is_closed(&self) -> bool {
         self.inner.state.lock().condition == QueueCondition::Closed
     }
