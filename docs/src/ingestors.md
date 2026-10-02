@@ -208,6 +208,14 @@ routing, and domain pacing use the configuration in effect at delivery, so a cod
 alteration decodes payloads buffered during its hold. `TIMESTAMP NOW` therefore records delivery
 time. Bounds are per instance, and an endpoint has an independent buffer on every serving node.
 
+A payload stays in its buffer, counted in the buffered records and bytes and within `MAX SIZE`,
+until its messages enter their ingest group, and overflow never discards it while it drains. Its
+sender was already answered or its source has moved past it, so when its codec's `ON INGESTION`
+transformation finds the node's extension workers full, the payload waits for them rather than
+being refused, ahead of work that asks after it, and nothing behind it drains first. A new quiesce
+or a shutdown ends that wait and leaves the payload at the front of the buffer. A payload its codec
+rejects is reported and dropped, as any failure after it was retained is.
+
 Memory pressure never adds buffered bytes. During memory-pressure quiesce, a `BUFFER` push source
 drops and counts new payloads, polling sources skip polls, and endpoints reject. Payloads already
 buffered by an overlapping alteration remain retained. `DROP` continues to discard and `SUSPEND`
@@ -896,9 +904,11 @@ A body whose codec runs an `ON INGESTION` transformation is unfolded on the node
 workers. When they cannot take it now, the body is rejected the same way: HTTP answers 503 without
 `Retry-After`, and an established WebSocket closes with 1013. The body was not decoded, so its
 sender may send it again; a body its codec rejects is still accepted and reported as a decode
-failure. A body `BUFFER` retained is unfolded when it drains after resume; if the extension workers
-cannot take it then, it is reported as an ingestor error and not delivered, like any other retained
-body that fails after its 202.
+failure. A body `BUFFER` retained was already answered 202, so when it drains after resume and the
+extension workers cannot take it, it waits for them instead. It stays in the buffer, counted in the
+ingestor's buffered records and bytes, until they unfold it, and the bodies behind it follow in
+order. A body its codec rejects as it drains is reported as an ingestor error and not delivered,
+like any other retained body that fails after its 202.
 
 A WebSocket connection retains the route and signaling protocol selected at upgrade. Stopping or
 replacing its endpoint source ends that intake lifetime, including signaling data intake. During

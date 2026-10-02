@@ -53,6 +53,10 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn state_checkpoint_announcements_are_lost(&self) -> bool {
+        false
+    }
+
     pub(in crate::runtime) fn wasm_checkpoint_storage_fails(&self) -> bool {
         false
     }

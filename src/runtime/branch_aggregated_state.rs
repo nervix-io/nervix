@@ -15,6 +15,15 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one branch state placement",
+        bound = "one installed primary/replica role set and synchronous role replacement",
+        reason = "assignment roles belong to the retained replicated state"
+    )
+)]
 pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
     roles: nervix_primitives::sync::blocking::RwLock<StateReplicationRoles>,
@@ -28,6 +37,14 @@ pub(super) struct ReplicatedBranchAggregatedState {
 }
 
 impl ReplicatedBranchAggregatedState {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
@@ -80,6 +97,14 @@ impl ReplicatedBranchAggregatedState {
         lsm
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn latest_snapshot(
         &self,
         metrics: &RuntimeMetrics,
@@ -98,6 +123,14 @@ impl ReplicatedBranchAggregatedState {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn apply_snapshot(
         &self,
         metrics: &RuntimeMetrics,
@@ -117,6 +150,14 @@ impl ReplicatedBranchAggregatedState {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn restore_persisted_snapshot(
         &self,
         metrics: &RuntimeMetrics,

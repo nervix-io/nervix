@@ -1,8 +1,8 @@
 """Run the pinned compiler acquisition inventory and require complete, current evidence.
 
 The ordinary Rust source scanner retains its disjoint rules. This module owns Cargo execution,
-worktree/cache identity and completion; the driver owns resolved API classification. Inventory
-mode reports acquisitions without claiming that reviewed policy scopes have passed.
+worktree/cache identity and completion; the compiler owns source contracts and diagnostics.
+Inventory mode uses ordinary warning levels and does not claim that the diagnostic gate passed.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ TOOLING = pathlib.Path("tools/nervix-lint")
 
 
 class AnalysisError(Exception):
-    """Compiler, declared coverage, freshness or scope validation failed."""
+    """Compiler, declared coverage or current analysis failed."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,10 +90,7 @@ def source_inputs(root: pathlib.Path) -> dict[str, str]:
     inputs = {}
     for name in sorted(set(tracked.split("\0"))):
         path = root / name
-        # The reviewed policy is validated on every invocation and fingerprinted separately.
-        if name in {"debt-baseline.json", str(TOOLING / "scopes.json"), str(TOOLING / "review-context.json")}:
-            continue
-        if name and path.is_file() and path.suffix in {".rs", ".toml", ".lock", ".fbs", ".proto", ".json"}:
+        if name and path.is_file() and path.suffix in {".rs", ".toml", ".lock", ".fbs", ".proto", ".json", ".py"}:
             inputs[name] = digest(path)
     return inputs
 
@@ -130,7 +127,7 @@ def load_configurations(root: pathlib.Path) -> list[Configuration]:
 
 
 class Runner:
-    def __init__(self, root: pathlib.Path, target: pathlib.Path) -> None:
+    def __init__(self, root: pathlib.Path, target: pathlib.Path, *, inventory: bool = False) -> None:
         self.root = root.resolve()
         self.target = target.resolve()
         self.driver = self.target / "typed-ratchet/driver/debug/nervix-lint-driver"
@@ -140,6 +137,7 @@ class Runner:
         self.compiler = compiler_identity(self.root)
         self.inputs = source_inputs(self.root)
         self.environment = dict(os.environ)
+        self.environment["NERVIX_LINT_MODE"] = "inventory" if inventory else "gate"
         if self.environment.get("RUSTC_WORKSPACE_WRAPPER"):
             raise AnalysisError("RUSTC_WORKSPACE_WRAPPER is already set; cannot compose another driver")
         sysroot = command(["rustup", "run", TOOLCHAIN, "rustc", "--print", "sysroot"], cwd=self.root).strip()
@@ -147,6 +145,7 @@ class Runner:
         previous = self.environment.get("LD_LIBRARY_PATH")
         self.environment["LD_LIBRARY_PATH"] = library_path + (":" + previous if previous else "")
         payload = {
+            "mode": self.environment["NERVIX_LINT_MODE"],
             "root": str(self.root),
             "compiler": self.compiler,
             "driver": digest(self.driver),
@@ -230,9 +229,20 @@ class Runner:
             messages.append(message)
         if status or not any(message.get("reason") == "build-finished" and message.get("success") is True for message in messages):
             raise AnalysisError(f"{configuration.name}: compiler run failed or did not finish; evidence: {log}")
+        self.check_diagnostics(messages)
         return messages
 
+    def check_diagnostics(self, messages: list[dict[str, Any]]) -> None:
+        if self.environment.get("NERVIX_LINT_MODE") == "inventory":
+            return
+        for message in messages:
+            diagnostic = message.get("message", {})
+            code = diagnostic.get("code") or {}
+            if message.get("reason") == "compiler-message" and code.get("code", "").startswith("nervix::"):
+                raise AnalysisError("unresolved Nervix diagnostic in required gate; repair it or document one operation with expect")
+
     def validate_reports(self, configuration: Configuration, expected: dict[str, Any], messages: list[dict[str, Any]], reports: pathlib.Path) -> dict[str, Any]:
+        self.check_diagnostics(messages)
         covered = set()
         accepted = {}
         files = {}
@@ -355,54 +365,25 @@ class Runner:
         return evidence
 
 
-def review_inputs(inputs: dict[str, str]) -> dict[str, str]:
-    """Bind frequency reviews to callers and feature inputs as well as acquisition bodies.
-
-    This selects the product source context, not a hotness policy. Tooling implementation changes
-    invalidate compiler evidence; its catalog and declared configurations invalidate reviews too.
-    """
-    declarations = {str(TOOLING / "catalog.json"), str(TOOLING / "configurations.toml"), str(TOOLING / "rust-toolchain.toml")}
-    return {name: value for name, value in inputs.items()
-            if not name.startswith(str(TOOLING) + "/") or name in declarations}
-
-
-def policy(runner: Runner, evidence: list[dict[str, Any]], *, inventory: bool) -> list[dict[str, Any]]:
-    if not inventory:
-        context = json.loads((runner.root / TOOLING / "review-context.json").read_text())
-        if not isinstance(context, dict) or set(context) != {"inputs"}:
-            raise AnalysisError("invalid review context; expected reviewed input fingerprints")
-        reviewed = context["inputs"]
-        if not isinstance(reviewed, dict) or any(not isinstance(name, str) or not isinstance(value, str)
-                                                 for name, value in reviewed.items()):
-            raise AnalysisError("invalid review context; expected source names and fingerprints")
-        current = review_inputs(runner.inputs)
-        if reviewed != current:
-            changed = sorted(name for name in set(reviewed) | set(current)
-                             if reviewed.get(name) != current.get(name))
-            raise AnalysisError(f"stale review context; re-review affected callers and scopes: {changed}")
+def summarize(runner: Runner, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     reports = [report for configuration in evidence for report in configuration["reports"].values()]
-    scopes = [] if inventory else json.loads((runner.root / TOOLING / "scopes.json").read_text())
-    payload = {"reports": reports, "scopes": scopes, "source_sha256": runner.inputs}
     executable = runner.target / "typed-ratchet/driver/debug/nervix-lint-report"
-    args = [str(executable), *( ["--inventory"] if inventory else [])]
+    args = [str(executable)]
     if os.environ.get("NERVIX_NATIVE_COVERAGE_ATTEMPT"):
         args = [sys.executable, str(runner.root / "scripts/native_coverage.py"), "exec", *args]
-    completed = subprocess.run(args, input=encode(payload), capture_output=True)
+    completed = subprocess.run(args, input=encode(reports), capture_output=True)
     if completed.returncode:
-        raise AnalysisError(f"report/scope validation failed:\n{completed.stderr.decode()}")
+        raise AnalysisError(f"generated report validation failed:\n{completed.stderr.decode()}")
     return json.loads(completed.stdout)
 
 
-def render_finding(classified: dict[str, Any]) -> str:
-    acquisition, scope = classified["acquisition"], classified["scope"]
-    findings = [finding for values in acquisition["configurations"].values() for finding in values]
+def render_finding(site: dict[str, Any]) -> str:
+    findings = [finding for values in site["configurations"].values() for finding in values]
     operations = sorted({f"{finding['receiver_type']}.{finding['operation']} ({finding['acquisition']})" for finding in findings})
+    owners = sorted({finding["owner"] for finding in findings})
+    contracts = sorted({json.dumps(finding["context"], sort_keys=True) for finding in findings})
     origins = sorted({origin["macro_name"] + " at " + origin["call_site"] for finding in findings for origin in finding["expansion"]})
-    text = f"data_plane_lock_acquisitions: {', '.join(operations)}; {scope['disposition']['class']}; owner {', '.join(scope['owners'])}; frequency {scope['frequency']}; {scope['rationale']}; configurations {', '.join(acquisition['configurations'])}"
-    if scope["disposition"]["class"] == "bounded_protocol":
-        text += f"; key {scope['disposition']['key']}; bound {scope['disposition']['bound']}"
-    if scope["disposition"]["class"] == "debt":
-        text += "; delivery " + scope["disposition"]["delivery"]
+    text = f"synchronization: {', '.join(operations)}; owner {', '.join(owners)}; source contracts {', '.join(contracts)}; configurations {', '.join(site['configurations'])}"
     if origins:
         text += "; expansions " + ", ".join(origins)
     return text
@@ -413,36 +394,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=pathlib.Path, default=ROOT)
     parser.add_argument("--target-dir", type=pathlib.Path, default=pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")))
     parser.add_argument("--configuration", action="append")
+    parser.add_argument("--turmoil-child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--fixture-mode", choices=["ordinary", "shuttle", "loom", "turmoil"])
     parser.add_argument("--fresh", action="store_true", help="run Cargo even when complete evidence already exists")
     parser.add_argument("--recompile", action="store_true", help="discard authored artifacts in the isolated analysis build before running Cargo")
-    parser.add_argument("--inventory", action="store_true", help="report acquisitions; do not claim the reviewed policy gate passed")
+    parser.add_argument("--inventory", action="store_true", help="report acquisitions using ordinary warning levels; requires the full matrix for the diagnostic gate")
     parser.add_argument("--output", type=pathlib.Path)
-    parser.add_argument("--show", action="store_true", help="print every classified finding with its review")
+    parser.add_argument("--show", action="store_true", help="print every compiler finding and its source contract")
     args = parser.parse_args(argv)
     try:
-        runner = Runner(args.root, args.target_dir)
+        runner = Runner(args.root, args.target_dir, inventory=args.inventory)
+        source_identity = hashlib.sha256(encode(runner.inputs)).hexdigest()
         if args.fixture_mode:
             features = () if args.fixture_mode == "ordinary" else (args.fixture_mode,)
             configurations = [Configuration("fixture-" + args.fixture_mode, str(TOOLING / "fixtures/Cargo.toml"), (), features=features)]
         else:
             configurations = load_configurations(args.root)
             if args.configuration:
-                if not args.inventory:
+                if not args.inventory and not args.turmoil_child:
                     raise AnalysisError("selected configurations are inventory only; the policy gate requires the whole declared matrix")
                 selected = set(args.configuration)
                 configurations = [configuration for configuration in configurations if configuration.name in selected]
                 if {configuration.name for configuration in configurations} != selected:
                     raise AnalysisError("unknown requested configuration")
+        if args.turmoil_child and (args.fixture_mode or not args.configuration or len(configurations) != 1 or "turmoil" not in configurations[0].features or "--cfg tokio_unstable" not in os.environ.get("RUSTFLAGS", "")):
+            raise AnalysisError("Turmoil child requires its single declared configuration and the just recipe's tokio_unstable setting")
         evidence = []
         for configuration in configurations:
             if args.recompile:
                 runner.clean_authored_artifacts(configuration, runner.expected_targets(configuration), runner.target / "typed-ratchet/build" / configuration.name)
             if "turmoil" in configuration.features:
                 nested_output = runner.work / "turmoil.json"
-                nested = ["just", "typed-ratchet-turmoil", "--root", str(args.root), "--target-dir", str(args.target_dir), "--inventory", "--configuration", configuration.name, "--output", str(nested_output)]
+                nested = ["just", "typed-ratchet-turmoil", "--root", str(args.root), "--target-dir", str(args.target_dir), "--turmoil-child", "--configuration", configuration.name, "--output", str(nested_output)]
                 if args.fixture_mode:
-                    nested = ["just", "typed-ratchet-turmoil", "--fixture-mode", "turmoil", "--inventory", "--output", str(nested_output)]
+                    nested = ["just", "typed-ratchet-turmoil", "--root", str(args.root), "--target-dir", str(args.target_dir), "--fixture-mode", "turmoil", "--output", str(nested_output)]
+                if args.inventory:
+                    nested.append("--inventory")
                 if args.fresh:
                     nested.append("--fresh")
                 if args.recompile:
@@ -456,20 +443,19 @@ def main(argv: list[str] | None = None) -> int:
                         raise AnalysisError("Turmoil evidence is incomplete or belongs to another compiler/worktree")
                     if [entry["configuration"]["name"] for entry in separate["evidence"]] != [configuration.name]:
                         raise AnalysisError("Turmoil evidence covers different configurations")
+                    if separate.get("diagnostics_checked") != (not args.inventory) or separate.get("source_identity") != source_identity:
+                        raise AnalysisError("Turmoil evidence has a different diagnostic mode or source/dependency inputs")
                     evidence.extend(separate["evidence"])
                     continue
             evidence.append(runner.analyze(configuration, fresh=args.fresh or args.recompile))
-        sites = policy(runner, evidence, inventory=args.inventory)
-        report = {"identity": runner.identity, "compiler": runner.compiler, "root": str(runner.root), "configurations": [entry["configuration"] for entry in evidence], "evidence": evidence, "findings": sites, "complete": True, "policy_checked": not args.inventory}
-        if not args.inventory:
-            report["policy_sha256"] = digest(runner.root / TOOLING / "scopes.json")
-            report["review_context_sha256"] = digest(runner.root / TOOLING / "review-context.json")
-            report["debt"] = sum(site["scope"]["disposition"]["class"] == "debt" for site in sites)
-            if args.show:
-                for site in sites:
-                    acquisition = site["acquisition"]
-                    finding = next(iter(acquisition["configurations"].values()))[0]
-                    print(f"{acquisition['site']['path']}:{finding['span']['line']}:{finding['span']['column'] + 1}: {render_finding(site)}")
+        sites = summarize(runner, evidence)
+        if source_inputs(runner.root) != runner.inputs:
+            raise AnalysisError("source/configuration/dependency inputs changed during matrix analysis")
+        report = {"identity": runner.identity, "source_identity": source_identity, "compiler": runner.compiler, "root": str(runner.root), "configurations": [entry["configuration"] for entry in evidence], "evidence": evidence, "findings": sites, "complete": True, "matrix_complete": not (args.fixture_mode or args.configuration), "diagnostics_checked": not args.inventory}
+        if args.show:
+            for site in sites:
+                finding = next(iter(site["configurations"].values()))[0]
+                print(f"{site['site']['path']}:{finding['span']['line']}:{finding['span']['column'] + 1}: {render_finding(site)}")
         destination = args.output or runner.work / "inventory.json"
         atomic_json(destination, report)
         print(f"typed ratchet: {len(report['findings'])} authored acquisition sites; inventory: {destination}")

@@ -9,6 +9,15 @@
 //! - **Must not know.** Product configuration, NSPL syntax, connector implementations, or runtime
 //!   ownership beyond the typed values needed to select a seam.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "the testing harness owns failure seams and observations; these are not product \
+                  graph state"
+    )
+)]
+
 use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
@@ -139,6 +148,9 @@ struct FaultInjectionState {
     /// Wall time already elapsed when the next newly supplied mapping for a domain starts.
     domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
+    /// While set, every node drops every runtime-state checkpoint announcement it receives, as if
+    /// each was lost on the way.
+    state_checkpoint_announcements_lost: AtomicBool,
     /// While set, every node's WASM guest-state checkpoint fails to reach its stable storage.
     wasm_checkpoint_storage_failing: AtomicBool,
     /// While set, every coordinated WASM reset fails while building its fresh guest instance.
@@ -359,6 +371,7 @@ impl Default for FaultInjection {
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
+                state_checkpoint_announcements_lost: AtomicBool::new(false),
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
@@ -1454,6 +1467,14 @@ impl FaultInjection {
             .store(true, Ordering::Release);
     }
 
+    /// Make every node drop every runtime-state checkpoint announcement it receives, so replicas
+    /// learn of new checkpoints only through their own catch-up rounds.
+    pub fn lose_state_checkpoint_announcements(&self) {
+        self.inner
+            .state_checkpoint_announcements_lost
+            .store(true, Ordering::Release);
+    }
+
     /// Make every node's WASM guest-state checkpoint fail to reach its stable storage, as a failing
     /// disk would, until [`Self::restore_wasm_checkpoint_storage`].
     pub fn fail_wasm_checkpoint_storage(&self) {
@@ -1580,6 +1601,15 @@ impl FaultInjection {
             .means_shutdown("leadership transfer watcher");
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained emitter fault mode",
+            key = "one test emitter",
+            bound = "one keyed read; the guard ends with the synchronous predicate"
+        )
+    )]
     pub(crate) fn emitter_should_fail(&self, emitter: &EmitterName) -> bool {
         self.inner
             .emitter_faults
@@ -1587,6 +1617,15 @@ impl FaultInjection {
             .is_some_and(|mode| *mode == EmitterFaultMode::Fail)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained emitter stall mode",
+            key = "one test emitter",
+            bound = "one keyed read; the guard ends with the synchronous predicate"
+        )
+    )]
     pub(crate) fn emitter_should_stall(&self, emitter: &EmitterName) -> bool {
         self.inner
             .emitter_faults
@@ -1594,12 +1633,30 @@ impl FaultInjection {
             .is_some_and(|mode| *mode == EmitterFaultMode::Stall)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained ingestor failure seam",
+            key = "one test ingestor",
+            bound = "one keyed presence read with no retained guard"
+        )
+    )]
     pub(crate) fn ingestor_is_failed(&self, ingestor: &IngestorName) -> bool {
         self.inner
             .failed_ingestors
             .contains_key(&ingestor.as_str().to_ascii_lowercase())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained sink unavailability seam",
+            key = "one test emitter",
+            bound = "one keyed presence read with no retained guard"
+        )
+    )]
     pub(crate) fn sink_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.inner
             .unavailable_sink_clients
@@ -1608,6 +1665,15 @@ impl FaultInjection {
 
     /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
     /// sink resolves before it stalls.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario consumes its single armed sink-write stall",
+            key = "one test emitter",
+            bound = "one keyed removal; no guard survives the operation"
+        )
+    )]
     pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
         self.inner
             .stalled_emitter_sinks
@@ -1837,6 +1903,15 @@ impl FaultInjection {
         self.inner.entity_gate_pauses.remove(&key);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned ingestor dispatch pause is claimed once",
+            key = "one test domain and ingestor",
+            bound = "one keyed read and removal; guards end before the test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_ingestor_dispatch_if_armed(
         &self,
         domain: &DomainName,
@@ -1881,6 +1956,16 @@ impl FaultInjection {
         self.inner.entity_gate_response_pauses.remove(&key);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned admission pause chooses an exact or domain selector",
+            key = "one test domain and optional branch",
+            bound = "at most two keyed reads and one removal; guards end before the \
+                     test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_remote_relay_admission_if_armed(
         &self,
         domain: &DomainName,
@@ -1921,6 +2006,15 @@ impl FaultInjection {
 
     /// Hold a guest-state checkpoint of `processor` at `window` when a scenario armed that window
     /// and no other checkpoint has claimed it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned guest checkpoint window is claimed once",
+            key = "one test domain, processor and checkpoint window",
+            bound = "one keyed read; its guard ends before the test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_wasm_checkpoint_if_armed(
         &self,
         domain: &DomainName,
@@ -1949,6 +2043,16 @@ impl FaultInjection {
 
     /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
     /// lost on the way. Only the first acknowledgement on an armed link is lost.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario drops only the first acknowledgement on an armed link",
+            key = "one test resolver and registrar link",
+            bound = "one keyed read and a terminal retained watch transition; no guard across \
+                     await"
+        )
+    )]
     pub(crate) fn loses_remote_acknowledgement(
         &self,
         resolver: &ClusterNodeName,
@@ -1970,6 +2074,15 @@ impl FaultInjection {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned remote dispatch pause is consumed at its selected seam",
+            key = "one test domain",
+            bound = "one keyed read and removal; guards end before the test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_remote_relay_dispatch_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
         let Some(pause) = self
@@ -1985,6 +2098,15 @@ impl FaultInjection {
         self.inner.remote_relay_dispatch_pauses.remove(&key);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned relay fanout pause is claimed once",
+            key = "one test domain",
+            bound = "one keyed read; its guard ends before the test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
         let Some(pause) = self
@@ -2152,6 +2274,12 @@ impl FaultInjection {
     pub(crate) fn state_replica_polling_is_paused(&self) -> bool {
         self.inner
             .state_replica_polling_paused
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn state_checkpoint_announcements_are_lost(&self) -> bool {
+        self.inner
+            .state_checkpoint_announcements_lost
             .load(Ordering::Acquire)
     }
 

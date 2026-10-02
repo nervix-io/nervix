@@ -58,6 +58,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
 | `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
 | `replica-progress` | `nervix-checkpoint-replication` replica reports, offers and announcer steps against the monotonic quorum contract: each replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone | bounded report, offer, step, cancel and retire sequences over four replicas and sixteen revisions, v1 | 256 | 256 bytes |
+| `replica-catch-up` | `nervix-server` an owner's catalog of branch checkpoints and a replica's catch-up rounds against convergence: whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, the replica holds every branch its lifecycle names at the owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form and encoding unchanged | bounded start, publish, stop, catalog replacement, naming, eviction, lifecycle, announcement and round sequences over four branches, unbranched work included, v1 | 256 | 256 bytes |
 | `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
 | `typed-catalog-scope` | `nervix-lint-report` complete catalog/scope parsing equality | resolved identities and all reviewed disposition variants, v1 | 256 | 32 bytes |
 | `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration and review | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
@@ -74,9 +75,9 @@ target or executable fails the run before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
 bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
-remain enforced by the shared runner. Validation uses a 16-CPU runner and the same overall limit
-to complete Clippy, compiled discovery and the declared compiler synchronization matrix from a
-cold cache.
+remain enforced by the shared runner. Validation uses a 4-CPU runner and the same overall limit
+to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
+inventory and compiled discovery run through the dedicated Bolero commands and workflow.
 The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
 instrumentation and the full modeled suite.
 
@@ -169,7 +170,7 @@ just fuzz-list
 just test-bolero
 just test-bolero nspl-model
 just fuzz nspl-model 30
-just fuzz-all
+just fuzz-all 30
 just fuzz-replay nspl-model <saved-input>
 just fuzz-reduce nspl-model <saved-input>
 ```
@@ -181,7 +182,8 @@ corpus paths different from Bolero's actual work directory. Discovery executes o
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
-`just validate` and `just validate-ci` include this gate.
+`just validate` and `just validate-ci` do not run Bolero checks. The dedicated Bolero commands
+perform discovery before their selected action, and the ordinary Bolero CI job owns this check.
 
 `just test-bolero` requires the configured randomized-case count and checked-in corpus
 replay for every selected property, checking Bolero's reported input counts. Fuzz runs use real
@@ -190,16 +192,13 @@ profile enables optimization, debug information, debug assertions and overflow c
 use the pinned nightly and keep the configured kache wrapper. Modeled execution features are
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
 
-Every pull request runs the required ordinary randomized/corpus job. The sanitizer libFuzzer job
-runs on a pull request only when it carries the `fuzz` label: adding the label starts the job for
-the pull request's current code, and every later push to it fuzzes again. Scheduled and manual
-campaigns always run it. The `bolero-gate` check requires the ordinary job for every change and the
-libFuzzer job wherever it was due, and a labeled run never cancels the run for the code. On a pull
-request every target shares ten minutes of engine time, the inventory's
-`pr_fuzz_total_seconds`, split evenly, so a new target shortens the others' share instead of
-lengthening the job. `just fuzz` and `just fuzz-all` use the same share when no duration is given;
-a duration they are given is seconds per target. Scheduled or manual campaigns give each target five
-minutes. Job limits reserve additional time for compilation, artifacts and cleanup. A
+PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
+the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
+[CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
+their own compiler flags. Adding or removing the
+label reevaluates the jobs; the gate requires sanitizer success when the label is present and
+accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs execute the ordinary
+properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 
@@ -217,7 +216,6 @@ and input length, and assert the complete current-value contract. Register the p
 test name, source, domain version, features, corpus, budgets and invariant in the inventory.
 Check in current-domain seeds, run `just validate-bolero`,
 `just test-bolero <id>` and `just fuzz <id> 30`, then run
-`just validate`. The ordinary CI job covers the target in the same change; label the pull request
-`fuzz` to have CI fuzz it as well before it merges. A public product
+`just validate`. Both CI jobs include the target in the same change. A public product
 bug found this way first gets a failing focused reproducer and affected public Cucumber scenario
 before its fix.

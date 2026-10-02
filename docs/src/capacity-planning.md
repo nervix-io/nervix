@@ -61,7 +61,9 @@ share of admission; it is not guaranteed an idle thread. Apart from the classes,
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
 Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that is refused, and
-the work that submitted it reports the refusal as its own failure.
+the work that submitted it reports the refusal as its own failure. The one exception is work the
+node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
+place instead, while its payload stays counted in the buffer.
 
 Transient memory is 275 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work, 32 MiB for

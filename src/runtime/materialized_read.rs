@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "materialized dependencies are read repeatedly by the concrete branch processing \
+                  path"
+    )
+)]
+
 use error_stack::ResultExt as _;
 
 use super::{state_snapshot_exchange::MaterializedSnapshotExchangeError, *};
@@ -114,23 +123,25 @@ impl Runtime {
         let routing = self
             .domain_routing(domain)
             .map(|routing| routing.load_full());
-        let states = self
-            .inner
-            .replicated_materialized_stream_states
-            .iter()
-            .filter(|state| {
-                let placement = state.key();
-                placement.domain == *domain
-                    && placement.kind == ModelKind::Relay
-                    && placement.identifier == ModelName::from(relay)
-            })
-            .map(|state| {
-                (
-                    state.key().clone(),
-                    ReplicatedMaterializedRelayState::read(state.value()),
-                )
-            })
-            .collect::<Vec<_>>();
+        let states = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner.replicated_materialized_stream_states.iter()
+        )
+        .filter(|state| {
+            let placement = state.key();
+            placement.domain == *domain
+                && placement.kind == ModelKind::Relay
+                && placement.identifier == ModelName::from(relay)
+        })
+        .map(|state| {
+            (
+                state.key().clone(),
+                ReplicatedMaterializedRelayState::read(state.value()),
+            )
+        })
+        .collect::<Vec<_>>();
         let mut reports = Vec::new();
         let mut found = false;
         for (placement, state) in states {
@@ -205,11 +216,15 @@ impl Runtime {
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         let placements = self.materialized_record_placements(domain, relay, branch_key)?;
         for placement in &placements {
-            let state = self
-                .inner
-                .replicated_materialized_stream_states
-                .get(placement)
-                .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
+            let state = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+                 dependencies instead of table lookup",
+                self.inner
+                    .replicated_materialized_stream_states
+                    .get(placement)
+            )
+            .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
             let Some(state) = state else {
                 continue;
             };
@@ -318,11 +333,14 @@ impl Runtime {
         routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
     ) -> Option<StdArc<arrow_schema::Schema>> {
-        if let Some(state) = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(placement)
-        {
+        if let Some(state) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner
+                .replicated_materialized_stream_states
+                .get(placement)
+        ) {
             return Some(
                 ReplicatedMaterializedRelayState::read(state.value())
                     .schema()
@@ -493,7 +511,12 @@ impl Runtime {
             branch_key: None,
             ..placement.clone()
         };
-        let Some(presence) = self.inner.relay_branch_presences.get(&presence_placement) else {
+        let Some(presence) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner.relay_branch_presences.get(&presence_placement)
+        ) else {
             return true;
         };
         presence.contains(key.as_ref())
@@ -603,23 +626,25 @@ impl Runtime {
                 })
                 .collect());
         }
-        let states = self
-            .inner
-            .replicated_materialized_stream_states
-            .iter()
-            .filter(|state| {
-                let key = state.key();
-                key.domain == *domain
-                    && key.kind == ModelKind::Relay
-                    && key.identifier == ModelName::from(relay)
-            })
-            .map(|state| {
-                (
-                    state.key().clone(),
-                    ReplicatedMaterializedRelayState::read(state.value()),
-                )
-            })
-            .collect::<Vec<_>>();
+        let states = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner.replicated_materialized_stream_states.iter()
+        )
+        .filter(|state| {
+            let key = state.key();
+            key.domain == *domain
+                && key.kind == ModelKind::Relay
+                && key.identifier == ModelName::from(relay)
+        })
+        .map(|state| {
+            (
+                state.key().clone(),
+                ReplicatedMaterializedRelayState::read(state.value()),
+            )
+        })
+        .collect::<Vec<_>>();
         if states.is_empty() {
             let Some(restored) = self
                 .open_stored_materialized_snapshot(Some(&routing), &placement)

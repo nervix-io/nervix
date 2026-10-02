@@ -4,7 +4,7 @@
 
 Baseline `b02ef87b60a54a2278e8bab8d742b94761769d1b`; candidate is this change. The
 `Cargo.lock` blob is `61d5f820a54403ea652efdd19709ed5ca53fc754`. Measurements were made on
-2026-09-25 on a 32-logical-CPU Intel Core i9-14900HX, x86-64 Linux, with rustc 1.98.0,
+2026-09-25 on a 32-logical-CPU Intel Core i9-14900HX, x86-64 Linux, with rustc 1.99.0,
 LLVM 22.1.8, Arrow 58.4.0, Criterion 0.5.1, Aho-Corasick 1.1.5, and simd-json 0.17.3.
 Other worktrees were building on this host during part of the run, so short timings are
 diagnostic, not a statistically stable throughput claim. `perf` hardware counters were unavailable

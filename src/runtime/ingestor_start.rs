@@ -8,6 +8,15 @@
 //! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "source task installation resolves retained branch, clock and acknowledgement \
+                  owners"
+    )
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -374,6 +383,7 @@ impl Runtime {
             }
             let decoded = decode_ingested_payload(
                 self.executor(),
+                QueueAdmission::RefuseWhenFull,
                 &codec,
                 line.as_bytes(),
                 &mut decoder,

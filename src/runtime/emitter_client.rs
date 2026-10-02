@@ -6,6 +6,14 @@
 //! - **Depends on.** The emitter host's prepared-payload contract and client delivery owner.
 //! - **Must not know.** Session transport, cluster routing, NSPL text, or an external connector.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "sink client setup resolves the configured driver and retained pool"
+    )
+)]
+
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_ipc::writer::StreamWriter;
 use async_trait::async_trait;
@@ -47,6 +55,13 @@ pub(super) struct ClientEmitterSink {
 }
 
 impl ClientEmitterSink {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "installation publishes one concrete client-emitter endpoint lifetime"
+        )
+    )]
     pub(super) fn new(
         context: &EmitterSinkContext,
         plan: &ClientSinkPlan,

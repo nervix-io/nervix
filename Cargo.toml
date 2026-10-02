@@ -96,6 +96,7 @@ hyper-util = { workspace = true, features = [
   "tokio",
   "http1",
 ] }
+imbl = { workspace = true }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
@@ -252,7 +253,6 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
-trybuild = { workspace = true }
 zeromq = { workspace = true }
 
 [[test]]
@@ -362,12 +362,15 @@ version = "0.1.0-dev"
 # Tokio's unstable runtime knobs are enabled only by the Turmoil test recipes, which pass
 # `--cfg tokio_unstable`; the simulation runner refuses to run without them.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(tokio_unstable)",
+  "cfg(nervix_lint)",
+] }
 
 [workspace.lints.clippy]
-as-conversions = "deny"
-disallowed-methods = "deny"
-disallowed-types = "deny"
+as_conversions = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
 
 [workspace.metadata.tooling]
 workspaces = ["tools/nervix-lint"]
@@ -713,7 +716,6 @@ tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"
 triomphe = "0.1"
-trybuild = "1.0"
 typed-builder = "0.20"
 typetag = "0.2"
 ubyte = "0.10.4"

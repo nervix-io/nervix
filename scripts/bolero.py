@@ -68,15 +68,9 @@ class Inventory:
     cargo_bolero: str
     nightly: str
     sanitizer: str
-    # The engine time one PR fuzz pass has for all registered targets together.
-    pr_fuzz_total_seconds: int
+    pr_fuzz_seconds: int
     campaign_fuzz_seconds: int
     targets: tuple[Target, ...]
-
-    def pr_fuzz_seconds_per_target(self) -> int:
-        """Each target's even share of the PR fuzz budget, so a pass over every target stays within
-        it however many targets are registered."""
-        return self.pr_fuzz_total_seconds // len(self.targets)
 
 
 def positive_int(value: Any, name: str) -> int:
@@ -104,7 +98,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
         "cargo_bolero",
         "nightly",
         "sanitizer",
-        "pr_fuzz_total_seconds",
+        "pr_fuzz_seconds",
         "campaign_fuzz_seconds",
     }:
         raise BoleroError("tool section has missing or unknown fields")
@@ -189,24 +183,16 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
         duplicates = [value for value, count in Counter(values).items() if count > 1]
         if duplicates:
             raise BoleroError(f"duplicate {label}: {duplicates}")
-    inventory = Inventory(
+    return Inventory(
         cargo_bolero=tool["cargo_bolero"],
         nightly=tool["nightly"],
         sanitizer=tool["sanitizer"],
-        pr_fuzz_total_seconds=positive_int(
-            tool["pr_fuzz_total_seconds"], "pr_fuzz_total_seconds"
-        ),
+        pr_fuzz_seconds=positive_int(tool["pr_fuzz_seconds"], "pr_fuzz_seconds"),
         campaign_fuzz_seconds=positive_int(
             tool["campaign_fuzz_seconds"], "campaign_fuzz_seconds"
         ),
         targets=tuple(targets),
     )
-    if inventory.pr_fuzz_seconds_per_target() < 1:
-        raise BoleroError(
-            f"pr_fuzz_total_seconds = {inventory.pr_fuzz_total_seconds} gives each of the "
-            f"{len(targets)} targets less than one second"
-        )
-    return inventory
 
 
 def package_manifests() -> dict[str, pathlib.Path]:
@@ -714,11 +700,6 @@ def fuzz_targets(
     inventory: Inventory, selected: tuple[Target, ...], duration: int
 ) -> None:
     verify_tool(inventory)
-    print(
-        f"Bolero fuzz budget: {duration}s per target, {duration * len(selected)}s in total "
-        f"for {len(selected)} selected",
-        flush=True,
-    )
     executed = 0
     completed = 0
     for target in selected:
@@ -1038,7 +1019,7 @@ def main() -> int:
         duration = (
             args.duration
             if args.duration is not None
-            else inventory.pr_fuzz_seconds_per_target()
+            else inventory.pr_fuzz_seconds
         )
         positive_int(duration, "duration")
         fuzz_targets(inventory, selected, duration)

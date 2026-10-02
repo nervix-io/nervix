@@ -4,9 +4,7 @@
 campaign_fuzz_seconds = 300
 cargo_bolero = "0.13.4"
 nightly = "nightly-2026-09-17"
-# Engine time a PR fuzz pass shares evenly among every target, so adding a target shortens the
-# others' share instead of lengthening the pass.
-pr_fuzz_total_seconds = 600
+pr_fuzz_seconds = 30
 sanitizer = "address"
 
 [[target]]
@@ -22,6 +20,21 @@ package = "nervix-server"
 random_iterations = 256
 source = "src/runtime/endpoint_route_table_tests.rs"
 test = "runtime::endpoint_route_table::tests::bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__replica_branch_checkpoints__tests__bolero_a_replica_catches_up_every_named_branch_with_its_owner/corpus"
+domain_version = 1
+features = []
+id = "replica-catch-up"
+invariant = "Whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, a replica holds every branch its lifecycle names at its owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_replication/replica_branch_checkpoints_tests.rs"
+test = "runtime::state_replication::replica_branch_checkpoints::tests::bolero_a_replica_catches_up_every_named_branch_with_its_owner"
 test_target = "lib"
 
 [[target]]
@@ -477,17 +490,17 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_catalog_and_scopes_round_trip/corpus"
+corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_source_contracts_round_trip/corpus"
 domain_version = 1
 features = []
-id = "typed-catalog-scope"
-invariant = "Current API catalog and reviewed scope values round trip completely and classification requires resolved definition identity."
+id = "typed-source-contract"
+invariant = "Current source contracts round trip completely and preserve their frequency and acquisition semantics."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"
 random_iterations = 256
 source = "tools/nervix-lint/report/src/tests.rs"
-test = "tests::bolero_catalog_and_scopes_round_trip"
+test = "tests::bolero_source_contracts_round_trip"
 test_target = "lib"
 
 
@@ -497,7 +510,7 @@ corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_authored_sites_pre
 domain_version = 1
 features = []
 id = "typed-site-union"
-invariant = "Aggregation is idempotent at authored sites, preserves every compiled configuration and validates reviewed scope freshness."
+invariant = "Aggregation is idempotent at authored sites and preserves complete findings and source contracts in every compiled configuration."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"

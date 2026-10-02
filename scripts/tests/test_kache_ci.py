@@ -35,9 +35,8 @@ class KacheCiTests(unittest.TestCase):
             "tests",
             "scenarios",
             "client-conformance",
-            "shuttle",
-            "runtime-capabilities",
             "extra-tests",
+            "shuttle",
             "turmoil",
             "benchmark",
             "build-book",
@@ -103,6 +102,7 @@ class KacheCiTests(unittest.TestCase):
                         "bucket": "kache-ci",
                         "region": "auto",
                         "endpoint": "https://account-id.r2.cloudflarestorage.com",
+                        "pull_request_prefix": "artifacts-pr",
                     }
                 }
             },
