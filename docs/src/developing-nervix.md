@@ -123,9 +123,10 @@ check can run without a GPU.
 The pinned runtime forces warnings to errors on its core and CUDA targets. Release builds pass
 CMake's `--compile-no-warning-as-error` switch so newer LLVM diagnostics remain visible warnings.
 Actual compiler errors still fail the build. This setting participates in the artifact identity.
-CUDA compilation uses a generated Abseil header that excludes a Clang-only relocation builtin
-from NVCC's device frontend. The fetched dependencies remain unchanged, and the correction is
-part of the build identity.
+CUDA compilation uses generated Abseil headers that exclude Clang's relocation builtin,
+class nullability annotations, and lifetime annotations from NVCC compilations. Ordinary Clang
+compilation retains those features. The fetched dependencies remain unchanged, and the
+corrections are part of the build identity.
 
 Every Linux package is built with CUDA 13 enabled. Linux amd64 and
 [arm64 SBSA](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-installation-guide-linux/index.html#system-requirements)

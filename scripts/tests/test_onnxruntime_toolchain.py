@@ -6,6 +6,7 @@ from pathlib import Path
 from shutil import which
 import subprocess
 import tempfile
+from textwrap import dedent
 import unittest
 from unittest.mock import Mock, patch
 
@@ -234,6 +235,115 @@ class NativeToolchainTests(unittest.TestCase):
         with patch.dict(os.environ, {"CC": "clang-23", "CXX": "clang++-23"}):
             second = BuildSpec.create("linux/amd64", repo=ROOT)
         self.assertEqual(first.object_key, second.object_key)
+
+    @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
+                         "requires CMake, Ninja, and installed Clang")
+    def test_abseil_headers_exclude_host_features_when_nvcc_preprocesses_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            abseil = root / "abseil"
+            traits = abseil / "absl/meta/type_traits.h"
+            nullability = abseil / "absl/base/nullability.h"
+            attributes = abseil / "absl/base/attributes.h"
+            traits.parent.mkdir(parents=True)
+            nullability.parent.mkdir(parents=True)
+            # Exercise the pinned dependency's feature gates without downloading dependencies.
+            traits.write_text(dedent("""\
+                #pragma once
+                #define ABSL_HAVE_BUILTIN(x) __has_builtin(x)
+                #if ABSL_HAVE_BUILTIN(__builtin_is_cpp_trivially_relocatable)
+                inline constexpr bool relocation_builtin = true;
+                #else
+                inline constexpr bool relocation_builtin = false;
+                #endif
+                """))
+            nullability.write_text(dedent("""\
+                #pragma once
+                #define ABSL_HAVE_FEATURE(x) __has_feature(x)
+                #if defined(__clang__) && !defined(__OBJC__) && ABSL_HAVE_FEATURE(nullability_on_classes)
+                #define absl_nonnull _Nonnull
+                #define absl_nullable _Nullable
+                #define absl_nullability_unknown _Null_unspecified
+                #else
+                #define absl_nonnull
+                #define absl_nullable
+                #define absl_nullability_unknown
+                #endif
+                #if ABSL_HAVE_FEATURE(nullability_on_classes)
+                #define ABSL_NULLABILITY_COMPATIBLE _Nullable
+                #else
+                #define ABSL_NULLABILITY_COMPATIBLE
+                #endif
+                """))
+            attributes.write_text(dedent("""\
+                #pragma once
+                #define ABSL_HAVE_CPP_ATTRIBUTE(x) __has_cpp_attribute(x)
+                #define ABSL_HAVE_ATTRIBUTE(x) __has_attribute(x)
+                #if ABSL_HAVE_CPP_ATTRIBUTE(clang::lifetimebound)
+                #define ABSL_ATTRIBUTE_LIFETIME_BOUND [[clang::lifetimebound]]
+                #elif ABSL_HAVE_CPP_ATTRIBUTE(msvc::lifetimebound)
+                #define ABSL_ATTRIBUTE_LIFETIME_BOUND [[msvc::lifetimebound]]
+                #elif ABSL_HAVE_ATTRIBUTE(lifetimebound)
+                #define ABSL_ATTRIBUTE_LIFETIME_BOUND __attribute__((lifetimebound))
+                #else
+                #define ABSL_ATTRIBUTE_LIFETIME_BOUND
+                #endif
+                """))
+            original_headers = {path: path.read_bytes() for path in (traits, nullability, attributes)}
+            (root / "empty.cc").write_text("int value = 0;\n")
+            (root / "CMakeLists.txt").write_text(dedent(f"""\
+                cmake_minimum_required(VERSION 3.29)
+                project(nervix_cuda_headers LANGUAGES CXX)
+                set(abseil_cpp_SOURCE_DIR "{abseil}")
+                add_library(onnxruntime STATIC empty.cc)
+                add_library(onnxruntime_providers_shared SHARED empty.cc)
+                add_library(onnxruntime_providers_cuda SHARED empty.cc)
+                """))
+            build = root / "build"
+            result = subprocess.run([
+                "cmake", "-S", str(root), "-B", str(build), "-G", "Ninja",
+                f"-DCMAKE_CXX_COMPILER={CLANG_CXX}", "-Donnxruntime_USE_CUDA=ON",
+                f"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES={ROOT}/scripts/onnxruntime/aggregate.cmake",
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source = root / "probe.cc"
+            source.write_text(dedent("""\
+                #include "absl/meta/type_traits.h"
+                #include "absl/base/nullability.h"
+                #include "absl/base/attributes.h"
+                #include <string_view>
+                #define STRINGIFY_TOKEN(x) #x
+                #define STRINGIFY(x) STRINGIFY_TOKEN(x)
+                #if defined(__NVCC__)
+                static_assert(!relocation_builtin);
+                static_assert(std::string_view(STRINGIFY(ABSL_NULLABILITY_COMPATIBLE)).empty());
+                static_assert(std::string_view(STRINGIFY(absl_nonnull)).empty());
+                static_assert(std::string_view(STRINGIFY(absl_nullable)).empty());
+                static_assert(std::string_view(STRINGIFY(absl_nullability_unknown)).empty());
+                static_assert(std::string_view(STRINGIFY(ABSL_ATTRIBUTE_LIFETIME_BOUND)).empty());
+                #else
+                static_assert(relocation_builtin == __has_builtin(__builtin_is_cpp_trivially_relocatable));
+                #if __has_feature(nullability_on_classes)
+                static_assert(std::string_view(STRINGIFY(ABSL_NULLABILITY_COMPATIBLE)) == "_Nullable");
+                static_assert(std::string_view(STRINGIFY(absl_nonnull)) == "_Nonnull");
+                static_assert(std::string_view(STRINGIFY(absl_nullable)) == "_Nullable");
+                static_assert(std::string_view(STRINGIFY(absl_nullability_unknown)) == "_Null_unspecified");
+                #endif
+                #if __has_cpp_attribute(clang::lifetimebound)
+                static_assert(std::string_view(STRINGIFY(ABSL_ATTRIBUTE_LIFETIME_BOUND)) == "[[clang::lifetimebound]]");
+                #endif
+                #endif
+                """))
+            for mode in ("host", "nvcc"):
+                with self.subTest(mode=mode):
+                    command = [CLANG_CXX, "-std=c++20", "-fsyntax-only",
+                               "-I", str(build / "nervix-cuda-includes"), "-I", str(abseil)]
+                    if mode == "nvcc":
+                        command.append("-D__NVCC__=1")
+                    result = subprocess.run([*command, str(source)], capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for path, content in original_headers.items():
+                self.assertEqual(path.read_bytes(), content)
 
     @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
                          "requires CMake, Ninja, and installed Clang")

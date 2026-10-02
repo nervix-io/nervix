@@ -20,6 +20,31 @@ function(nervix_cuda_abseil)
   set(headers "${CMAKE_BINARY_DIR}/nervix-cuda-includes")
   file(MAKE_DIRECTORY "${headers}/absl/meta")
   file(CONFIGURE OUTPUT "${headers}/absl/meta/type_traits.h" CONTENT "${content}" @ONLY)
+
+  # Clang also advertises class nullability annotations that NVCC's device frontend cannot parse.
+  set(source "${abseil_cpp_SOURCE_DIR}/absl/base/nullability.h")
+  file(READ "${source}" content)
+  set(guard "ABSL_HAVE_FEATURE(nullability_on_classes)")
+  string(FIND "${content}" "${guard}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "The pinned Abseil nullability header does not match the NVCC patch")
+  endif()
+  string(REPLACE "${guard}" "${guard} && !defined(__NVCC__)" content "${content}")
+  file(MAKE_DIRECTORY "${headers}/absl/base")
+  file(CONFIGURE OUTPUT "${headers}/absl/base/nullability.h" CONTENT "${content}" @ONLY)
+
+  # NVCC emits lifetimebound annotations in positions that Clang rejects.
+  set(source "${abseil_cpp_SOURCE_DIR}/absl/base/attributes.h")
+  file(READ "${source}" content)
+  set(guard "#if ABSL_HAVE_CPP_ATTRIBUTE(clang::lifetimebound)")
+  string(FIND "${content}" "${guard}" position)
+  if(position EQUAL -1)
+    message(FATAL_ERROR "The pinned Abseil lifetime attribute does not match the NVCC patch")
+  endif()
+  string(REPLACE "${guard}"
+    "#if defined(__NVCC__)\n#define ABSL_ATTRIBUTE_LIFETIME_BOUND\n#elif ABSL_HAVE_CPP_ATTRIBUTE(clang::lifetimebound)"
+    content "${content}")
+  file(CONFIGURE OUTPUT "${headers}/absl/base/attributes.h" CONTENT "${content}" @ONLY)
   target_include_directories(onnxruntime_providers_cuda BEFORE PRIVATE
     "$<$<COMPILE_LANGUAGE:CUDA>:${headers}>")
 endfunction()
