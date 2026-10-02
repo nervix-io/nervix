@@ -207,7 +207,10 @@ Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, 
 so each configuration has its own build directory lock. `just cargo-clippy-package <package>
 [arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
 builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation.
+wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
+reads a build directory after its lint and the runner's disk cannot hold every configuration's at
+once, a target that passed deletes its own; a failed target keeps its directory, and a local run
+keeps them all for the next one.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
