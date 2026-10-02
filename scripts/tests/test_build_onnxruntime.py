@@ -544,7 +544,7 @@ class BuildCacheTests(unittest.TestCase):
         self.assertFalse(mac.cuda_enabled)
         for spec in (self.spec, arm, mac):
             self.assertEqual(spec.object_key,
-                             f"1.24.2/{spec.platform}/{spec.fingerprint}.tar.gz")
+                             f"{spec.configuration['version']}/{spec.platform}/{spec.fingerprint}.tar.gz")
 
     def test_manifest_covers_all_packaged_files(self) -> None:
         self.build_package()

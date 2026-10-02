@@ -2006,6 +2006,10 @@ verify-onnxruntime platform="native" *args: (fetch-onnxruntime platform args)
 # Normal development and CI recipes never depend on this task.
 build-artifacts platform="native" *args: (build-onnxruntime platform args)
 
+# Maintainer only: record a completed local artifact's fingerprint and SHA-256 in checksums.toml.
+pin-onnxruntime platform="native" *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts pin --platform {{ quote(platform) }} {{ args }}
+
 # Maintainer only: upload the completed, locally pinned artifact to R2.
 publish-onnxruntime platform="native" *args:
     uv run --locked python -m scripts.onnxruntime.artifacts publish --platform {{ quote(platform) }} {{ args }}

@@ -71,7 +71,7 @@ class ManagedRuntimeBuild(RuntimeBuild):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["build", "fetch", "publish", "path", "verify"])
+    parser.add_argument("operation", choices=["build", "fetch", "pin", "publish", "path", "verify"])
     parser.add_argument("--platform", default="native")
     parser.add_argument("--stage", type=Path, default=cache_root())
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 4))
@@ -104,6 +104,17 @@ def main() -> int:
                 print(path)
             elif arguments.operation == "fetch":
                 print(build.prepare())
+            elif arguments.operation == "pin":
+                if os.environ.get("CI") == "true":
+                    raise BuildError("pinning artifact checksums is a manual operation and is disabled in CI")
+                if not build.package_dir.exists():
+                    raise BuildError(f"no completed ONNX Runtime package to pin for {spec.configuration['version']} "
+                                     f"{spec.platform}; build it with just build-onnxruntime {spec.platform}")
+                checksum = build.checksum()
+                print(f'["{spec.platform}"]')
+                print(f'fingerprint = "{spec.fingerprint}"')
+                print(f'sha256 = "{checksum}"')
+                print("updated scripts/onnxruntime/checksums.toml", file=sys.stderr)
             elif arguments.operation == "publish":
                 if os.environ.get("CI") == "true":
                     raise BuildError("publishing ONNX Runtime is a manual operation and is disabled in CI")

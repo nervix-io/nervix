@@ -81,6 +81,12 @@ host tools and target SDKs, compiles with LLVM, verifies the package, and record
 installed atomically after validation. Repeating the command skips downloads, compilation, and
 compression for an already verified package. Normal recipes can immediately reuse the local result.
 
+`just pin-onnxruntime [platform]` records the fingerprint and archive SHA-256 for a completed local
+artifact in `scripts/onnxruntime/checksums.toml` and prints its TOML entry. It validates the package,
+reuses its cached archive or creates one when needed, and updates only the selected platform's pin.
+It requires a completed package matching the current manifest and build identity. Pinning needs no
+compiler or R2 credentials and performs no downloads, source compilation, or publication.
+
 `just build-onnxruntime native --force` recompiles a completed package and updates its local
 checksum pin. Use `just build-onnxruntime linux/arm64 --force` for the arm64 cross-build, or pass
 `--force` to `just build-artifacts [platform]`. A forced build cleans the selected compiler tree's
@@ -114,10 +120,7 @@ A C API program links the archive and executes a generated ONNX model before ins
 builds also initialize and load the packaged CUDA provider before running CPU inference. This
 check can run without a GPU.
 
-The pinned runtime's Linux x86 spin-pause source uses a GCC builtin signature. The build compiles
-a copy using LLVM's `_tpause` intrinsic; the downloaded source checkout remains clean, and this
-correction participates in the artifact identity.
-The CUDA group-query attention source likewise compiles from a copy with the member-template
+The CUDA group-query attention source compiles from a copy with the member-template
 disambiguator required by LLVM.
 The pinned runtime forces warnings to errors on its core and CUDA targets. Release builds pass
 CMake's `--compile-no-warning-as-error` switch so newer LLVM diagnostics remain visible warnings.

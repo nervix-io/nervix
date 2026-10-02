@@ -283,8 +283,76 @@ sys.exit(0)
                          [platform for platform in ("linux/amd64", "linux/arm64", "darwin/arm64") for _ in range(2)])
         self.assertFalse(self.log.exists())
 
+    def test_pin_records_completed_artifacts_without_compilation_or_publication(self) -> None:
+        pin_file = self.repo / "scripts/onnxruntime/checksums.toml"
+        for platform in ("linux/amd64", "linux/arm64", "darwin/arm64"):
+            with self.subTest(platform=platform):
+                previous = tomllib.loads(pin_file.read_text())
+                build = RuntimeBuild(BuildSpec.create(platform, repo=self.repo), self.root / "stage")
+                construct_package(build.package_dir, platform=platform)
+                build._seal(build.package_dir)
+                recipe = ["just", "pin-onnxruntime", platform]
+                result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                pins = tomllib.loads(pin_file.read_text())
+                expected = {"fingerprint": build.spec.fingerprint, "sha256": file_digest(build.archive())}
+                self.assertEqual(pins, {**previous, platform: expected})
+                self.assertEqual(tomllib.loads(result.stdout), {platform: expected})
+                archive = build.archive()
+                written = archive.stat().st_mtime_ns
+                result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(archive.stat().st_mtime_ns, written)
+                self.assertEqual(tomllib.loads(pin_file.read_text()), pins)
+                replacement = self.root / "rebuilt-package"
+                construct_package(replacement, platform=platform)
+                (replacement / "lib/libonnxruntime.a").write_bytes(b"!<arch>\nnew compilation")
+                build._seal(replacement)
+                shutil.rmtree(build.package_dir)
+                replacement.rename(build.package_dir)
+                result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotEqual(build.spec.artifact_checksum, expected["sha256"])
+                self.assertEqual(build.spec.artifact_checksum, file_digest(build.archive()))
+                result = subprocess.run(["just", "fetch-onnxruntime", platform], cwd=self.repo,
+                                        env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
+        self.assertFalse(self.log.exists())
+
+    def test_pin_rejects_missing_or_damaged_packages_and_ci_without_changing_pins(self) -> None:
+        pin_file = self.repo / "scripts/onnxruntime/checksums.toml"
+        original = pin_file.read_bytes()
+        recipe = ["just", "pin-onnxruntime"]
+        result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no completed ONNX Runtime package to pin", result.stderr)
+        build = RuntimeBuild(BuildSpec.create("native", repo=self.repo), self.root / "stage")
+        construct_package(build.package_dir, platform=build.spec.platform)
+        build._seal(build.package_dir)
+        archive = build.package_dir / "lib/libonnxruntime.a"
+        archive.write_bytes(b"!<arch>\nincomplete compilation")
+        result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("package file checksum mismatch", result.stderr)
+        self.assertEqual(pin_file.read_bytes(), original)
+        archive.write_bytes(b"!<arch>\nfixture")
+        self.environment["CI"] = "true"
+        result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pinning artifact checksums is a manual operation and is disabled in CI", result.stderr)
+        self.assertEqual(pin_file.read_bytes(), original)
+        self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
+        self.assertFalse(self.log.exists())
+
     def test_force_is_reserved_for_explicit_source_builds(self) -> None:
-        for recipe in ("fetch-onnxruntime", "publish-onnxruntime", "verify-onnxruntime"):
+        for recipe in ("fetch-onnxruntime", "pin-onnxruntime", "publish-onnxruntime", "verify-onnxruntime"):
             with self.subTest(recipe=recipe):
                 result = subprocess.run(["just", recipe, "native", "--force"], cwd=self.repo,
                                         env=self.environment, capture_output=True, text=True, timeout=30)
@@ -384,7 +452,7 @@ pathlib.Path(os.environ['RECIPE_PUBLICATION']).write_text('GPU verification requ
         result = subprocess.run(["just", "verify-onnxruntime"], cwd=self.repo,
                                 env=self.environment, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("verified ONNX Runtime 1.24.2 linux/amd64", result.stdout)
+        self.assertIn(f"verified ONNX Runtime {build.spec.configuration['version']} {build.spec.platform}", result.stdout)
         self.assertEqual(self.log.read_text(), "GPU verification requested")
         build.validate_package()
 
