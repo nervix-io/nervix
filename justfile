@@ -4,16 +4,17 @@ build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
-export ORT_LIB_PATH := shell("python3 -m scripts.build_onnxruntime path --unchecked")
+export NERVIX_ONNXRUNTIME_DIR := env("NERVIX_ONNXRUNTIME_DIR", env("HOME") + "/.cache/nervix-build/onnxruntime")
+export ORT_LIB_PATH := shell("python3 -m scripts.onnxruntime.artifacts path --unchecked --stage " + quote(NERVIX_ONNXRUNTIME_DIR))
 export ORT_PREFER_DYNAMIC_LINK := "0"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
 help:
     just --list
 
-# Exercise ONNX dependency preparation and its local and R2 cache failure paths.
+# Exercise ONNX artifact preparation and its local and R2 cache failure paths.
 test-onnxruntime-tooling:
-    uv run --locked python -m unittest scripts.tests.test_build_onnxruntime scripts.tests.test_onnxruntime_toolchain scripts.tests.test_onnxruntime_recipes
+    uv run --locked python -m unittest scripts.tests.test_build_onnxruntime scripts.tests.test_onnxruntime_toolchain scripts.tests.test_onnxruntime_bootstrap scripts.tests.test_onnxruntime_recipes
 
 # Install the qualified CLI version with only the libFuzzer engine.
 install-cargo-bolero:
@@ -86,9 +87,8 @@ coverage-bolero duration="2": fetch-onnxruntime
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
 
-build-deps: generate-test-onnx fetch-onnxruntime build-web-console wasm-processor-guests
-
-tests-deps: build-deps build-nspl-format build-test-cli
+# Fetch published ONNX Runtime and build Nervix's test programs, fixtures, and assets.
+tests-deps: fetch-onnxruntime generate-test-onnx build-web-console wasm-processor-guests build-nspl-format build-test-cli
 
 build-test-cli:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-cli --bin nervix-cli
@@ -1742,14 +1742,14 @@ deps-down:
 chaos *args:
     bash scripts/chaos/chaos.sh {{ args }}
 
-server *args: fetch-onnxruntime build-deps generate-dev-tls
+server *args: fetch-onnxruntime build-web-console generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \
     NERVIX_INTERCONNECT_TLS_CA="${NERVIX_INTERCONNECT_TLS_CA:-tls/dev/ca.pem}" \
     NERVIX_INTERCONNECT_TLS_CERT="${NERVIX_INTERCONNECT_TLS_CERT:-tls/dev/node.pem}" \
     NERVIX_INTERCONNECT_TLS_KEY="${NERVIX_INTERCONNECT_TLS_KEY:-tls/dev/node-key.pem}" \
     cargo run --package nervix-server --bin nervix-server -- {{ args }}
 
-client *args: build-deps
+client *args:
     cargo run --package nervix-cli -- {{ args }}
 
 build-web-console:
@@ -1782,7 +1782,7 @@ uninstall:
 [parallel]
 build-apps: build-cli build-server
 
-build-all: generate-dev-tls build-deps build-apps
+build-all: generate-dev-tls build-apps
 
 wasm-processor-rust-guest:
     #!/usr/bin/env bash
@@ -1891,23 +1891,24 @@ generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_outp
 
 # Fetch the published static artifact over public R2 HTTPS without credentials, or reuse its verified local copy; never compile.
 fetch-onnxruntime platform="native" *args:
-    uv run --locked python -m scripts.build_onnxruntime fetch --platform {{ quote(platform) }} {{ args }}
+    uv run --locked python -m scripts.onnxruntime.artifacts fetch --platform {{ quote(platform) }} {{ args }}
 
-# Maintainer only: compile a missing artifact from source with host LLVM; never a development dependency.
+# Maintainer only: compile directly with local LLVM; use [platform] --force to rebuild a completed artifact.
+# Normal development and CI depend on fetch-onnxruntime.
 build-onnxruntime platform="native" *args:
-    uv run --locked python -m scripts.build_onnxruntime build-source --platform {{ quote(platform) }} {{ args }}
+    uv run --locked python -m scripts.onnxruntime.artifacts build --platform {{ quote(platform) }} {{ args }}
 
 # Verify the prepared package through native inference; CUDA verification requires a GPU.
 verify-onnxruntime platform="native" *args: (fetch-onnxruntime platform args)
-    uv run --locked python -m scripts.build_onnxruntime verify --platform {{ quote(platform) }} {{ args }}
+    uv run --locked python -m scripts.onnxruntime.artifacts verify --platform {{ quote(platform) }} {{ args }}
 
-# Maintainer only: build if needed, pin the checksum, and publish the artifact to R2.
-publish-onnxruntime platform="native" *args: (checksum-onnxruntime platform args)
-    uv run --locked python -m scripts.build_onnxruntime publish --platform {{ quote(platform) }} {{ args }}
+# Manual task: compile external artifacts and pin their checksums for local use.
+# Normal development and CI recipes never depend on this task.
+build-artifacts platform="native" *args: (build-onnxruntime platform args)
 
-# Maintainer only: build if needed and record the artifact's SHA-256 pin.
-checksum-onnxruntime platform="native" *args: (build-onnxruntime platform args)
-    uv run --locked python -m scripts.build_onnxruntime checksum --platform {{ quote(platform) }} {{ args }}
+# Maintainer only: upload the completed, locally pinned artifact to R2.
+publish-onnxruntime platform="native" *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts publish --platform {{ quote(platform) }} {{ args }}
 
 [private]
 prepare-server-package package:
@@ -1915,7 +1916,7 @@ prepare-server-package package:
 
 # Print the absolute library directory of a validated, prepared ONNX Runtime package.
 onnxruntime-path platform="native":
-    python3 -m scripts.build_onnxruntime path --platform {{ quote(platform) }}
+    python3 -m scripts.onnxruntime.artifacts path --platform {{ quote(platform) }}
 
 reset-local-dashboard-state:
     #!/usr/bin/env bash

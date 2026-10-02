@@ -11,7 +11,7 @@ import threading
 import tomllib
 import unittest
 
-from scripts.build_onnxruntime import BuildSpec, RuntimeBuild, native_platform
+from scripts.build_onnxruntime import BuildSpec, RuntimeBuild, file_digest, native_platform
 from scripts.tests.test_build_onnxruntime import construct_package, fixture_repository
 
 
@@ -33,7 +33,8 @@ class ArtifactRecipeTests(unittest.TestCase):
 import json, os, pathlib, sys
 sys.path.insert(0, str(pathlib.Path.cwd()))
 from scripts import build_onnxruntime as builder
-assert sys.argv[1:6] == ['run', '--locked', 'python', '-m', 'scripts.build_onnxruntime']
+from scripts.onnxruntime import artifacts
+assert sys.argv[1:6] == ['run', '--locked', 'python', '-m', 'scripts.onnxruntime.artifacts']
 class Cache:
     def restore(self, spec, destination):
         return None
@@ -52,11 +53,15 @@ if os.environ.get('RECIPE_PUBLIC_URL'):
     builder.R2_PUBLIC_URL = os.environ['RECIPE_PUBLIC_URL']
 else:
     builder.R2Cache = Cache
-builder.R2Publisher.configured = lambda: Publisher()
+def publisher():
+    if os.environ.get('RECIPE_ALLOW_PUBLICATION') != 'true':
+        raise builder.BuildError('R2 publishing permissions unavailable')
+    return Publisher()
+builder.R2Publisher.configured = publisher
 def compile_artifact(self, destination):
     (destination / 'lib').mkdir()
     (destination / 'include').mkdir()
-    (destination / 'lib/libonnxruntime.a').write_bytes(b'!<arch>\\nfixture')
+    (destination / 'lib/libonnxruntime.a').write_bytes(b'!<arch>\\n' + os.environ.get('RECIPE_GENERATION', 'fixture').encode())
     (destination / 'include/onnxruntime_c_api.h').write_text('fixture header')
     (destination / 'LICENSE').write_text('fixture license')
     (destination / 'ThirdPartyNotices.txt').write_text('fixture notices')
@@ -68,9 +73,13 @@ def compile_artifact(self, destination):
             (runtime / name).write_bytes(b'fixture library')
     with pathlib.Path(os.environ['RECIPE_COMPILATION']).open('a') as stream:
         stream.write(self.spec.platform + '\\n')
-builder.RuntimeBuild._build = compile_artifact
+artifacts.ManagedRuntimeBuild._build = compile_artifact
+if os.environ.get('RECIPE_REQUIRE_REUSE') == 'true':
+    def archive(self):
+        raise AssertionError('completed artifact should not be compressed again')
+    builder.RuntimeBuild.archive = archive
 sys.argv = ['onnxruntime', *sys.argv[6:]]
-sys.exit(builder.main())
+sys.exit(artifacts.main())
 """)
         uv.chmod(0o755)
         docker = self.bin / "docker"
@@ -84,6 +93,7 @@ sys.exit(builder.main())
             "NERVIX_ONNXRUNTIME_DIR": str(self.root / "stage"),
             "RECIPE_PUBLICATION": str(self.log), "RECIPE_ARCHIVE": str(self.root / "package.tar.gz"),
             "RECIPE_COMPILATION": str(self.root / "compilation.log"),
+            "RECIPE_ALLOW_PUBLICATION": "false",
             "CC": "unavailable-clang", "CXX": "unavailable-clang++",
             "KACHE_S3_BUCKET": "fixture", "KACHE_S3_REGION": "fixture",
             "KACHE_S3_ENDPOINT": "https://fixture.r2.cloudflarestorage.com",
@@ -92,7 +102,8 @@ sys.exit(builder.main())
 
     def test_development_and_ci_require_published_artifacts_before_building_the_product(self) -> None:
         recipes = [
-            ["build-server"], ["test"], ["docker-build-debian"], ["test-admission-runtime"],
+            ["build-server"], ["server"], ["tests-deps"], ["test"], ["docker-build-debian"],
+            ["test-admission-runtime"],
             ["test-runtime"], ["test-capability-docs"], ["test-endpoint-intake"], ["bench-endpoint-routing"],
             ["bench-admitted-work"], ["bench-state-replication"], ["bench-task-handles"],
             ["coverage-task-handles"], ["coverage-runtime"], ["bench-smoke"], ["ratchet"],
@@ -111,6 +122,18 @@ sys.exit(builder.main())
                     self.assertIn("ask a maintainer", result.stderr)
         self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
 
+    def test_recipes_select_the_same_home_cache_from_every_workspace(self) -> None:
+        second_repo = fixture_repository(self.root / "second-workspace")
+        environment = self.environment.copy()
+        environment.pop("NERVIX_ONNXRUNTIME_DIR")
+        for repo in (self.repo, second_repo):
+            result = subprocess.run(["just", "--evaluate", "ORT_LIB_PATH"], cwd=repo,
+                                    env=environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            spec = BuildSpec.create("native", repo=repo)
+            expected = Path.home() / ".cache/nervix-build/onnxruntime/packages" / spec.fingerprint / "lib"
+            self.assertEqual(Path(result.stdout.strip()), expected)
+
     def test_fetch_reuses_a_pinned_artifact_without_host_compilers(self) -> None:
         build = RuntimeBuild(BuildSpec.create("native", repo=self.repo), self.root / "stage")
         build.package_dir.mkdir(parents=True)
@@ -125,13 +148,16 @@ sys.exit(builder.main())
             self.assertIn(str(build.package_dir / "lib"), result.stdout)
         self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
 
-    def test_fetch_downloads_public_artifacts_and_reuses_them_without_credentials(self) -> None:
+    def test_fetch_downloads_public_artifacts_and_reuses_them_across_workspaces_without_credentials(self) -> None:
         spec = BuildSpec.create("native", repo=self.repo)
         producer = RuntimeBuild(spec, self.root / "producer")
         producer.package_dir.mkdir(parents=True)
         construct_package(producer.package_dir, platform=spec.platform)
         producer._seal(producer.package_dir)
         producer.checksum()
+        second_repo = fixture_repository(self.root / "second-workspace")
+        shutil.copyfile(self.repo / "scripts/onnxruntime/checksums.toml",
+                        second_repo / "scripts/onnxruntime/checksums.toml")
         payload = producer.archive().read_bytes()
         requests = []
 
@@ -155,13 +181,14 @@ sys.exit(builder.main())
                 self.environment["CI"] = ci
                 stage = self.root / ("ci-download" if ci else "development-download")
                 self.environment["NERVIX_ONNXRUNTIME_DIR"] = str(stage)
-                for _ in range(2):
-                    result = subprocess.run(["just", "fetch-onnxruntime"], cwd=self.repo, env=self.environment,
-                                            capture_output=True, text=True, timeout=30)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    build = RuntimeBuild(spec, stage)
-                    build.validate_package()
-                    self.assertEqual(result.stdout.strip(), str(build.package_dir / "lib"))
+                for repo in (self.repo, second_repo):
+                    for _ in range(2):
+                        result = subprocess.run(["just", "fetch-onnxruntime"], cwd=repo, env=self.environment,
+                                                capture_output=True, text=True, timeout=30)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        build = RuntimeBuild(BuildSpec.create("native", repo=repo), stage)
+                        build.validate_package()
+                        self.assertEqual(result.stdout.strip(), str(build.package_dir / "lib"))
         finally:
             server.shutdown()
             worker.join(timeout=10)
@@ -169,20 +196,86 @@ sys.exit(builder.main())
         self.assertEqual(requests, [(f"/onnxruntime/{spec.object_key}", "nervix-onnxruntime-artifacts")] * 2)
         self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
 
-    def test_maintainer_publication_builds_and_pins_the_artifact_through_dependencies(self) -> None:
-        result = subprocess.run(["just", "publish-onnxruntime"], cwd=self.repo, env=self.environment,
-                                capture_output=True, text=True, timeout=30)
+    def test_local_artifact_build_is_reused_without_publication_permissions(self) -> None:
+        result = subprocess.run(["just", "build-artifacts", "native", "--jobs", "2"], cwd=self.repo,
+                                env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build = RuntimeBuild(BuildSpec.create("native", repo=self.repo), self.root / "stage")
+        build.validate_package()
+        self.assertEqual(build.spec.artifact_checksum, file_digest(build.archive()))
+        self.environment["RECIPE_REQUIRE_REUSE"] = "true"
+        for recipe in (["fetch-onnxruntime"], ["build-onnxruntime", "native"], ["build-artifacts", "native"]):
+            result = subprocess.run(["just", *recipe], cwd=self.repo, env=self.environment,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(str(build.package_dir / "lib"), result.stdout)
+        self.assertEqual(Path(self.environment["RECIPE_COMPILATION"]).read_text(), build.spec.platform + "\n")
+        self.assertFalse(self.log.exists())
+
+    def test_force_rebuild_replaces_and_repins_each_platform_without_publication(self) -> None:
+        for platform in ("linux/amd64", "linux/arm64", "darwin/arm64"):
+            with self.subTest(platform=platform):
+                self.environment["RECIPE_GENERATION"] = "first"
+                result = subprocess.run(["just", "build-onnxruntime", platform], cwd=self.repo,
+                                        env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                build = RuntimeBuild(BuildSpec.create(platform, repo=self.repo), self.root / "stage")
+                previous_checksum = build.spec.artifact_checksum
+                self.environment["RECIPE_GENERATION"] = "rebuilt"
+                result = subprocess.run(["just", "build-artifacts", platform, "--force"], cwd=self.repo,
+                                        env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotEqual(build.spec.artifact_checksum, previous_checksum)
+                self.assertEqual(build.spec.artifact_checksum, file_digest(build.archive()))
+                self.assertEqual((build.package_dir / "lib/libonnxruntime.a").read_bytes(), b"!<arch>\nrebuilt")
+                self.environment["RECIPE_REQUIRE_REUSE"] = "true"
+                for recipe in ("fetch-onnxruntime", "build-onnxruntime"):
+                    result = subprocess.run(["just", recipe, platform], cwd=self.repo,
+                                            env=self.environment, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.environment.pop("RECIPE_REQUIRE_REUSE")
+        self.assertEqual(Path(self.environment["RECIPE_COMPILATION"]).read_text().splitlines(),
+                         [platform for platform in ("linux/amd64", "linux/arm64", "darwin/arm64") for _ in range(2)])
+        self.assertFalse(self.log.exists())
+
+    def test_force_is_reserved_for_explicit_source_builds(self) -> None:
+        for recipe in ("fetch-onnxruntime", "publish-onnxruntime", "verify-onnxruntime"):
+            with self.subTest(recipe=recipe):
+                result = subprocess.run(["just", recipe, "native", "--force"], cwd=self.repo,
+                                        env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--force is only valid for build", result.stderr)
+        self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
+        self.assertFalse(self.log.exists())
+
+    def test_publication_uploads_the_completed_local_build(self) -> None:
+        built = subprocess.run(["just", "build-onnxruntime", "native", "--jobs", "2"], cwd=self.repo,
+                               env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.environment["RECIPE_ALLOW_PUBLICATION"] = "true"
+        result = subprocess.run(["just", "publish-onnxruntime", "native", "--jobs", "2"], cwd=self.repo,
+                                env=self.environment, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         build = RuntimeBuild(BuildSpec.create("native", repo=self.repo), self.root / "stage")
         build.prepare()
         self.assertEqual(Path(self.environment["RECIPE_COMPILATION"]).read_text(), build.spec.platform + "\n")
         self.assertIn("published ONNX Runtime to R2", result.stdout)
 
+    def test_publication_requires_a_completed_package(self) -> None:
+        result = subprocess.run(["just", "publish-onnxruntime"], cwd=self.repo, env=self.environment,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no completed ONNX Runtime package to publish", result.stderr)
+        self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
+        self.assertFalse(self.log.exists())
+
     def test_manual_publish_uses_the_completed_package_and_is_disabled_in_ci(self) -> None:
+        self.environment["RECIPE_ALLOW_PUBLICATION"] = "true"
         build = RuntimeBuild(BuildSpec.create("native", repo=self.repo), self.root / "stage")
         build.package_dir.mkdir(parents=True)
         construct_package(build.package_dir, platform=build.spec.platform)
         build._seal(build.package_dir)
+        build.checksum()
         recipe = ["just", "publish-onnxruntime", "native"]
         result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
                                 capture_output=True, text=True, timeout=30)
@@ -195,6 +288,7 @@ sys.exit(builder.main())
         self.assertEqual(json.loads(records[0]), {
             "key": f"onnxruntime/{build.spec.object_key}", "package": str(build.package_dir),
         })
+        self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
         self.environment["CI"] = "true"
         blocked = subprocess.run(recipe, cwd=self.repo, env=self.environment,
                                  capture_output=True, text=True, timeout=30)

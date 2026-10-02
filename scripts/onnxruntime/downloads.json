@@ -1,0 +1,253 @@
+{
+  "cmake": {
+    "linux/amd64": {
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.2.3/cmake-4.2.3-linux-x86_64.tar.gz",
+      "sha256": "5bb505d5e0cca0480a330f7f27ccf52c2b8b5214c5bba97df08899f5ef650c23",
+      "strip_root": true
+    },
+    "linux/arm64": {
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.2.3/cmake-4.2.3-linux-aarch64.tar.gz",
+      "sha256": "e529c75f18f27ba27c52b329efe7b1f98dc32ccc0c6d193c7ab343f888962672",
+      "strip_root": true
+    },
+    "darwin/arm64": {
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.2.3/cmake-4.2.3-macos-universal.tar.gz",
+      "sha256": "c2302d3e9c48daabee5ea7c4db4b2b93b989bcc89dae8b760880e00120641b5b",
+      "strip_root": true
+    }
+  },
+  "ninja": {
+    "linux/amd64": {
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip",
+      "sha256": "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6",
+      "strip_root": false
+    },
+    "linux/arm64": {
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux-aarch64.zip",
+      "sha256": "fd2cacc8050a7f12a16a2e48f9e06fca5c14fc4c2bee2babb67b58be17a607fc",
+      "strip_root": false
+    },
+    "darwin/arm64": {
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip",
+      "sha256": "c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b",
+      "strip_root": false
+    }
+  },
+  "cuda": {
+    "cuda_nvcc": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "706b996fefc59dc8d64d317fdf48d0aa84c4ae004eff43009dd918f40c5cc66a",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-sbsa/cuda_nvcc-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "28d201ffc46627abd919d623d85e721f33c92cf02749e023cd66d6fa0f1206a7",
+        "strip_root": true
+      }
+    },
+    "libnvvm": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvvm/linux-x86_64/libnvvm-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "e013fce38130d2337ea695aadc5ddd5dcfb78f9107903d72492b9819539749bb",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvvm/linux-sbsa/libnvvm-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "366da4383992b8d13df63ffecd3a8315815955f50da0c0288ca5123212f67e02",
+        "strip_root": true
+      }
+    },
+    "cuda_crt": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/linux-x86_64/cuda_crt-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "fbc31fed55b7255591f3a19f575ca078827f5e6757d317d009f7ec1e69fcde4b",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/linux-sbsa/cuda_crt-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "04f8fd03bc5a99507f5d531cc65452881c8949311bc5cc87bc1fe05a7607fd9e",
+        "strip_root": true
+      }
+    },
+    "cuda_cudart": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "539edc1056e44d319f2112e9971c6415d78d4dde04b3f6ffbd20ec808e718526",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-sbsa/cuda_cudart-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "379363621c59c8d6faeea2f7a527eae91fc7db8cb2121cb42fe7972a48462f67",
+        "strip_root": true
+      }
+    },
+    "cuda_cccl": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/linux-x86_64/cuda_cccl-linux-x86_64-13.2.27-archive.tar.xz",
+        "sha256": "56e1bafb29faa87375b0484814870046530b88c0a421909096892f027ec1927b",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/linux-sbsa/cuda_cccl-linux-sbsa-13.2.27-archive.tar.xz",
+        "sha256": "1587f83b92aef54414cd118723ec1e4c118e14c70ac7779e13caa941f8030faf",
+        "strip_root": true
+      }
+    },
+    "cuda_nvrtc": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/linux-x86_64/cuda_nvrtc-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "5a1897196b0276a82969db61ff4b3cd8d91fcf354f616945ed927f7224485083",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/linux-sbsa/cuda_nvrtc-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "fae41bccac873951144119e94ab2ebd50d188d382129110eecb382c8fdefbabf",
+        "strip_root": true
+      }
+    },
+    "libcublas": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux-x86_64/libcublas-linux-x86_64-13.3.0.5-archive.tar.xz",
+        "sha256": "9f3c23d55b098d9159c435db59f228df79493152a778d4d367e7d60470d8c64b",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux-sbsa/libcublas-linux-sbsa-13.3.0.5-archive.tar.xz",
+        "sha256": "edadce2ec8d997ffb08f5a1c4ee6b1d14a2c883f2aa11e1d3208b4f077d9225f",
+        "strip_root": true
+      }
+    },
+    "libcurand": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/linux-x86_64/libcurand-linux-x86_64-10.4.2.51-archive.tar.xz",
+        "sha256": "a089985ac24fff42b719ab42a015c7df39cd721a3d83bfa4af9249b9fca883dc",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/linux-sbsa/libcurand-linux-sbsa-10.4.2.51-archive.tar.xz",
+        "sha256": "4808a52a0fe82391b90391e853d7b6e532af91bd01f78822869a17ad9d72e9f8",
+        "strip_root": true
+      }
+    },
+    "libcufft": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/linux-x86_64/libcufft-linux-x86_64-12.2.0.37-archive.tar.xz",
+        "sha256": "2485f3a7be0493d5218b81b6def79abf38e3696c22a95b969d3b4e562d3211d1",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/linux-sbsa/libcufft-linux-sbsa-12.2.0.37-archive.tar.xz",
+        "sha256": "ce7781d9b1f9c35f9ba4aba190e696c6b1f55d5f752505b6ada53d0508954924",
+        "strip_root": true
+      }
+    },
+    "libcusparse": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/linux-x86_64/libcusparse-linux-x86_64-12.7.9.17-archive.tar.xz",
+        "sha256": "ccca88501fe9a432b199f489137f6edd76984fb2aa03108dab07fa475b9aa8bd",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/linux-sbsa/libcusparse-linux-sbsa-12.7.9.17-archive.tar.xz",
+        "sha256": "8101fb23683820618a84ea90332723ff536a6d6fa6341b953f09066348cdb29e",
+        "strip_root": true
+      }
+    },
+    "libnvjitlink": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvjitlink/linux-x86_64/libnvjitlink-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "da61b98d12fcba818967a39fdd282f42718477f02765515223678c0abdd0ce25",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvjitlink/linux-sbsa/libnvjitlink-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "505bc52ad0596d1486e8d44a260b2db5f02fbe257de4a108ab006d6851084af2",
+        "strip_root": true
+      }
+    },
+    "cuda_culibos": {
+      "linux/amd64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_culibos/linux-x86_64/cuda_culibos-linux-x86_64-13.2.51-archive.tar.xz",
+        "sha256": "dece3cdb7954d276e07eb23bee882a24627f431654cdeeef2bcee2d22669d93c",
+        "strip_root": true
+      },
+      "linux/arm64": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_culibos/linux-sbsa/cuda_culibos-linux-sbsa-13.2.51-archive.tar.xz",
+        "sha256": "35244c4d90e5b1aa48fb98d655f6dfa3f9e4f7d0ac220266ebf85c0928a7524b",
+        "strip_root": true
+      }
+    }
+  },
+  "cudnn": {
+    "linux/amd64": {
+      "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda13-archive.tar.xz",
+      "sha256": "73f091ee57668dc18e8b1b61811c0ddff2ec0b762efe613e9f27f9ebfd6c20c0",
+      "strip_root": true
+    },
+    "linux/arm64": {
+      "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-sbsa/cudnn-linux-sbsa-9.20.0.48_cuda13-archive.tar.xz",
+      "sha256": "21140178191c620799ec09620ae1d89649c9b95441163f8ef956e1493a0e3704",
+      "strip_root": true
+    }
+  },
+  "arm64_sysroot": [
+    {
+      "url": "https://deb.debian.org/debian/pool/main/c/cross-toolchain-base/libc6-arm64-cross_2.41-11cross1_all.deb",
+      "sha256": "82cd3a0c6754d36cb5a7acbd9fa64c38080a681608c41165736dc88438acfc71",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/c/cross-toolchain-base/libc6-dev-arm64-cross_2.41-11cross1_all.deb",
+      "sha256": "61e0b87dec4929abc9fb345ef324139498bf23ddbf0b10ca3a743b59c8ddf8bb",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/c/cross-toolchain-base/linux-libc-dev-arm64-cross_6.12.38-1cross1_all.deb",
+      "sha256": "fd77c13fedf057038732ef1c4fc06edd753d08092fd5f92c4629551f1f69870f",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libstdc++6-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "81e667b7dad2d378defcc502e9772fe4f435a27e62b7a33a20576885b02e9693",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libstdc++-14-dev-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "dc2d2e1e59f2687a6cb30f3f5ed25e795f2769482ee8f7c5835f00481bf5ad65",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libgcc-14-dev-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "44d31567993f2f138638e3088cc75240d13c7d8a2ebe69032aafd37bc35c7a6f",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libgcc-s1-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "272751f04dc1669c6368005ccea3496b28626c720c64c98980f705350f4c6b6b",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libatomic1-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "4a8636b3c0ab2b0a568d0b7fc6ab089d5b22f7a3e696fe8784acef594c88dc1c",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libgomp1-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "6ef2c0825f2edd319d333fe6db721e1efa79bd595a5149c9f5a17af04dd40978",
+      "strip_root": false
+    },
+    {
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libitm1-arm64-cross_14.2.0-19cross1_all.deb",
+      "sha256": "61e0bc450632165ef442d0db2902831c878fe24bb89f08e7257e02d4eff92b40",
+      "strip_root": false
+    }
+  ],
+  "qemu": {
+    "linux/amd64": {
+      "url": "https://deb.debian.org/debian/pool/main/q/qemu/qemu-user_10.0.13+ds-0+deb13u1_amd64.deb",
+      "sha256": "ca6ede739327a20ae5a3498230c8a3a9a072c586e131bc6bcc1201eb1725e336",
+      "strip_root": false
+    }
+  }
+}

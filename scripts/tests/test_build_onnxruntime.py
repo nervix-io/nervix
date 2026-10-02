@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def fixture_repository(destination: Path) -> Path:
     names = [*BuildSpec.create(repo=ROOT).identity["build_files"],
-             "scripts/onnxruntime/manifest.toml", "scripts/onnxruntime/upload.py", "justfile", "rust-toolchain.toml",
+             "scripts/onnxruntime/manifest.toml", "scripts/onnxruntime/upload.py",
+             "scripts/onnxruntime/artifacts.py", "scripts/onnxruntime/bootstrap.py",
+             "scripts/onnxruntime/downloads.json", "justfile", "rust-toolchain.toml",
              "pyproject.toml", "uv.lock"]
     for name in names:
         target = destination / name

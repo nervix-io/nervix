@@ -1,9 +1,9 @@
 {
   "inputs": {
     ".cargo/audit.toml": "0aa355dd164e2310dbc2e08e0826717eb7acd809dbd22830a05d5b31d49c83ba",
-    ".taplo.toml": "a17361e08df7cc8e3bbd460597854a36284f57d6184b642c3c8f8c2492e6c32d",
-    "Cargo.lock": "690990226d142f8eab5fd1be6c425ba3409ed7876d0a8d8f07a145375cbd296c",
-    "Cargo.toml": "28bb850faf16f4e23d6eb682b54f1f980ee0006646236eaf447b229de9c22f3a",
+    ".taplo.toml": "51bee09006d2af38b91f4ea60c11bfa2c12b01cfb22f300a29a97ef32185feb5",
+    "Cargo.lock": "b07d871d797c6ddad0497f67b733573c9badeb271b229bc4912367e272e2fa0e",
+    "Cargo.toml": "6a26eac5e00a9b34f23712e98756d17b44076cc7e3e0be7c7ebc5a4f91fe8de0",
     "benches/admitted_work.rs": "e1795ec5396228a9cee0ad0565c06effa79dfdf231156485c6487eae90659bd8",
     "benches/benchmarks/hot-path-ingest/benchmark.toml": "12b67ea5c4457b8ae0a6e1bcddd8f51598921f6ab3c9fc9d5e1386cd9de41af8",
     "benches/benchmarks/hot-path-processor/benchmark.toml": "609a968d31f3bace6f6ab5ab77d29743825ac001b844893ca1efdbc4d75aa8ae",
@@ -17,6 +17,7 @@
     "benches/subscription_row_encoding.rs": "e501e0a1b5582be7abb3f8112b1a93921c6919d97f9c6d5787a71b3a2d9f2dff",
     "benches/task_handles.rs": "0b7918d0391309f70c4cef82a4a389ef00539b3116702212e5dbd49eccd58443",
     "benches/wasm_checkpoint.rs": "d64e3fc7bdb1802ababcf344f63429b414a93d74bf1b5b2036833918b9548f9c",
+    "build.rs": "21382eba17a95c39b9d255f4fcc013348708f5fcd0c364b936046e3caf64e3d4",
     "clippy.toml": "8319767221cddf0184f73306d110fc578525b694791262b8dd7c7a7b22aade70",
     "cloudflare/docs-worker/package.json": "609158e6c5fbc237939fa3ddf7faab80ab690bdc0c8d584414a885130103c4e8",
     "crates/approx-into/Cargo.toml": "d299673e7de6a24af60e1ac0e632748f255f426f6967c637e892abeebaaddbd1",
@@ -676,11 +677,13 @@
     "examples/wasm-processors/rust-guest/Cargo.lock": "d012ab7077260a7627c703890be8d700cf4acc906deb61554a6d18ffbe39d891",
     "examples/wasm-processors/rust-guest/Cargo.toml": "05bb237b8dbd648811745f5a77e2292a2549a4131bef21f7a3b0d60912c9ceb7",
     "examples/wasm-processors/rust-guest/src/lib.rs": "ec81167644039cd408fe0884475f02097376076313b82049554f21b1ee22e6c8",
-    "pyproject.toml": "9cfe31e4608ceaa6a9746ae3c9c6aad7a10727114c424afc8a50f9c9137b0e6e",
+    "pyproject.toml": "478c19193e6ca113e2ab3e5707b4997d097fe7568d06390bbc6923fbed915736",
     "rust-toolchain.toml": "1033049243fb7f582826aae9e37e32f252648bda7f323a726b27f19435712a15",
     "rustfmt.toml": "ec19afd194eb8dd7a6a7c64687961f4718ec3aea0f7d071d3b36dbefd2df9ba9",
     "scripts/console-screenshots/package-lock.json": "904bbda663c4e523b1a84ce141333bb9f940e7d5cf5a401fb76b578c24a98d6c",
     "scripts/console-screenshots/package.json": "13b8327d464eb59d7a37f7758f6f052b7ec63f24324e985f27908a3f9a9d1d25",
+    "scripts/onnxruntime/checksums.toml": "9d39149ac441457b22ec56e87b9f6525af8285722c538feefb68f5654dc2fdc1",
+    "scripts/onnxruntime/manifest.toml": "2a3f41e99ecf880552346e8e79ebcd8e8d0e40c150f5a69604c117da14999782",
     "src/application.rs": "371029b537adf215170d373a95c96bc0bcb67d410d74cac84ad3f12c4bad328f",
     "src/application/admitted_connection.rs": "034b4936ead234589d95fd8e3a57977b28fd2b29abaed30736b72c77c7989ca9",
     "src/application/authentication.rs": "548267787cc7dfdb1d5cfa24da4c56b52b6b9d97d8b2c809f22b53d82c69f14a",
@@ -1046,12 +1049,12 @@
     "tests/harness_liveness.rs": "dc6bd63a46991ea913b1adf9f30dbd5c3a751cd63eb98d7a283169fb18b2629c",
     "tests/ingestion_time/mod.rs": "c388e726c9eed2102a4c125585d82616dfa4a0ec77f2d1c9189114a5f1a75ac0",
     "tests/process_cluster/mod.rs": "80f5b1438add54a99e8e9f54d065e8d38d7393b30b96a6fb64957d7f95761656",
-    "tests/scenarios.rs": "4e59d3ea75e27818bafc645cb22dc9e8e31409be8e90e87d663c30fc17510c1d",
+    "tests/scenarios.rs": "7604ab44d54713d3a2ab15584eb4f7d3c37303bc333384bdb0963f9aaae1d230",
     "tests/session_protocol/mod.rs": "b92e5bbfab057463d113efc1a5314502992c87076ee1e0f283d6659854706a4d",
     "tools/nervix-lint/catalog.json": "8f7efeac3602744f3a8de32447bc9cd4520de3f7c04be19f2d7a8e36a753575a",
     "tools/nervix-lint/configurations.toml": "9ce4b0a743f40ec9f6e50caaa8a654c2e779fc5f7df40f6a5ecf0e6801f276d0",
     "tools/nervix-lint/rust-toolchain.toml": "6f97d960d9a2a1daaea8a6538c9c96d6ac7d992b6f8fa7c9962f8e691fb3edd0",
     "typos.toml": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-    "uv.lock": "15744395c029fc4435c781b068d7e9b21ee6aaf38a8ca9060ab0d90e62299532"
+    "uv.lock": "26471b22a3c181f60648be18fc7edba09331fc039a94ebf68de218ca400bb1f7"
   }
 }
