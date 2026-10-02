@@ -36,6 +36,11 @@ impl TransportEntropy {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the transport constructor supplies the environment-owned \
+                                   entropy callback; no internal runtime ownership is inferred")
+    )]
     pub(crate) fn next_u64(&self) -> u64 {
         (self.source)()
     }

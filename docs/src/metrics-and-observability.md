@@ -95,7 +95,8 @@ Nervix records these raw metric families:
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
 - `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
-  per-instance quiesce buffers
+  per-instance quiesce buffers, including a payload that is draining until its messages enter
+  their ingest group
 - `nervix_ingestor_quiesce_buffered_bytes`: raw payload bytes currently retained in those buffers
 - `nervix_ingestor_quiesce_dropped_total`: payloads deliberately discarded by `DROP`, buffer
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination

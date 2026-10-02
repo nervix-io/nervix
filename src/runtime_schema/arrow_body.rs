@@ -55,6 +55,12 @@ impl ArrowBodyError {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the typed Arrow decoding failure conversion"
+        )
+    )]
     fn decoding(error: impl ToString) -> Report<Self> {
         Report::new(Self::Decode {
             reason: error.to_string(),

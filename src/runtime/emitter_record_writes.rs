@@ -221,6 +221,13 @@ pub(super) trait PreparedContent {
 
     /// The value the write hands the sink for this payload under `record`. The sink takes its own
     /// copy, so the payload stays retained until an answer resolves it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
     fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> Self::Written;
 }
 
@@ -238,6 +245,13 @@ pub(super) struct EncodedPayload {
 impl PreparedContent for EncodedPayload {
     type Written = SinkRecord;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
     fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkRecord {
         let sink_record = SinkRecord::new(
             record,
@@ -266,6 +280,13 @@ pub(super) struct PreparedHttpRequest {
 impl PreparedContent for PreparedHttpRequest {
     type Written = SinkHttpRequest;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
     fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkHttpRequest {
         SinkHttpRequest {
             id: record,
@@ -289,6 +310,13 @@ pub(super) struct RowRequestBody {
 impl PreparedContent for RowRequestBody {
     type Written = SinkRowRequest;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
     fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkRowRequest {
         SinkRowRequest {
             id: record,
@@ -462,6 +490,13 @@ impl<Content: PreparedContent> PreparedPayload<Content> {
     }
 
     /// The value one write hands the sink for this payload.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
     fn written(&self, record: SinkRecordId) -> Content::Written {
         self.content.written(record, self.occurred_at)
     }
@@ -669,6 +704,13 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
     fn written(write: &PreparedWrite<SinkRecord>) -> Vec<(usize, Vec<u8>)> {
         write
             .records

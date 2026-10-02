@@ -7,8 +7,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
-from scripts.ratchet import BASELINE_FILE, main, measure
+from scripts.ratchet import BASELINE_FILE, COUNTS, main, measure_sources, write_baseline
 
 
 def write_repository(root: Path, sources: dict[str, str]) -> None:
@@ -23,7 +24,7 @@ def write_repository(root: Path, sources: dict[str, str]) -> None:
 
 
 def count(root: Path, name: str) -> int:
-    return len(measure(root)[name])
+    return len(measure_sources(root)[name])
 
 
 def run(*arguments: str) -> tuple[int, str, str]:
@@ -34,11 +35,17 @@ def run(*arguments: str) -> tuple[int, str, str]:
 
 
 class RatchetGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patch = mock.patch("scripts.ratchet.check_synchronization", return_value=None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_a_deliberate_increase_fails_and_names_the_count(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(root, {"src/lib.rs": "fn width(x: u64) -> u32 { x as u32 }\n"})
 
+            write_baseline(root / BASELINE_FILE, {count.name: len(measure_sources(root).get(count.name, [])) for count in COUNTS})
             status, _, _ = run("--root", str(root), "--update")
             self.assertEqual(status, 0)
             self.assertEqual(json.loads((root / BASELINE_FILE).read_text())["as_casts"], 1)
@@ -53,13 +60,29 @@ class RatchetGateTests(unittest.TestCase):
             # One stream, so a CI log cannot print the failure above the table it refers to.
             self.assertEqual(errors, "")
             self.assertLess(report.index("as_casts  "), report.index("as_casts: 1 -> 2 (+1)"))
+            before = (root / BASELINE_FILE).read_bytes()
+            status, report, _ = run("--root", str(root), "--update")
+            self.assertEqual(status, 1)
+            self.assertIn("debt rose", report)
+            self.assertEqual((root / BASELINE_FILE).read_bytes(), before)
+
+    def test_failed_compiler_analysis_cannot_rewrite_the_baseline(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {"src/lib.rs": "fn owner() {}\n"})
+            write_baseline(root / BASELINE_FILE, {count.name: 0 for count in COUNTS})
+            before = (root / BASELINE_FILE).read_bytes()
+            with mock.patch("scripts.ratchet.check_synchronization", side_effect=SystemExit("compiler diagnostics failed")):
+                with self.assertRaisesRegex(SystemExit, "compiler diagnostics failed"):
+                    run("--root", str(root), "--update")
+            self.assertEqual((root / BASELINE_FILE).read_bytes(), before)
 
     def test_an_unchanged_tree_passes(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(root, {"src/lib.rs": "fn width(x: u64) -> u32 { x as u32 }\n"})
 
-            run("--root", str(root), "--update")
+            write_baseline(root / BASELINE_FILE, {count.name: len(measure_sources(root).get(count.name, [])) for count in COUNTS})
             status, report, errors = run("--root", str(root))
 
             self.assertEqual(status, 0)
@@ -71,7 +94,7 @@ class RatchetGateTests(unittest.TestCase):
             root = Path(directory)
             write_repository(root, {"src/lib.rs": "fn width(x: u64) -> u32 { x as u32 }\n"})
 
-            run("--root", str(root), "--update")
+            write_baseline(root / BASELINE_FILE, {count.name: len(measure_sources(root).get(count.name, [])) for count in COUNTS})
             (root / "src" / "lib.rs").write_text("fn width(x: u64) -> u32 { 0 }\n", encoding="utf-8")
 
             status, report, _ = run("--root", str(root))
@@ -103,6 +126,7 @@ class RatchetGateTests(unittest.TestCase):
 
 
 class CountTests(unittest.TestCase):
+
     def test_as_casts_ignore_comments_literals_imports_and_unit_tests(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -345,41 +369,6 @@ impl Runtime {
 
             self.assertEqual(count(root, "model_matches_in_data_plane"), 1)
 
-    def test_data_plane_lock_acquisitions_cover_owned_files_and_exclude_tests(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/runtime/worker.rs": """
-async fn process(state: State, entries: Entries, key: Key) {
-    state.lock();
-    state.read();
-    state.write();
-    state.lock().await;
-    entries.entry(key);
-    let example = "state.lock()";
-    // state.write();
-}
-
-#[cfg(test)]
-mod tests {
-    fn locks(state: State) {
-        state.lock();
-    }
-}
-""",
-                    "src/runtime/tests.rs": "fn locks(state: State) { state.lock(); }\n",
-                    "src/runtime_ack.rs": "fn ack(state: State) { state.lock(); }\n",
-                    "src/metrics.rs": "fn metric(map: Map) { map.entry(Key); }\n",
-                    "crates/interconnect/src/lib.rs": "fn tls(state: State) { state.read(); }\n",
-                    "src/control_plane.rs": "fn update(state: State) { state.write(); }\n",
-                    "src/metrics/helper.rs": "fn update(state: State) { state.lock(); }\n",
-                    "crates/interconnect/tests/session.rs": "fn read(state: State) { state.read(); }\n",
-                },
-            )
-
-            self.assertEqual(count(root, "data_plane_lock_acquisitions"), 8)
 
     def test_data_plane_cluster_awaits_count_only_product_runtime_calls(self) -> None:
         with TemporaryDirectory() as directory:
@@ -434,7 +423,6 @@ async fn publish(model: Model, state: State, runtime: Runtime) {
             )
 
             self.assertEqual(count(root, "model_matches_in_data_plane"), 2)
-            self.assertEqual(count(root, "data_plane_lock_acquisitions"), 2)
             self.assertEqual(count(root, "data_plane_cluster_awaits"), 2)
 
     def test_write_once_rwlocks_count_only_arc_and_name_struct_fields(self) -> None:

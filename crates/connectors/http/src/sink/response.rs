@@ -128,6 +128,10 @@ struct ParsedBlock {
 /// Reads through complete final headers. Any body bytes received with their terminating CRLF are
 /// discarded with the stream; the body is neither parsed nor awaited. Only the final head's
 /// `Retry-After` counts; an interim head's is read with its block and dropped with it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the generic external stream reader owns its I/O effects")
+)]
 pub(super) async fn read_final_headers<S>(stream: &mut S) -> ResponseHeadResult<FinalResponse>
 where
     S: AsyncRead + Unpin + ?Sized,

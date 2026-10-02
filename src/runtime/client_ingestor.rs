@@ -27,6 +27,14 @@
 //! routes. The window bounds how many admitted batches may await their acknowledgement across
 //! every producer, so attaching another producer never widens it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "client source attachment creation and ending manage its exact producer lifetime"
+    )
+)]
+
 use std::num::NonZeroU32;
 
 use bytes::Bytes;
@@ -334,6 +342,13 @@ pub(in crate::runtime) struct ClientIntake {
 
 /// Whether an execution may admit a batch right now, as its quiesce publication decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained client intake checks each admitted payload against its lifetime"
+    )
+)]
 pub(in crate::runtime) enum ClientIntakeState {
     /// Batches are admitted.
     Open,

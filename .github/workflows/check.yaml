@@ -35,11 +35,12 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 60
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # Cold validation includes Clippy and the complete compiler matrix.
+    timeout-minutes: 120
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -51,7 +52,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just,cargo-autoinherit,toml-cli,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,toml-cli,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -64,8 +65,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -118,11 +118,6 @@ jobs:
         with:
           fetch-depth: 2
 
-      # Runs before the build: the counts are a text scan, so a change that raises one is named in
-      # seconds rather than after the toolchain has warmed up.
-      - name: Debt ratchet
-        run: just ratchet
-
       - name: Configure kache daemon remote
         env:
           KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
@@ -153,7 +148,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Validate
-        run: just validate-ci
+        run: |
+          just toolchains-install
+          just validate-ci
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -181,14 +178,14 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -201,8 +198,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -282,7 +278,9 @@ jobs:
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
       - name: Tests coverage
-        run: just test-coverage
+        run: |
+          just toolchains-install
+          just test-coverage
 
       - name: Upload tests coverage
         if: always()
@@ -353,14 +351,14 @@ jobs:
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -373,8 +371,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -454,7 +451,9 @@ jobs:
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
       - name: Scenario coverage
-        run: just test-scenarios-coverage
+        run: |
+          just toolchains-install
+          just test-scenarios-coverage
 
       - name: Upload scenarios coverage
         if: always()
@@ -524,7 +523,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios]
+    needs: [tests, scenarios, extra-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -537,12 +536,12 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
 
       - name: Install CRAP and LCOV
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-crap
+          tool: cargo-crap,just,toml-cli
 
       - name: Install LCOV
         run: sudo apt-get update && sudo apt-get install -y lcov
@@ -559,6 +558,12 @@ jobs:
           name: coverage-scenarios
           path: coverage-inputs/scenarios
 
+      - name: Download native extra coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-native-extras
+          path: coverage-inputs/native-extras
+
       - name: Merge coverage and check CRAP
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
@@ -567,14 +572,18 @@ jobs:
           lcov --add-tracefile coverage-inputs/tests/lcov.info \
             --add-tracefile coverage-inputs/scenarios/lcov.info \
             --output-file lcov.info
-          cargo crap --lcov lcov-workspace.info --min 30 --threshold 30
+          while IFS= read -r report; do
+            lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
+            lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
+          done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
+          just check-coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           disable_search: true
           fail_ci_if_error: true
-          files: ./lcov.info
+          files: ./lcov-workspace.info
           use_oidc: true
 
       - name: Upload merged coverage
@@ -609,14 +618,14 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk,wild-linker
+          tool: just@latest,toml-cli,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -631,8 +640,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -717,7 +725,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Client conformance
-        run: just test-client-conformance
+        run: |
+          just toolchains-install
+          just test-client-conformance
 
       - name: Publish kache report
         if: always()
@@ -747,11 +757,10 @@ jobs:
   # coverage from that same run.
   extra-tests:
     name: extra-tests
-    # Half the suite job's cores on purpose. The smaller runner saves capacity, but cold
-    # compilation and the full modeled suite can outlast the scenario job. A 45-minute bound
-    # cancelled Shuttle checks before primitive, Loom, and completion checks could start.
+    # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
+    # compiler checks and modeled primitive and Loom builds.
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 75
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -760,7 +769,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
@@ -772,7 +781,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-mutants,just,toml-cli,trunk,wild-linker
+          tool: cargo-llvm-cov,cargo-mutants,just@latest,toml-cli,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -787,8 +796,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Setup Go environment
@@ -854,11 +862,13 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
-      - name: Runtime state capability checks
-        run: just test-runtime-state-capabilities
-
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Capability doctests
+        run: |
+          just toolchains-install
+          just test-capability-docs
+
       - name: Expiry map Miri
         run: just test-expiry-map-miri
 
@@ -870,14 +880,22 @@ jobs:
       - name: Native coverage collector
         run: just test-native-coverage
 
+      - name: Source contracts, compiler diagnostics and paired API doctests
+        run: just coverage-native-extras test-typed-ratchet
+
+      - name: Setup uv for compiler runner coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Compiler cache changes, interruption and runner qualification
+        run: |
+          just qualify-typed-ratchet-cache
+          just coverage-typed-ratchet-python
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
-
-      - name: Shuttle concurrency checks
-        run: just test-shuttle
 
       # The primitive boundary's conformance in every execution mode, the ordinary one collected
       # for coverage, then every registered Loom model of a production owner explored to
@@ -910,6 +928,8 @@ jobs:
             target/native-coverage/**/lcov.info
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
+            target/typed-ratchet/python.lcov
+            target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 
       - name: Publish kache report
@@ -924,16 +944,6 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-      # A modeled concurrency failure is only reproducible from the schedule that produced it, and
-      # this job is the only witness of that schedule.
-      - name: Upload Shuttle failure traces
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shuttle-failures
-          path: target/shuttle-failures
-          if-no-files-found: ignore
-
       # A failed Loom model is only reproducible from the checkpoint of the execution that failed,
       # and a failed qualification from its weakened run; this job is the only witness of either.
       - name: Upload Loom failure evidence
@@ -945,6 +955,133 @@ jobs:
             target/loom-failures
             target/loom-qualification/*/*.log
             target/loom-qualification/*/*.json
+          if-no-files-found: ignore
+
+  # Shuttle's in-process scheduling checks and uncontrolled-nondeterminism rechecks run
+  # independently of the native coverage collectors and other extra tests.
+  shuttle:
+    name: shuttle
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.99
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Shuttle concurrency checks
+        run: |
+          just toolchains-install
+          just test-shuttle
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # A modeled concurrency failure is only reproducible from the schedule that produced it,
+      # and this job is the only witness of that schedule.
+      - name: Upload Shuttle failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shuttle-failures
+          path: target/shuttle-failures
           if-no-files-found: ignore
 
   # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
@@ -968,14 +1105,14 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,wild-linker
+          tool: just@latest,toml-cli,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -990,8 +1127,7 @@ jobs:
           tee <<EOF > ~/.cargo/config.toml
           [target.x86_64-unknown-linux-gnu]
           ar = "llvm-ar-23"
-          linker = "clang-23"
-          rustflags = ["-Clink-arg=--ld-path=wild"]
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
       - name: Checkout
@@ -1029,7 +1165,9 @@ jobs:
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Turmoil simulations
-        run: just test-turmoil
+        run: |
+          just toolchains-install
+          just test-turmoil
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check

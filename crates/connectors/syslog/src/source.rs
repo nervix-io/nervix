@@ -423,6 +423,13 @@ impl SyslogStreamListener {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the generic external stream reader owns its I/O effects; local callbacks remain \
+                  analyzed"
+    )
+)]
 async fn read_stream_connection(
     mut stream: impl AsyncRead + Unpin,
     peer_addr: SocketAddr,

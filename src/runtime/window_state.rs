@@ -19,6 +19,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
     WindowAccumulatorPlan, WindowProcessorError, WindowProcessorState,
+    branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, RestoredMaterializedSnapshot,
         SealedSource, decode_aligned_rkyv,
@@ -75,6 +76,9 @@ pub(super) struct ReplicatedWindowProcessorState {
     /// What each replica reported holding of the published window, and the offer of the newest
     /// published window to the replicas that lack it.
     replication: CheckpointReplication,
+    /// The entry of the entity's branch checkpoint catalog that every published window is recorded
+    /// in, absent for a state that only encodes or checks a checkpoint.
+    catalog: Option<CatalogRegistration>,
 }
 
 #[derive(Debug, Clone)]
@@ -608,7 +612,20 @@ impl ReplicatedWindowProcessorState {
             placement,
             generations,
             replication: CheckpointReplication::new(),
+            catalog: None,
         })
+    }
+
+    /// This state as the state of a branch this node owns, with every window it publishes recorded
+    /// in `catalog`, so the entity's replicas learn of it.
+    pub(super) fn cataloged(mut self, catalog: &BranchCheckpointCatalog) -> Self {
+        let revision = self.generations.load().revision;
+        self.catalog = Some(catalog.register(
+            self.placement.branch_key.clone(),
+            self.placement.state,
+            revision,
+        ));
+        self
     }
 
     pub(super) fn replication(&self) -> &CheckpointReplication {
@@ -670,8 +687,12 @@ impl ReplicatedWindowProcessorState {
         let snapshot = state
             .to_snapshot()
             .change_context(RuntimePersistenceError::WindowSnapshot)?;
-        self.generations
+        let revision = self
+            .generations
             .publish(Some(WindowPublishedSnapshot::Live(snapshot)));
+        if let Some(catalog) = &self.catalog {
+            catalog.record(revision);
+        }
         Ok(())
     }
 

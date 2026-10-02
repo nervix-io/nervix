@@ -27,6 +27,16 @@ pub struct CheckpointReplication {
 
 /// What the replicated state shares with the announcer offering its checkpoint.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "placement checkpoint replication",
+        bound = "one synchronous progress or announcement transition; the guard never crosses \
+                 await",
+        reason = "the placement retains its progress and announcement owner"
+    )
+)]
 struct Shared {
     /// The announcement and the replicas' progress change together, under a lock that belongs to
     /// this one placement and is never held across an await.
@@ -81,6 +91,16 @@ impl CheckpointReplication {
     /// nothing is returned. Otherwise the returned announcer offers `revision`, and the caller
     /// drives it until it finishes. A retired replication offers nothing.
     #[must_use = "an announcer that nothing drives offers nothing"]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained checkpoint replication handle serializes progress and \
+                      announcement state",
+            key = "checkpoint placement and revision",
+            bound = "one synchronous progress transition; no state guard crosses a wait"
+        )
+    )]
     pub fn offer(&self, revision: u64) -> Option<Announcer> {
         let mut state = self.shared.state();
         match state.announcement {
@@ -103,6 +123,16 @@ impl CheckpointReplication {
 
     /// Record that `replica` reported holding `revision` on its stable storage, and wake every task
     /// waiting for a report when that raised what the replica holds.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained checkpoint replication handle serializes progress and \
+                      announcement state",
+            key = "checkpoint placement and revision",
+            bound = "one synchronous progress transition; no state guard crosses a wait"
+        )
+    )]
     pub fn record(&self, replica: &ClusterNodeName, revision: u64) {
         let raised = self.shared.state().progress.record(replica, revision);
         if raised {
@@ -112,6 +142,21 @@ impl CheckpointReplication {
 
     /// Read what the replicas reported holding. The read runs under this placement's lock, so it
     /// stays short.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained checkpoint replication handle serializes progress and \
+                      announcement state",
+            key = "checkpoint placement and revision",
+            bound = "one synchronous progress transition; no state guard crosses a wait"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a synchronous read-only progress \
+                                   predicate; its effects belong to that caller")
+    )]
     pub fn with_progress<R>(&self, read: impl FnOnce(&ReplicaProgress) -> R) -> R {
         let state = self.shared.state();
         read(&state.progress)
@@ -121,6 +166,21 @@ impl CheckpointReplication {
     ///
     /// Each round registers for the next report before it reads the progress, so a report that
     /// lands between the read and the wait wakes the wait instead of being missed.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained checkpoint replication handle serializes progress and \
+                      announcement state",
+            key = "checkpoint placement and revision",
+            bound = "one synchronous progress transition; no state guard crosses a wait"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a synchronous read-only progress \
+                                   predicate; its effects belong to that caller")
+    )]
     pub async fn wait_until(&self, mut enough: impl FnMut(&ReplicaProgress) -> bool) {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -142,12 +202,32 @@ impl CheckpointReplication {
 
     /// Record that the owner announced a newer checkpoint: wake the task that keeps this node's
     /// copy current, or leave it the permit while it is busy.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained checkpoint replication handle serializes progress and \
+                      announcement state",
+            key = "checkpoint placement and revision",
+            bound = "one synchronous progress transition; no state guard crosses a wait"
+        )
+    )]
     pub fn announced(&self) {
         self.shared.announced.notify_one();
     }
 
     /// Wait for the owner's next announcement, or return at once for one that arrived while
     /// nothing waited.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained checkpoint replication handle serializes progress and \
+                      announcement state",
+            key = "checkpoint placement and revision",
+            bound = "one synchronous progress transition; no state guard crosses a wait"
+        )
+    )]
     pub async fn next_announcement(&self) {
         self.shared.announced.notified().await;
     }

@@ -9,7 +9,7 @@ use std::{sync::Arc as StdArc, time::Duration};
 
 use fjall::Database;
 use futures_util::FutureExt as _;
-use nervix_models::{ClusterNodeName, ModelKind, ModelName, SchemaFingerprint, Timestamp};
+use nervix_models::{ClusterNodeName, ModelKind, ModelName, SchemaFingerprint};
 use nervix_primitives::time::Instant;
 use tempfile::tempdir;
 
@@ -48,23 +48,6 @@ fn acknowledge(runtime: &Runtime, replica: &ClusterNodeName, placement: &Runtime
             lsm: REVISION,
         },
     );
-}
-
-/// A branch lifecycle checkpoint at `lsm` naming `branches`.
-fn lifecycle_snapshot(lsm: u64, branches: &[Option<BranchKey>]) -> PersistedRuntimeStateEntry {
-    let mut entries = Vec::new();
-    for key in branches {
-        entries.push(BranchInstanceSnapshotEntry {
-            key: key.clone(),
-            last_ingestion: Timestamp::from_unix_nanos(1),
-            incarnation: 1,
-        });
-    }
-    PersistedRuntimeStateEntry {
-        lsm,
-        payload: encode_branch_lru_snapshot(&entries)
-            .expect("a current branch lifecycle checkpoint encodes"),
-    }
 }
 
 #[test]
@@ -449,6 +432,7 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
             None,
         )
         .expect("the published identity places the branch lifecycle");
+    let lifecycle = runtime.replicated_branch_lifecycle(&branch_lru);
     let acme = string_branch_key("tenant", "acme");
     let beta = string_branch_key("tenant", "beta");
     let branch_placement = |branch: &Option<BranchKey>| {
@@ -477,21 +461,22 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
     runtime
         .install_replica_branch_lru_snapshot(
             &branch_lru,
-            lifecycle_snapshot(1, &[acme.clone(), beta.clone()]),
+            &lifecycle,
+            branch_lifecycle_snapshot(1, &[acme.clone(), beta.clone()]),
         )
         .expect("a lifecycle naming both branches installs");
     assert!(
-        runtime
-            .replica_branch_is_current(&acme_placement)
+        lifecycle
+            .names(acme.as_ref())
             .expect("the lifecycle decodes")
     );
     assert!(
-        runtime
-            .replica_branch_is_current(&beta_placement)
+        lifecycle
+            .names(beta.as_ref())
             .expect("the lifecycle decodes")
     );
-    let held = runtime
-        .held_branch_lifecycle(&branch_lru)
+    let held = lifecycle
+        .latest()
         .expect("the replica holds the lifecycle it installed");
     let first = held.branches().expect("the lifecycle decodes");
     let again = held.branches().expect("the lifecycle decodes");
@@ -503,12 +488,13 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
     runtime
         .install_replica_branch_lru_snapshot(
             &branch_lru,
-            lifecycle_snapshot(2, std::slice::from_ref(&acme)),
+            &lifecycle,
+            branch_lifecycle_snapshot(2, std::slice::from_ref(&acme)),
         )
         .expect("a newer lifecycle without beta installs");
     assert!(
-        !runtime
-            .replica_branch_is_current(&beta_placement)
+        !lifecycle
+            .names(beta.as_ref())
             .expect("the lifecycle decodes")
     );
     assert!(
@@ -526,25 +512,27 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
     );
 
     runtime
-        .install_replica_branch_lru_snapshot(&branch_lru, lifecycle_snapshot(1, &[acme, beta]))
+        .install_replica_branch_lru_snapshot(
+            &branch_lru,
+            &lifecycle,
+            branch_lifecycle_snapshot(1, &[acme, beta.clone()]),
+        )
         .expect("an older lifecycle arriving late decodes");
-    let held = runtime
-        .held_branch_lifecycle(&branch_lru)
-        .expect("the replica holds a lifecycle");
+    let held = lifecycle.latest().expect("the replica holds a lifecycle");
     assert_eq!(
         held.lsm(),
         2,
         "a late older lifecycle never replaces a newer one"
     );
     assert!(
-        !runtime
-            .replica_branch_is_current(&beta_placement)
+        !lifecycle
+            .names(beta.as_ref())
             .expect("the lifecycle decodes")
     );
 }
 
 #[nervix_primitives::test]
-async fn a_replica_reads_a_stored_branch_lifecycle_once_and_holds_it() {
+async fn a_replica_task_restores_the_stored_branch_lifecycle_only_while_it_holds_none() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
         .open()
@@ -564,12 +552,12 @@ async fn a_replica_reads_a_stored_branch_lifecycle_once_and_holds_it() {
             &domain,
             RuntimeStateKind::BranchLru,
             ModelKind::Deduplicator,
-            deduplicator.clone(),
+            deduplicator,
             None,
         )
         .expect("the published identity places the branch lifecycle");
     let acme = string_branch_key("tenant", "acme");
-    let stored = lifecycle_snapshot(4, std::slice::from_ref(&acme));
+    let stored = branch_lifecycle_snapshot(4, std::slice::from_ref(&acme));
     runtime
         .inner
         .state_store
@@ -577,33 +565,29 @@ async fn a_replica_reads_a_stored_branch_lifecycle_once_and_holds_it() {
         .expect("the runtime has a state store")
         .persist_latest_snapshot(&branch_lru, stored.lsm, &stored.payload)
         .expect("the lifecycle persists");
-    assert!(runtime.held_branch_lifecycle(&branch_lru).is_none());
+    let lifecycle = runtime.replicated_branch_lifecycle(&branch_lru);
+    assert!(lifecycle.latest().is_none());
 
-    let acme_placement = runtime
-        .state_placement(
-            &domain,
-            RuntimeStateKind::Deduplicator,
-            ModelKind::Deduplicator,
-            deduplicator,
-            acme,
-        )
-        .expect("the published identity places the branch state");
+    runtime
+        .restore_replica_branch_lifecycle(&branch_lru, &lifecycle)
+        .expect("the stored lifecycle reads");
+
+    assert_eq!(lifecycle.latest().map(|held| held.lsm()), Some(4));
     assert!(
-        runtime
-            .replica_branch_is_current(&acme_placement)
-            .expect("the stored lifecycle decodes")
+        lifecycle
+            .names(acme.as_ref())
+            .expect("the lifecycle decodes")
     );
+
+    lifecycle.install(StdArc::new(BranchLifecycleCheckpoint::new(
+        branch_lifecycle_snapshot(6, &[]),
+    )));
+    runtime
+        .restore_replica_branch_lifecycle(&branch_lru, &lifecycle)
+        .expect("a held lifecycle needs no read");
     assert_eq!(
-        runtime
-            .held_branch_lifecycle(&branch_lru)
-            .map(|held| held.lsm()),
-        Some(4),
-        "the lifecycle read from storage is held, so its branches decode once"
-    );
-    assert_eq!(
-        runtime
-            .passive_state_replica_lsm(&branch_lru)
-            .expect("the held lifecycle has a revision"),
-        Some(4)
+        lifecycle.latest().map(|held| held.lsm()),
+        Some(6),
+        "the stored lifecycle never replaces one the replica already holds"
     );
 }
