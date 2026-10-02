@@ -27,7 +27,7 @@ use nervix_models::{
     MqttIngestMode, PulsarIngestMode, RabbitMqIngestMode, ResolvedBranching, ScheduledNode,
     SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, parse_duration_text,
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{
     domain_activation_plan::DomainActivationPlan,

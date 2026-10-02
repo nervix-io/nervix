@@ -18,13 +18,14 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, ack_window,
         alter_op_separator, bodyless_route_construction, boxed_choice, braced_list_value_tokens,
         byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
-        duration_lit, emitter_name, emitter_ref, expression_before_clause, flush_each,
+        duration_lit, embedded, emitter_name, emitter_ref, expression_before_clause, flush_each,
         from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
         kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        queue_ref, relay_ref, render_expression_tokens, retry_policy, route_construction,
-        schema_ref, string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value,
-        where_expression, where_only_route_construction, word_raw,
+        queue_ref, relay_ref, retry_policy, route_construction, schema_ref, string_lit,
+        subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
+        where_only_route_construction, word_raw,
     },
+    semantic_program::read_expression,
 };
 
 fn no_ack_publishing_mode<'src>()
@@ -259,28 +260,25 @@ fn syslog_emit_sink_parser<'src>()
 fn sqs_fifo_group_expression<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    any()
-        .and_is(kw(Identifier::Mode).not())
-        .filter(|token: &Token| !matches!(token, Token::Semicolon))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .labelled("fifo_group_expression")
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .boxed()
+    embedded(
+        any()
+            .and_is(kw(Identifier::Mode).not())
+            .filter(|token: &Token| !matches!(token, Token::Semicolon))
+            .repeated()
+            .at_least(1)
+            .labelled("fifo_group_expression"),
+        read_expression,
+    )
 }
 
 fn sqs_fifo_group_clause<'src>()
 -> impl Parser<'src, &'src [Token], SqsFifoGroup, extra::Err<ParseError<'src>>> + Clone {
+    // The expression is tried first: an embedded rejection raised at the token where `FROM BRANCH`
+    // had already failed would take that failure's span.
     kw_phrase2(Identifier::Fifo, Identifier::Group)
         .ignore_then(choice((
-            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
             sqs_fifo_group_expression().map(SqsFifoGroup::Expression),
+            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
         )))
         .boxed()
 }
@@ -473,12 +471,7 @@ fn otel_emit_sink_parser<'src>()
 fn clickhouse_value_expr<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    braced_list_value_tokens().try_map(|tokens, span| {
-        let source = render_expression_tokens(&tokens);
-        crate::parse_expression(&source).map_err(|error| {
-            Rich::custom(span, error.current_context().embedded_expression_message())
-        })
-    })
+    embedded(braced_list_value_tokens(), read_expression)
 }
 
 fn clickhouse_value_mapping<'src>()
@@ -486,7 +479,7 @@ fn clickhouse_value_mapping<'src>()
     string_lit()
         .labelled("column_name")
         .then_ignore(tok(Token::Eq))
-        .then(clickhouse_value_expr().labelled("value_expression"))
+        .then(clickhouse_value_expr())
         .map(|(column, expression)| ClickHouseValueMapping { column, expression })
 }
 

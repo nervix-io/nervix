@@ -9,11 +9,12 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        completion_tokens, duration_lit, filter_where_clause, flushed_processor_outputs,
+        completion_tokens, duration_lit, embedded, filter_where_clause, flushed_processor_outputs,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, nested_expression_tokens, render_expression_tokens,
-        reorderer_name, reorderer_ref, suggest_from, suggestions_from_errors, tok,
+        materialized_state_dependencies, nested_expression_tokens, reorderer_name, reorderer_ref,
+        suggest_from, suggestions_from_errors, tok,
     },
+    semantic_program::read_expression_list,
 };
 
 fn boundary_token(token: &Token) -> bool {
@@ -33,13 +34,10 @@ fn by_exprs<'src>()
     // The label covers the expressions only, not the `BY` that introduces them, so it means the
     // same thing here as in `ALTER REORDERER ... SET BY <expressions>`. Labelling the keyword too
     // would give one completion label two different contracts.
-    kw(Identifier::By)
-        .ignore_then(nested_expression_tokens(boundary_token).labelled("reorder_by"))
-        .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+    kw(Identifier::By).ignore_then(embedded(
+        nested_expression_tokens(boundary_token).labelled("reorder_by"),
+        read_expression_list,
+    ))
 }
 
 pub fn create_reorderer_parser<'src>()

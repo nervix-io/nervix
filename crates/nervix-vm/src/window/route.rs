@@ -8,10 +8,11 @@
 //! - **Depends on.** The window lowering and the VM compiler.
 //! - **Must not know.** Relays, branches, accumulator state, or when a window emits.
 
-use std::{collections::BTreeMap, sync::Arc as StdArc};
+use std::collections::BTreeMap;
 
 use arrow_schema::{DataType, Field, Schema};
 use error_stack::{Report, ResultExt as _};
+use nervix_primitives::sync::StdArc;
 use sorted_vec::SortedSet;
 use thiserror::Error;
 
@@ -66,7 +67,7 @@ pub struct WindowRouteSchemas<'a> {
 #[derive(Debug, Clone)]
 pub struct CompiledWindowRoute {
     /// Evaluates every per-row argument of the route's demands over one input batch.
-    pub argument_program: triomphe::Arc<CompiledProgram>,
+    pub argument_program: nervix_primitives::sync::Arc<CompiledProgram>,
     /// Every demand of the route, in demand order, with the argument columns it reads.
     pub demands: Vec<CompiledWindowDemand>,
     /// The compiled value of every assigned output field, in assignment order.
@@ -96,7 +97,7 @@ pub struct CompiledWindowAssignment {
 #[derive(Debug, Clone)]
 pub enum CompiledWindowExpr {
     /// A one-row program over the injected aggregate results.
-    Scalar(triomphe::Arc<CompiledProgram>),
+    Scalar(nervix_primitives::sync::Arc<CompiledProgram>),
     /// An array literal whose items are compiled one by one.
     Array {
         items: Vec<CompiledWindowExpr>,
@@ -294,7 +295,8 @@ impl CompiledWindowRoute {
         target: AssignmentTarget<'_>,
         bindings: &[CompileBinding],
         options: &CompileOptions,
-    ) -> Result<triomphe::Arc<CompiledProgram>, Report<WindowRouteCompileError>> {
+    ) -> Result<nervix_primitives::sync::Arc<CompiledProgram>, Report<WindowRouteCompileError>>
+    {
         let output_schema = StdArc::new(Schema::new(vec![Field::new(
             target.reference.field.clone(),
             target.data_type.clone(),
@@ -328,7 +330,7 @@ impl CompiledWindowRoute {
         .change_context_lazy(|| WindowRouteCompileError::Assignment {
             field: target.reference.field.clone(),
         })?;
-        Ok(triomphe::Arc::new(compiled))
+        Ok(nervix_primitives::sync::Arc::new(compiled))
     }
 }
 
@@ -361,7 +363,7 @@ impl CompiledWindowExpr {
 
 /// The program that evaluates every argument of a route's demands, and where each argument lands.
 struct CompiledArguments {
-    program: triomphe::Arc<CompiledProgram>,
+    program: nervix_primitives::sync::Arc<CompiledProgram>,
     demands: Vec<CompiledWindowDemand>,
 }
 
@@ -445,7 +447,7 @@ impl CompiledArguments {
         )
         .change_context(WindowRouteCompileError::ArgumentCompile)?;
         Ok(Self {
-            program: triomphe::Arc::new(compiled),
+            program: nervix_primitives::sync::Arc::new(compiled),
             demands,
         })
     }

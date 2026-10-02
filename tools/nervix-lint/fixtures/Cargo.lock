@@ -591,7 +591,6 @@ dependencies = [
  "nervix-lint-fixture-macros",
  "nervix-primitives",
  "serde_json",
- "triomphe",
 ]
 
 [[package]]
@@ -601,6 +600,8 @@ dependencies = [
  "arc-swap",
  "concurrent-queue",
  "dashmap",
+ "futures-channel",
+ "futures-util",
  "loom",
  "meticulous",
  "nervix-primitives-macros",
@@ -614,6 +615,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "triomphe",
  "turmoil",
 ]
 

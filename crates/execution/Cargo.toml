@@ -12,7 +12,11 @@ workspace = true
 default = []
 # Runs the cancellation protocol's Loom models, with Loom's primitives selected for the whole graph.
 loom = ["nervix-model-harness/loom", "nervix-primitives/loom"]
-shuttle = ["dep:shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
 turmoil = ["nervix-primitives/turmoil"]
 
 [dependencies]
@@ -22,7 +26,6 @@ meticulous = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
-triomphe = { workspace = true }
 ubyte = { workspace = true }
 
 [dev-dependencies]

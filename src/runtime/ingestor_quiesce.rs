@@ -1443,10 +1443,10 @@ impl Runtime {
 mod tests {
     use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
     use nervix_primitives::sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         watch,
     };
-    use triomphe::Arc;
 
     use super::*;
 
@@ -2094,10 +2094,10 @@ mod tests {
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
         use nervix_execution::{CpuClass, MemoryClass};
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// What a control answers to each intake check an ingestor makes.
         #[derive(Debug, PartialEq, Eq)]

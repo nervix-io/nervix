@@ -216,6 +216,32 @@ mod tests {
     }
 
     #[test]
+    fn a_postgres_update_leaves_a_mapped_column_to_update_in_nspl() {
+        for seed in 0..=u8::MAX {
+            let bytes = seeded_bytes(seed);
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+            let emitter = arbitrary.create_emitter_to(SinkVariant::Postgres);
+            let nervix_models::EmitSink::Postgres {
+                values,
+                conflict_action,
+                ..
+            } = emitter.sink.as_ref()
+            else {
+                panic!("a Postgres sink was requested, found {:?}", emitter.sink);
+            };
+            if let nervix_models::PostgresConflictAction::DoUpdate { target } = conflict_action {
+                assert!(!target.is_empty(), "{values:?}");
+                assert!(
+                    values
+                        .iter()
+                        .any(|mapping| !target.contains(&mapping.column)),
+                    "{values:?} {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn names_reach_both_ends_of_the_name_bound() {
         let mut lengths = std::collections::BTreeSet::new();
         for seed in 0..=u8::MAX {

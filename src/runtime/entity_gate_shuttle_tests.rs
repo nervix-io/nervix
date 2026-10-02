@@ -3,28 +3,29 @@
 //! Layer: test harness.
 //! - **Owns.** The fencing, admission, counter and waiter invariants an entity gate hold and the
 //!   node quiesce counters are held to while work is admitted, parked, resumed and released.
-//! - **Depends on.** The entity gate types, the relay dispatch gate, and the server Shuttle runner.
+//! - **Depends on.** The entity gate types, the relay dispatch gate, and the model harness's
+//!   Shuttle runner.
 //! - **Must not know.** What an entity is, what a relay carries, or what a work item does.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records. The counters under test are Shuttle's atomics, so a
 // check reads them while another task is between two of its own adjustments.
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::EntityGatePurpose;
+use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, ModelKind, ModelName,
     NodeRef, RelayName,
 };
 use nervix_primitives::{
     collections::DashMap,
-    sync::oneshot,
+    sync::{Arc, StdArc, oneshot},
     time::Instant,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use triomphe::Arc;
 
 use super::{
     BranchQuiesceDepths, BranchQuiesceGauges, EntityAlterHold, EntityGateHold, EntityGateOperation,
@@ -32,7 +33,6 @@ use super::{
     OutputBufferQuiesceGauge, OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch,
     RelayDispatchGate, RelayDispatchGateLease, Runtime,
 };
-use crate::shuttle_test::{check_pct, check_random};
 
 const RANDOM_ITERATIONS: usize = 1_000;
 const PCT_ITERATIONS: usize = 1_000;

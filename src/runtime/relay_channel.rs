@@ -16,20 +16,18 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     publication::{ArcSwap, Guard},
     sync::{
-        Notify,
+        Arc, AtomicWaker, Notify,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::Mutex,
     },
     time::{Instant, timeout_at},
 };
 use tracing::debug;
-use triomphe::Arc;
 
 #[derive(Debug)]
 #[cfg_attr(
@@ -468,8 +466,7 @@ impl Drop for OwnedRelayDispatchPermit {
 mod gate_tests {
     use std::time::Duration;
 
-    use nervix_primitives::time::Instant;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::Instant};
 
     use super::{RelayDispatchGate, RelayDispatchGateLease};
 

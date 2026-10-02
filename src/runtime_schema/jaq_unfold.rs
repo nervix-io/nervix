@@ -274,7 +274,7 @@ mod tests {
         CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
         ParseAsType, ResolvedCodecWireFormat, SchemaField,
     };
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::runtime_schema::{

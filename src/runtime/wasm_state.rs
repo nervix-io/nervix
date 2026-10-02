@@ -11,7 +11,7 @@
 //! - **Must not know.** How a checkpoint reaches stable storage or a replica, guest execution, or
 //!   which acknowledgements a completed checkpoint releases.
 
-use std::{collections::BTreeSet, num::NonZeroU64, sync::Arc as StdArc};
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::CheckpointReplication;
@@ -19,7 +19,10 @@ use nervix_interconnect::RuntimeState;
 use nervix_models::{
     ClusterNodeName, WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration,
 };
-use nervix_primitives::publication::{ArcSwap, ArcSwapOption};
+use nervix_primitives::{
+    publication::{ArcSwap, ArcSwapOption},
+    sync::StdArc,
+};
 
 use super::{
     PersistedRuntimeStateEntry, RuntimeStatePlacement, SharedStateAssignment,
@@ -531,7 +534,7 @@ mod tests {
     use nervix_models::{
         DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
     };
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{

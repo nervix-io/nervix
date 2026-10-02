@@ -26,6 +26,7 @@ use nervix_connector::{
 };
 use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsResolver, HOOK_LOOKUP_BUDGET};
 use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
+use nervix_primitives::sync::Arc;
 use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
     ErrorKind as RedisErrorKind, RedisFuture, ServerErrorKind,
@@ -35,7 +36,6 @@ pub use source::{
     RedisPubSubSource, RedisPubSubSourceError, RedisPubSubSourceMessage, RedisPubSubSourcePlan,
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 const REDIS: &str = "redis";
 pub(crate) const CONNECT_BUDGET: Duration = Duration::from_secs(30);

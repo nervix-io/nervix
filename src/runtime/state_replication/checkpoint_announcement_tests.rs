@@ -5,12 +5,12 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
 use fjall::Database;
 use futures_util::FutureExt as _;
 use nervix_models::{ClusterNodeName, ModelKind, ModelName, SchemaFingerprint};
-use nervix_primitives::time::Instant;
+use nervix_primitives::{sync::StdArc, time::Instant};
 use tempfile::tempdir;
 
 use super::*;

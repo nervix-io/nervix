@@ -10,15 +10,16 @@
 //!   checkpoint replication.
 //! - **Must not know.** Branch tasks, schedules, how a checkpoint is persisted or fetched, or NSPL.
 
-use std::sync::Arc as StdArc;
-
 use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_interconnect::RuntimeState;
 use nervix_primitives::{
     publication::ArcSwapOption,
-    sync::blocking::{Mutex, MutexGuard, OnceLock},
+    sync::{
+        StdArc,
+        blocking::{Mutex, MutexGuard, OnceLock},
+    },
 };
 use nervix_recovery::Discarded as _;
 

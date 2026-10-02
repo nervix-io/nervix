@@ -13,9 +13,8 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_dns::ConnectionBudget;
 use nervix_models::NodeEndpoint;
-use nervix_primitives::{net::TcpStream, time::timeout};
+use nervix_primitives::{net::TcpStream, sync::Arc, time::timeout};
 use tracing::debug;
-use triomphe::Arc;
 
 use super::{ConnectionSlotKey, TransportState};
 use crate::TransportError;

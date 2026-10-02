@@ -41,6 +41,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
         blocking::Mutex,
     },
@@ -57,7 +58,6 @@ use prometheus::{
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
-use triomphe::Arc;
 
 mod interconnection;
 

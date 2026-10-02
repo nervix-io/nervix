@@ -24,12 +24,11 @@ use nervix_client_wire::{
     SessionLimits, TransferAssembly, VerifiedFrame,
 };
 use nervix_primitives::{
-    sync::{Notify, blocking::Mutex, mpsc},
+    sync::{Arc, Notify, blocking::Mutex, mpsc},
     task::AbortOnDropHandle,
     time::Instant,
 };
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use triomphe::Arc;
 
 /// How many frames the session queues for its transport before a send waits.
 const OUTBOUND_FRAMES: usize = 64;

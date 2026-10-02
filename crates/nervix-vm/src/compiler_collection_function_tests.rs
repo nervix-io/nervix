@@ -6,17 +6,16 @@
 //! - **Depends on.** The VM compiler and semantic program parser.
 //! - **Must not know.** Runtime Arrow kernel implementation.
 
-use std::sync::Arc;
-
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::*;
 use crate::test_support::parse_program;
 
-fn source_schema() -> Arc<Schema> {
-    let integer_item = Arc::new(Field::new("item", DataType::Int64, false));
-    let float_item = Arc::new(Field::new("item", DataType::Float64, false));
-    Arc::new(Schema::new(vec![
+fn source_schema() -> StdArc<Schema> {
+    let integer_item = StdArc::new(Field::new("item", DataType::Int64, false));
+    let float_item = StdArc::new(Field::new("item", DataType::Float64, false));
+    StdArc::new(Schema::new(vec![
         Field::new("left", DataType::List(integer_item.clone()), true),
         Field::new("right", DataType::FixedSizeList(integer_item, 2), true),
         Field::new("other", DataType::List(float_item), true),
@@ -40,14 +39,14 @@ fn compile_assignment(
     fields.push(Field::new("result", result_type, true));
     compile_program_for_bindings(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
     )
 }
 
 #[test]
 fn collection_calls_have_exact_shapes_and_result_types() {
-    let item = Arc::new(Field::new("item", DataType::Int64, false));
+    let item = StdArc::new(Field::new("item", DataType::Int64, false));
     let fixed_two = DataType::FixedSizeList(item.clone(), 2);
     let fixed_four = DataType::FixedSizeList(item.clone(), 4);
     let vector = DataType::List(item);

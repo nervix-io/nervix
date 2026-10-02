@@ -17,7 +17,7 @@
 //! is the equality `=` decides: floats compare by IEEE 754, so NaN is a member of no set and no
 //! NaN operand is a member of one, and `0.0` and `-0.0` are the same element.
 
-use std::{borrow::Borrow, hash::Hash, sync::Arc};
+use std::{borrow::Borrow, hash::Hash};
 
 use ahash::{HashSet, HashSetExt};
 use arrow_array::{
@@ -28,6 +28,7 @@ use arrow_array::{
     },
 };
 use arrow_buffer::BooleanBuffer;
+use nervix_primitives::sync::StdArc;
 use sorted_vec::SortedSet;
 
 use crate::{batch::TypedArray, ir::RegisterType};
@@ -42,7 +43,7 @@ pub const SMALL_SET_CAPACITY: usize = 8;
 /// tests against the one set that was prepared when the program was compiled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipSet {
-    elements: Arc<Elements>,
+    elements: StdArc<Elements>,
 }
 
 /// The distinct elements of a set, held as values of the operand's type.
@@ -162,7 +163,7 @@ impl MembershipSet {
     pub(crate) fn prepare(operand: RegisterType, elements: &[TypedArray]) -> Option<Self> {
         if elements.is_empty() {
             return Some(Self {
-                elements: Arc::new(Elements::Empty),
+                elements: StdArc::new(Elements::Empty),
             });
         }
         let elements = match operand {
@@ -200,14 +201,14 @@ impl MembershipSet {
             RegisterType::Generic => return None,
         };
         Some(Self {
-            elements: Arc::new(elements),
+            elements: StdArc::new(elements),
         })
     }
 
     /// Whether both sets share one prepared set of elements.
     #[cfg(test)]
     pub(crate) fn shares_elements_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.elements, &other.elements)
+        StdArc::ptr_eq(&self.elements, &other.elements)
     }
 
     /// Whether each row of `operand` is a member of the set.

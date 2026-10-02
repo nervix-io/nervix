@@ -8,7 +8,7 @@
 //!   entries, `error-stack`, Tokio and `redis`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
-use std::{io, sync::Arc as StdArc};
+use std::io;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -20,7 +20,7 @@ use nervix_connector::{
 };
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::{ChannelName, ClientConfigEntry};
-use nervix_primitives::{net::TcpStream, time::timeout};
+use nervix_primitives::{net::TcpStream, sync::StdArc, time::timeout};
 use redis::{
     Client as RedisClient, ConnectionAddr, Msg,
     aio::{PubSub, PubSubStream},

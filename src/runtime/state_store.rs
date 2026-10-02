@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fmt, str::FromStr, sync::Arc as StdArc};
+use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
@@ -17,9 +17,8 @@ use nervix_primitives::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
-use triomphe::Arc;
 
-use super::{BranchKey, WasmGuestState};
+use super::{Arc, BranchKey, StdArc, WasmGuestState};
 
 mod durability;
 

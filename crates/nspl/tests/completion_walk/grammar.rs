@@ -64,8 +64,9 @@ impl Grammar {
 /// The walk only ever extends states that were accepted or incomplete, so a rejection in a child
 /// state is always caused by the text that was just appended. That makes the position of the
 /// diagnostic irrelevant to the verdict: what matters is only whether the parser reached the end of
-/// the input. `Rich::custom` errors from the expression splice point at the whole captured run
-/// rather than at the offending token, so anything finer would misread them anyway.
+/// the input. A rejection inside an embedded expression points at the token its reader failed at,
+/// so an expression that ran out of input reads as incomplete and one that went wrong earlier as
+/// rejected there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseOutcome {
     /// The input is a complete statement.

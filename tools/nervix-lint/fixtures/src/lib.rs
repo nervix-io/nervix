@@ -21,9 +21,11 @@ use indexmap::IndexMap;
 pub use nervix_primitives::expect_lint;
 use nervix_primitives::{
     collections::DashMap,
-    sync::blocking::{Mutex, MutexGuard, RwLock},
+    sync::{
+        Arc,
+        blocking::{Mutex, MutexGuard, RwLock},
+    },
 };
-use triomphe::Arc;
 
 pub fn owned_collections(
     hash: &mut HashMap<u32, u32>,

@@ -3,8 +3,8 @@
 //! Layer: test harness.
 //! - **Owns.** The fencing, waiter-release and admission invariants the production relay dispatch
 //!   gate and relay fan-out are held to.
-//! - **Depends on.** The relay channel types, the server Shuttle runner, and the task labels and
-//!   timeout triggers of Shuttle's Tokio.
+//! - **Depends on.** The relay channel types, the model harness's Shuttle runner, and the task
+//!   labels and timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, or what a dispatch delivers.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each gate and wake record below changes
@@ -12,24 +12,22 @@
 use std::{
     future::Future,
     num::NonZeroUsize,
-    sync::Arc as StdArc,
     task::{Context, Wake, Waker},
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::{
-    sync::oneshot,
+    sync::{Arc, StdArc, oneshot},
     time::Instant,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use shuttle::rand::{Rng as _, thread_rng};
-use triomphe::Arc;
 
 use super::{
     RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease, RelayReceiver, RelayTryRecv,
 };
-use crate::shuttle_test::{check_pct, check_random};
 
 const RANDOM_ITERATIONS: usize = 1_000;
 const PCT_ITERATIONS: usize = 1_000;

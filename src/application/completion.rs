@@ -19,9 +19,11 @@ use nervix_interconnect::{
     HttpsListenerInstallation, HttpsListenerInstallationRequest, Transport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
-use nervix_primitives::{sync::CancellationToken, task::JoinHandle};
+use nervix_primitives::{
+    sync::{Arc, CancellationToken},
+    task::JoinHandle,
+};
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND, session_service::SessionServiceImpl,

@@ -8,10 +8,10 @@
 
 use std::{
     collections::BTreeSet,
-    io::{self, Cursor},
+    io,
+    io::Cursor,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
-    sync::Arc as StdArc,
     time::{Duration, SystemTime},
 };
 
@@ -30,7 +30,7 @@ use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeEndpoint,
     RelayName, RemoteAckRegistration,
 };
-use nervix_primitives::sync::{mpsc, watch};
+use nervix_primitives::sync::{StdArc, mpsc, watch};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,

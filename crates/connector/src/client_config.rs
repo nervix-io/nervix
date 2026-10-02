@@ -14,9 +14,9 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 use error_stack::Report;
+use nervix_primitives::sync::Arc;
 use tempfile::TempDir;
 use thiserror::Error;
-use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
 pub type ClientConfigResult<T> = Result<T, Report<ClientConfigError>>;

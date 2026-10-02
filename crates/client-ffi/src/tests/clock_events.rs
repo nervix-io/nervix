@@ -545,7 +545,7 @@ impl ServerExchange {
     }
 
     /// The next request the session sends on this exchange.
-    async fn next_request(&mut self) -> ClientMessage {
+    pub(super) async fn next_request(&mut self) -> ClientMessage {
         let frame = nervix_primitives::time::timeout(DEADLINE, self.requests.message())
             .await
             .assured("the session sends its request within the test deadline")
@@ -554,12 +554,19 @@ impl ServerExchange {
         ClientMessage::decode(&frame).assured("a request the client encoded decodes")
     }
 
-    async fn reply(&self, reply: Reply) {
+    /// Whether the session sends nothing on this exchange within `within`.
+    pub(super) async fn quiet(&mut self, within: Duration) -> bool {
+        nervix_primitives::time::timeout(within, self.requests.message())
+            .await
+            .is_err()
+    }
+
+    pub(super) async fn reply(&self, reply: Reply) {
         let delivery = reply
             .encode(&SessionLimits::DEFAULT)
-            .assured("a domain clock reply fits the default limits");
+            .assured("a test reply fits the default limits");
         let ReplyDelivery::Frame(frame) = delivery else {
-            panic!("a domain clock reply fits one frame");
+            panic!("a test reply fits one frame");
         };
         self.send(frame).await;
     }

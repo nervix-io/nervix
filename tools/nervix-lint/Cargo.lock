@@ -210,6 +210,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "futures-channel"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+dependencies = [
+ "futures-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -347,7 +356,6 @@ dependencies = [
  "nervix-lint-report",
  "nervix-primitives",
  "serde_json",
- "triomphe",
 ]
 
 [[package]]
@@ -371,12 +379,15 @@ dependencies = [
  "arc-swap",
  "concurrent-queue",
  "dashmap",
+ "futures-channel",
+ "futures-util",
  "meticulous",
  "nervix-primitives-macros",
  "parking_lot",
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "triomphe",
 ]
 
 [[package]]

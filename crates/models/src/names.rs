@@ -25,6 +25,7 @@ use std::{
 };
 
 use error_stack::Report;
+use nervix_primitives::sync::Arc;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize, SerializeUnsized,
     rancor::{Fallible, Source},
@@ -32,7 +33,6 @@ use rkyv::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 /// The longest a name may be, in bytes.
 const MAX_NAME_LEN: usize = 128;

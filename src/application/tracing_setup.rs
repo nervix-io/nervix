@@ -22,7 +22,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::OptionExt as _;
 use nervix_dns::DnsResolver;
 use nervix_primitives::{
-    sync::{blocking::Mutex as ParkingMutex, watch},
+    sync::{Arc, blocking::Mutex as ParkingMutex, watch},
     time::timeout,
 };
 use nervix_recovery::{Discarded, Reported};
@@ -37,7 +37,6 @@ use tracing_subscriber::{
     EnvFilter, fmt, fmt::writer::BoxMakeWriter, prelude::__tracing_subscriber_SubscriberExt,
     util::SubscriberInitExt,
 };
-use triomphe::Arc;
 
 use super::{AppError, Args};
 

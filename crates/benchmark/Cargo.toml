@@ -41,7 +41,6 @@ testcontainers = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
-triomphe = { workspace = true }
 upon = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 

@@ -12,14 +12,15 @@
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Bound::{Excluded, Unbounded},
-    sync::Arc as StdArc,
 };
 
 use imbl::{GenericHashMap, GenericOrdMap, shared_ptr::DefaultSharedPtr};
 use meticulous::OptionExt as _;
 use nervix_interconnect::{BranchCheckpointCursor, RuntimeState};
-use nervix_primitives::publication::ArcSwap;
-use triomphe::Arc;
+use nervix_primitives::{
+    publication::ArcSwap,
+    sync::{Arc, StdArc},
+};
 
 use super::BranchKey;
 

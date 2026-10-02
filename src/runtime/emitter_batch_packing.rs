@@ -21,7 +21,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkRecordPosition;
 use nervix_models::{EmitterBatchPolicy, RelayName};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{BranchKey, EmitterHeaders};
 use crate::runtime_schema::{

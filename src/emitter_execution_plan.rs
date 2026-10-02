@@ -8,7 +8,7 @@
 //!   decision, and the expression VM frontend.
 //! - **Must not know.** Tokio, locks, connector I/O, node-local resources, or task spawning.
 
-use std::{collections::BTreeMap, sync::Arc as StdArc};
+use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -17,12 +17,12 @@ use nervix_models::{
     Expression, FieldName, FlushPolicy, InputCollectPolicy, MaterializedStateDependency, Model,
     ModelKind, ModelName, NodeRef, RelayName, RouteConstruction, ScheduledNodes, SqsFifoGroup,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction, lower_transforming_route,
     program::{FunctionName, Program, SpannedNode},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{
     emitter_start_plan::{DeclaredClientConfig, EmitterClientModels, EmitterStartPlan},

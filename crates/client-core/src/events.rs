@@ -15,7 +15,7 @@ use nervix_client_wire::{
     SuggestionKind, SuggestionStatus,
 };
 use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::subscriptions::{SubscriptionInterruption, SubscriptionRestorationFailure};
 

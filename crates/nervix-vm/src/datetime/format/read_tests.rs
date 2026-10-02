@@ -55,7 +55,7 @@ fn mismatch(position: usize, expected: TextExpectation) -> Result<i64, TextFailu
 }
 
 fn literal(text: &str) -> TextExpectation {
-    TextExpectation::Literal(triomphe::Arc::from(text))
+    TextExpectation::Literal(nervix_primitives::sync::Arc::from(text))
 }
 
 fn unreadable(reason: UnreadableText) -> Result<i64, TextFailure> {

@@ -5,7 +5,7 @@ use std::{num::NonZeroU64, time::Duration};
 
 use nervix_client_wire::{ProducerAdmissionChanged, ProducerEnded, ProducerId, RequestId};
 use nervix_models::{ClientProducerAdmission, ClientProducerEndReason};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{ProducerEnd, ProducerRegistry, next_backoff};
 

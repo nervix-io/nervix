@@ -2,10 +2,11 @@
 
 This is the executable ledger of [Client Wire 14](https://app.clickup.com/t/86bc1ahyr), which
 [Clock Attach 05](https://app.clickup.com/t/86bc8azn1) extended with the domain clock events the
-binding exposes and [Clock Attach 05A](https://app.clickup.com/t/86bc95p44) with the clock an
-attach reports. It records which runtimes speak the finalized session protocol, whether each does
-so as an independent native client or through the shared Rust binding, the commands that build and
-run each one, and what the qualification found. It does not promise a separately maintained
+binding exposes, [Clock Attach 05A](https://app.clickup.com/t/86bc95p44) with the clock an attach
+reports, and [Client I/O 04](https://app.clickup.com/t/86bc8bj89) with the producers and consumers
+of client endpoints. It records which runtimes speak the finalized session protocol, whether each
+does so as an independent native client or through the shared Rust binding, the commands that build
+and run each one, and what the qualification found. It does not promise a separately maintained
 production SDK for any language: the probes are qualification clients, and the binding is the
 supported way for Python, JVM, Ruby, C and C++ hosts to reuse the Rust session.
 
@@ -56,7 +57,9 @@ A binding probe reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target 
 `NERVIX_PROBE_GRPC_URI`, `NERVIX_PROBE_WEBSOCKET_URI`, `NERVIX_PROBE_USERNAME`,
 `NERVIX_PROBE_PASSWORD` and `NERVIX_PROBE_DOMAIN`, and its subscription from `NERVIX_PROBE_RELAY`,
 `NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. Run with the `clock` argument, a binding probe
-follows the domain's clock instead and reads no subscription.
+follows the domain's clock instead and reads no subscription. Run with the `io` argument, it
+publishes to the ingestor `NERVIX_PROBE_INGESTOR` names, consumes the emitter
+`NERVIX_PROBE_EMITTER` names, and reads no subscription either.
 
 ## What every probe proves
 
@@ -111,15 +114,65 @@ same report:
 Tick ids, the authority's UTC observation and the UTC anchor depend on when the scenario ran, so
 they are checked rather than printed.
 
+`A <runtime> client publishes typed batches through a client ingestor and acknowledges their output
+through a client emitter` runs every binding host, the C ABI in process, C, C++, Python, Java and
+Ruby, against a one- and a three-node cluster, through a TCP forwarder in front of `node-1`. The
+client ingestor branches its rows by tenant, and the client emitter inherits every field, adds an
+`echo` of the identifier and leaks the sensitive one, under a sequential window of one attempt.
+Every probe prints the same report:
+
+- The opens: a producer and a consumer whose expected fields differ from the endpoint's only in one
+  field's sensitivity are both refused as a schema mismatch, read with `nx_error_open_refusal`.
+  Then the opened consumer's and producer's generation, state, admission, window, ACK timeout, grant
+  and batch limits, and every field of both schemas with its nullability and sensitivity, a list
+  type by its levels.
+- The waits: a read of no output ends by its deadline, and one cancelled from another thread by its
+  token.
+- A batch of the wrong schema: built for the consumer's schema, it is refused as the host's
+  argument before anything is sent, and the same batch submitted as the stream other Arrow tooling
+  would write is refused by the server as an invalid batch of another schema.
+- The typed batch, built column by column: every integer width at both extremes, 64-bit values on
+  both sides of the JavaScript safe-integer boundary, `-0.0`, the smallest subnormal and the largest
+  finite floats by their bits, multi-byte text, text with an embedded NUL, bytes that are not UTF-8,
+  empty and null text and bytes, the extreme DATETIME nanoseconds, an absent and a present-zero
+  optional value, a `VEC<STRING>` holding an empty list and an empty string, an `ARRAY<I16, 2, 2>`
+  at the `I16` extremes, and a nullable `VEC<ARRAY<DATETIME, 2>>` that is null, empty, and at the
+  extremes. Its submission stays unresolved while its output waits, and the output rows are read
+  from the delivery one level at a time.
+- The settlements: a retry comes back with the same identity and a new reference, the first
+  reference then settles as stale, and the retained one acknowledges; the submission completes.
+  A rejected delivery finishes its submission as a processing failure the application rejected.
+- The credit: two outstanding submissions take the producer's credit, so a third waits and ends by
+  its deadline without being submitted; once both are acknowledged it is submitted and completes.
+- The session loss: while one delivery is held unacknowledged, the scenario stops the forwarder.
+  The consumer's read reports the interruption, the held delivery can no longer be settled, its
+  submission's outcome is unknown because the session was lost, and a producer closed during the
+  reconnect stays closed. When the forwarder returns, the consumer receives the held batch again
+  under the same identity and the restored producer publishes one more batch, which completes.
+- The closure: both handles close, and the endpoints report no producer, no consumer, and no
+  outstanding or retained batch.
+
 Beyond the shared report, each kind of probe checks what only it can reach:
 
 | Probe | Checks |
 | --- | --- |
 | Binding hosts | Rows survive on a retained reference after the first is released, and read identically after collections, allocation churn, and release on another thread. Every column is copied in one call, and every string and bytes value borrowed from the frame equals its copy. A wait cancelled from another thread reports `NX_ERROR_CANCELLED`, an expired deadline `NX_ERROR_DEADLINE`, and a cancelled command keeps its execution reference. A clock wait of a session that follows no clock ends the same two ways, and the clock the attach reported and the first tick event read identically on a retained reference after the first is released on another thread. |
+| Binding hosts, producers and consumers | Every buffer a host passes a batch builder is overwritten as soon as the call returns, and the rows the consumer reads are still the ones the host built. The stream a host passes `nx_producer_submit_ipc` is overwritten or released as soon as the call returns, and the server still refuses it for its schema rather than as malformed. A delivery's batch borrows the stream the delivery carried. A delivery and its batch retained before the first reference is released on another thread read the same stream and rows, and the retained delivery settles the attempt. A submission's pending list names the one waiting submission, and a wait for its outcome ends by its deadline while its output is unacknowledged. |
 | Python | The frame is a `memoryview` whose buffer keeps the event alive; it stays readable after every other reference is dropped and collected. |
 | Java | References retained into automatic arenas are released by the collector while other references to the same event are read. A view of a released event throws instead of reading freed memory. |
 | Ruby | References nothing reaches are released by the collector's free function while retained references are read. |
 | Go, TypeScript | A request that omits the required subscription type is rejected rather than defaulted, and cancelling an identity that is not in flight reports `NotInFlight`. The TypeScript client reads every 64-bit value as a `BigInt`. |
+
+## Batch buffers
+
+What the binding copies on the way from a host's buffers to the session and back:
+
+| Path | Copies the binding makes |
+| --- | --- |
+| A batch a host builds | Each builder call copies the buffer it receives before it returns. Finishing assembles the Arrow arrays from those copies without another, and submitting writes the canonical stream once. |
+| A stream a host writes | `nx_producer_submit_ipc` copies the stream once before it returns. |
+| A delivery's stream | None: `nx_delivery_ipc`, and `nx_batch_ipc` of its batch, borrow the stream the reply carried until the last reference is released. |
+| A delivery's columns | `nx_delivery_batch` decodes the stream the first time it is called and keeps the batch, and each read copies one whole level of a column into the host's buffer. |
 
 ## The corpus
 
@@ -154,11 +207,18 @@ the independent interoperation with Rust in both encoding directions.
 | JavaScriptCore, which Bun runs on, canonicalizes a NaN it materializes as a Number, and V8 keeps the payload; the generated `value()` of a float cell returns a Number. | A JavaScript client that needs exact float bits reads the scalar's bits, as the TypeScript probe does. |
 | The Go and TypeScript FlatBuffers runtimes have no verifier. | Their probes check each frame's identifier and every union discriminant and required value they read. The Rust verifier remains the only full structural verification. |
 | Dart code generation rejects optional scalars, which the schema uses for every required enum. | Dart is not a target runtime. |
+| Under load, the outputs of two batches a producer had outstanding at once sometimes arrived in the other order, with one- and three-node clusters alike. The node refuses a batch as `Busy` when it cannot reserve memory or a worker to validate it, and the client sends that batch again after the backoff, behind the batch submitted after it. | Nothing orders batches outstanding at once, as [Ordering And Backpressure](../docs/src/client-session-protocol.md#ordering-and-backpressure) and P-5 of the implementation manual say. The probes check that each of the two outputs keeps its rows, in either order. |
 
 ## Limits
 
-- The binding's column access covers scalar, string and bytes fields. A list field reports its shape,
-  and its values are read from the borrowed frame with generated code.
+- The binding's column access to a subscription's Row events covers scalar, string and bytes
+  fields. A list field reports its shape, and its values are read from the borrowed frame with
+  generated code. A producer's or consumer's batch reads and writes every field, a list one level at
+  a time.
+- The loss of an acknowledgement's answer cannot be timed against a live cluster, so the probes do
+  not cut a session between the server applying a settlement and its answer. The binding's unit
+  test `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain` does, and the
+  settlement reports `NX_ERROR_UNCERTAIN`.
 - The probes connect over plaintext. TLS selection is the Rust client's and is not reimplemented by
   the binding.
 - C and C++ consume the binding. No independent C or C++ reader is maintained.

@@ -482,8 +482,13 @@ operation's domain semantics.
    may close independently. Opening the stream is bounded by the operation's declared setup
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
    is awaiting. The initiator's sender reports when the peer's flow control last accepted its
-   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Consensus append
-   traffic and [client producer links](#client-producer-links) use this form.
+   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Receiving is
+   cancel-safe on both ends: a frame is decoded under the pool's memory and CPU admission after it
+   leaves the stream, and a receive its caller abandons, because a timer or command it selects
+   against won, leaves that decoding to the next receive, which finishes the frame before it reads
+   another. No abandoned receive loses a frame or reorders one. Consensus append traffic,
+   [client producer links](#client-producer-links) and
+   [client consumer streams](#client-consumer-streams) use this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
 

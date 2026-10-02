@@ -1497,7 +1497,7 @@ fn lower_expression_with_span(
         ModelExpression::JsonExists { document, path } => Expr::Json {
             document: Box::new(lower_expression_with_span(document, scope_policy, span)?),
             extraction: JsonExtraction {
-                path: triomphe::Arc::new(path.clone()),
+                path: nervix_primitives::sync::Arc::new(path.clone()),
                 output: JsonOutput::Exists,
             },
         },
@@ -1951,9 +1951,9 @@ fn json_value_extraction(
         )
     })?;
     Ok(JsonExtraction {
-        path: triomphe::Arc::new(path.clone()),
+        path: nervix_primitives::sync::Arc::new(path.clone()),
         output: JsonOutput::Value {
-            target: triomphe::Arc::new(target),
+            target: nervix_primitives::sync::Arc::new(target),
             on_failure,
         },
     })

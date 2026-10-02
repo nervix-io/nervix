@@ -68,6 +68,44 @@ pub(crate) unsafe fn handle<'a, T>(
     }
 }
 
+/// Borrows a handle the host passed in to a call that changes it.
+///
+/// # Safety
+///
+/// A non-null `handle` points to a live `T` this library handed out, which outlives `'a` and no
+/// other thread uses meanwhile.
+pub(crate) unsafe fn handle_mut<'a, T>(
+    handle: *mut T,
+    argument: &'static str,
+) -> Result<&'a mut T, Failure> {
+    // SAFETY: the caller upholds this function's contract.
+    match unsafe { handle.as_mut() } {
+        Some(handle) => Ok(handle),
+        None => Err(Failure::invalid_argument(argument, "is required")),
+    }
+}
+
+/// Borrows the elements of a buffer the host passed in. A null buffer is the empty one, and any
+/// other null is refused.
+///
+/// # Safety
+///
+/// A non-null `data` points to `len` readable, aligned elements that outlive `'a`.
+pub(crate) unsafe fn input_slice<'a, T>(
+    data: *const T,
+    len: usize,
+    argument: &'static str,
+) -> Result<&'a [T], Failure> {
+    if data.is_null() {
+        if len == 0 {
+            return Ok(&[]);
+        }
+        return Err(Failure::invalid_argument(argument, "is required"));
+    }
+    // SAFETY: `data` is non-null and the caller guarantees `len` readable elements.
+    Ok(unsafe { slice::from_raw_parts(data, len) })
+}
+
 /// Borrows a handle an infallible accessor reads, which the header requires to be valid.
 ///
 /// # Safety

@@ -188,13 +188,12 @@ impl Broadcast for ArrayRef {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_array::{
         Array, ArrayRef, BooleanArray, Int64Array, ListArray, StringArray,
         TimestampNanosecondArray, types::Int64Type,
     };
     use arrow_schema::{DataType, TimeUnit};
+    use nervix_primitives::sync::StdArc;
 
     use super::{Broadcast, Operand};
 
@@ -259,7 +258,7 @@ mod tests {
 
         let list =
             ListArray::from_iter_primitive::<Int64Type, _, _>(vec![Some(vec![Some(1), Some(2)])]);
-        let list_ref: ArrayRef = Arc::new(list);
+        let list_ref: ArrayRef = StdArc::new(list);
         let lists = list_ref.broadcast(3);
         assert_eq!(lists.len(), 3);
         assert_eq!(lists.null_count(), 0);

@@ -818,12 +818,11 @@ fn write_runtime_value(
 /// A reproducible typed Row encoding workload for measuring its CPU, allocations and wire bytes.
 #[cfg(feature = "benchmarks")]
 pub mod benchmark {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::{ArrayRef, BinaryArray, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use nervix_client_wire::{EncodedFrame, RowBranch, ServerFrame};
     use nervix_models::SubscriptionName;
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
     use crate::runtime_schema::RuntimeRecordBatch;
@@ -1267,10 +1266,7 @@ pub enum SubscriptionRowEncodingError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::{NonZeroU32, NonZeroUsize},
-        sync::Arc as StdArc,
-    };
+    use std::num::{NonZeroU32, NonZeroUsize};
 
     use arrow_array::{ArrayRef, BinaryArray, RecordBatch};
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
@@ -1283,6 +1279,7 @@ mod tests {
         BranchName, CreateSchema, DomainName, FieldName, ParseAsType, RelayName, SchemaField,
         Timestamp,
     };
+    use nervix_primitives::sync::StdArc;
 
     use super::{
         SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowFrame,

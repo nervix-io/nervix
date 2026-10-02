@@ -7,8 +7,6 @@
 //! - **Depends on.** The schema Models and the VM's type system.
 //! - **Must not know.** Which model asked for the comparison.
 
-use std::sync::Arc as StdArc;
-
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
     TimeUnit as ArrowTimeUnit,
@@ -18,6 +16,7 @@ use nervix_models::{
     CreateSchema, CreateWireSchema, DomainName, ModelIndex, ModelKind, ModelName, SchemaField,
     SchemaName,
 };
+use nervix_primitives::sync::StdArc;
 use nervix_vm::{CompileBinding, SchemaSensitivity};
 
 use crate::registry::error::RegistryError;

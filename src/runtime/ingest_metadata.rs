@@ -579,8 +579,8 @@ mod tests {
         MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,
         RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::{

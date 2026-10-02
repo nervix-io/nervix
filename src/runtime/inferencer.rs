@@ -18,13 +18,12 @@ use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
 };
-use nervix_primitives::sync::blocking::Mutex;
+use nervix_primitives::sync::{Arc, blocking::Mutex};
 use ordered_float::OrderedFloat;
 use ort::{
     session::{Session, SessionInputValue},
     value::Tensor,
 };
-use triomphe::Arc;
 
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
 

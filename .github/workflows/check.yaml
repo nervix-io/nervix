@@ -1057,10 +1057,15 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
+      # Every registered Shuttle check under its exploration and under the nondeterminism detector,
+      # each in its own process, then the proof that a failing schedule persists and replays.
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
           just test-shuttle
+
+      - name: Shuttle schedule replay
+        run: just test-shuttle-replay-check
 
       - name: Publish kache report
         if: always()
@@ -1192,5 +1197,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: turmoil-failures
-          path: target/turmoil-failures
+          path: |
+            target/turmoil-failures
+            target/turmoil-suite
           if-no-files-found: ignore

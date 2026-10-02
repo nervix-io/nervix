@@ -896,22 +896,27 @@ each enable one.
 
 Ordinary execution pays nothing for the boundary: each path re-exports the library item itself,
 with no wrapper, allocation, dispatch or scheduling point, so a primitive on a hot path costs
-exactly what it did before. The atomic family is portable and builds for the browser console.
-Everything else is the explicit `native` capability, and asking for a capability or a mode the
-target cannot provide is a compile error rather than another implementation.
+exactly what it did before. The atomic and shared-ownership families are portable and build for the
+browser console. Everything else is the explicit `native` capability, and asking for a capability or
+a mode the target cannot provide is a compile error rather than another implementation: a mode or
+the `native` capability requested for the browser's target fails with the boundary's own diagnostic
+as its first error, because the libraries of every mode and of the native capability exist only for
+native targets and none of them is compiled there.
 
 | Family | Path | Ordinary and Turmoil | Shuttle | Loom |
 | --- | --- | --- | --- | --- |
 | Atomic values, `Ordering`, `fence` | `sync::atomic` | The standard library's | Modeled: every operation is a scheduling point, and every ordering behaves as `SeqCst` | Modeled: explored under the C11 orderings Loom supports |
+| Shared ownership: Nervix-owned references, and the standard strong and weak references a weak reference or an external API such as Arrow or a Tokio semaphore requires | `sync::Arc`, `sync::StdArc`, `sync::StdWeak` | `triomphe`'s `Arc`, and the standard library's `Arc` and `Weak` | Real, with no scheduling point: no reference count is modeled | Real, outside every model |
 | Async locks, semaphores and one-time cells; the `mpsc`, `oneshot` and `broadcast` channels | `sync` | Tokio's | Modeled: Shuttle's Tokio | Real: Tokio's, outside every model |
 | `Notify` and the `watch` channel | `sync` | Tokio's | Modeled: the boundary's own, with Tokio's semantics and a scheduling point before every registration, notification and deciding read | Real: Tokio's, outside every model |
+| The waker registration of one waiting task | `sync::AtomicWaker` | The `futures` crate's | Opaque, with a scheduling point before and after each registration, wake and take | Real: the `futures` crate's, outside every model |
 | Cancellation tokens and their guards | `sync` | Tokio Util's | Modeled: Shuttle's token, wrapped for Tokio Util's clone identity and owned operations | Real: Tokio Util's, outside every model |
 | Blocking locks and their condition variable | `sync::blocking` | `parking_lot`'s | Modeled: Shuttle's `parking_lot` locks, and the boundary's condition variable over them | Real: `parking_lot`'s, outside every model |
 | Barriers, `Once` and the synchronous channel | `sync::blocking` | The standard library's | Modeled: Shuttle's | Real: the standard library's, outside every model |
 | `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Real: the standard library's, outside every model |
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
 | Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
-| `block_in_place` | `task` | Tokio's | Unavailable | Real: Tokio's, outside every model |
+| Blocking the runtime worker thread that calls it: the declared owners outside the executor | `task::block_in_place` | Tokio's | Unavailable | Real: Tokio's, outside every model |
 | Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Running a job on the blocking pool itself: the executor's storage jobs, and the declared owners outside the executor | `task::spawn_blocking` | Tokio's blocking pool | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | Tokio's, following the clock of the runtime that polls them: the operating system's, a test's paused clock, or the simulated host's under Turmoil | Shuttle's: a sleep or an interval's tick is one scheduling point that takes no time, and a timeout expires only when a check triggers it; `Instant::now` reads the operating system's clock | Real: Tokio's, outside every model |
@@ -935,13 +940,20 @@ order an owner's use of it against other tasks, but the primitive's own instruct
 ordering stay unmodeled, so a check claims nothing about them. An operation **outside the modeled
 execution** is a real primitive reached through `nervix_primitives::unmodeled` under a named
 permission, and supplies no evidence about a checked protocol. An operation a mode cannot provide is
-unavailable in that mode and fails to compile; it never falls back to a real primitive. Loom models
-isolated synchronous owners: atomics, the threads a model spawns, joins, parks and yields, and
-thread-local storage. It models no async family, lock, collection or publication, so a Loom build,
-in which the server and consensus compile for the models of their owners, takes the ordinary
-library for each of those, outside every model. `just validate-primitive-boundary` rejects every
-such family in Loom model code, a module compiled only for Loom, so a model never names a real
-primitive; what an owner a model drives uses internally is excluded from that model's claim.
+unavailable in that mode and fails to compile; it never falls back to a real primitive. Shared
+ownership is real in every mode and on every target: no model checker counts references, so a check
+claims nothing about an ordering a reference count establishes, such as the one `get_mut` or
+`try_unwrap` relies on. Loom models isolated synchronous owners: atomics, the threads a model
+spawns, joins, parks and yields, and thread-local storage. It models no async family, lock,
+collection or publication, so a Loom build, in which the server and consensus compile for the models
+of their owners, takes the ordinary library for each of those, outside every model.
+`just validate-primitive-boundary` rejects every such family in Loom model code, an inline module or
+a module file whose declaration compiles it only for Loom, so a model never names a real primitive
+silently; what an owner a model drives uses internally is excluded from that model's claim. The check
+reads each `cfg` of a module through its `all`, `any` and `not`: a module is Loom model code when one
+of them is false in every build without the `loom` feature, and a module whose `cfg` the check
+cannot read is rejected. Model
+code may name shared ownership and a permitted unmodeled primitive, because each says it is real.
 `just test-primitives` shows each mode's selection.
 
 Turmoil replaces the network and the clock, not synchronization. A Turmoil build runs the ordinary
@@ -960,14 +972,15 @@ keep the owners `scripts/check_clock_boundaries.py` declares, and a logical dead
 domain clock's coordinate, as [Domain Clock](./domain-clock.md) describes. `task::spawn_cpu` belongs
 to the bounded executor, which admits, charges and cancels every job; the boundary check rejects it
 in any file but the executor's worker pools, so it is no way around admission. `task::spawn_blocking`
-is the runtime's blocking pool, which the executor's storage workers run on. Work a node runs off
-its async workers goes through the executor instead, so the check rejects the pool in any other file
-unless a permission in `crates/primitives/blocking-permissions.toml` declares that file's owner, why
-the owner stays outside the executor, and what bounds its work there instead, as
-[Blocking work outside the executor](#blocking-work-outside-the-executor) lists. `pause`, `advance`
-and `resume` exist only with the `test-util` capability, which ordinary tests of elapsed-time
-behavior enable and no production graph has, because a clock that can be paused is checked on every
-read.
+is the runtime's blocking pool, which the executor's storage workers run on, and
+`task::block_in_place` blocks the runtime worker thread that calls it, which no file owns by
+default. Work a node runs off its async workers goes through the executor instead, so the check
+rejects either in any other file unless a permission in `crates/primitives/blocking-permissions.toml`
+lists it for that file, with the owner, why the owner stays outside the executor, and what bounds
+its work instead, as [Blocking work outside the executor](#blocking-work-outside-the-executor)
+lists. `pause`, `advance` and `resume` exist only with the `test-util` capability, which ordinary
+tests of elapsed-time behavior enable and no production graph has, because a clock that can be
+paused is checked on every read.
 
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
@@ -985,12 +998,12 @@ unverified:
 
 | Owner | Why the primitive is real | What stays outside every check |
 | --- | --- | --- |
-| The Shuttle runners of execution, the interconnect, the server and the Rust client, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
+| The Shuttle and Loom runners of `nervix-model-harness` | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
 | The WASM runtime's epoch driver and guest-callback time | The epoch driver is an operating-system thread no model runs, which sleeps for real and is stopped by a flag; a guest callback reads its domain time from Tokio's task-local storage, which no model isolates | When the epoch thread observes shutdown, and a callback's time scope, which Shuttle tasks would share while polled |
 | The C binding's session | The binding owns the runtime its host's threads enter and shuts it down in the background, which is its contract with the host and which Shuttle's runtime does not provide | Everything the binding runs; the Rust client it drives has its own checks |
 | The cluster membership transport | Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait, sleep and select on Tokio's primitives | Cluster membership gossip |
 | Process-wide one-time state: the SIMD instruction level, the interconnect's cryptography provider, and the test and benchmark schema and certificate fixtures | Initialized once per process and read by every later model execution in it | Detection, installation and fixture construction |
-| The browser console's executor installation | The browser target runs in no execution mode and has no native capability | Everything the console runs |
+| The browser console: its executor installation, and the `futures` channel, `select!` and abort handles its tasks use on the browser's event loop | The browser target runs in no execution mode and has no native capability, so the console takes those families from the `futures` crate, which a native build takes from Tokio | Everything the console runs |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
 | The application unit-test fixtures | Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test | Nothing a check claims; no model builds the fixtures |
 | The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own primitives are modeled |
@@ -998,7 +1011,10 @@ unverified:
 | The integration-test harness's port pool and the benchmark driver | They reserve free ports from the operating system for real node processes and containers, synchronously and before anything binds them, with the standard library's blocking listener | Nothing a check claims; the ports carry the traffic of real processes |
 
 A real primitive never carries the protocol under test, chooses its branches, supplies its wakeups
-or establishes an ordering an assertion relies on.
+or establishes an ordering an assertion relies on. A permission covers one Rust file the boundary
+governs and lists real items of the unmodeled path; a permission for a directory, a glob, a file
+outside the governed sources, or an item the path does not have is rejected, and so is a permission
+or a listed item nothing uses.
 
 A selected atomic belongs to the model execution that constructs it, so it never lives in a
 `static`. A static is constructed once per process and would carry its state from one execution into
@@ -1012,36 +1028,82 @@ a `static`.
 `just validate-primitive-boundary` rejects every other path to a governed family however it is
 spelled: a direct, renamed, grouped or glob import, a fully qualified path, an attribute, a renamed
 crate, an imported `sync`, `time` or `net` module, or a path in a macro body or an inactive `cfg`
-branch. That covers Tokio's `time` and `net` modules, Turmoil's `net`, and the standard library's
-`Instant` and sockets. Each rejection names the approved path; `tokio::net::lookup_host` and the
-`ToSocketAddrs` traits name the node's resolver instead. It also rejects an unmodeled use without its
-permission, a permission nothing uses, a dependency on a library whose family the boundary selects
-from any package but the boundary, `task::spawn_cpu` in any file but the executor's worker
-pools, `task::spawn_blocking` in any file but those pools and the owners a blocking permission
-declares, and a blocking permission for a file that no longer names the pool. Turmoil is a runner
-as well as the network the boundary selects, so beside the boundary, a package whose harness drives
-a simulation may depend on it, only as an optional dependency its own `turmoil` feature enables. Tokio's unstable runtime controls belong to the Turmoil build: the check
-rejects `--cfg tokio_unstable` in any `justfile` recipe but a Turmoil one, and in Cargo
-configuration, a workflow or a build script. It rejects a `static`, including one a
-`thread_local!` declares, whose declared type names a selected atomic, directly or through a
-wrapper, an array, a reference, a module path or a local type alias, and a `static` or `const`
-initializer, `const fn` or `const` block that constructs one. It reads declared types and
-constructions, so a struct holding an atomic that a static builds lazily is left to review. `just validate-loom-dependencies` keeps Loom out of every
-ordinary dependency graph, and `just validate-execution-mode-conflicts` requires the combined-mode
-diagnostic.
+branch. That covers shared ownership through `triomphe` or the standard library's `sync`, the
+`futures` crates' channels, locks, executors, waker registration, `select!` and abort handles,
+Tokio's `time` and `net` modules, Turmoil's `net`, and the standard library's `Instant` and sockets.
+Each rejection names the approved path; `tokio::net::lookup_host` and the `ToSocketAddrs` traits
+name the node's resolver instead. It also rejects an unmodeled use without its permission, a stale
+or misplaced permission, a dependency on a library whose family the boundary selects from any
+package but the boundary, a manifest entry that renames a governed crate, `task::spawn_cpu` in
+any file but the executor's worker pools, `task::spawn_blocking` in any file but those pools and
+the owners a blocking permission declares, `task::block_in_place` in any file but the owners a
+blocking permission declares, and a blocking permission that lists an item its file no longer
+names. The source and manifest rules read every tracked file and every new file Git does not
+ignore, whether or not the workspace lists its package: the isolated analysis workspace under
+`tools/nervix-lint`, with its driver, fixtures and fixture macros, is authored source like any
+crate. What a build wrote is not: Cargo tags each build directory it creates with a `CACHEDIR.TAG`,
+and the check reads nothing below a tagged directory, wherever it is nested. Turmoil is a runner as
+well as the network the boundary selects, so beside the boundary, a package whose harness drives a
+simulation may depend on it, only as an optional dependency its own `turmoil` feature enables.
 
-Some families still reach their libraries through their current access paths. Each joins the
-boundary as one complete move, with every consumer migrated and its enforcement extended, and until
-then keeps the behavior this chapter describes:
+An execution mode is a feature of the boundary, never a global cfg: `--cfg loom` would reach every
+crate of a build, and Tokio and other dependencies read the same names. The check rejects a bare
+`loom`, `shuttle` or `turmoil` in a `cfg` predicate, and `--cfg loom`, `--cfg shuttle` or
+`--cfg turmoil` in any `justfile` recipe, Cargo configuration, workflow or build script. Tokio's
+unstable runtime controls belong to the Turmoil build: the check rejects `--cfg tokio_unstable` in
+any `justfile` recipe but a Turmoil one, and in Cargo configuration, a workflow or a build script.
 
-| Family | Current access path |
-| --- | --- |
-| Edge I/O | Tokio's I/O traits, filesystem, process and signal modules, which are real in every mode |
-| Shared ownership | `triomphe::Arc`, and `std::sync::Arc` where an external API such as a Tokio semaphore requires it; opaque in every mode |
-| The browser console | `futures-channel` and the browser's executor, in a target no execution mode runs |
+The analysis cfg of the [source contracts](#source-contracts), `nervix_lint`, is tooling only and
+selects nothing. Only the analysis driver sets it, for the crates it analyzes, and the analysis must
+read the code a product build compiles. The check rejects `--cfg nervix_lint` in any `justfile`
+recipe, Cargo configuration, workflow or build script, a `cfg` or `cfg!` predicate that names it,
+and a `cfg_attr` under it that holds anything but `nervix::` contracts and lint levels, such as a
+`path`, a `derive` or a nested `cfg`. An annotation hides nothing from the other rules: a governed
+path is rejected in the code an annotation gates as it is anywhere else.
 
-Tokio's `pin!` and `join!` pin and poll futures without any synchronization of their own, so they
-stay Tokio's in every mode.
+The check rejects a `static`, including one a `thread_local!` declares, whose declared type names a
+selected atomic, directly or through a wrapper, an array, a reference, a module path or a local type
+alias, and a `static` or `const` initializer, `const fn` or `const` block that constructs one. It
+reads declared types and constructions, so a struct holding an atomic that a static builds lazily is
+left to review.
+
+Guest code is outside the source rules: the WASM guest SDK and every guest library built on it are
+compiled into a user's WASM guest, a single-threaded program in the host's sandbox where no mode
+exists and no Nervix process runs, and a user's guest takes Arrow's standard references without the
+boundary. The rules still read their manifests. Tokio's I/O traits, filesystem, process and signal
+modules are real in every mode, and so are the pure polling combinators of Tokio, `pin!` and
+`join!`, and of the `futures` crates, which poll futures without synchronizing anything of their
+own. The browser's event loop, its executor reached through `wasm-bindgen-futures` and Leptos and
+its timers through `web-sys`, exists only in a target no mode runs. The cells of `std::cell` are
+confined to one thread. None of these is a family the boundary selects.
+
+### Builds, modes and product binaries
+
+Each mode is its own build invocation, with explicit features, because Cargo unifies the features of
+one invocation:
+
+| Mode | Lint | Tests | Coverage |
+| --- | --- | --- | --- |
+| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`, `just coverage-native-extras` |
+| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
+| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, the Loom part of `just test-primitives-modeled` | Not collected: a model is evidence of an ordering, not of product coverage |
+| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, the Turmoil part of `just test-primitives-modeled` | `just coverage-turmoil` |
+
+`just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
+and of every package on its own, the way a consumer builds it, with default features and without
+them, and rejects Loom, Shuttle, a Shuttle wrapper or Turmoil in any of them, and an execution mode
+or the `test-util` capability enabled on the boundary. It also keeps the portable graphs portable:
+the vocabulary crate, and the browser console and the wire crate for the browser's target, contain
+no async runtime or network library and never enable the boundary's `native` capability.
+`just validate-execution-mode-conflicts` requires the combined-mode diagnostic, including for modes
+two dependencies select separately, the boundary's own diagnostic for a mode or the native
+capability requested for the browser's target, and the product-binary diagnostic.
+
+A build that selects a mode is a test artifact. Every binary Nervix ships, the server, the CLI and
+the NSPL formatter, declares itself with `nervix_primitives::product_binary!`, which fails to
+compile in a build that selects a mode and names the binary and the mode, so no modeled binary can
+be built, let alone published. `just validate-primitive-boundary` requires the declaration in the
+crate root of every binary the release image's build compiles.
 
 ### Blocking work outside the executor
 
@@ -1052,21 +1114,25 @@ between its bounded units. Operator-supplied code the node cannot bound, a Roto 
 transformation, takes the extension class, so a program that never returns holds only that class's
 workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
 listener spends only those, and saturated data, extension or bulk work never delays a login. The
-executor's storage workers are the one built-in owner of the runtime's blocking pool.
+executor's storage workers are the one built-in owner of the runtime's blocking pool, and no file
+owns `task::block_in_place`, which blocks the runtime worker thread that calls it.
 
 Everything else that blocks a thread is a declared owner in
-`crates/primitives/blocking-permissions.toml`, which names the file, the owner, why it stays outside
-the executor, and what bounds its work instead:
+`crates/primitives/blocking-permissions.toml`, which names the file, the blocking items the owner
+names there by their paths below `nervix_primitives`, the owner, why it stays outside the executor,
+and what bounds its work instead. A permission declares its file for exactly the items it lists, so
+a file whose owners block in different ways, such as the CLI's, has a permission for each:
 
-| Owner | Why it stays outside the executor | What bounds it |
-| --- | --- | --- |
-| The resolver's configuration load in `nervix-dns` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
-| The Kafka sink's final producer-queue drain and the Kafka source's partition inspection | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, and a five-second metadata timeout per request |
-| The Rust client's backup download and restore upload, and the CLI's event printer | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
-| The benchmark driver and the scenario harness | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
+| Owner | Blocks through | Why it stays outside the executor | What bounds it |
+| --- | --- | --- | --- |
+| The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
+| The Kafka sink's final producer-queue drain and the Kafka source's partition inspection | `task::spawn_blocking` | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, and a five-second metadata timeout per request |
+| The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
+| The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
+| The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
 
-The boundary check rejects the pool in any other file, and a permission for a file that no longer
-names it.
+The boundary check rejects either item in a file no permission lists it for, and a listed item its
+file no longer names.
 
 ## Deterministic Concurrency Verification
 
@@ -1097,13 +1163,15 @@ execution has no Tokio reactor, so a socket created inside a check panics and fa
 reaching the network unobserved. A check's own records use unmodeled atomics on purpose, under the
 permissions above, so that recording an operation adds no scheduling point to it.
 
-Some primitives are opaque to Shuttle: `arc-swap`, `concurrent-queue` and `triomphe` have no modeled
-implementation. The boundary runs each `ArcSwap` and `ArcSwapOption` load and store, each `ArcSwap`
-compare-and-swap and read-copy-update, each operation of a lock-free queue, and each read and write
-of a `OnceLock` between two scheduling points, and calls the primitive directly in ordinary
-execution. The boundary's thread module supplies the scheduler-visible synchronous yield that
-admission spin waits use. A check may claim an ordering around an opaque primitive only when its
-relevant calls have visible scheduling points. Shuttle cannot interrupt an arbitrary instruction
+Some primitives are opaque to Shuttle: `arc-swap`, `concurrent-queue` and the `futures` crate's
+atomic waker have no modeled implementation. The boundary runs each `ArcSwap` and `ArcSwapOption`
+load and store, each `ArcSwap` compare-and-swap and read-copy-update, each operation of a lock-free
+queue, each registration, wake and take of an atomic waker, and each read and write of a `OnceLock`
+between two scheduling points, and calls the primitive directly in ordinary execution. Shared
+ownership through `triomphe` or the standard library takes no scheduling point: a reference count is
+real in every mode. The boundary's thread module supplies the scheduler-visible synchronous yield
+that admission spin waits use. A check may claim an ordering around an opaque primitive only when
+its relevant calls have visible scheduling points. Shuttle cannot interrupt an arbitrary instruction
 inside it, and a check never claims the primitive's own memory safety.
 
 A lost wakeup lives between a waiter's read of some state and its registration for the
@@ -1113,7 +1181,8 @@ point, so no schedule could place a publication in that window, and a read follo
 registration looked safe in a check even though a release between the two is lost in production.
 The boundary's `Notify` and `watch` channel keep Tokio's semantics and take a scheduling point
 immediately before each registration, each notification and each read of the version that
-registers or decides. Tokio's `Notify` registers a future for `notify_waiters` when the future is
+registers or decides, and the atomic waker's adapter takes one before and after each registration
+and wake. Tokio's `Notify` registers a future for `notify_waiters` when the future is
 created, and for `notify_one` only when it is first polled or enabled; `notify_one` without a
 registered waiter stores one permit; a waiter a single notification chose passes it on when it is
 dropped before it observed it. A `watch` receiver marks the current version as seen when it
@@ -1140,26 +1209,46 @@ Use an explicit handshake or scheduler-visible yield to position a race. When bo
 read and waiter registration are scheduler-visible, a missed notification leaves the waiter
 pending and Shuttle reports the resulting deadlock. Name a bounded number of participants so the
 search remains reviewable; use bounded depth-first search for small races and random plus
-probabilistic concurrency testing (PCT) for larger ones. The server's shared runner supplies
-random, PCT, and bounded DFS modes; interconnect, execution, and the Rust client use random and
-PCT. The runner caps each schedule at 10,000 steps. Individual checks choose their iteration counts and PCT
-depth; `SHUTTLE_REPORT_STEPS=1` reports the highest observed step count when tuning a check. A
-step cap is an exploration bound, not a product timeout.
+probabilistic concurrency testing (PCT) for larger ones.
+
+Every check runs through the one Shuttle runner, `nervix_model_harness::shuttle`: 100 random and
+100 PCT schedules of depth three, 1,000 of each with a depth-first search bounded at 1,000
+schedules, or one scheduler with the check's own bounds. Every schedule may take 10,000 steps; one
+that needs more fails its check, because a step cap is an exploration bound, not a product timeout.
+A random or PCT search that ran fewer schedules than it declares fails too, and a search that
+finishes prints a record naming what it explored. `SHUTTLE_REPORT_STEPS=1` reports the highest
+observed step count when tuning a check.
 
 The primitive boundary's own conformance and race checks run in `just test-primitives`, which
 builds the boundary once per mode; its Shuttle checks explore their small models exhaustively with
 depth-first search, and each deliberately broken order must deadlock in some schedule.
 
-`just test-shuttle` runs only library tests whose full names contain `shuttle_`, one test per
-process, in `nervix-execution`, `nervix-interconnect`, `nervix-client-core`, and `nervix-server`. It then repeats each
-package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses the repository's
-kache-backed build and prepares the server's test dependencies; `just test` continues to run the
-ordinary suite. CI's dedicated `shuttle` job runs `just test-shuttle` and uploads
-`target/shuttle-failures` as the `shuttle-failures` artifact when a check fails.
-`just test-shuttle <filter>` selects checks whose full name contains the filter. The
-runner stores a failing schedule under
-`target/shuttle-failures/<package>/<fully-qualified-test-name>/`; replay uses that path and exact
-test name. See the command recipe in [Developing Nervix](./developing-nervix.md).
+`crates/model-harness/shuttle-inventory.toml` registers every check of `nervix-execution`,
+`nervix-interconnect`, `nervix-client-core` and `nervix-server` by its test's full name.
+`just test-shuttle` lists the library tests whose full names contain `shuttle_` in each registered
+package, built with its `shuttle` feature, and a run over the whole inventory fails when a
+registered check is missing or ignored, or when a discovered check is unregistered. Each selected
+check runs twice, each time in its own process: under the exploration it declares, then under
+Shuttle's uncontrolled-nondeterminism detector, which runs 100 random schedules twice each and
+fails when the second run diverges. A run counts only when its test passed and the runner printed
+its record, and the command reports how many checks it discovered, selected, executed and saw
+complete. `just test-shuttle <filter>` selects the checks whose full name contains the filter in
+every package; a package with no match is fine, and a filter that selects nothing at all fails. The
+recipe uses the repository's kache-backed build and prepares the server's test dependencies; `just
+test` continues to run the ordinary suite.
+`just cargo-clippy-shuttle`, whose package checks also run in `just lint`, lints every Shuttle
+build with warnings denied, including these four packages in test mode, where their checks are
+compiled, so a check that compiles with a warning fails validation.
+
+A failed check leaves `target/shuttle-failures/<package>/<fully-qualified-test-name>/`: the schedule
+Shuttle persisted for the failing execution, the run's output, and metadata naming the check, the
+run, the revision, the toolchain, Shuttle's version and the replay command. `just
+test-shuttle-replay <schedule>` replays exactly that check in a fresh process with the schedule,
+which ends where its execution failed and so replays that failure. `just test-shuttle-replay-check`
+proves the path end to end: it fails one check deliberately after its invariant held, requires one
+persisted schedule, and requires it to reproduce the failure in a fresh process. CI's dedicated
+`shuttle` job runs both and uploads `target/shuttle-failures` as the `shuttle-failures` artifact
+when a check fails. See the command recipes in [Developing Nervix](./developing-nervix.md).
 
 ### Protocols and their checks
 
@@ -1169,7 +1258,7 @@ A family of names means each member runs independently through the recipe.
 
 | Protocol | Invariant and check |
 | --- | --- |
-| Waiter registration and cancellation (`crates/primitives/src/tests/shuttle_races.rs`) | `shuttle_reaches_a_notify_waiters_published_between_a_read_and_the_registration` and `shuttle_reaches_a_send_between_a_read_and_the_subscription` require a waiter that reads before it registers to deadlock in some schedule, which shows the scheduler reaches a publication between the read and the registration; `shuttle_registering_before_reading_never_misses_a_notify_waiters` and `shuttle_subscribing_before_reading_never_misses_a_send` require the correct order never to lose one. `shuttle_a_notify_one_between_a_read_and_the_registration_is_kept_as_the_permit` shows a single notification's permit makes the other order correct for `notify_one`, and `shuttle_a_waiter_cancelled_as_it_is_notified_passes_the_notification_on` requires the surviving waiter to complete however a cancellation and a notification interleave. |
+| Waiter registration and cancellation (`crates/primitives/src/tests/shuttle_races.rs`) | `shuttle_reaches_a_notify_waiters_published_between_a_read_and_the_registration` and `shuttle_reaches_a_send_between_a_read_and_the_subscription` require a waiter that reads before it registers to deadlock in some schedule, which shows the scheduler reaches a publication between the read and the registration; `shuttle_registering_before_reading_never_misses_a_notify_waiters` and `shuttle_subscribing_before_reading_never_misses_a_send` require the correct order never to lose one. `shuttle_reaches_a_wake_between_a_read_and_the_waker_registration` and `shuttle_registering_the_waker_before_reading_never_misses_a_wake` hold an atomic waker to the same pair. `shuttle_a_notify_one_between_a_read_and_the_registration_is_kept_as_the_permit` shows a single notification's permit makes the other order correct for `notify_one`, and `shuttle_a_waiter_cancelled_as_it_is_notified_passes_the_notification_on` requires the surviving waiter to complete however a cancellation and a notification interleave. |
 | Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. |

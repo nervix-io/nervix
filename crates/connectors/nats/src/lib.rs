@@ -12,7 +12,7 @@
 
 mod source;
 
-use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc as StdArc, time::Duration};
+use std::{collections::VecDeque, future::Future, pin::Pin, time::Duration};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
@@ -35,7 +35,10 @@ use nervix_connector::{
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
 use nervix_primitives::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        StdArc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Instant, sleep},
 };
 pub use source::{

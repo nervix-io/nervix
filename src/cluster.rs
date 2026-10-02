@@ -22,7 +22,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::SocketAddr,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -48,7 +47,7 @@ use nervix_primitives::{
     collections::DashMap,
     publication::{ArcSwap, Guard},
     stream::StreamExt,
-    sync::{CancellationToken, blocking::Mutex, broadcast, mpsc, watch},
+    sync::{CancellationToken, StdArc, blocking::Mutex, broadcast, mpsc, watch},
     task::JoinHandle,
     time::Instant,
 };
@@ -79,10 +78,10 @@ const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
-    chitchat: Arc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
+    chitchat: StdArc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
     /// The membership task owns the other reference and replaces this snapshot whenever the
     /// Chitchat live-node state watcher changes.
-    subscription_interest: Arc<SubscriptionInterestPublication>,
+    subscription_interest: StdArc<SubscriptionInterestPublication>,
     /// The transport the gossip server and the membership task also hold, kept here so shutdown
     /// can close it before it asks the gossip server to stop.
     gossip_transport: InterconnectGossipTransport,
@@ -191,11 +190,11 @@ impl SubscriptionInterestPublication {
 
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = SubscriptionInterestIndex::from_live_node_states(nodes);
-        self.index.store(Arc::new(index));
+        self.index.store(StdArc::new(index));
         self.changed.send_replace(());
     }
 
-    fn load(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
+    fn load(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
         self.index.load()
     }
 
@@ -893,7 +892,7 @@ impl InterconnectRequest for GossipExchange {
 
 #[derive(Clone)]
 struct InterconnectGossipTransport {
-    inner: Arc<InterconnectGossipTransportInner>,
+    inner: StdArc<InterconnectGossipTransportInner>,
 }
 
 struct InterconnectGossipTransportInner {
@@ -950,7 +949,7 @@ impl InterconnectGossipTransport {
             );
         }
         let transport = Self {
-            inner: Arc::new(InterconnectGossipTransportInner {
+            inner: StdArc::new(InterconnectGossipTransportInner {
                 listen_addr: interconnect.local_addr(),
                 advertise_addr,
                 interconnect: interconnect.clone(),
@@ -1346,7 +1345,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let events = ClusterEvents::new();
     let chitchat_state = chitchat.chitchat();
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
-    let subscription_interest = Arc::new(SubscriptionInterestPublication::new());
+    let subscription_interest = StdArc::new(SubscriptionInterestPublication::new());
     let subscription_interest_publisher = subscription_interest.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
@@ -1682,7 +1681,7 @@ impl ClusterHandle {
             .is_some()
     }
 
-    pub(crate) fn subscription_interest_index(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
+    pub(crate) fn subscription_interest_index(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
         self.subscription_interest.load()
     }
 

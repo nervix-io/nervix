@@ -17,6 +17,7 @@ use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
     blocking::{Mutex, RwLock},
     watch,
@@ -34,7 +35,6 @@ use openraft::{
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 #[cfg(test)]
 use crate::apply_consensus_command;

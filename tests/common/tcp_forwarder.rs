@@ -19,13 +19,12 @@ use std::{
     collections::BTreeMap,
     io,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
 };
 
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
     sync::{
-        CancellationToken,
+        CancellationToken, StdArc,
         atomic::{AtomicU64, Ordering},
     },
     task::JoinHandle,
@@ -46,7 +45,7 @@ pub(crate) struct TcpForwarders {
 /// One listener and the connections it forwarded.
 #[derive(Debug)]
 struct TcpForwarder {
-    accepted: Arc<AtomicU64>,
+    accepted: StdArc<AtomicU64>,
     /// Cancelled to close every connection the listener forwarded, when the forwarder stops.
     connections: CancellationToken,
     listener: JoinHandle<()>,
@@ -130,7 +129,7 @@ impl Drop for TcpForwarders {
 
 impl TcpForwarder {
     fn start(listener: TcpListener, target: SocketAddr) -> Self {
-        let accepted = Arc::new(AtomicU64::new(0));
+        let accepted = StdArc::new(AtomicU64::new(0));
         let connections = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
@@ -148,7 +147,7 @@ impl TcpForwarder {
     async fn accept(
         listener: TcpListener,
         target: SocketAddr,
-        accepted: Arc<AtomicU64>,
+        accepted: StdArc<AtomicU64>,
         connections: CancellationToken,
     ) {
         loop {

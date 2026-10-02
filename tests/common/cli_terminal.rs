@@ -35,13 +35,12 @@ use std::{
     os::fd::OwnedFd,
     path::Path,
     process::{ExitStatus, Stdio},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
 use meticulous::OptionExt as _;
 use nervix_primitives::{
-    sync::{blocking::Mutex, mpsc},
+    sync::{StdArc, blocking::Mutex, mpsc},
     task::AbortOnDropHandle,
     time::Instant,
 };

@@ -8,7 +8,7 @@
 //!   compile its programs off the caller's task.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
 //!
-use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, sync::Arc as StdArc, time::Duration};
+use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, time::Duration};
 
 use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
@@ -29,7 +29,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName, UdfReturn};
-use nervix_primitives::{sync::blocking::Mutex, time::Instant};
+use nervix_primitives::{
+    sync::{Arc, StdArc, blocking::Mutex},
+    time::Instant,
+};
 use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
@@ -40,7 +43,6 @@ use nervix_vm::{
 use regex::Regex;
 use roto::{FileTree, NoCtx, RegistrationError, RotoString, Runtime, TypedFunc, Val, library};
 use thiserror::Error;
-use triomphe::Arc;
 
 const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
 const COMPILE_TEST_BUDGET: Duration = Duration::from_secs(10);

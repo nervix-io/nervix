@@ -321,69 +321,40 @@ test-primitives-compile:
     cargo test --package nervix-primitives --features native --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
-# Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
-# randomized schedules to detect uncontrolled nondeterminism in every check. The former Loom
-# recipe is retired: acknowledgement races, the relay dispatch gate and the relay fan-out exercise
-# production types. A non-empty `filter` runs only the checks whose full names contain it.
+# The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
+# and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
+# this list to the inventory.
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-server"]
+
+# Explore every registered Shuttle check of a production owner, each in its own process: under the
+# exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
+# crates/model-harness/shuttle-inventory.toml registers each check by package and test; the whole
+# run fails when a registered check is missing, ignored or did not complete its exploration, or when
+# a check is unregistered. A non-empty `filter` runs the checks whose full names contain it, in
+# every package, and fails when it selects none at all. A failed check leaves its persisted
+# schedule, output and metadata under target/shuttle-failures for `test-shuttle-replay`. The server's
+# checks need the build dependencies this recipe prepares.
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    shuttle_packages=(nervix-execution nervix-interconnect nervix-client-core nervix-server)
-    for shuttle_package in "${shuttle_packages[@]}"; do
-        just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
-        SHUTTLE_CHECK_NONDETERMINISM=1 \
-            just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
-    done
-
-# Explore one package's filtered invariants under Shuttle. Each test gets its own process so a
-# persisted schedule identifies its package and test. The server's invariants need the build
-# dependencies that `test-shuttle` prepares. A non-empty `filter` runs only the checks whose full
-# names contain it.
-test-shuttle-package package filter="":
-    #!/usr/bin/env bash
-    set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    shuttle_package={{ quote(package) }}
-    filter={{ quote(filter) }}
-    trace_root="{{ cargo_target_dir }}/shuttle-failures"
-    mkdir -p "${trace_root}"
-    shuttle_test_list="$(
-        cargo test --package "${shuttle_package}" --features shuttle --lib shuttle_ -- \
-            --list --format terse | sed -n 's/: test$//p'
-    )"
-    if [[ -z "${shuttle_test_list}" ]]; then
-        echo "no shuttle_ tests found in ${shuttle_package}" >&2
-        exit 1
-    fi
-    mapfile -t shuttle_tests <<< "${shuttle_test_list}"
-    for shuttle_test in "${shuttle_tests[@]}"; do
-        if [[ "${shuttle_test}" != *"${filter}"* ]]; then
-            continue
-        fi
-        trace_directory="${trace_root}/${shuttle_package}/${shuttle_test}"
-        mkdir -p "${trace_directory}"
-        SHUTTLE_TRACE_DIR="${trace_directory}" \
-            cargo test --package "${shuttle_package}" --features shuttle --lib \
-                "${shuttle_test}" -- --exact --test-threads=1
-    done
+    python3 -m unittest --quiet scripts.tests.test_shuttle_checks
+    python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
 
-# Replay a schedule emitted under target/shuttle-failures. Its parent directory is the exact test
-# name written by `test-shuttle`, so the schedule cannot accidentally run against another invariant.
+# Replay a schedule `test-shuttle` persisted under target/shuttle-failures in a fresh process. Its
+# parent directories name the exact package and check, so the schedule cannot run against another
+# invariant.
 test-shuttle-replay schedule: build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    schedule={{ quote(schedule) }}
-    if [[ ! -f "${schedule}" ]]; then
-        echo "Shuttle schedule does not exist: ${schedule}" >&2
-        exit 1
-    fi
-    schedule="$(realpath "${schedule}")"
-    shuttle_test="$(basename "$(dirname "${schedule}")")"
-    shuttle_package="$(basename "$(dirname "$(dirname "${schedule}")")")"
-    SHUTTLE_TRACE_FILE="${schedule}" \
-        cargo test --package "${shuttle_package}" --features shuttle --lib \
-            "${shuttle_test}" -- --exact --test-threads=1 --nocapture
+    python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(schedule) }}
+
+# Prove schedule persistence and replay end to end: fail one execution check deliberately after its
+# invariant held, require exactly one persisted schedule, and require it to reproduce the failure in
+# a fresh process.
+test-shuttle-replay-check:
+    python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} replay-check
 
 # Explore every registered Loom model of a production owner to exhaustion, each in its own process
 # and with Loom's primitives selected through its package's `loom` feature. The inventory in
@@ -413,10 +384,15 @@ test-loom-qualification:
 # failures; the cfg is scoped to this test mode, and ordinary and Shuttle builds keep their flags.
 # After the build, the tests run inside a real-time budget of `budget_seconds` and end with status
 # 124 when it expires. A failed scenario leaves a failure record under target/turmoil-failures for
-# `test-turmoil-replay`.
+# `test-turmoil-replay`. The suite reports how many tests each invocation and the whole suite
+# discovered, selected, executed and completed. tests/turmoil-inventory.toml registers the tests
+# each invocation runs and leaves ignored, and the suite fails when a registered test did not run or
+# ran ignored, when an invariant ran unregistered, and when an invocation executed no test. Each
+# invocation's output stays under target/turmoil-suite.
 test-turmoil budget_seconds="480":
     #!/usr/bin/env bash
     set -euo pipefail
+    python3 -m unittest --quiet scripts.tests.test_libtest_accounting
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
@@ -425,13 +401,21 @@ test-turmoil budget_seconds="480":
         --package nervix-execution --features turmoil --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-interconnect --features turmoil --lib --test simulation
+    logs={{ quote(cargo_target_dir + "/turmoil-suite") }}
+    rm -rf "${logs}"
+    mkdir -p "${logs}"
     deadline=$((SECONDS + {{ budget_seconds }}))
     within_budget() {
+        local log="$1"
+        shift
         local remaining=$((deadline - SECONDS))
         local status=0
         if ((remaining > 0)); then
-            RUSTFLAGS="${turmoil_rustflags}" timeout --kill-after=30 "${remaining}" "$@" \
-                || status=$?
+            set +e
+            RUSTFLAGS="${turmoil_rustflags}" timeout --kill-after=30 "${remaining}" "$@" 2>&1 \
+                | tee "${logs}/${log}.log"
+            status="${PIPESTATUS[0]}"
+            set -e
         else
             status=124
         fi
@@ -441,23 +425,40 @@ test-turmoil budget_seconds="480":
         fi
         return "${status}"
     }
-    within_budget cargo test --package nervix-primitives --features 'turmoil native' --lib -- \
-        simulated_host turmoil_mode --test-threads=1
-    within_budget cargo test --package nervix-execution --features turmoil --lib -- \
-        --test-threads=1
-    within_budget cargo test --package nervix-interconnect --features turmoil --lib -- \
-        wire::simulation_checks authentication::simulation_tests --test-threads=1
-    within_budget cargo test --package nervix-interconnect --features turmoil --test simulation -- \
-        --test-threads=1
+    within_budget primitives \
+        cargo test --package nervix-primitives --features 'turmoil native' --lib -- \
+            simulated_host turmoil_mode --test-threads=1
+    within_budget execution \
+        cargo test --package nervix-execution --features turmoil --lib -- --test-threads=1
+    within_budget interconnect-library \
+        cargo test --package nervix-interconnect --features turmoil --lib -- \
+            wire::simulation_checks authentication::simulation_tests --test-threads=1
+    within_budget interconnect-simulation \
+        cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+            --test-threads=1
+    python3 -m scripts.libtest_accounting turmoil --inventory tests/turmoil-inventory.toml \
+        "${logs}/primitives.log" "${logs}/execution.log" "${logs}/interconnect-library.log" \
+        "${logs}/interconnect-simulation.log"
 
 # Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
-# binary, so one test can run without the execution and library checks.
+# binary, so one test can run without the execution and library checks. A selection that executes
+# no test fails.
 test-turmoil-simulation *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
-    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1 {{ args }}
+    logs="$(mktemp -d)"
+    trap 'rm -rf "${logs}"' EXIT
+    set +e
+    cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+        --test-threads=1 {{ args }} 2>&1 | tee "${logs}/simulation.log"
+    status="${PIPESTATUS[0]}"
+    set -e
+    if ((status != 0)); then
+        exit "${status}"
+    fi
+    python3 -m scripts.libtest_accounting turmoil-simulation "${logs}/simulation.log"
 
 # Replay one Turmoil failure record in a fresh process with exactly its recorded inputs: the seed,
 # epoch, topology, network parameters, bounds and any injected failure. The record names the
@@ -529,7 +530,7 @@ test-turmoil-replay-check:
 # committed regression seeds, running each seed twice, inside a real-time budget of
 # `budget_seconds`; the recipe ends with status 124 when the budget expires. A failure leaves a
 # record like any other run. A seed that exposes a defect joins its scenario's committed seeds
-# with the fix.
+# with the fix. A sweep that executes no scenario fails.
 test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -539,16 +540,23 @@ test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
     end=$((first + {{ count }}))
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-interconnect --features turmoil --test simulation
-    status=0
+    logs="$(mktemp -d)"
+    trap 'rm -rf "${logs}"' EXIT
+    set +e
     NERVIX_TURMOIL_SWEEP="${first}..${end}" RUSTFLAGS="${turmoil_rustflags}" \
         timeout --kill-after=30 {{ budget_seconds }} \
         cargo test --package nervix-interconnect --features turmoil --test simulation -- \
-            --test-threads=1 || status=$?
+            --test-threads=1 2>&1 | tee "${logs}/sweep.log"
+    status="${PIPESTATUS[0]}"
+    set -e
     if ((status == 124)); then
         echo "the seed sweep exceeded its {{ budget_seconds }}s real-time budget;" \
             "in-progress records under ${NERVIX_TURMOIL_FAILURES} name the unfinished runs" >&2
     fi
-    exit "${status}"
+    if ((status != 0)); then
+        exit "${status}"
+    fi
+    python3 -m scripts.libtest_accounting turmoil-sweep "${logs}/sweep.log"
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
@@ -1449,12 +1457,20 @@ ordinary-clippy-targets: \
     *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
     (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
+# Lint every Shuttle build: each library under the mode, the primitive boundary, and each
+# package `test-shuttle` explores in test mode. The full validation matrix runs the same targets.
+cargo-clippy-shuttle jobs=default_jobs: (run-with-jobs "shuttle-clippy-targets" jobs)
+
+# The `--profile test` targets lint each package `test-shuttle` explores as the runner builds it,
+# with its checks compiled. The library targets never compile them, so a warning in a check would
+# otherwise pass validation and the Shuttle job alike.
 [private, parallel]
 shuttle-clippy-targets: \
     *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
     *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
     *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"])
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
+    *(clippy-target *shuttle_test_packages ["--lib", "--profile", "test", "--features", "shuttle"])
 
 [private, parallel]
 turmoil-clippy-targets: \
@@ -1475,9 +1491,12 @@ loom-clippy-targets: \
 
 # The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
 # profile and toolchain differences identify separate build directories. Keep kache configured.
+# On CI nothing reads a build directory after its lint and the runner's disk cannot hold them all,
+# so a target that passed deletes its own.
 [private]
 clippy-target package args toolchain="":
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
+    @{{ if env("CI", "") == "true" { "rm -rf " + quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) } else { "true" } }}
 
 # Lint one package and all of its targets; extra arguments retain their boundaries.
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
@@ -1587,7 +1606,7 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1688,89 +1707,69 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
-# Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
-# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a
-# selected atomic held by a static or constructed in a const context, an unmodeled atomic without
-# its permission, a stale permission, a `loom` dependency outside its owner and harness, and a mode
-# feature that is not forwarded. The check's own tests run first, so a rule that stopped rejecting
-# its bypass fails here too.
+# Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
+# rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
+# primitives, shared ownership and the `futures` crates' synchronization included; a manifest that
+# renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; the analysis cfg
+# selecting code or set by a build; a selected atomic held by a static or constructed in a const
+# context; a family Loom does not model in Loom model code; an unmodeled primitive without its
+# permission; a stale or misplaced permission; a `loom` dependency outside its owner and harness;
+# and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
+# the source rules, and so is what a build wrote into a Cargo build directory. The check's own
+# tests run first, so a rule that stopped rejecting its bypass fails here too.
 validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
 
-# Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
-# graphs use the real synchronization crates directly and contain no Shuttle package.
-validate-shuttle-dependencies:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    production_dependencies="$(
-        cargo tree --workspace --edges normal --no-default-features --prefix none
-    )"
-    if printf '%s\n' "${production_dependencies}" \
-        | grep -E '^shuttle([[:space:]-]|$)'; then
-        echo "the production workspace includes a Shuttle package" >&2
-        exit 1
-    fi
+# Keep every model checker, simulator and modeled wrapper out of every ordinary dependency graph, and
+# the portable graphs portable. The workspace and every package built on its own, the way a consumer
+# builds it, with default features and without them, contain no Loom, Shuttle, Shuttle wrapper or
+# Turmoil, and enable no execution mode or paused-clock capability of the primitive boundary. The
+# vocabulary, and the browser console and wire crate for the browser's target, contain no async
+# runtime or network library and never the boundary's `native` capability. The check's own tests run
+# first.
+validate-execution-mode-dependencies:
+    python3 -m unittest --quiet scripts.tests.test_check_mode_dependencies
+    python3 -m scripts.check_mode_dependencies
 
-# The normal workspace graph, with or without default features, must not pull the optional
-# simulation scheduler into production.
-validate-turmoil-dependencies:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    production_graphs=(
-        "$(cargo tree --workspace --edges normal --prefix none)"
-        "$(cargo tree --workspace --edges normal --no-default-features --prefix none)"
-    )
-    for production_graph in "${production_graphs[@]}"; do
-        if printf '%s\n' "${production_graph}" | grep -E '^turmoil([[:space:]-]|$)'; then
-            echo "the production workspace includes Turmoil" >&2
-            exit 1
-        fi
-    done
-
-# Loom belongs only to modeled builds. Neither the workspace nor any package built on its own, the way
-# a consumer builds it, contains Loom in its normal dependency graph, with default features or
-# without them.
-validate-loom-dependencies:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mapfile -t packages < <(
-        cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json, sys; print("\n".join(p["name"] for p in json.load(sys.stdin)["packages"]))'
-    )
-    roots=(--workspace)
-    for package in "${packages[@]}"; do
-        roots+=("--package ${package}")
-    done
-    for root in "${roots[@]}"; do
-        for defaults in "" --no-default-features; do
-            graph="$(cargo tree ${root} --edges normal ${defaults} --prefix none)"
-            if printf '%s\n' "${graph}" | grep -E '^loom v'; then
-                echo "the normal dependency graph of ${root} ${defaults} includes Loom" >&2
-                exit 1
-            fi
-        done
-    done
-    echo "no ordinary graph of the workspace or its ${#packages[@]} packages contains Loom"
-
-# Keep one precise diagnostic when execution modes are selected together. nervix-primitives owns
-# the rejection, so every pair of `loom`, `shuttle` and `turmoil`, and all three, fail there with the
-# modes named, including when separate dependencies enable them.
+# Keep one precise diagnostic when an execution mode is selected where it cannot run.
+# nervix-primitives owns the rejection, so every pair of `loom`, `shuttle` and `turmoil`, and all
+# three, fail there with the modes named, including when separate dependencies enable them. A mode or
+# the `native` capability requested for the browser's target fails with the boundary's own
+# diagnostic as the first error, before any dependency that cannot build there. A product binary
+# built with a mode fails where it declares itself one, naming the binary and the mode.
 validate-execution-mode-conflicts:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The diagnostics are read as text, so Cargo must not color them even where the caller asks.
+    export CARGO_TERM_COLOR=never
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
+    expect_failure() {
+        local description="$1"
+        shift
+        if "$@" >"${diagnostics}" 2>&1; then
+            echo "${description}: the build unexpectedly compiled" >&2
+            exit 1
+        fi
+    }
+    expect_first_error() {
+        local description="$1" message="$2"
+        local first
+        first="$(grep -m 1 '^error' "${diagnostics}" || true)"
+        if [[ "${first}" != *"${message}"* ]]; then
+            cat "${diagnostics}" >&2
+            echo "${description}: the first error is not \`${message}\`" >&2
+            exit 1
+        fi
+    }
     expect_conflict() {
         local package="$1" features="$2"
         shift 2
-        if cargo check --package "${package}" --features "${features}" --lib \
-            >"${diagnostics}" 2>&1; then
-            echo "${package} with ${features}: the modes unexpectedly compiled together" >&2
-            exit 1
-        fi
+        expect_failure "${package} with ${features}" \
+            cargo check --package "${package}" --features "${features}" --lib
         for pair in "$@"; do
             if ! grep -Fq "the ${pair} execution modes cannot be enabled together" "${diagnostics}"; then
                 cat "${diagnostics}" >&2
@@ -1788,6 +1787,26 @@ validate-execution-mode-conflicts:
     expect_conflict nervix-interconnect 'shuttle nervix-execution/turmoil' \
         '`shuttle` and `turmoil`'
     expect_conflict nervix-execution 'loom nervix-primitives/shuttle' '`loom` and `shuttle`'
+    for mode in loom shuttle turmoil; do
+        expect_failure "nervix-primitives with ${mode} for the browser" \
+            cargo check --package nervix-primitives --features "${mode}" --lib \
+                --target wasm32-unknown-unknown
+        expect_first_error "nervix-primitives with ${mode} for the browser" \
+            'execution modes run on native targets only'
+    done
+    expect_failure "nervix-primitives with native for the browser" \
+        cargo check --package nervix-primitives --features native --lib \
+            --target wasm32-unknown-unknown
+    expect_first_error "nervix-primitives with native for the browser" \
+        'the `native` capability provides operating-system threads'
+    for mode in loom shuttle turmoil; do
+        expect_failure "nervix-nspl-format with ${mode}" \
+            cargo check --package nervix-nspl-format --bin nervix-nspl-format \
+                --features "nervix-primitives/${mode}"
+        expect_first_error "nervix-nspl-format with ${mode}" \
+            "nervix-nspl-format is a product binary and builds only for ordinary execution; a build that selects the \`${mode}\` execution mode is a test artifact"
+    done
+    echo "every mode conflict, browser-target request and modeled product binary fails with its diagnostic"
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py
