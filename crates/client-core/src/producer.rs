@@ -53,7 +53,7 @@ use triomphe::Arc;
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
-    exchange::{ExchangeRequests, SESSION_LIMITS},
+    exchange::{ExchangeRequests, PendingRequest, SESSION_LIMITS},
 };
 
 mod slots;
@@ -68,6 +68,13 @@ pub struct SubmissionId(NonZeroU64);
 impl SubmissionId {
     pub const fn get(self) -> NonZeroU64 {
         self.0
+    }
+}
+
+/// The submission a host names by the identity its producer gave it.
+impl From<NonZeroU64> for SubmissionId {
+    fn from(id: NonZeroU64) -> Self {
+        Self(id)
     }
 }
 
@@ -221,6 +228,11 @@ impl ProducerBatch {
     /// batch message and the end-of-stream marker, uncompressed and without dictionaries.
     pub fn from_arrow_ipc(ipc: Bytes) -> Self {
         Self { ipc }
+    }
+
+    /// The stream the producer submits, exactly as it goes onto the wire.
+    pub fn arrow_ipc(&self) -> &Bytes {
+        &self.ipc
     }
 
     pub fn len(&self) -> usize {
@@ -422,7 +434,6 @@ impl ProducerRegistry {
 /// A producer attached to a client ingestor. Dropping it closes it without waiting.
 pub struct Producer {
     inner: StdArc<ProducerInner>,
-    closed: bool,
 }
 
 pub(crate) struct ProducerInner {
@@ -570,12 +581,28 @@ pub(crate) async fn request_on_exchange(
     request: ClientRequest,
     kind: RequestKind,
 ) -> error_stack::Result<Answered, ClientError> {
-    let Some(mut registered) = exchange.register() else {
+    let mut registered = send_on_exchange(exchange, request, kind).await?;
+    let request_id = registered.request_id;
+    match registered.receive().await {
+        Some(body) => Ok(Answered { request_id, body }),
+        None => Err(Report::new(ClientError::RequestInterrupted {
+            request: kind,
+        })),
+    }
+}
+
+/// Registers the waiter of one request on `exchange` and sends its frame, returning the waiter
+/// its reply completes. A caller that stops waiting before the frame is sent sends nothing.
+pub(crate) async fn send_on_exchange(
+    exchange: &ExchangeRequests,
+    request: ClientRequest,
+    kind: RequestKind,
+) -> error_stack::Result<PendingRequest, ClientError> {
+    let Some(registered) = exchange.register() else {
         return Err(Report::new(exchange.pending.lock().failure()));
     };
-    let request_id = registered.request_id;
     let message = ClientMessage {
-        request_id,
+        request_id: registered.request_id,
         request,
     };
     let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
@@ -587,12 +614,7 @@ pub(crate) async fn request_on_exchange(
     if exchange.frames.send(frame).await.is_err() {
         return Err(Report::new(exchange.pending.lock().failure()));
     }
-    match registered.receive().await {
-        Some(body) => Ok(Answered { request_id, body }),
-        None => Err(Report::new(ClientError::RequestInterrupted {
-            request: kind,
-        })),
-    }
+    Ok(registered)
 }
 
 /// Releases one wire attachment even when the application stopped awaiting its close. A silent
@@ -740,10 +762,7 @@ impl ProducerInner {
         if attachment.signals.end.borrow().is_some() {
             inner.exchange_ended(&attachment.generation);
         }
-        Ok(Producer {
-            inner,
-            closed: false,
-        })
+        Ok(Producer { inner })
     }
 
     fn connection(&self) -> ProducerConnection {
@@ -1278,8 +1297,11 @@ impl Producer {
 
     /// Stops admission for the producer and waits until the server released it. Every batch the
     /// producer sent has its outcome by then.
-    pub async fn close(mut self) -> error_stack::Result<(), ClientError> {
-        self.closed = true;
+    ///
+    /// Only the first close releases the attachment; a later one, or one while the producer waits
+    /// to be restored, finds nothing attached and returns at once. A caller that stops waiting
+    /// leaves the release running.
+    pub async fn close(&self) -> error_stack::Result<(), ClientError> {
         let Some(attachment) = self.inner.stop() else {
             return Ok(());
         };
@@ -1300,9 +1322,8 @@ impl Producer {
 
 impl Drop for Producer {
     fn drop(&mut self) {
-        if self.closed {
-            return;
-        }
+        // A producer the application closed, or one waiting to be restored, has no attachment
+        // left to release.
         let Some(attachment) = self.inner.stop() else {
             return;
         };

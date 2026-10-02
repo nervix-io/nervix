@@ -36,8 +36,10 @@ use crate::{
     nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_free,
 };
 
+mod batches;
 mod clock_events;
 mod domain_clock;
+mod endpoints;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;

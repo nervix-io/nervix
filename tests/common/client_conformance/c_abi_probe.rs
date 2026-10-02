@@ -37,10 +37,10 @@ const ROWS_DEADLINE_MILLIS: u64 = 120_000;
 const CLOCK_DEADLINE_MILLIS: u64 = 120_000;
 
 /// A reporting sink: one call per report line.
-type Emit<'a> = dyn FnMut(&str) -> io::Result<()> + 'a;
+pub(super) type Emit<'a> = dyn FnMut(&str) -> io::Result<()> + 'a;
 
 /// Turns a returned failure into an error, releasing it.
-fn check(failure: *mut nervix_client_ffi::Failure) -> io::Result<()> {
+pub(super) fn check(failure: *mut nervix_client_ffi::Failure) -> io::Result<()> {
     if failure.is_null() {
         return Ok(());
     }
@@ -59,7 +59,7 @@ fn check(failure: *mut nervix_client_ffi::Failure) -> io::Result<()> {
 }
 
 /// Reads a failure's kind and reference, releasing it, or reports that the call succeeded.
-fn expect_failure(failure: *mut nervix_client_ffi::Failure) -> io::Result<FailureKind> {
+pub(super) fn expect_failure(failure: *mut nervix_client_ffi::Failure) -> io::Result<FailureKind> {
     if failure.is_null() {
         return Err(io::Error::other("the call succeeded where it had to fail"));
     }
@@ -76,7 +76,7 @@ fn expect_failure(failure: *mut nervix_client_ffi::Failure) -> io::Result<Failur
 /// # Safety
 ///
 /// `data` addresses `len` readable bytes.
-unsafe fn copied(data: *const u8, len: usize) -> Vec<u8> {
+pub(super) unsafe fn copied(data: *const u8, len: usize) -> Vec<u8> {
     if len == 0 {
         return Vec::new();
     }
@@ -84,7 +84,7 @@ unsafe fn copied(data: *const u8, len: usize) -> Vec<u8> {
     unsafe { slice::from_raw_parts(data, len) }.to_vec()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         text.push_str(&format!("{byte:02x}"));
@@ -93,7 +93,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// An open session, freed when dropped.
-struct OpenSession(*mut Session);
+pub(super) struct OpenSession(pub(super) *mut Session);
 
 impl Drop for OpenSession {
     fn drop(&mut self) {
@@ -144,7 +144,7 @@ impl EventReference {
 }
 
 /// A cancellation token, freed when dropped.
-struct Token(*mut Cancel);
+pub(super) struct Token(pub(super) *mut Cancel);
 
 // SAFETY: a token may be triggered from any thread, which is what the binding promises.
 unsafe impl Send for Token {}
@@ -152,11 +152,11 @@ unsafe impl Send for Token {}
 unsafe impl Sync for Token {}
 
 impl Token {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(nx_cancel_new())
     }
 
-    fn with_deadline(millis: u64) -> io::Result<Self> {
+    pub(super) fn with_deadline(millis: u64) -> io::Result<Self> {
         let mut token = ptr::null_mut();
         // SAFETY: `token` is writable.
         check(unsafe { nx_cancel_with_deadline(millis, &mut token) })?;
@@ -1044,6 +1044,9 @@ pub(super) fn run(target: &ProbeTarget, emit: &mut Emit<'_>) -> io::Result<()> {
             rows,
         } => run_subscription(&session, relay, subscription, *rows, emit),
         ProbeExercise::DomainClock => run_domain_clock(&session, &target.domain, emit),
+        ProbeExercise::Endpoints { ingestor, emitter } => {
+            super::c_abi_endpoints::run(&session, &target.domain, ingestor, emitter, emit)
+        }
     }
 }
 

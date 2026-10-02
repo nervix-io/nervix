@@ -492,3 +492,74 @@ async fn closing_during_restoration_releases_the_late_attachment() {
         )
         .await;
 }
+
+#[nervix_primitives::test]
+async fn a_read_whose_caller_stopped_waiting_is_taken_over_by_the_next_read() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let consumer = StdArc::new(open(&mut loopback).await);
+    let abandoned = nervix_primitives::task::spawn({
+        let consumer = consumer.clone();
+        async move { consumer.next_batch().await }
+    });
+    let read = loopback.next_request().await;
+    assert!(matches!(read.request, ClientRequest::ReadEmitterBatch(_)));
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .err()
+            .assured("the aborted read ends cancelled")
+            .is_cancelled()
+    );
+    // The server assigns an attempt to the read nobody waits for any more.
+    loopback.answer(read.request_id, received()).await;
+    let delivery = nervix_primitives::time::timeout(DEADLINE, consumer.next_batch())
+        .await
+        .assured("the next read takes over the parked reply within the deadline")
+        .assured("the read succeeds")
+        .assured("the read yields the assigned attempt");
+    assert_eq!(delivery.reference, Uuid::from_bytes([2; 16]));
+    assert!(
+        loopback.requests.try_recv().is_err(),
+        "the read that took over sent no read of its own"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_close_whose_caller_stopped_waiting_still_releases_the_attachment() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let consumer = StdArc::new(open(&mut loopback).await);
+    let closing = nervix_primitives::task::spawn({
+        let consumer = consumer.clone();
+        async move { consumer.close().await }
+    });
+    let close = loopback.next_request().await;
+    assert!(matches!(close.request, ClientRequest::CloseEmitter(_)));
+    closing.abort();
+    assert!(
+        closing
+            .await
+            .err()
+            .assured("the aborted close ends cancelled")
+            .is_cancelled()
+    );
+    assert_eq!(consumer.connection(), ConsumerConnection::Closed);
+    // The release goes on without its caller, and a second close finds nothing attached.
+    loopback
+        .answer(
+            close.request_id,
+            ReplyBody::CloseEmitter(CloseEmitterOutcome {
+                disposition: EmitterCloseDisposition::Closed,
+                message: String::new(),
+            }),
+        )
+        .await;
+    assert_eq!(
+        consumer.close().await.assured("a second close succeeds"),
+        EmitterCloseDisposition::Closed
+    );
+    assert!(
+        loopback.requests.try_recv().is_err(),
+        "a second close sends nothing"
+    );
+}

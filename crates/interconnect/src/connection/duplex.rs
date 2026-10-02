@@ -3,8 +3,14 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Opening one ordered frame stream per caller, frame length validation, per-frame
-//!   memory admission, when the peer last accepted a sender's bytes, and the half-close that ends
-//!   a stream.
+//!   memory admission, the decoding of a frame a receive took off the stream, when the peer last
+//!   accepted a sender's bytes, and the half-close that ends a stream.
+//!
+//! Receiving is cancel-safe. A receive that took its frame off the stream waits for the frame's
+//! decoding, and a caller that selects the receive against a timer or a command drops it whenever
+//! another arm wins. The decoding therefore stays with the receiving half, and the next receive
+//! finishes that frame before it reads another, so an abandoned receive loses no frame and
+//! reorders none.
 //!
 //! A decoded frame is handed to its caller together with the charge that covers it. How long a
 //! decoded frame stays resident is the caller's contract, not this module's, so the charge travels
@@ -51,6 +57,10 @@ const FRAME_HEADER_BYTES: usize = 4;
 const FRAME_CARRY_SLACK_BYTES: u64 = 64 * 1024;
 /// What a reader charges before it has seen how large this stream's frames are.
 const INITIAL_FRAME_CHARGE: u64 = 4 * 1024;
+
+/// The decoding of one frame a receive took off the stream, kept until a receive finishes it.
+type FrameDecoding<T> =
+    Pin<Box<dyn Future<Output = Result<(T, Reservation), Report<TransportError>>> + Send>>;
 
 fn carry_limit(frame_limit: u64) -> u64 {
     frame_limit
@@ -390,6 +400,8 @@ pub struct DuplexReceiver<M: InterconnectDuplexRequest> {
     reader: FrameReader,
     executor: Executor,
     node: ClusterNodeName,
+    /// The answer an abandoned receive took off the stream, still decoding.
+    decoding: Option<FrameDecoding<M::Response>>,
     _hold: Arc<DuplexHold>,
     response: PhantomData<fn() -> M::Response>,
 }
@@ -399,19 +411,27 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
     ///
     /// This waits as long as the stream stays open. A caller with work outstanding owns the
     /// deadline for that work and applies it here, and [`DuplexSender::progress`] tells it whether
-    /// the peer still accepts what it sends.
+    /// the peer still accepts what it sends. It is cancel-safe: an answer a dropped receive took
+    /// off the stream is the next receive's.
     pub async fn next(&mut self) -> Result<Option<M::Response>, Report<RequestError>> {
-        let frame =
-            self.reader.next_frame().await.map_err(|error| {
+        if self.decoding.is_none() {
+            let frame = self.reader.next_frame().await.map_err(|error| {
                 RequestError::stream_with_cause(error, self.node.clone(), M::NAME)
             })?;
-        let Some(frame) = frame else {
-            return Ok(None);
-        };
-        let (response, _reservation) =
-            M::Response::decode_rkyv(self.executor.clone(), M::CLASS, frame)
-                .await
-                .map_err(|error| error.change_context(RequestError::Decode { request: M::NAME }))?;
+            let Some(frame) = frame else {
+                return Ok(None);
+            };
+            let decoding = M::Response::decode_rkyv(self.executor.clone(), M::CLASS, frame);
+            self.decoding = Some(Box::pin(decoding));
+        }
+        let decoding = self
+            .decoding
+            .as_mut()
+            .verified("the branch above starts a decoding whenever no receive left one");
+        let decoded = decoding.await;
+        self.decoding = None;
+        let (response, _reservation) = decoded
+            .map_err(|error| error.change_context(RequestError::Decode { request: M::NAME }))?;
         Ok(Some(response))
     }
 }
@@ -422,6 +442,8 @@ pub struct DuplexItems<T> {
     executor: Executor,
     class: PoolClass,
     request: &'static str,
+    /// The frame an abandoned read took off the stream, still decoding.
+    decoding: Option<FrameDecoding<T>>,
     item: PhantomData<fn() -> T>,
 }
 
@@ -437,6 +459,7 @@ impl<T> DuplexItems<T> {
             executor,
             class,
             request,
+            decoding: None,
             item: PhantomData,
         }
     }
@@ -455,24 +478,33 @@ pub struct ChargedItem<T> {
 
 impl<T: RkyvMessage> DuplexItems<T> {
     /// The next frame and the charge covering it, or `None` once the peer half-closed its
-    /// direction.
+    /// direction. It is cancel-safe: a frame a dropped read took off the stream is the next
+    /// read's.
     pub async fn next(&mut self) -> Result<Option<ChargedItem<T>>, Report<StreamHandlerError>> {
-        let frame = self
-            .reader
-            .next_frame()
-            .await
-            .map_err(StreamHandlerError::with_cause)?;
-        let Some(frame) = frame else {
-            return Ok(None);
-        };
-        let (item, charge) = T::decode_rkyv(self.executor.clone(), self.class, frame)
-            .await
-            .map_err(|error| {
-                Report::new(StreamHandlerError::new(format!(
-                    "{} frame: {error}",
-                    self.request
-                )))
-            })?;
+        if self.decoding.is_none() {
+            let frame = self
+                .reader
+                .next_frame()
+                .await
+                .map_err(StreamHandlerError::with_cause)?;
+            let Some(frame) = frame else {
+                return Ok(None);
+            };
+            let decoding = T::decode_rkyv(self.executor.clone(), self.class, frame);
+            self.decoding = Some(Box::pin(decoding));
+        }
+        let decoding = self
+            .decoding
+            .as_mut()
+            .verified("the branch above starts a decoding whenever no read left one");
+        let decoded = decoding.await;
+        self.decoding = None;
+        let (item, charge) = decoded.map_err(|error| {
+            Report::new(StreamHandlerError::new(format!(
+                "{} frame: {error}",
+                self.request
+            )))
+        })?;
         Ok(Some(ChargedItem { item, charge }))
     }
 }
@@ -622,6 +654,7 @@ impl TransportState {
                 reader,
                 executor: self.executor.clone(),
                 node: node_id.clone(),
+                decoding: None,
                 _hold: hold,
                 response: PhantomData,
             },
