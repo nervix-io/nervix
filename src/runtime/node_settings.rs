@@ -76,6 +76,12 @@ impl Runtime {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the typed node identifier converts through the caller-supplied Into contract"
+        )
+    )]
     pub(in crate::runtime) fn parse_runtime_node_duration_setting(
         domain: &DomainName,
         kind: &str,
@@ -93,6 +99,12 @@ impl Runtime {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the typed node identifier converts through the caller-supplied Into contract"
+        )
+    )]
     pub(in crate::runtime) fn parse_runtime_node_flush_policy(
         domain: &DomainName,
         kind: &str,

@@ -475,17 +475,17 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_catalog_and_scopes_round_trip/corpus"
+corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_source_contracts_round_trip/corpus"
 domain_version = 1
 features = []
-id = "typed-catalog-scope"
-invariant = "Current API catalog and reviewed scope values round trip completely and classification requires resolved definition identity."
+id = "typed-source-contract"
+invariant = "Current source contracts round trip completely and preserve their frequency and acquisition semantics."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"
 random_iterations = 256
 source = "tools/nervix-lint/report/src/tests.rs"
-test = "tests::bolero_catalog_and_scopes_round_trip"
+test = "tests::bolero_source_contracts_round_trip"
 test_target = "lib"
 
 
@@ -495,7 +495,7 @@ corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_authored_sites_pre
 domain_version = 1
 features = []
 id = "typed-site-union"
-invariant = "Aggregation is idempotent at authored sites, preserves every compiled configuration and validates reviewed scope freshness."
+invariant = "Aggregation is idempotent at authored sites and preserves complete findings and source contracts in every compiled configuration."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"

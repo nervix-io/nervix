@@ -362,12 +362,15 @@ version = "0.1.0-dev"
 # Tokio's unstable runtime knobs are enabled only by the Turmoil test recipes, which pass
 # `--cfg tokio_unstable`; the simulation runner refuses to run without them.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(tokio_unstable)",
+  "cfg(nervix_lint)",
+] }
 
 [workspace.lints.clippy]
-as-conversions = "deny"
-disallowed-methods = "deny"
-disallowed-types = "deny"
+as_conversions = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
 
 [workspace.metadata.tooling]
 workspaces = ["tools/nervix-lint"]

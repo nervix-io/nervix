@@ -103,7 +103,8 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server and CLI, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After both jobs, merge their workspace reports for CRAP, merge their public-scope reports for one Codecov upload |
-| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, Shuttle, and Loom checks |
+| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
+| `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
 seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a

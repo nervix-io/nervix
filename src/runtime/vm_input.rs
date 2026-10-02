@@ -89,6 +89,11 @@ impl SharedVmInputColumns {
     ///
     /// Routes may request the same name with a different Arrow type or nullability, so the
     /// resolved field is part of the identity rather than the name alone.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "external Arrow access and the admitted expression executor \
+                                   own their generic effects")
+    )]
     pub(super) fn column(
         &mut self,
         field: &arrow_schema::Field,
@@ -307,6 +312,13 @@ pub(super) fn branch_key_input_column(
     )
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) fn runtime_values_input_column<'a>(
     values: impl Iterator<Item = Option<&'a RuntimeValue>>,
     len: usize,
@@ -387,6 +399,13 @@ pub(super) fn lookup_generated_input_field<'a>(
         })
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn compute_lookup_hash_map_columns(
     executor: &Executor,
     program: &CompiledProgramWithMaterializedInterest,

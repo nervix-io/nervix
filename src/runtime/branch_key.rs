@@ -42,6 +42,10 @@ impl BranchKey {
         self.0.fields.len()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies an iterator of typed branch fields")
+    )]
     pub(crate) fn from_fields(
         fields: impl IntoIterator<Item = (FieldName, RuntimeValue)>,
     ) -> error_stack::Result<Self, BranchKeyError> {

@@ -72,6 +72,11 @@ impl ZeroMqSink {
         Report::new(SinkStartError::Initialize { sink: ZEROMQ }).attach_printable(error.to_string())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "formats the typed external ZeroMQ driver failure; no \
+                                   internal runtime ownership is inferred")
+    )]
     fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
         Report::new(SinkPublishError::Publish { sink: ZEROMQ }).attach_printable(error.to_string())
     }

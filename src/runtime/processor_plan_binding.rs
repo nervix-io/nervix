@@ -5,6 +5,14 @@
 //! - **Depends on.** Decision-layer processor specifications and installed runtime capabilities.
 //! - **Must not know.** NSPL text, parser state or control-plane transaction mechanics.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "processor plans are prepared and published once per installed domain revision"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 
 use super::*;

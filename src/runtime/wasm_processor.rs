@@ -6,6 +6,14 @@
 //! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
 //! - **Must not know.** NSPL parsing, placement policy or external connector clients.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "WASM task installation and reset bind retained guest-state and callback owners"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_wasm::WasmGuestReportExt as _;
 
@@ -633,6 +641,20 @@ impl Runtime {
     /// while the schedule assigns a processor that pins it to the node: validating the domain,
     /// starting the processor, preparing an ownership handoff and restoring guests during forced
     /// recovery all reuse it instead of waiting for a compilation the node already made.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "typed name conversion and external Arrow access own their data effects"
+        )
+    )]
     pub(super) async fn compile_wasm_processor_module(
         &self,
         domain: &DomainName,
@@ -698,6 +720,13 @@ impl Runtime {
     /// so a batch discovered to be unusable after publication has already invalidated the saved
     /// state of the binding it replaced. Compiling first keeps the previous model and its guest
     /// state the current ones, and the module this check compiles is the one activation installs.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one resource binding prepares the retained module before guest execution"
+        )
+    )]
     pub(crate) async fn prepare_wasm_module(
         &self,
         plan: &WasmModulePlan,
@@ -762,16 +791,19 @@ pub(super) async fn ensure_wasm_processor_instance(
     let compiled_module = match compiled.as_ref() {
         Some(compiled_module) => compiled_module.clone(),
         None => {
-            let prepared = branch
-                .runtime
-                .compile_wasm_processor_module(
+            let prepared = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the admitted module-preparation job installs one resource binding before guest \
+                 callbacks",
+                branch.runtime.compile_wasm_processor_module(
                     &branch.domain,
                     processor,
                     resource,
                     resource_version,
                     file,
                 )
-                .await?;
+            )
+            .await?;
             *compiled = Some(prepared.clone());
             *instance = None;
             prepared
@@ -822,6 +854,12 @@ pub(super) async fn ensure_wasm_processor_instance(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "typed name conversion and external Arrow access own their data effects"
+    )
+)]
 pub(super) async fn wasm_envelope_from_relay_batch(
     executor: &Executor,
     batch: &RelayRecordBatch,

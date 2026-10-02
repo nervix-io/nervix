@@ -260,6 +260,11 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+Generated compiler findings carry a required execution-context field. An explicit null means that
+analysis has not established a source contract; it is an unknown effect, not a cold classification.
+The report decoder requires that field even though its value is optional. Complete compiler,
+configuration and worktree identities are also required before generated evidence is reusable.
+
 A vocabulary type that validates its value when it is parsed or constructed validates it again when
 it is decoded, from JSON and from the archive alike. Every name type, a command execution reference,
 a resource upload identity, a JSON path, connection-pool bounds, and an emitter's message and size

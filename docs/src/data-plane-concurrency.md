@@ -668,73 +668,135 @@ not discard batches already queued.
 
 ## Ratchet And Review
 
-`just ratchet` keeps the synchronization debt from growing. The
-`data_plane_lock_acquisitions` count uses the pinned compiler's resolved definitions and normalized
-receivers for Mutex, RwLock and DashMap acquisitions. Its checked-in
-value in `debt-baseline.json` is a ceiling: the count may fall and may never rise. When it falls,
-`just ratchet --update` records the lower baseline in the same change.
+`just ratchet`, `just validate` and `just validate-ci` require the pinned compiler's Nervix
+source diagnostics to pass across the complete declared matrix. Finite API recognition lives in
+`tools/nervix-lint/report/src/rules.rs`. Architectural contracts live with their source owners;
+generated inventories under `target/` are evidence, never approval inputs. Other structural
+ratchets retain their own checked-in counts.
 
-The compiler inventories every recognized acquisition, including borrowed reads, mutating and try
-operations, iteration, aliases, re-exports, dereference adjustments and UFCS. Trait calls resolve
-their selected implementation. Ordinary collection entries, held-guard entries and I/O operations
-are not acquisitions. Borrowed DashMap iteration acquires lazily; consuming iteration owns its
-storage. A custom method with the same spelling does not acquire a known lock.
+The compiler recognizes resolved Mutex, RwLock and DashMap acquisitions through aliases,
+re-exports, dereference adjustments, UFCS and selected trait implementations. Borrowed reads,
+mutating and try operations, and iteration remain visible. Ordinary collection entries,
+held-guard entries and I/O do not acquire a recognized lock. Borrowed DashMap iteration acquires
+lazily; consuming iteration owns its storage. Authored arguments remain checked through external
+macros, including operation expectation macros.
 
-Every authored site has a reviewed scope naming its source fingerprint, all compiler owner variants,
-frequency and rationale. Lifecycle, observer, retained-state and bounded-protocol acquisitions
-remain visible separately from debt. A bounded protocol also names its key and bound. The reviewed
-inventory below is the basis of those decisions; filenames and sharing traits infer no policy.
-Helpers and callbacks are compiled and require their own scopes. Missing, stale, duplicated or
-unobserved scopes fail, even if the aggregate count could otherwise pass. A reviewed new recurring
-acquisition remains a defect even if another deletion keeps the total below its ceiling.
+### Source contracts
 
-`review-context.json` also binds the frequency review to the wider product source and declarations.
-Changing a caller invalidates that context even when its helper's acquisition body is unchanged.
-Review the affected call chains and scopes before refreshing the context; the gate lists the changed
-inputs and supplies no automatic classification or review-refresh command.
+Gate annotations with `cfg_attr(nervix_lint, ...)`. Only the isolated analysis driver registers the
+`nervix` tool and enables that cfg; ordinary stable and browser source needs no unstable feature.
+Contracts use the narrowest meaningful function, trait, type, impl, module or crate boundary:
 
-The isolated tooling workspace uses `nightly-2026-09-17`; stable product builds use their existing
-toolchain. The declared matrix analyzes ordinary workspace libraries and binaries, the server's
-testing capability, server/interconnect/primitives under Shuttle, server/consensus/primitives under
-Loom, and interconnect/primitives under Turmoil. Turmoil's runtime cfg comes only from its just
-recipe. These are compilation checks; they do not execute concurrency protocols. Test targets,
-browser configurations and undeclared feature combinations are not claimed. The mandatory source
-primitive validator still checks import provenance, inactive cfg and authored macro bodies.
+```rust,ignore
+#[cfg_attr(nervix_lint, nervix::context(recurring, reason = "one callback per admitted batch"))]
+fn process_batch() { /* retained execution state */ }
 
-Reports preserve every compiled configuration and expansion instance while counting an authored
-source site once. Authored tokens passed through external macros remain visible. Resolved sites
-in generated target files or external source files are counted as exclusions, not reviewed sites.
-Calls dynamically dispatched through an unknown API and synchronization internal to external
-libraries are outside this catalog's claim.
+#[cfg_attr(nervix_lint, nervix::context(bounded,
+    reason = "the retained grant serializes its terminal transition",
+    key = "one admitted relay grant", bound = "one synchronous transition; no guard across await"))]
+struct GrantState { /* retained bounded state */ }
+```
 
-Complete Cargo target artifacts, compiler side reports and declared roots must agree before any
-count is accepted, including zero. Completion fingerprints cover the compiler, driver, validator,
-catalog, configuration, sources, dependency locks, Cargo configuration and relevant build flags.
-The reviewed policy is checked and fingerprinted on every invocation. The workspace wrapper nests
-under configured kache; a missing side report triggers a separate supported key-salt namespace
-and recompile of isolated authored artifacts. The gate never clears `RUSTC_WRAPPER`.
+`recurring` identifies record, batch, frame, acknowledgement and steady poll execution.
+`lifecycle` identifies installation, replacement, snapshot cadence and teardown. `observer`
+identifies observation outside execution, and `outside` names an edge or harness outside this
+rule's data plane. `bounded` remains recurring but permits the explicitly described retained
+protocol; its reason, identity key and capacity or deadline are required. These are reviewed
+architectural assertions, not proofs of exclusive ownership, bounded waiting or runtime cadence.
 
-Cutover calibration and validation evidence belong on the corresponding
-[Typed Ratchet task](https://app.clickup.com/t/86bc9eqhf) in ClickUp. The repository retains the
-operative catalog, per-site scopes, reviewed caller context, declared configuration matrix and
-debt ceiling. Generated inventories, qualification results and execution logs are task artifacts.
-Each remaining debt site names its owning epic delivery.
+An explicit callable contract wins over defaults. An implementation inherits its trait method's
+contract before its impl/type or lexical defaults; a recurring trait method's override remains
+recurring or names a bounded protocol. A type contract applies to its implementations. Duplicate,
+conflicting, malformed and misplaced annotations fail. A binding whose initializer owns exactly one
+anonymous body can supply that body's context: use it when a constructor installs a recurring task. Nested task bodies
+still require their actual entry contract.
 
-Task handles remove recurring status, freeze, metric and checkpoint lookups;
-ingest tracker and clock binders now run at construction, and force-flush claims acquire only for an
-available obligation. Remote relay root tracking remains debt. The executor-saturation lookup belongs
-to explicit testing fault control.
-Placement-local progress and announcement transitions have an explicit
-bounded-protocol scope. Borrowed state-registry reads on replication frames remain debt, as do
-per-branch catch-up lookups: Typed Ratchet 14 owns the polling repair and Typed Ratchet 15 owns
-retained frame routing. A helper reached by both installation and recurring callers carries its
-hottest frequency; it cannot inherit installation's lifecycle disposition.
+The compiler re-evaluates supported local call edges and closure/callback bodies to a fixed point.
+A recurring caller makes an unannotated local helper recurring, including one in a lifecycle module.
+An explicit lifecycle callable is an installation boundary: entering it from recurring execution
+emits `nervix::lifecycle_call`. Callee and trait contracts survive cross-crate metadata and renamed
+imports. During recurring execution, unresolved generic, dynamic trait and function-pointer
+application calls require a callable/trait contract or `nervix::dispatch(reason = "...")` on their
+owning callable; a cold module default is insufficient. A dispatch contract states the external
+driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
 
-Use the site listing while reviewing:
+Local iteration and polling implementations remain call edges. Generated `await` polling is the
+Rust scheduling protocol, rather than a separate application callback diagnostic. Synchronization
+inside external libraries, opaque external future implementations and unsupported whole-program
+relationships remain outside the recognizer's claim. The checker supplies no universal ownership
+or effect proof.
+
+### Diagnostics and reviewed exceptions
+
+`nervix::sync_acquisition` diagnoses an acquisition on ordinary recurring execution.
+`nervix::unknown_effect` diagnoses an acquisition without a context or an unresolved application
+call reached from recurring execution. `nervix::invalid_contract` rejects contract and exception
+errors. The lints use ordinary Rust warn/deny/expect levels; the required gate also rejects unresolved Nervix warnings.
+
+Retained repair debt names its owning task at the exact operation:
+
+```rust,ignore
+let channel = nervix_primitives::expect_lint!(nervix::sync_acquisition,
+    "Typed Ratchet 03 (86bc9eqjv): retain the channel selected at branch installation",
+    channels.get(&branch));
+```
+
+`expect_lint!` puts a normal reason-bearing Rust expectation on one binding, evaluates the
+operation once and returns its value. It supplies stable syntax and introduces no runtime policy,
+allocation or lock. A direct gated expectation on one operation binding works too. A lifecycle
+call admitted only during first installation or terminal teardown explains that phase and its
+concrete lifetime in the same narrow form. Blanket allow, undocumented or broad expectations,
+lint caps and unfulfilled expectations fail. The checker counts distinct HIR operations against
+Rust's effective expectation identity, including macro expansion; widening a binding to cover a
+second operation fails even when Rust would regard the expectation as fulfilled.
+
+Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness
+registry reads during polling remain operation-specific debt for Typed Ratchet 03, alongside
+relay/channel selection. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
+owns remaining remote acknowledgement/admission discovery. Typed Ratchet 14 owns recurring branch
+catch-up discovery and Typed Ratchet 15 owns state-replication frame and announcer registry reads.
+Bounded retained placement progress remains explicitly documented. Testing fault selectors name
+their exact emitter, ingestor, domain/branch, checkpoint window or acknowledgement link and finite
+read/removal steps; they release map guards before a scenario-controlled pause. These contracts
+describe test selection, not a product wait deadline. The executor-saturation lookup belongs to
+testing fault control. The [concurrent map inventory](../../tests/concurrent-map-inventory-ledger.md)
+records the runtime ownership review; source contracts and expectations are the executable policy.
+
+### Complete analysis and qualification
+
+The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The matrix
+analyzes ordinary workspace libraries/binaries, the server's testing capability,
+server/interconnect/primitives under Shuttle, server/consensus/primitives under Loom, and
+interconnect/primitives under Turmoil. Turmoil's runtime cfg comes only from its just recipe,
+which preserves the parent's diagnostic mode. Compilation supplies no concurrency execution
+evidence. Test targets, browser analysis and undeclared feature combinations are not claimed.
+Mandatory source/manifest checks retain import provenance, inactive cfg and authored macro checks.
+
+Cargo artifacts, complete side reports and declared roots must agree, including when there are
+zero sites. Reports retain every owner, configuration and expansion instance; generated target
+and external source sites are exclusions. Completion identities cover current source and
+annotations, Rust rules, compiler, driver, validator, locks, dependency declarations, Cargo
+configuration, diagnostic mode and relevant flags. Source changes during a run fail. The workspace
+wrapper nests beneath configured kache. Missing reports establish a new supported cache namespace
+and rebuild only isolated authored artifacts; the gate preserves `RUSTC_WRAPPER`.
+
+`just test-typed-ratchet` qualifies APIs and source diagnostics in the legal modes, ordinary Bolero
+properties, stable gated syntax and paired Rust API doctests. `just qualify-typed-ratchet-cache`
+qualifies fresh/Cargo-fresh runs, an actual kache dependency hit, changed inputs, missing and
+interrupted output, and two worktrees. Native coverage uses the matching LLVM tools and records
+the driver executions that ran. Sanitizer campaigns follow the shared Bolero label policy.
+Calibration, measured cost and complete generated evidence belong on
+[Typed Ratchet 02A](https://app.clickup.com/t/86bcau18u).
+
+Use the generated listing during review:
 
 ```text
-just ratchet --show data_plane_lock_acquisitions
+just typed-ratchet --show
+just typed-ratchet --configuration shuttle --inventory
 ```
+
+Partial selections and warning-mode inventories identify their diagnostic/matrix scope explicitly;
+they cannot satisfy the required full diagnostic gate.
 
 For every new or moved site and every shared-map access, the reviewer
 establishes all of the following:
@@ -1041,8 +1103,9 @@ depth-first search, and each deliberately broken order must deadlock in some sch
 process, in `nervix-execution`, `nervix-interconnect`, `nervix-client-core`, and `nervix-server`. It then repeats each
 package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses the repository's
 kache-backed build and prepares the server's test dependencies; `just test` continues to run the
-ordinary suite. CI runs `just test-shuttle` and uploads `target/shuttle-failures` when a check
-fails. `just test-shuttle <filter>` selects checks whose full name contains the filter. The
+ordinary suite. CI's dedicated `shuttle` job runs `just test-shuttle` and uploads
+`target/shuttle-failures` as the `shuttle-failures` artifact when a check fails.
+`just test-shuttle <filter>` selects checks whose full name contains the filter. The
 runner stores a failing schedule under
 `target/shuttle-failures/<package>/<fully-qualified-test-name>/`; replay uses that path and exact
 test name. See the command recipe in [Developing Nervix](./developing-nervix.md).
@@ -1099,7 +1162,8 @@ that a join or an extra lock publishes, or a real atomic does not make a model.
 
 The execution, consensus and server crates own a `loom` feature, and each forwards it to the
 primitive crate and to every dependency that owns one, so the whole library graph of each builds
-with Loom's primitives. `just cargo-clippy-loom`, which `just lint` runs, lints every Loom build:
+with Loom's primitives. `just cargo-clippy-loom`, whose package checks also run in `just lint`,
+lints every Loom build:
 the models and their harness, the primitive boundary, and the server and consensus libraries both
 as they ship and in test mode, where models of their owners are compiled.
 

@@ -6,6 +6,15 @@
 //! - **Depends on.** Shared coordination identities, schedules and persisted runtime state.
 //! - **Must not know.** Handoff transport, schedule planning or state-store key encoding.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "state handoff checkpoints and authority changes transfer one ownership \
+                  generation"
+    )
+)]
+
 use super::*;
 
 #[derive(Debug, Clone)]

@@ -208,6 +208,12 @@ impl HttpSink {
     /// The transport generates Host, Connection and, with a body, Content-Length. It defaults
     /// Accept to */* only when no application Accept header was prepared. It generates neither
     /// Accept-Encoding nor Content-Type, cookies or credentials.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "compares prepared header names through the external \
+                                   iterator; its local predicate is analyzed; no internal \
+                                   runtime ownership is inferred")
+    )]
     fn request_head(request: &SinkHttpRequest) -> Vec<u8> {
         let url = request.target.url();
         let authority = &url[Position::BeforeHost..Position::AfterPort];

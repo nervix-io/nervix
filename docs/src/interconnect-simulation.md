@@ -482,7 +482,7 @@ committed seed of that case.
 ## CI And Budgets
 
 CI runs the simulation as a job of its own, `turmoil`, beside the default tests and the
-`extra-tests` job that runs the Shuttle checks. Its build enables the `turmoil` feature and
+dedicated `shuttle` job. Its build enables the `turmoil` feature and
 `tokio_unstable`, so it shares no compilation with them, and a failed case's record is its own
 artifact. The job runs `just test-turmoil`, then `just test-turmoil-replay-check`, and on failure
 uploads `target/turmoil-failures` as the `turmoil-failures` artifact. The coverage job does not run

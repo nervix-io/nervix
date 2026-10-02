@@ -16,7 +16,7 @@ a separate maintainer task.
 Cargo build output stays in the repository's `target` directory, or `CARGO_TARGET_DIR` when set,
 so later installations reuse the compiled dependencies.
 
-The build requires Rust 1.98 or newer with the `wasm32-unknown-unknown` target, Trunk, `just`,
+The build requires Rust 1.99 or newer with the `wasm32-unknown-unknown` target, Trunk, `just`,
 Python 3.12 or newer, `uv`, Git, and the native build tools required by Nervix's dependencies.
 ONNX Runtime downloads use the public R2 development URL without credentials; validated local
 artifacts are reused without another download. CUDA and cuDNN SDKs are unnecessary for this installation.

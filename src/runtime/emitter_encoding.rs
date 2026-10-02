@@ -149,6 +149,13 @@ impl EmitterSinkContext {
     /// than on the data workers. The charge is bounded by what one relay body may encode into. A
     /// node that cannot take the encoding now refuses it with a retryable failure, so the emitter
     /// keeps its rows and retries them; a panic is the batch's own defect and is not retried.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the bounded executor invokes the admitted encoding callback; local callback \
+                      bodies remain checked"
+        )
+    )]
     async fn encode_on_extension_workers<T>(
         &self,
         bytes: u64,

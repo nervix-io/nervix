@@ -104,7 +104,8 @@ sys.exit(artifacts.main())
         recipes = [
             ["build-server"], ["server"], ["tests-deps"], ["test"], ["docker-build-debian"],
             ["test-admission-runtime"],
-            ["test-runtime"], ["test-capability-docs"], ["test-endpoint-intake"], ["bench-endpoint-routing"],
+            ["test-runtime"], ["test-capability-docs"], ["test-runtime-state-capabilities"],
+            ["test-endpoint-intake"], ["bench-endpoint-routing"],
             ["bench-admitted-work"], ["bench-state-replication"], ["bench-task-handles"],
             ["coverage-task-handles"], ["coverage-runtime"], ["bench-smoke"], ["ratchet"],
             ["coverage-scenarios", str(self.root / "scenarios.lcov")],
@@ -121,6 +122,50 @@ sys.exit(artifacts.main())
                     self.assertIn("normal development requires a published R2 artifact", result.stderr)
                     self.assertIn("ask a maintainer", result.stderr)
         self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
+
+    def test_package_clippy_prepares_the_runtime_before_compiling_the_server(self) -> None:
+        cargo_log = self.root / "cargo.json"
+        self.environment["RECIPE_CARGO_LOG"] = str(cargo_log)
+        cargo = self.bin / "cargo"
+        cargo.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['RECIPE_CARGO_LOG']).write_text(json.dumps(sys.argv[1:]))
+sys.exit(0)
+""")
+        cargo.chmod(0o755)
+        for ci in ("", "true"):
+            self.environment["CI"] = ci
+            with self.subTest(ci=ci, package="nervix-server"):
+                result = subprocess.run(["just", "cargo-clippy-package", "nervix-server"],
+                                        cwd=self.repo, env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("normal development requires a published R2 artifact", result.stderr)
+                self.assertFalse(cargo_log.exists())
+            with self.subTest(ci=ci, package="nervix-cli"):
+                result = subprocess.run(["just", "cargo-clippy-package", "nervix-cli"],
+                                        cwd=self.repo, env=self.environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                arguments = json.loads(cargo_log.read_text())
+                self.assertEqual(arguments[:3], ["clippy", "--package", "nervix-cli"])
+                cargo_log.unlink()
+        self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
+
+    def test_validation_fetches_the_runtime_before_starting_parallel_workers(self) -> None:
+        result = subprocess.run(["just", "--dump", "--dump-format", "json"], cwd=self.repo,
+                                env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        recipes = json.loads(result.stdout)["recipes"]
+        for name, workers in (
+            ("cargo-clippy", "clippy-targets"), ("cargo-clippy-loom", "loom-clippy-targets"),
+            ("lint", "lint-targets"), ("validate", "validate-targets"), ("validate-ci", "validate-ci-targets"),
+        ):
+            with self.subTest(recipe=name):
+                dependencies = recipes[name]["dependencies"]
+                self.assertEqual(dependencies[0]["recipe"], "fetch-onnxruntime")
+                self.assertEqual(dependencies[1]["recipe"], "run-with-jobs")
+                self.assertEqual(dependencies[1]["arguments"], [workers, ["variable", "jobs"]])
+        for name in ("validate-targets", "validate-ci-targets"):
+            self.assertIn("test-onnxruntime-tooling", [item["recipe"] for item in recipes[name]["dependencies"]])
 
     def test_recipes_select_the_same_home_cache_from_every_workspace(self) -> None:
         second_repo = fixture_repository(self.root / "second-workspace")

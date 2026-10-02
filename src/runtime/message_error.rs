@@ -235,6 +235,12 @@ pub(super) enum SingleRecordFilterMapOutcome {
     },
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the caller supplies typed error conversion and the planned route iterator"
+    )
+)]
 pub(super) fn structured_message_error(
     execution_now: Timestamp,
     code: MessageErrorCode,
@@ -654,6 +660,12 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies typed error conversion and the planned route iterator"
+        )
+    )]
     pub(in crate::runtime) fn handle_general_error_for_acks<'a>(
         &self,
         domain: &DomainName,
@@ -692,6 +704,12 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies typed error conversion and the planned route iterator"
+        )
+    )]
     pub(in crate::runtime) fn handle_internal_processor_error_for_acks<'a>(
         &self,
         domain: &DomainName,
@@ -721,6 +739,12 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies typed error conversion and the planned route iterator"
+        )
+    )]
     pub(in crate::runtime) async fn handle_planned_message_errors(
         &self,
         routing: Option<&DomainRoutingSnapshot>,

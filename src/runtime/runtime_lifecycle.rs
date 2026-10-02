@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "runtime construction, binding and teardown install or withdraw node-owned \
+                  services"
+    )
+)]
+
 use super::*;
 
 impl Runtime {
@@ -185,6 +194,14 @@ impl Runtime {
     }
 
     /// The node's bounded execution and transient-memory admission.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(crate) fn executor(&self) -> &Executor {
         &self.inner.executor
     }
@@ -212,11 +229,27 @@ impl Runtime {
     }
 
     /// The directory connectors stage local files in before they publish them.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(in crate::runtime) fn temp_dir(&self) -> &Path {
         self.inner.temp_dir.as_path()
     }
 
     /// The node's runtime event bus. Connectors report transient failures here.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(in crate::runtime) fn events(&self) -> &RuntimeEvents {
         &self.inner.events
     }
@@ -584,6 +617,14 @@ impl Runtime {
         self.inner.replicated_branch_aggregated_states.clear();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(in crate::runtime) async fn await_ack_completion(
         shutdown_rx: &mut watch::Receiver<bool>,
         mut completion: AckCompletion,

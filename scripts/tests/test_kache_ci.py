@@ -36,6 +36,7 @@ class KacheCiTests(unittest.TestCase):
             "scenarios",
             "client-conformance",
             "extra-tests",
+            "shuttle",
             "turmoil",
             "benchmark",
             "build-book",
