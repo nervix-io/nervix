@@ -119,3 +119,25 @@ invariant = "runtime.relay-fanout.admission-wakeup"
 original = "let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);"
 path = "src/runtime/relay_channel.rs"
 weakened = "let admitted = self.admitted.load(Ordering::Acquire);"
+
+[[invariant]]
+claim = "An operation admitted under a runtime-state binding that a rebind supersedes either observes the new binding and is refused, or finishes before the rebind returns with everything it did visible to the rebinding side: the operation counts itself in before it reads the binding, the rebind publishes the binding before it reads the count, both reach the count by read-modify-write, and finishing releases what the read acquires."
+id = "runtime.state-assignment.admission-fence"
+package = "nervix-server"
+test = "runtime::state_store::loom_models::loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebind"
+
+[[qualification]]
+failure = "an operation admitted under the superseded binding was still running after its superseding rebind returned"
+id = "runtime.state-assignment.rebind-loads-the-admissions"
+invariant = "runtime.state-assignment.admission-fence"
+original = "while admitted.fetch_add(0, Ordering::AcqRel) != 0 {"
+path = "src/runtime/state_store.rs"
+weakened = "while admitted.load(Ordering::Acquire) != 0 {"
+
+[[qualification]]
+failure = "an operation admitted under the superseded binding was still running after its superseding rebind returned"
+id = "runtime.state-assignment.relaxed-finish"
+invariant = "runtime.state-assignment.admission-fence"
+original = ".fetch_sub(1, Ordering::Release)"
+path = "src/runtime/state_store.rs"
+weakened = ".fetch_sub(1, Ordering::Relaxed)"

@@ -335,10 +335,12 @@ impl StateAdmissions {
         }
     }
 
+    /// Counts one operation in under `generation`. The read-modify-write acquires the read of a
+    /// rebind that came before it, so the operation then observes the binding that rebind published.
     fn admit(&self, generation: u64) -> StateAdmission<'_> {
         let admitted = self.of_generation(generation);
         admitted
-            .fetch_add(1, Ordering::SeqCst)
+            .fetch_add(1, Ordering::AcqRel)
             .checked_add(1)
             .assured(
                 "every admitted operation occupies a running stack frame, so fewer than \
@@ -349,14 +351,21 @@ impl StateAdmissions {
 
     /// Wait until every operation admitted under `generation` has finished.
     ///
+    /// The count is read with a read-modify-write, which reads its newest value. An operation
+    /// counted in before the read is waited for, and one counted in after it acquires the read and
+    /// observes the binding the rebind published before waiting, so it is refused. A plain load
+    /// could miss both: it may return a count from before an admission that preceded it, while that
+    /// operation's load of the binding returns the superseded one. Reading the count also acquires
+    /// every operation that finished, so what it did happens before the rebind returns.
+    ///
     /// Admitted operations are synchronous and never take the barrier, so the wait lasts only as
-    /// long as the operations already running. The spin yields through the execution crate, whose
-    /// yield a deterministic scheduler sees, so that scheduler runs the operations this waits for
-    /// instead of the spin.
+    /// long as the operations already running. The spin yields through the primitive boundary,
+    /// whose yield a deterministic scheduler sees, so that scheduler runs the operations this waits
+    /// for instead of the spin.
     fn wait_until_finished(&self, generation: u64) {
         let admitted = self.of_generation(generation);
         let mut spins = 0_u32;
-        while admitted.load(Ordering::SeqCst) != 0 {
+        while admitted.fetch_add(0, Ordering::AcqRel) != 0 {
             if spins < ADMISSION_SPINS_BEFORE_YIELD {
                 spins = spins
                     .checked_add(1)
@@ -376,9 +385,10 @@ struct StateAdmission<'a> {
 }
 
 impl Drop for StateAdmission<'_> {
+    /// Counts the operation out, releasing what it did to the rebind that waits for it.
     fn drop(&mut self) {
         self.admitted
-            .fetch_sub(1, Ordering::SeqCst)
+            .fetch_sub(1, Ordering::Release)
             .checked_sub(1)
             .verified("an admission releases only the count it added");
     }
@@ -395,8 +405,9 @@ impl Drop for StateAdmission<'_> {
 /// consistent generation, serialize on the barrier. A per-message operation never takes it: it is
 /// admitted instead, counting itself in before it compares the binding and out when it finishes,
 /// while `rebind` publishes the new binding under the barrier and then waits for the operations
-/// admitted under the one it replaced. An admitted operation therefore either observes the new
-/// binding and is refused, or finishes before `rebind` returns.
+/// admitted under the one it replaced. Both sides reach the admission count by read-modify-write,
+/// which are totally ordered, so an admitted operation either observes the new binding and is
+/// refused, or finishes before `rebind` returns.
 #[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
@@ -437,14 +448,15 @@ impl StateAssignmentAuthority {
         let superseded = self.current_binding();
         let binding = superseded.successor(roles.local_capability(local_node));
         self.roles.store(StdArc::new(roles));
-        self.binding.store(binding.packed, Ordering::SeqCst);
+        // Release: a reader that loads this binding also observes the roles published with it.
+        self.binding.store(binding.packed, Ordering::Release);
         self.admissions.wait_until_finished(superseded.generation());
         binding
     }
 
     pub(in crate::runtime) fn current_binding(&self) -> StateAssignmentBinding {
         StateAssignmentBinding {
-            packed: self.binding.load(Ordering::SeqCst),
+            packed: self.binding.load(Ordering::Acquire),
         }
     }
 
@@ -509,7 +521,7 @@ impl StateAssignmentAuthority {
             }));
         }
         let _admission = self.admissions.admit(token.binding.generation());
-        if self.binding.load(Ordering::SeqCst) != token.binding.packed {
+        if self.binding.load(Ordering::Acquire) != token.binding.packed {
             return Err(Report::new(StateAuthorityError {
                 operation: required,
             }));
@@ -536,7 +548,7 @@ impl StateAssignmentAuthority {
     ) -> Result<T, Report<StateAuthorityError>> {
         let _barrier = self.barrier.lock();
         if !token.binding.grants(required)
-            || self.binding.load(Ordering::SeqCst) != token.binding.packed
+            || self.binding.load(Ordering::Acquire) != token.binding.packed
         {
             return Err(Report::new(StateAuthorityError {
                 operation: required,
@@ -2167,3 +2179,7 @@ mod tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "state_store_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "state_store_loom_models.rs"]
+mod loom_models;
