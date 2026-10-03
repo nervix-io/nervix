@@ -21,7 +21,7 @@ use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     publication::{ArcSwap, Guard},
     sync::{
-        Arc, AtomicWaker, Notify,
+        Arc, AtomicWaker, Notify, StdArc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::Mutex,
     },
@@ -724,6 +724,14 @@ pub(in crate::runtime) struct RelayFanoutClosed<T> {
     pub(in crate::runtime) batch: T,
 }
 
+/// One publication into a relay fan-out: the consumers registered when it began, which it both
+/// counts and delivers to. A consumer that registers later receives later publications only, so
+/// whatever a publisher prepares for each counted consumer matches the deliveries.
+pub(in crate::runtime) struct RelayPublication<'fanout, T> {
+    fanout: &'fanout RelayFanout<T>,
+    consumers: Guard<StdArc<Vec<Arc<RelayConsumerQueue<T>>>>>,
+}
+
 impl<T> RelayBroadcast<T> {
     pub(crate) fn with_capacity(capacity: NonZeroUsize) -> Self {
         Self {
@@ -799,14 +807,38 @@ impl<T> RelayBroadcast<T> {
     }
 }
 
+impl<T> RelayBroadcast<T> {
+    /// Begins one publication into the consumers registered now.
+    pub(in crate::runtime) fn publication(&self) -> RelayPublication<'_, T> {
+        RelayPublication {
+            fanout: &self.fanout,
+            consumers: self.fanout.consumers.load(),
+        }
+    }
+}
+
 impl<T: Clone> RelayBroadcast<T> {
     /// Delivers `batch` to every consumer registered when publishing begins.
+    pub(in crate::runtime) async fn broadcast(&self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+        self.publication().broadcast(batch).await
+    }
+}
+
+impl<T> RelayPublication<'_, T> {
+    /// How many consumers this publication delivers to.
+    pub(in crate::runtime) fn receivers(&self) -> usize {
+        self.consumers.len()
+    }
+}
+
+impl<T: Clone> RelayPublication<'_, T> {
+    /// Delivers `batch` to every consumer this publication counted.
     ///
     /// Waits while any of those consumers is at capacity. A consumer that leaves during the wait is
     /// skipped, and the batch comes back only when no consumer is left to take it.
-    pub(in crate::runtime) async fn broadcast(&self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
-        let consumers = self.fanout.consumers.load();
-        let capacity = self.fanout.capacity.load(Ordering::Acquire);
+    pub(in crate::runtime) async fn broadcast(self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+        let Self { fanout, consumers } = self;
+        let capacity = fanout.capacity.load(Ordering::Acquire);
         let mut first_full = None;
         for (index, consumer) in consumers.iter().enumerate() {
             if !consumer.try_admit(capacity) {
@@ -826,7 +858,7 @@ impl<T: Clone> RelayBroadcast<T> {
         let (reserved, remaining) = consumers.split_at(first_full);
         let mut admitted: Vec<&Arc<RelayConsumerQueue<T>>> = reserved.iter().collect();
         for consumer in remaining {
-            if self.fanout.admit(consumer).await {
+            if fanout.admit(consumer).await {
                 admitted.push(consumer);
             }
         }
