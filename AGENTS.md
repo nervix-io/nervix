@@ -373,6 +373,17 @@ choose a backend.
   tool that is not a node or an external driver that waits on the network. A permission declares
   its file for exactly the items it lists, so an item no permission lists for its file and a listed
   item the file no longer names both fail.
+- Thread creation through `nervix_primitives::thread::{spawn, Builder, scope, spawn_detached}`
+  and `nervix_primitives::unmodeled::thread::Builder` needs the same exact-file, exact-item
+  declaration in `crates/primitives/blocking-permissions.toml`, with its owner, why it stays
+  outside the bounded executor, and what bounds its work, thread count and lifetime. There is
+  no built-in caller outside the primitive crate. Unit tests, Loom and Shuttle models, and
+  harnesses declare their files and items too: no directory, `cfg(test)` module, model-only
+  module, inactive branch or authored macro is exempt. An unlisted use and an unused declared
+  item fail. The real builder also needs its unmodeled permission and verification limit;
+  that permission alone does not authorize thread creation.
+  Reimported module aliases retain confinement; import boundary modules and items by name,
+  because a root glob hides confined and unmodeled paths and is rejected.
 - An execution mode is a feature, never a global cfg: a bare `loom`, `shuttle`, `turmoil` or
   `deloxide` in a `cfg` predicate, and `--cfg` with any of those names in any recipe, Cargo
   configuration, workflow or build script, are rejected, because every crate of a build, Tokio's

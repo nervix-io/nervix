@@ -897,6 +897,9 @@ jobs:
           just qualify-typed-ratchet-cache
           just coverage-typed-ratchet-python
 
+      - name: Primitive source and thread owner validation coverage
+        run: just coverage-primitive-boundary
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
@@ -940,6 +943,7 @@ jobs:
             target/native-coverage/**/models.json
             target/typed-ratchet/python.lcov
             target/model-coverage/python.lcov
+            target/primitive-boundary/python.lcov
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 

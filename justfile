@@ -1942,6 +1942,19 @@ validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
 
+# Measure the primitive source validator and its fixtures, including exact thread owner declarations.
+coverage-primitive-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/primitive-boundary"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    export COVERAGE_FILE="{{ cargo_target_dir }}/primitive-boundary/python.coverage"
+    "${coverage[@]}" run --branch --source=scripts.check_primitive_boundary,scripts.tests.test_check_primitive_boundary -m unittest scripts.tests.test_check_primitive_boundary
+    "${coverage[@]}" run --branch -a --source=scripts.check_primitive_boundary -m scripts.check_primitive_boundary
+    "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/primitive-boundary/python.lcov"
+    "${coverage[@]}" json -o "{{ cargo_target_dir }}/primitive-boundary/python.json"
+    "${coverage[@]}" report
+
 # Keep every model checker, simulator and modeled wrapper out of every ordinary dependency graph, and
 # the portable graphs portable. The workspace and every package built on its own, the way a consumer
 # builds it, with default features and without them, contain no Loom, Shuttle, Shuttle wrapper or
