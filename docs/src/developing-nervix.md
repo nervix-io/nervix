@@ -358,7 +358,12 @@ just test-loom-replay target/loom-failures/<package>/<test>
 ```
 
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
-requires its model to fail.
+requires its model to fail. The copy lives below `target/loom-qualification-build/` and builds into a
+target directory of its own there, so a weakened build never stands in for the working tree's.
+Every file the copy takes or restores gets a fresh modification time, so each weakening rebuilds only
+what it changed, and qualifications that register the same weakening share one weakened build. The
+server's models embed the built web console, which the copy links rather than copies; both Loom
+recipes build it first.
 
 ### Primitive boundary and execution modes
 

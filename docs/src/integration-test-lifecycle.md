@@ -103,7 +103,8 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server and CLI, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP and one Codecov upload |
-| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
+| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, and compiler checks |
+| `loom` | Memory-ordering models explored to exhaustion, their weakening qualifications, and failure checkpoints |
 | `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five

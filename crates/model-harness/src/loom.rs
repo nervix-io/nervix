@@ -12,17 +12,40 @@
 //! the bounds it ran under; `just test-loom` accepts nothing else as a completed model. When
 //! `LOOM_CHECKPOINT_FILE` names a checkpoint that already exists, Loom resumes the search from that
 //! execution, which is how a failure is replayed, and the record says the search was resumed.
+//!
+//! Loom runs a model's threads as coroutines of one operating-system thread, each on a stack of a
+//! few kilobytes unless it asks for more, and a production owner called from a debug build needs
+//! more. [`explore`] runs each model on a thread with [`MODEL_THREAD_STACK`], and a model spawns its
+//! own threads through [`spawn`], which gives them the same. A stack size decides nothing a model
+//! explores.
 
 use std::env;
 
 use loom::{MAX_THREADS, model::Builder};
+use meticulous::ResultExt as _;
 use nervix_primitives::{
     sync::Arc,
+    thread::{self, JoinHandle},
     unmodeled::sync::atomic::{AtomicUsize, Ordering},
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::exploration::{InvariantId, LOOM_BRANCH_LIMIT, refused_loom_settings};
+
+/// The stack of the thread each model runs on, and of every thread it spawns through [`spawn`].
+pub const MODEL_THREAD_STACK: usize = 8 * 1024 * 1024;
+
+/// Spawns a thread of a model, with a stack a production owner's calls fit in.
+pub fn spawn<F, T>(task: F) -> JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    thread::Builder::new()
+        .stack_size(MODEL_THREAD_STACK)
+        .spawn(task)
+        .assured("a Loom model spawns its threads inside the model, below Loom's thread limit")
+}
 
 /// Explore `model`, which checks `invariant` against a production owner, to exhaustion.
 ///
@@ -64,9 +87,16 @@ where
     // real atomic outside the model.
     let executions = Arc::new(AtomicUsize::new(0));
     let counted_executions = Arc::clone(&executions);
+    let model = Arc::new(model);
     let counted_model = move || {
         counted_executions.fetch_add(1, Ordering::Relaxed);
-        model();
+        let execution = Arc::clone(&model);
+        spawn(move || {
+            let model: &F = &execution;
+            model();
+        })
+        .join()
+        .assured("a model that panics fails its execution before this join returns");
     };
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(EnvFilter::from_env("LOOM_LOG"))

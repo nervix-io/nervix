@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -9,12 +10,15 @@ from tempfile import TemporaryDirectory
 from typing import Callable, Mapping, Sequence
 
 from scripts.loom_models import (
+    GENERATED_INPUTS,
     Commands,
     Discovery,
     Inventory,
     Outcome,
     RunnerError,
+    Weakening,
     completion,
+    copy_working_tree,
     exploration_bounds,
     listed_tests,
     parse_inventory,
@@ -22,6 +26,7 @@ from scripts.loom_models import (
     run_models,
     select,
     weaken,
+    weakenings,
 )
 
 PUBLICATION_TEST = "cancellation::loom_models::loom_publication"
@@ -220,6 +225,91 @@ class RecordTests(unittest.TestCase):
             "without reporting",
             qualification_failure(Outcome(101, ran + "panicked: other"), qualification) or "",
         )
+
+
+class WeakeningTests(unittest.TestCase):
+    def test_qualifications_that_apply_one_weakening_share_it_in_inventory_order(self) -> None:
+        shared = (
+            "\n[[qualification]]\n"
+            'id = "execution.cancellation.relaxed-cancel-again"\n'
+            'invariant = "execution.cancellation.disarm"\n'
+            'path = "crates/execution/src/cancellation.rs"\n'
+            'original = "store(true, Ordering::Release)"\n'
+            'weakened = "store(true, Ordering::Relaxed)"\n'
+            'failure = "a disarmed obligation cancelled its job"\n'
+            "\n[[qualification]]\n"
+            'id = "execution.cancellation.relaxed-observation"\n'
+            'invariant = "execution.cancellation.publication"\n'
+            'path = "crates/execution/src/cancellation.rs"\n'
+            'original = "load(Ordering::Acquire)"\n'
+            'weakened = "load(Ordering::Relaxed)"\n'
+            'failure = "observed its cancellation without the write"\n'
+        )
+        grouped = weakenings(parse_inventory(INVENTORY + shared).qualifications)
+        self.assertEqual(
+            [weakening for weakening, _ in grouped],
+            [
+                Weakening(
+                    path="crates/execution/src/cancellation.rs",
+                    original="store(true, Ordering::Release)",
+                    weakened="store(true, Ordering::Relaxed)",
+                ),
+                Weakening(
+                    path="crates/execution/src/cancellation.rs",
+                    original="load(Ordering::Acquire)",
+                    weakened="load(Ordering::Relaxed)",
+                ),
+            ],
+        )
+        self.assertEqual(
+            [[qualification.id for qualification in group] for _, group in grouped],
+            [
+                [
+                    "execution.cancellation.relaxed-cancel",
+                    "execution.cancellation.relaxed-cancel-again",
+                ],
+                ["execution.cancellation.relaxed-observation"],
+            ],
+        )
+
+
+class CopyTests(unittest.TestCase):
+    def working_tree(self, files: Mapping[str, str]) -> tuple[Path, Commands]:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name) / "root"
+        for relative, text in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        def respond(arguments: Sequence[str]) -> Outcome:
+            self.assertEqual(arguments[:2], ["git", "ls-files"])
+            return Outcome(0, "".join(f"{relative}\0" for relative in files))
+
+        return root, ScriptedCommands(root, respond)
+
+    def test_the_copy_gives_every_file_a_fresh_time_and_links_the_generated_inputs(self) -> None:
+        root, commands = self.working_tree({"Cargo.toml": "[workspace]\n", "src/lib.rs": "//\n"})
+        old = 1_000_000_000
+        os.utime(root / "src/lib.rs", (old, old))
+        for generated in GENERATED_INPUTS:
+            (root / generated).mkdir(parents=True)
+            (root / generated / "index.html").write_text("<html/>", encoding="utf-8")
+        destination = root.parent / "copy"
+        copy_working_tree(commands, destination)
+        self.assertEqual((destination / "src/lib.rs").read_text(encoding="utf-8"), "//\n")
+        self.assertGreater((destination / "src/lib.rs").stat().st_mtime, old)
+        for generated in GENERATED_INPUTS:
+            self.assertTrue((destination / generated).is_symlink())
+            self.assertEqual(
+                (destination / generated / "index.html").read_text(encoding="utf-8"), "<html/>"
+            )
+
+    def test_a_missing_generated_input_stops_the_copy(self) -> None:
+        root, commands = self.working_tree({"Cargo.toml": "[workspace]\n"})
+        with self.assertRaisesRegex(RunnerError, "is missing; build it"):
+            copy_working_tree(commands, root.parent / "copy")
 
 
 class ScriptedCommands(Commands):
