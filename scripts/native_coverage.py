@@ -177,7 +177,7 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="bench-smoke",
         mode="ordinary",
-        prepare=("build-web-console",),
+        prepare=("fetch-onnxruntime", "build-web-console"),
         instrumented="bench-smoke-bodies",
         finish=(),
     ),

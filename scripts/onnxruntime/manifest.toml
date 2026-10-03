@@ -1,0 +1,5 @@
+cuda_architectures = "75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
+macos_deployment_target = "14.0"
+repository = "https://github.com/microsoft/onnxruntime.git"
+revision = "33ca9628233dc8f002435e868d4c2e9f82766ca1"
+version = "1.28.2"

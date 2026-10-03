@@ -1,2 +1,4 @@
+exclude = [".nervix-deps/**", ".venv/**", "**/target/**"]
+
 [formatting]
 reorder_keys = true

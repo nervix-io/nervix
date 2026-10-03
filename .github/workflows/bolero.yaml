@@ -35,6 +35,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
+
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
@@ -124,6 +129,11 @@ jobs:
         with:
           toolchain: nightly-2026-09-17
 
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
+
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
@@ -139,10 +149,7 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Setup uv for runner coverage
-        uses: astral-sh/setup-uv@v6
-
-      - name: Install native build tools
+      - name: Install LLVM 23
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh

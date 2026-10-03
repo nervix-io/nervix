@@ -162,7 +162,7 @@ mod session_protocol;
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
-static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+static ONNX_RUNTIME_INIT: OnceLock<()> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> = OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<BlockingMutex<BTreeMap<String, String>>> =
     OnceLock::new();
@@ -8343,7 +8343,7 @@ fn place_onnx_fixture_resource_directory(
     node_id: &str,
     placeholder: &str,
 ) -> PathBuf {
-    ensure_onnx_runtime_loaded();
+    initialize_onnx_runtime();
 
     let base_dir = world
         .cluster()
@@ -9670,41 +9670,10 @@ impl WasmLifecycleFailureFixture {
     }
 }
 
-fn ensure_onnx_runtime_loaded() {
-    let result = ONNX_RUNTIME_INIT.get_or_init(|| {
-        let dylib_path = resolve_onnxruntime_dylib()?;
-        ort::init_from(&dylib_path)
-            .map_err(|error| {
-                format!(
-                    "failed to initialize ONNX Runtime from '{}': {error}",
-                    dylib_path.display()
-                )
-            })?
-            .commit();
-        Ok(())
+fn initialize_onnx_runtime() {
+    ONNX_RUNTIME_INIT.get_or_init(|| {
+        ort::init().commit();
     });
-
-    if let Err(error) = result {
-        panic!("{error}");
-    }
-}
-
-fn resolve_onnxruntime_dylib() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "ORT_DYLIB_PATH points to missing ONNX Runtime library '{}'",
-            path.display()
-        ));
-    }
-
-    Err(
-        "ORT_DYLIB_PATH must be set before running ONNX inferencer scenarios; use `just test` or \
-         `just test-scenarios --input tests/features/runtime/inferencer.feature --concurrency 1`"
-            .to_string(),
-    )
 }
 
 #[given(expr = "node {string} has TLS resource directory {string} for hosts {string}")]

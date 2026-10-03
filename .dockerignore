@@ -1,2 +1,4 @@
 target
-
+.nervix-deps
+.venv
+**/__pycache__

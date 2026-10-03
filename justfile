@@ -10,12 +10,18 @@ build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
+export NERVIX_ONNXRUNTIME_DIR := env("NERVIX_ONNXRUNTIME_DIR", env("HOME") + "/.cache/nervix-build/onnxruntime")
+export ORT_LIB_PATH := shell("python3 -m scripts.onnxruntime.artifacts path --unchecked --stage " + quote(NERVIX_ONNXRUNTIME_DIR))
+export ORT_PREFER_DYNAMIC_LINK := "0"
 default_jobs := num_jobs() || "4"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
 help:
     just --list
 
+# Exercise ONNX artifact preparation and its local and R2 cache failure paths.
+test-onnxruntime-tooling:
+    uv run --locked python -m unittest scripts.tests.test_build_onnxruntime scripts.tests.test_onnxruntime_toolchain scripts.tests.test_onnxruntime_bootstrap scripts.tests.test_onnxruntime_recipes scripts.tests.test_onnxruntime_macos
 # Start one bounded invocation and retain the caller's repository variable overrides.
 [private]
 run-with-jobs recipe jobs:
@@ -33,7 +39,7 @@ install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Server library properties embed the same real console assets as the product.
-bolero-deps: build-web-console
+bolero-deps: fetch-onnxruntime build-web-console
 
 # Prepare one declared sanitizer target through the shared build path, without a campaign.
 prepare-bolero target: bolero-deps
@@ -125,7 +131,7 @@ coverage-bolero-restore duration="30": build-web-console
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
 
-build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
+build-deps: generate-test-onnx fetch-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format build-test-cli build-paced-simulation
 
@@ -156,10 +162,9 @@ paced-simulation-python *args:
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/release/libnervix_client_ffi.so") }}
     python3 examples/paced-simulation/python/paced_simulation.py {{ args }}
 
-test: tests-deps
+test: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     # Execution-mode features replace primitives and are valid only inside their runner, and the
     # modes cannot be enabled together. Test the packages that own a mode with ordinary primitives
     # here; `test-shuttle`, `test-loom`, `test-turmoil`, `test-deloxide` and `test-primitives`
@@ -196,18 +201,17 @@ test: tests-deps
     just test-turmoil
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
-test-capability-docs: build-web-console
+test-capability-docs: fetch-onnxruntime build-web-console
     cargo test --package nervix-server --package nervix-roto --features nervix-server/testing --doc
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
-test-scenarios-binary binary *args: download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}
+test-scenarios-binary binary *args: fetch-onnxruntime
+    {{ quote(binary) }} {{ args }}
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
@@ -251,19 +255,19 @@ bench-constant-division-x86-64-v3 *args:
 bench-checked-lanes-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench checked_lanes -- {{ args }}
 
-test-admission-runtime *args: download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+test-admission-runtime *args: fetch-onnxruntime
+    cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 # Focused ordinary-mode regressions for runtime owners.
-test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+test-runtime *args: fetch-onnxruntime build-web-console wasm-processor-guests
+    cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 # Measure the endpoint's actual request routing and per-thread allocations on the same host.
-bench-endpoint-routing: build-web-console download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
+bench-endpoint-routing: fetch-onnxruntime build-web-console
+    cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
 
-test-endpoint-intake *args: build-web-console download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+test-endpoint-intake *args: fetch-onnxruntime build-web-console
+    cargo test --package nervix-server --features testing --lib -- {{ args }}
 
 test-web-console:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console
@@ -271,19 +275,17 @@ test-web-console:
 test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
 
-test-scenarios-reuse *args: tests-deps
+test-scenarios-reuse *args: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --features testing --test scenarios -- {{ args }}
 
 # Measure the public client protocol against a release nervix-server process.
 # The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
-client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console download-onnxruntime
+client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console fetch-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo build --release --package nervix-server --bin nervix-server
     export NERVIX_CLIENT_WIRE_BASELINE_SERVER={{ quote(cargo_target_dir + "/release/nervix-server") }}
     export NERVIX_CLIENT_WIRE_BASELINE_SERVER_PROFILE=release
@@ -300,7 +302,7 @@ client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" outpu
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output
 # rather than repository content and the book stages them from target/.
-docs-screenshots: build-web-console
+docs-screenshots: fetch-onnxruntime build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
@@ -313,37 +315,35 @@ docs-screenshots: build-web-console
 test-lib *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
 # Run the Arrow-to-Row correctness cases and print the typed encoding's allocation evidence.
 test-subscription-rows: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features benchmarks,testing --lib subscription_row:: -- --nocapture
 
 # Type-check one workspace package and all of its targets without building binaries. Extra
 # arguments are forwarded to Cargo, so a server check can add `--features testing`.
-check-package package *args:
+check-package package *args: (prepare-server-package package)
     cargo check --package {{ package }} --all-targets {{ args }}
 
 # Type-check only the library target of one package, leaving its tests, benches and binaries out.
-check-package-lib package *args:
+check-package-lib package *args: (prepare-server-package package)
     cargo check --package {{ package }} --lib {{ args }}
 
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
-test-package-lib package *args:
+test-package-lib package *args: (prepare-server-package package)
     cargo test --package {{ package }} --lib -- {{ args }}
 
 # Run one integration test target of one workspace package whose tests need no server test
 # dependencies, such as the vocabulary's representation properties.
-test-package-test package test *args:
+test-package-test package test *args: (prepare-server-package package)
     cargo test --package {{ package }} --test {{ test }} -- {{ args }}
 
 # Run the unit tests in the binary targets of one workspace package, such as the web console's
 # view logic in its `main.rs`.
-test-package-bins package *args:
+test-package-bins package *args: (prepare-server-package package)
     cargo test --package {{ package }} --bins -- {{ args }}
 
 # Run the bounded-execution unit tests, which live in the nervix-execution crate rather than the
@@ -436,7 +436,6 @@ test-deloxide budget_seconds="2400": tests-deps
     within_budget probes \
         cargo test --package nervix-deadlock --features deloxide --test active_cycles
     python3 -m scripts.libtest_accounting deloxide "${logs}/probes.log"
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_DEADLOCK_EVIDENCE="${logs}/evidence"
     cargo test --no-run --features 'testing deloxide' --test scenarios
     within_budget scenarios \
@@ -465,20 +464,18 @@ shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-cli
 # every package, and fails when it selects none at all. A failed check leaves its persisted
 # schedule, output and metadata under target/shuttle-failures for `test-shuttle-replay`. The server's
 # checks need the build dependencies this recipe prepares.
-test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
+test-shuttle filter="": build-web-console wasm-processor-guests fetch-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     python3 -m unittest --quiet scripts.tests.test_shuttle_checks
     python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
 
 # Replay a schedule `test-shuttle` persisted under target/shuttle-failures in a fresh process. Its
 # parent directories name the exact package and check, so the schedule cannot run against another
 # invariant.
-test-shuttle-replay schedule: build-web-console wasm-processor-guests download-onnxruntime
+test-shuttle-replay schedule: build-web-console wasm-processor-guests fetch-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(schedule) }}
 
 # Prove schedule persistence and replay end to end: fail one execution check deliberately after its
@@ -494,7 +491,7 @@ test-shuttle-replay-check:
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
 # target/loom-failures for `test-loom-replay`.
-test-loom filter="": build-web-console
+test-loom filter="": fetch-onnxruntime build-web-console
     python3 -m unittest --quiet scripts.tests.test_loom_models
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
 
@@ -509,13 +506,13 @@ coverage-loom-runner:
 
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
-test-loom-replay failure:
+test-loom-replay failure: fetch-onnxruntime
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
 # Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
 # checkpoint of that failure must replay it.
-test-loom-qualification: build-web-console
+test-loom-qualification: fetch-onnxruntime build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
@@ -783,7 +780,6 @@ build-client-conformance:
 test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps build-client-conformance
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     cargo test --features testing --test scenarios -- \
@@ -793,7 +789,6 @@ test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps b
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --package nervix-server --doc runtime::
 
 # Validate the small unsafe boundary used by deduplicator expiration tracking.
@@ -818,10 +813,9 @@ nspl-completion-walk-deep *args:
     cargo test -p nervix-nspl --test completion_walk -- \
       --report-only --signature-window 8 --max-states 1000000 {{ args }}
 
-test-coverage: tests-deps
+test-coverage: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     # Merge ordinary-mode coverage for the packages that own an execution mode into the workspace
     # profile without running modeled primitives outside their runner. Model checks are not
     # product coverage, so no Shuttle, Loom, Turmoil or diagnostic build contributes to it.
@@ -862,10 +856,9 @@ test-coverage: tests-deps
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
-test-scenarios-coverage: tests-deps
+test-scenarios-coverage: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
@@ -898,10 +891,9 @@ check-coverage report="lcov-workspace.info":
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
 # to them exactly as `test-coverage` does. That recipe remains the CI gate for workspace coverage
 # and CRAP.
-test-coverage-feature +features: tests-deps
+test-coverage-feature +features: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
@@ -933,17 +925,15 @@ test-coverage-backup-packages:
 test-coverage-scenario-filter feature filter:
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --features testing --package nervix-server \
         --test scenarios -- --input {{ quote(feature) }} --name {{ quote(filter) }} \
         --concurrency 1 --retry 0
 
 # Measure browser and CLI binary tests together with their public session scenarios.
-test-coverage-clients: tests-deps
+test-coverage-clients: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --bins \
         --package nervix-web-console --package nervix-cli
@@ -962,7 +952,7 @@ test-coverage-clients: tests-deps
     done
     just coverage-clients-report
 
-coverage-clients-report:
+coverage-clients-report: fetch-onnxruntime
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -998,10 +988,9 @@ coverage-clients-units:
 # Measure the visual create patch across its Model, language, wire, browser, and server owners,
 # including the public browser scenarios that exercise the attached transaction prefix and the
 # subscription tab lifecycle.
-coverage-visual-create output="target/visual-create.lcov": tests-deps
+coverage-visual-create output="target/visual-create.lcov": fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --lib \
         --package nervix-models --package nervix-client-wire --package nervix-nspl
@@ -1016,7 +1005,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
 
 # Write the LCOV report of the profiles `coverage-visual-create` collected, over the packages the
 # visual create forms span.
-coverage-visual-create-report output="target/visual-create.lcov":
+coverage-visual-create-report output="target/visual-create.lcov": fetch-onnxruntime
     cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
         --package nervix-models --package nervix-client-wire --package nervix-nspl \
         --package nervix-web-console --package nervix-server
@@ -1024,7 +1013,7 @@ coverage-visual-create-report output="target/visual-create.lcov":
 # Write the line coverage of the unit tests of the packages named in `args`, such as
 # `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of
 # a change to those packages without the scenario suite that `test-coverage` runs.
-coverage-lib output *args:
+coverage-lib output *args: fetch-onnxruntime
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
 
 # Measure the count adapter through vocabulary properties, production storage codecs, language
@@ -1032,7 +1021,6 @@ coverage-lib output *args:
 coverage-archive-counts output="target/archive-counts.lcov": tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --package nervix-models --test representations
     cargo llvm-cov --no-report --package nervix-consensus --lib
@@ -1056,10 +1044,9 @@ coverage-archive-counts-tests-append output="target/archive-counts-tests.lcov":
     cargo llvm-cov report --workspace --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Retain the current package profiles while collecting both server archive owners.
-coverage-archive-counts-server-append output="target/archive-counts.lcov": download-onnxruntime
+coverage-archive-counts-server-append output="target/archive-counts.lcov": fetch-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --no-clean --features testing --package nervix-server --lib -- \
         registry::storage::tests
     cargo llvm-cov --no-clean --features testing --package nervix-server --lib -- \
@@ -1069,14 +1056,13 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
         --package nervix-interconnect --package nervix-server
 
 # Measure the server owner regressions with the same dependencies and environment as test-runtime.
-coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
+coverage-runtime output="target/task-handles-runtime.lcov" *args: fetch-onnxruntime build-web-console wasm-processor-guests
+    cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
 
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
-coverage-scenarios output *args: tests-deps
+coverage-scenarios output *args: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
@@ -1087,10 +1073,9 @@ coverage-scenarios output *args: tests-deps
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
-coverage-scenarios-append output *args: tests-deps
+coverage-scenarios-append output *args: fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
@@ -1101,10 +1086,9 @@ coverage-scenarios-append output *args: tests-deps
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.
-coverage-redis output="target/redis-dns.lcov": tests-deps
+coverage-redis output="target/redis-dns.lcov": fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --lib \
         --package nervix-dns \
@@ -1118,7 +1102,7 @@ coverage-redis output="target/redis-dns.lcov": tests-deps
         --input tests/features/runtime/redis_dns_resolution.feature --name Redis --retry 0 --concurrency 1
     just coverage-redis-report {{ quote(output) }}
 
-coverage-redis-report output="target/redis-dns.lcov":
+coverage-redis-report output="target/redis-dns.lcov": fetch-onnxruntime
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
         --package nervix-server \
         --package nervix-dns \
@@ -1129,17 +1113,16 @@ coverage-redis-units-append output="target/redis-dns.lcov":
     cargo llvm-cov --no-clean --lib --package nervix-connector-redis
     just coverage-redis-report {{ quote(output) }}
 
-coverage-redis-server-units-append output="target/redis-dns.lcov":
+coverage-redis-server-units-append output="target/redis-dns.lcov": fetch-onnxruntime
     cargo llvm-cov --no-clean --lib --package nervix-server -- redis_
     cargo llvm-cov --no-clean --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
     just coverage-redis-report {{ quote(output) }}
 
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
-coverage-dns-clients output="target/dns-clients.lcov": tests-deps
+coverage-dns-clients output="target/dns-clients.lcov": fetch-onnxruntime tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets \
         --package nervix-dns \
@@ -1188,7 +1171,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     just coverage-dns-clients-report {{ quote(output) }}
 
 # Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
-coverage-dns-clients-report output="target/dns-clients.lcov":
+coverage-dns-clients-report output="target/dns-clients.lcov": fetch-onnxruntime
     cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
         --package nervix-server \
         --package nervix-dns \
@@ -1213,10 +1196,9 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
 # The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
 # so Shuttle's scheduler state is not shared between tests.
-coverage-shuttle output: build-web-console wasm-processor-guests download-onnxruntime
+coverage-shuttle output: build-web-console wasm-processor-guests fetch-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     for shuttle_package in nervix-execution nervix-interconnect nervix-server; do
         SHUTTLE_REPORT_STEPS=1 cargo llvm-cov test --no-report \
@@ -1227,7 +1209,7 @@ coverage-shuttle output: build-web-console wasm-processor-guests download-onnxru
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Write line coverage for binary unit tests, such as the CLI's main target.
-coverage-bins output *args:
+coverage-bins output *args: fetch-onnxruntime
     cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
 
 # Exercise the CLI binary through the public transaction, clock, and REPL reconnect scenarios with
@@ -1290,7 +1272,7 @@ test-native-coverage:
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
-bench *args: build-web-console
+bench *args: fetch-onnxruntime build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
@@ -1300,7 +1282,7 @@ bench *args: build-web-console
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console bench-smoke-bodies
+bench-smoke: fetch-onnxruntime build-web-console bench-smoke-bodies
 
 # The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
@@ -1321,7 +1303,7 @@ bench-smoke-bodies:
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
 # one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ
 # transformation. Extra arguments are forwarded to Criterion.
-bench-admitted-work *args: build-web-console
+bench-admitted-work *args: fetch-onnxruntime build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
 
 # Exercise the admission benchmark's current emitter context while measuring its line coverage.
@@ -1330,7 +1312,7 @@ coverage-admitted-work output="target/admitted-work.lcov": build-web-console
 
 # Run only the relay-interaction Criterion suite, including the delivery a node input records for
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
-bench-relay-interaction *args: build-web-console
+bench-relay-interaction *args: fetch-onnxruntime build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
 
 # Measure the branch owner a relay owner task holds: batches for established branches, which
@@ -1351,11 +1333,11 @@ bench-json-encode *args:
 
 # Measure direct Arrow-to-Row subscription encoding. The suite reports encoded bytes before
 # Criterion measures CPU; its unit probe measures allocations.
-bench-subscription-rows *args:
+bench-subscription-rows *args: fetch-onnxruntime
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
 
 # Write raw component timing and retained-allocation samples for Arrow-to-Row delivery.
-client-wire-cost output="target/client-wire-cost.json":
+client-wire-cost output="target/client-wire-cost.json": fetch-onnxruntime
     cargo bench --package nervix-server --bench client_wire_cost --features benchmarks -- {{ quote(output) }}
 
 # Run the component benchmark with coverage instrumentation for changed benchmark lines.
@@ -1363,7 +1345,7 @@ coverage-client-wire-cost output="target/client-wire-cost.lcov" report="target/c
     cargo llvm-cov --bench client_wire_cost --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
 
 # Check the typed Arrow workload's selection, null, redaction, branch and frame-limit assertions.
-test-client-wire-bench-fixture:
+test-client-wire-bench-fixture: fetch-onnxruntime
     cargo test --package nervix-server --features benchmarks --lib subscription_row::benchmark::tests -- --nocapture
 
 # Capture raw timings through the exported Rust binding's C ABI on a 100-row frame.
@@ -1381,12 +1363,12 @@ client-wire-tls-cost output_dir="target/client-wire-tls-cost":
 # Measure runtime-state replication on the owner and on a replica: a Kafka offset commit its one
 # replica acknowledges, and the branch lifecycle check a replica makes before it installs each
 # branch checkpoint, for lifecycles of 16, 128 and 1,024 branches.
-bench-state-replication *args:
+bench-state-replication *args: fetch-onnxruntime
     cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
 
 # Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
 # store lives under the crate target directory, so the synchronization cost is that of its storage.
-bench-wasm-checkpoint *args:
+bench-wasm-checkpoint *args: fetch-onnxruntime
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
 
 # Run only the expression VM Criterion suite. Extra arguments are forwarded to Criterion, so a
@@ -1422,7 +1404,7 @@ benchmark-flink-image:
         "{{ justfile_directory() }}/benches/flink"
 
 # Build and benchmark the current local Nervix checkout.
-benchmark-nervix-local benchmark_name="kafka-filter-map" *args: build-web-console
+benchmark-nervix-local benchmark_name="kafka-filter-map" *args: fetch-onnxruntime build-web-console
     cargo build --release \
         --package nervix-server --bin nervix-server \
         --package nervix-benchmark --bins
@@ -1437,7 +1419,7 @@ benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
         --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
 
 # Build once, then run every declared workload implementation sequentially with local Nervix.
-benchmark-all-local *args: build-web-console benchmark-flink-image
+benchmark-all-local *args: fetch-onnxruntime build-web-console benchmark-flink-image
     cargo build --release \
         --package nervix-server --bin nervix-server \
         --package nervix-benchmark --bins
@@ -1448,7 +1430,7 @@ benchmark-all-local *args: build-web-console benchmark-flink-image
 # Local same-hardware A/B: build the baseline ref and the current tree once each into cached
 # binaries under target/ab/, then interleave runs per arm so machine drift cancels out. This is
 # how performance claims are established; CI benchmark comments are only a same-run smoke signal.
-benchmark-ab baseline_ref runs="3" benchmark_name="kafka-filter-map" *args: build-web-console
+benchmark-ab baseline_ref runs="3" benchmark_name="kafka-filter-map" *args: fetch-onnxruntime build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
     baseline_commit="$(git rev-parse --verify --end-of-options {{ quote(baseline_ref) }}'^{commit}')" || {
@@ -1660,7 +1642,7 @@ turmoil-clippy-targets: \
 
 # Lint the Loom models and harness, the primitive boundary, and each library as it ships and
 # in test mode. The same parallel dependencies run in the full validation matrix.
-cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
+cargo-clippy-loom jobs=default_jobs: fetch-onnxruntime (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
 loom-clippy-targets: \
@@ -1686,7 +1668,7 @@ deloxide-clippy-targets: \
 # On CI nothing reads a build directory after its lint and the runner's disk cannot hold them all,
 # so a target that passed deletes its own.
 [private]
-clippy-target package args toolchain="":
+clippy-target package args toolchain="": (prepare-server-package package)
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
     @{{ if env("CI", "") == "true" { "rm -rf " + quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) } else { "true" } }}
 
@@ -1694,13 +1676,13 @@ clippy-target package args toolchain="":
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
 
 # Lint every product Clippy target, with four concurrent processes by default.
-cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
+cargo-clippy jobs=default_jobs: fetch-onnxruntime (run-with-jobs "clippy-targets" jobs)
 
 [private, parallel]
 lint-inner: clippy-targets typed-ratchet-clippy-targets
 
 # Lint the product and compiler tooling in one bounded invocation.
-lint jobs=default_jobs: (run-with-jobs "lint-targets" jobs)
+lint jobs=default_jobs: fetch-onnxruntime (run-with-jobs "lint-targets" jobs)
 
 [private]
 lint-targets: build-web-console lint-inner
@@ -1709,7 +1691,7 @@ audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args: typed-ratchet-build
+ratchet *args: fetch-onnxruntime typed-ratchet-build
     python3 -m scripts.ratchet {{ args }}
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
@@ -1796,10 +1778,10 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
     "${coverage[@]}" report
 
 # Format and validate, with four concurrent recipe bodies by default.
-validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
+validate jobs=default_jobs: fetch-onnxruntime (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+validate-targets: fmt lint-targets test-onnxruntime-tooling validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1897,10 +1879,10 @@ validate-dns-dependencies:
     fi
 
 # Check formatting and validate with the same concurrency default as local validation.
-validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
+validate-ci jobs=default_jobs: fetch-onnxruntime (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+validate-ci-targets: fmt-check lint-targets test-onnxruntime-tooling validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2148,20 +2130,20 @@ deps-down:
 chaos *args:
     bash scripts/chaos/chaos.sh {{ args }}
 
-server *args: build-deps generate-dev-tls
+server *args: fetch-onnxruntime build-web-console generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \
     NERVIX_INTERCONNECT_TLS_CA="${NERVIX_INTERCONNECT_TLS_CA:-tls/dev/ca.pem}" \
     NERVIX_INTERCONNECT_TLS_CERT="${NERVIX_INTERCONNECT_TLS_CERT:-tls/dev/node.pem}" \
     NERVIX_INTERCONNECT_TLS_KEY="${NERVIX_INTERCONNECT_TLS_KEY:-tls/dev/node-key.pem}" \
     cargo run --package nervix-server --bin nervix-server -- {{ args }}
 
-client *args: build-deps
+client *args:
     cargo run --package nervix-cli -- {{ args }}
 
 build-web-console:
     python3 scripts/build_web_console.py
 
-build-server:
+build-server: fetch-onnxruntime build-web-console
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server
 
 # Reuse an already available packaged image's runtime libraries for a local Chaos candidate.
@@ -2193,10 +2175,25 @@ build-diagnostic-server:
 build-cli:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/cli cargo build {{ release_flag }} --package nervix-cli --bin nervix-cli
 
+# Install the server, CLI, and NSPL formatter with their required build artifacts.
+install *args: (install-server args) (install-cli args) (install-nspl-format args)
+
+install-server *args: fetch-onnxruntime build-web-console
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo install --locked --path . {{ args }}
+
+install-cli *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo install --locked --path crates/nervix-cli {{ args }}
+
+install-nspl-format *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo install --locked --path crates/nspl-format {{ args }}
+
+uninstall:
+    cargo uninstall nervix-server nervix-cli nervix-nspl-format
+
 [parallel]
 build-apps: build-cli build-server
 
-build-all: generate-dev-tls build-deps build-apps
+build-all: generate-dev-tls build-apps
 
 wasm-processor-rust-guest:
     #!/usr/bin/env bash
@@ -2303,8 +2300,43 @@ generate-dev-tls:
 generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
     python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
 
-download-onnxruntime:
-    bash scripts/download_onnxruntime.sh
+# Fetch the published static artifact over public R2 HTTPS without credentials, or reuse its verified local copy; never compile.
+fetch-onnxruntime platform="native" *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts fetch --platform {{ quote(platform) }} {{ args }}
+
+# Maintainer only: compile in pinned Linux Docker builders, including macOS ARM64 through OSXCross.
+# --force starts with an empty compiler tree.
+# Normal development and CI depend on fetch-onnxruntime.
+build-onnxruntime platform="native" *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts build --platform {{ quote(platform) }} {{ args }}
+
+# Verify the prepared package through native inference; CUDA verification requires a GPU.
+verify-onnxruntime platform="native" *args: (fetch-onnxruntime platform args)
+    uv run --locked python -m scripts.onnxruntime.artifacts verify --platform {{ quote(platform) }} {{ args }}
+
+# Manual task: compile external artifacts; macOS requires native qualification before pinning.
+# Normal development and CI recipes never depend on this task.
+build-artifacts platform="native" *args: (build-onnxruntime platform args)
+
+# Maintainer only: record a completed local artifact's fingerprint and SHA-256 in checksums.toml.
+pin-onnxruntime platform="native" *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts pin --platform {{ quote(platform) }} {{ args }}
+
+# Maintainer only: upload the completed, locally pinned artifact to R2.
+publish-onnxruntime platform="native" *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts publish --platform {{ quote(platform) }} {{ args }}
+
+# Execute a Linux-built macOS candidate on ARM64 macOS and retain its inference receipt.
+qualify-onnxruntime-macos archive receipt *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts qualify --platform darwin/arm64 --archive {{ quote(archive) }} --qualification {{ quote(receipt) }} {{ args }}
+
+[private]
+prepare-server-package package:
+    @if [ {{ quote(package) }} = nervix-server ]; then just fetch-onnxruntime; fi
+
+# Print the absolute library directory of a validated, prepared ONNX Runtime package.
+onnxruntime-path platform="native" variant="portable":
+    python3 -m scripts.onnxruntime.artifacts path --platform {{ quote(platform) }} --variant {{ quote(variant) }}
 
 reset-local-dashboard-state:
     #!/usr/bin/env bash
@@ -2331,7 +2363,7 @@ cluster-dashboard: build-all
 dockerfmt:
     #!/usr/bin/env bash
     set -euo pipefail
-    for file in Dockerfile*; do
+    for file in Dockerfile* scripts/onnxruntime/Dockerfile*; do
         tmp="$(mktemp)"
         dockerfmt < "${file}" > "${tmp}"
         mv "${tmp}" "${file}"
@@ -2341,7 +2373,7 @@ dockerfmt-check:
     #!/usr/bin/env bash
     set -euo pipefail
     failed=0
-    for file in Dockerfile*; do
+    for file in Dockerfile* scripts/onnxruntime/Dockerfile*; do
         tmp="$(mktemp)"
         dockerfmt < "${file}" > "${tmp}"
         if ! cmp -s "${file}" "${tmp}"; then
@@ -2370,14 +2402,30 @@ docker-prepare-qemu platform="linux/amd64":
         docker run --privileged --rm tonistiigi/binfmt --install all
     fi
 
-docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
+[private]
+validate-docker-kache:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
+    : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
+    : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"
+    : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}"
+    : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
+
+docker-build-debian tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="": validate-docker-kache (fetch-onnxruntime platform "--variant docker") (docker-prepare-qemu platform)
     #!/usr/bin/env bash
     set -euo pipefail
     normalized_platform="{{ platform }}"
     if [[ "${normalized_platform}" == "linux/aarch64" ]]; then
         normalized_platform="linux/arm64"
     fi
-    just docker-prepare-qemu "${normalized_platform}"
+    case "${normalized_platform}" in
+        linux/amd64|linux/arm64) ;;
+        *) echo "unsupported ONNX Runtime platform: ${normalized_platform}" >&2; exit 1 ;;
+    esac
+    onnx_lib_dir="$(just onnxruntime-path "${normalized_platform}" docker)"
+    onnx_package_dir="$(dirname "${onnx_lib_dir}")"
+    debian_image="$(python3 -c 'import json; print(json.load(open("scripts/onnxruntime/downloads.json"))["builder"]["image"])')"
     output_flag="--load"
     if [[ "{{ push }}" == "true" ]]; then
         output_flag="--push"
@@ -2390,19 +2438,15 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
     if [[ -n "{{ cache_to }}" ]]; then
         cache_to_flag="--cache-to={{ cache_to }}"
     fi
-    : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
-    : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
-    : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"
-    : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}"
-    : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
     docker buildx build \
         -f Dockerfile.debian \
+        --build-context "onnxruntime=${onnx_package_dir}" \
         --progress=plain \
         --platform "${normalized_platform}" \
         --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
-        --build-arg DEBIAN_VERSION={{ debian_version }} \
-        --build-arg LLVM_VERSION={{ llvm_version }} \
+        --build-arg "DEBIAN_IMAGE=${debian_image}" \
+        --build-arg LLVM_VERSION=23 \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
         --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
         --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
@@ -2466,10 +2510,10 @@ kube-cli-command command:
     bash scripts/kube_cli.sh --command "{{ command }}"
 
 # Record timing and allocations for every repaired recurring task dependency.
-bench-task-handles output="target/task-handles.json": build-web-console
+bench-task-handles output="target/task-handles.json": fetch-onnxruntime build-web-console
     cargo bench --package nervix-server --bench task_handles --features benchmarks -- {{ quote(output) }}
 
-coverage-task-handles output="target/task-handles.lcov" report="target/task-handles-coverage.json":
+coverage-task-handles output="target/task-handles.lcov" report="target/task-handles-coverage.json": fetch-onnxruntime
     cargo llvm-cov --bench task_handles --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
 
 # Inspect a benchmark harness from an existing successful instrumented run without rebuilding it.

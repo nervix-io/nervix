@@ -1,5 +1,5 @@
 Feature: Inferencer resources
-  Scenario Outline: Inferencer creation uses a static ONNX resource model
+  Scenario Outline: Inferencer executes a model with the statically linked ONNX Runtime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
@@ -58,6 +58,19 @@ Feature: Inferencer resources
     Then the last command output contains
       """
       quiesce level: DYNAMIC
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION scored_subscription TO scored;
+      START;
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"acme","vector":[1.0,2.0]}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"score":[-0.125]}
       """
 
     Examples:

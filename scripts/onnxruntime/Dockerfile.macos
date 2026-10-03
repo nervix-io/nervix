@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7
+
+ARG OSX_CROSS_IMAGE
+ARG DEBIAN_IMAGE
+FROM ${OSX_CROSS_IMAGE} AS sdk
+
+FROM ${DEBIAN_IMAGE}
+
+ARG LLVM_KEY_SHA256
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates cmake curl git gnupg make ninja-build patch python3 \
+    && curl --proto '=https' --tlsv1.2 -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm.key \
+    && echo "${LLVM_KEY_SHA256}  /tmp/llvm.key" | sha256sum --check - \
+    && gpg --dearmor -o /usr/share/keyrings/llvm.gpg /tmp/llvm.key \
+    && printf 'deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/trixie/ llvm-toolchain-trixie-23 main\n' >/etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang-23 llvm-23 \
+    && ln -s /usr/bin/clang-23 /usr/local/bin/clang \
+    && ln -s /usr/bin/clang++-23 /usr/local/bin/clang++ \
+    && rm -rf /var/lib/apt/lists/* /tmp/llvm.key
+
+COPY --from=sdk /osxcross /osxcross
+
+ENV PATH=/osxcross/bin:$PATH
+ENV LD_LIBRARY_PATH=/osxcross/lib
+ENV CMAKE_TOOLCHAIN_FILE=/osxcross/toolchain.cmake
+ENV CC=aarch64-apple-darwin23.6-clang
+ENV CXX=aarch64-apple-darwin23.6-clang++
+ENV AR=llvm-ar-23
+
+WORKDIR /workspace

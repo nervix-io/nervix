@@ -1,0 +1,22 @@
+# SHA-256 pins for manually published ONNX Runtime archives.
+# These pins are excluded from the build identity.
+
+["darwin/arm64/portable"]
+fingerprint = "3ee44e7b624ca03f53a05ec3f340a303882c45c2f6f44ea8947c159538666392"
+sha256 = "01919bbc8542d2b34ec588f14b51a874adff7f909d821a1be4939dd8b457f062"
+
+["linux/amd64/docker"]
+fingerprint = "9fd4d7d7c436caeea2f3459e16f69581716db933a4819d2573bb725ec89bec7c"
+sha256 = "7084d39bbd9c3f862ad4d71dd96cf13a2db04d1a24faec55293ecb124e38b9e6"
+
+["linux/amd64/portable"]
+fingerprint = "0505e043b19d88e6c953432590c349111f80ce4903e8dbceb4d924dafd774f48"
+sha256 = "a11f4ff4f90e9a7070c7769acbbda31794f86c77aa3795b680aeddefe48cf804"
+
+["linux/arm64/docker"]
+fingerprint = "72c158630d7c0972d359aa2c8303e7d9b8724cc5dc6fc4fe8ef58f62b5b9e3db"
+sha256 = "56e4130166607770f6c3e0110ce13e4691de0829bdb53114d6a7e9ff43acb0b9"
+
+["linux/arm64/portable"]
+fingerprint = "96819fdb5474e30420fa4646333087daf90ba26c06b41377341c9e1d69db84eb"
+sha256 = "3e51cfe76ee84282a07714eb21b85d26becfb64f69fd170c6df0c8ac8f76e3b3"

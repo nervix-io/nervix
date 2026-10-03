@@ -716,6 +716,15 @@ Recovery](./shutdown.md#exit-status).
 
 ## Test Dependencies
 
+The test recipes fetch the platform's pinned ONNX Runtime artifact over public R2 HTTPS without credentials or reuse its verified
+local copy before compiling the server or
+scenario binary. The runtime core is statically linked; fixture setup initializes that core once
+per process. An unavailable artifact fails the test recipe; ONNX Runtime is compiled only through
+explicit maintainer commands. Manual source builds, R2 publication, artifact fetching, and upload credentials
+are documented in [Developing Nervix](developing-nervix.md#onnx-runtime-artifact-cache). The package
+identity in `ORT_LIB_PATH` changes when any build input changes, so Cargo rebuilds the affected
+link artifacts.
+
 Brokers, databases, and the other external systems that scenarios use run as containers, started the
 first time a scenario needs one and shared by every scenario of the run. The run removes them when
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them

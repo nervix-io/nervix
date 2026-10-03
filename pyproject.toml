@@ -1,5 +1,5 @@
 [project]
-dependencies = ["boto3>=1.40,<2"]
+dependencies = ["boto3>=1.40,<2", "tqdm>=4.67,<5"]
 name = "nervix-tools"
 requires-python = ">=3.12"
 version = "0.0.0"
