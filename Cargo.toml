@@ -354,6 +354,7 @@ members = [
   "crates/simd-kernels",
   "crates/test-environment",
   "crates/nervix-cli",
+  "examples/paced-simulation/rust",
 ]
 
 [workspace.package]

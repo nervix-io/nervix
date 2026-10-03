@@ -153,6 +153,7 @@ mod database_batches;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod paced_simulation;
 mod process_cluster;
 mod session_protocol;
 
@@ -279,6 +280,8 @@ struct ScenarioWorld {
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     transaction_clients: BTreeMap<String, Client>,
+    /// The paced simulation drivers a scenario ran, and the files their runs share.
+    paced_simulation: paced_simulation::PacedSimulation,
     /// Rows a named client received and a step has not taken yet, as the client displays them.
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
