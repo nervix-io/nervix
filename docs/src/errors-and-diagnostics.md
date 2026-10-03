@@ -353,11 +353,16 @@ is parsed from its own run of those tokens, so a diagnostic indexes the whole su
 wherever in the batch the rejected statement starts. The session edge turns the stage into the
 failed command's `lex error` or `parse error` message and passes every span through unchanged, so a
 client underlines it in the text it sent. A statement grammar reads an expression it embeds from
-the statement's own tokens, with the reader a standalone expression uses, and reports the reader's
-first diagnostic at the tokens of the statement where the reader failed, with the message the
-standalone reader gives the same text. It carries no expectations of the expression grammar, so
-completion inside an unfinished expression offers nothing rather than guessing at expression
-syntax. A caller that owns a larger operation adds its own context above the
+the statement's own tokens, with the grammar a standalone expression uses, for as long as that
+grammar can go on, and its next clause begins where the expression ends. Where the expression
+cannot begin at all, the diagnostic expects the placeholder the clause names, such as
+`where_expression`. Where the expression goes on with a token and then fails, the statement reports
+the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
+message the standalone reader gives the same text. Where a complete expression is followed by a token
+no clause of the statement expects, the statement reports that token with its own expectations. An
+expression's diagnostic carries no expectations of the expression grammar, so completion inside an
+unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
+a larger operation adds its own context above the
 language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning

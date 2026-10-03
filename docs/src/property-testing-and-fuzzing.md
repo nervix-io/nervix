@@ -31,14 +31,14 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | --- | --- | --- | ---: | ---: |
 | `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
-| `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v3 | 256 | 512 bytes |
-| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v4 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v4 | 64 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v2 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v2 | 256 | 2048 bytes |
-| `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v1 | 256 | 512 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v2 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v2 | 256 | 4096 bytes |
+| `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v4 | 256 | 512 bytes |
+| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v5 | 256 | 2048 bytes |
+| `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v5 | 64 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v3 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v3 | 256 | 2048 bytes |
+| `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v2 | 256 | 512 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v3 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v3 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -53,10 +53,10 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v3 | 256 | 4096 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v4 | 256 | 4096 bytes |
 | `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v1 | 256 | 16 bytes |
 | `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
-| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v1 | 256 | 4096 bytes |
+| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v2 | 256 | 4096 bytes |
 | `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
@@ -122,7 +122,10 @@ embeds an expression, including a call to a built-in named like a keyword that b
 clause, such as `max`, `right` or `replace`, and a field in the `output` or `right` scope. Routes
 are generated in every shape a node family allows: transforming and set-only construction,
 `INHERIT`, ordered `SET`, `FLUSH EACH` and `FLUSH IMMEDIATE`, and branches declared per route or
-node-wide. Names reach both length limits, and counts reach the largest value their field holds.
+node-wide. A name of any kind may spell any NSPL keyword, statement and expression keywords alike,
+and a field, UDF or function name inside an expression or a route construction may also hold a `-`,
+`~` or `.`, or begin with a digit, which canonical NSPL writes between backticks. Names reach both
+length limits, and counts reach the largest value their field holds.
 The language properties also sweep sixteen deterministic byte sequences through every Model
 family, every emitter sink and every statement form on every ordinary run, so none is left to the
 random cases.
@@ -155,9 +158,12 @@ recorded boundary, not a claim:
 - Canonical NSPL writes a negative literal, `-0.0` included, as `-` applied to its magnitude, and
   reads it back that way. NaN and the infinities have no spelling, and rendering them fails with a
   typed error. The NSPL domain therefore holds only non-negative finite literals.
-- Names inside generated Models and statements are, in both domains, one lower-case ASCII
-  identifier that no keyword can match. The name rule admits more, such as `-`, `~`, `.` and a
-  leading digit; the name properties cover it on each name type directly.
+- Outside an expression or a route construction, a generated name is one lower-case ASCII
+  identifier, because canonical NSPL writes a name holding a `-`, `~` or `.`, or beginning with a
+  digit, between backticks only inside one. The name properties cover the whole name rule on each
+  name type directly. In the NSPL domain a relay is never named `message` or `branch`, and a
+  placement member is never named like an `ALTER` operation keyword, because NSPL reads those words
+  there as its own.
 - `DROP` has no form for branches, generators, hash maps, signaling protocols, WASM processors or
   window processors, an HTTP emitter has no `BATCH` clause, a correlator's filter has no
   spelling, and a Postgres `ON CONFLICT DO UPDATE` whose target names every mapped column is

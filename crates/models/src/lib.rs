@@ -34,6 +34,7 @@ mod ingestor_input;
 mod json_path;
 mod message_error;
 mod model_index;
+mod name_spelling;
 mod names;
 mod node_endpoint;
 mod node_ref;
@@ -109,6 +110,7 @@ pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
 pub use model_index::ModelIndex;
+pub use name_spelling::NamePosition;
 pub use names::{
     BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
     CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, DotPolicy,

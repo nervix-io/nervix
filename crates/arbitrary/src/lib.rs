@@ -37,6 +37,7 @@ pub use expression::{EXPRESSION_DEPTH, ExpressionForm};
 pub use model::ModelVariant;
 pub use route::{RouteBranch, RouteFlush, RouteShape};
 pub use statement::StatementVariant;
+pub use text::{GeneratedName, KEYWORDS};
 
 /// Which values a generator may produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,13 +47,16 @@ pub enum Domain {
     /// This excludes vocabulary states NSPL has no spelling for: a negative or non-finite numeric
     /// literal (a negative number is written as a negation of its magnitude), an empty array or a
     /// `CASE` without a `WHEN`, a cast to a collection type, a `DROP` of a kind NSPL cannot drop, a
-    /// batching HTTP emitter, and a correlator filter.
+    /// batching HTTP emitter, a correlator filter, a relay named `message` or `branch`, and a
+    /// placement member named like an `ALTER` operation keyword.
     Nspl,
     /// Every value the vocabulary types hold, including the states NSPL cannot spell. Stored and
     /// archived forms carry these, so their round trips draw from this domain.
     ///
-    /// Names are the exception: in both domains a generated name is an identifier NSPL spells. The
-    /// name properties cover the rest of the name rule on each name type directly.
+    /// In both domains a generated name is one lower-case identifier, and any NSPL keyword may be
+    /// one. Only the NSPL domain avoids the keywords NSPL refuses for a kind of name or at a
+    /// position, such as `message` for a relay. The name properties cover the rest of the name rule
+    /// on each name type directly.
     Vocabulary,
 }
 
@@ -245,7 +249,8 @@ mod tests {
     fn names_reach_both_ends_of_the_name_bound() {
         let mut lengths = std::collections::BTreeSet::new();
         for seed in 0..=u8::MAX {
-            let bytes = [seed, seed.wrapping_mul(13), seed.wrapping_add(1), 0, 0];
+            // The first byte declines a keyword spelling, so the rest draws an identifier.
+            let bytes = [0, seed, seed.wrapping_mul(13), seed.wrapping_add(1), 0, 0];
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
             let name = arbitrary.name_text();
             assert!(!name.is_empty() && name.len() <= 128, "{name:?}");
@@ -253,5 +258,32 @@ mod tests {
         }
         assert!(lengths.contains(&1));
         assert!(lengths.contains(&128));
+    }
+
+    #[test]
+    fn a_name_spells_every_keyword() {
+        let mut spelled = std::collections::BTreeSet::new();
+        for high in 0..=u8::MAX {
+            for low in 0..=u8::MAX {
+                let bytes = [3, high, low];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                spelled.insert(arbitrary.name_text());
+            }
+        }
+        for keyword in super::KEYWORDS {
+            assert!(spelled.contains(keyword), "{keyword} is never drawn");
+        }
+    }
+
+    #[test]
+    fn the_nspl_domain_names_a_relay_by_no_word_nspl_reserves_for_one() {
+        for high in 0..=u8::MAX {
+            for low in 0..=u8::MAX {
+                let bytes = [3, high, low];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let relay = arbitrary.name::<nervix_models::RelayName>();
+                assert!(!matches!(relay.as_str(), "message" | "branch"), "{relay}");
+            }
+        }
     }
 }
