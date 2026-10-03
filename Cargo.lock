@@ -6959,6 +6959,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "error-stack",
+ "faster-hex",
  "flate2",
  "hyper-util",
  "meticulous",
@@ -7124,6 +7125,7 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-simd-kernels",
  "nervix-test-environment",
  "tempfile",
  "thiserror 2.0.21",
@@ -7136,7 +7138,11 @@ version = "0.1.0-dev"
 dependencies = [
  "ahash",
  "async-trait",
+ "bolero",
+ "bytes",
+ "criterion 0.5.1",
  "error-stack",
+ "memchr",
  "meticulous",
  "nervix-connector",
  "nervix-dns",
@@ -7731,6 +7737,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-primitives",
+ "simdutf8",
  "thiserror 2.0.21",
 ]
 

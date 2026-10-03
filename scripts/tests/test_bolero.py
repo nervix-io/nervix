@@ -126,6 +126,10 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-archived-counts",
             "simd-constant-division",
             "simd-checked-lanes",
+            "simd-byte-classes",
+            "simd-xml-chars",
+            "syslog-stream-framing",
+            "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",
             "paced-simulation-records",
@@ -147,6 +151,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-server",
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
+            "nervix-connector-syslog",
             "nervix-paced-simulation",
         })
         for target in inventory.targets:

@@ -346,3 +346,134 @@ Feature: Syslog support
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: Syslog TCP intake reassembles a <framing> frame split across two reads
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_message (
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE CLIENT syslog_listener
+        TYPE SYSLOG
+        CONFIG {
+          'protocol' = 'tcp',
+          'addr' = '{{syslog_ingest_addr}}'
+        };
+      CREATE INGESTOR syslog_intake
+        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      status: running
+      """
+    When a Syslog TCP sender writes to "{{syslog_ingest_addr}}" one <framing> frame and another split "<split>"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-4 split 101 ID50 - before the split
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-4 split 102 ID51 - across the split
+      """
+    Then within "10s" the relay subscription receives payloads in order
+      """
+      "message":"before the split"
+      """
+    When the Syslog sender writes the rest of the split frame
+    Then within "10s" the relay subscription receives payloads in order
+      """
+      "message":"across the split"
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count | framing         | split                  |
+      | 1            | 0             | octet-counted   | inside its octet count |
+      | 3            | 1             | octet-counted   | inside its payload     |
+      | 1            | 0             | non-transparent | between CR and LF      |
+      | 3            | 1             | non-transparent | inside its payload     |
+
+  Scenario Outline: Syslog TLS intake reassembles an octet-counted frame split across two reads
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
+    When these NSPL commands are executed
+      """
+      CREATE RESOURCE syslog_tls;
+      """
+    And these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
+      """
+    And these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_message (
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE CLIENT syslog_listener
+        TYPE SYSLOG
+        MOUNT syslog_tls VERSION 1
+        CONFIG {
+          'protocol' = 'tls',
+          'addr' = '{{syslog_ingest_addr}}',
+          'tls_cert_file' = '{{ syslog_tls }}/tls.crt',
+          'tls_key_file' = '{{ syslog_tls }}/tls.key',
+          'tls_ca_file' = '{{ syslog_tls }}/ca.crt'
+        };
+      CREATE INGESTOR syslog_intake
+        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      status: running
+      """
+    When a Syslog TLS sender using identity and CA from resource directory "syslog_tls_dir" writes to "{{syslog_ingest_addr}}" one octet-counted frame and another split "<split>"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-5 split 201 ID52 - before the split
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-5 split 202 ID53 - across the split
+      """
+    Then within "10s" the relay subscription receives payloads in order
+      """
+      "message":"before the split"
+      """
+    When the Syslog sender writes the rest of the split frame
+    Then within "10s" the relay subscription receives payloads in order
+      """
+      "message":"across the split"
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count | split                  |
+      | 1            | 0             | inside its octet count |
+      | 3            | 1             | inside its payload     |

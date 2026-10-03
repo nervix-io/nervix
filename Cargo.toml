@@ -527,6 +527,7 @@ libc = "0.2"
 # so no ordinary dependency graph contains it.
 loom = "0.7.2"
 md5 = "0.8"
+memchr = "2.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
 # trait implementations but not on the trait declarations, so the feature fails every release build
 # with E0046 rather than only the builds that call `todo()`.
@@ -698,6 +699,7 @@ shuttle-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
 shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = { version = "0.17.0", features = ["known-key"] }
+simdutf8 = "0.1.5"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",
