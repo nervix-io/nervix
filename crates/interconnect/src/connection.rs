@@ -53,6 +53,7 @@ use nervix_primitives::{
 use strum::EnumCount as _;
 use tracing::{debug, warn};
 
+use self::stream_releases::{StreamLeaseAttempt, StreamRelease, StreamReleases};
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
     RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
@@ -78,6 +79,7 @@ mod dial;
 mod duplex;
 mod relay;
 mod stream;
+mod stream_releases;
 pub(crate) mod stream_slots;
 
 use body::{read_body, read_body_into, send_body, send_response, send_static_error};
@@ -186,6 +188,9 @@ struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
     slot_keys: [Box<[ConnectionSlotKey]>; PoolClass::COUNT],
+    /// The wakeups of the operations waiting for a stream of this peer. The same peer dialled
+    /// another way keeps them, so a waiter of the earlier target still hears a later release.
+    stream_releases: Arc<StreamReleases>,
 }
 
 impl OutboundTarget {
@@ -196,6 +201,7 @@ impl OutboundTarget {
             endpoint,
             dial,
             slot_keys,
+            stream_releases: Arc::new(StreamReleases::new()),
         }
     }
 
@@ -205,6 +211,7 @@ impl OutboundTarget {
             endpoint: self.endpoint.clone(),
             dial,
             slot_keys: self.slot_keys.clone(),
+            stream_releases: Arc::clone(&self.stream_releases),
         }
     }
 
@@ -309,12 +316,18 @@ pub(crate) struct StreamLease {
     connection: Arc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
     state: TransportState,
+    released: StreamRelease,
 }
 
 impl Drop for StreamLease {
     fn drop(&mut self) {
         drop(self.slot.take());
-        self.state.inner.connection_changed.notify_one();
+        let StreamRelease {
+            releases,
+            class,
+            subquota,
+        } = &self.released;
+        releases.of(*class, *subquota).notify_one();
     }
 }
 
@@ -1673,15 +1686,30 @@ impl TransportState {
             if self.admission_closed.is_cancelled() {
                 return Err(Report::new(TransportError::ShuttingDown));
             }
-            if let Some(lease) = self.try_lease(node_id, class, subquota) {
-                return Ok(lease);
+            let releases = match self.try_lease(node_id, class, subquota) {
+                StreamLeaseAttempt::Leased(lease) => return Ok(lease),
+                StreamLeaseAttempt::Busy(releases) => Some(releases),
+                StreamLeaseAttempt::NoTarget => None,
+            };
+            // Only an operation that found no free stream registers to wait: for a stream of its
+            // own class and subquota to be released, and for any change of the peer's connections.
+            // It checks the pools again once registered, so a change between the two checks still
+            // wakes it.
+            let changed = self.connection_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let released = async {
+                match &releases {
+                    Some(releases) => releases.of(class, subquota).notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(released);
+            // Polled once so the release wait registers before the second check.
+            if let std::task::Poll::Ready(()) = futures_util::poll!(released.as_mut()) {
+                continue;
             }
-            // Only an operation that found no free stream registers to wait. It checks the pools
-            // again once registered, so a change between the two checks still wakes it.
-            let notified = self.connection_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(lease) = self.try_lease(node_id, class, subquota) {
+            if let StreamLeaseAttempt::Leased(lease) = self.try_lease(node_id, class, subquota) {
                 return Ok(lease);
             }
 
@@ -1695,7 +1723,8 @@ impl TransportState {
                         timeout: self.options.request_timeout,
                     }));
                 }
-                _ = &mut notified => {}
+                _ = &mut changed => {}
+                () = &mut released => {}
             }
         }
     }
@@ -1717,14 +1746,16 @@ impl TransportState {
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
-    ) -> Option<StreamLease> {
-        let target = nervix_primitives::expect_lint!(
+    ) -> StreamLeaseAttempt {
+        let Some(target) = nervix_primitives::expect_lint!(
             nervix::sync_acquisition,
             "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
              slot instead of reaching the shared registry per request",
             self.targets.get(node_id)
         )
-        .map(|target| Arc::clone(target.value()))?;
+        .map(|target| Arc::clone(target.value())) else {
+            return StreamLeaseAttempt::NoTarget;
+        };
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
@@ -1758,13 +1789,18 @@ impl TransportState {
             if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
                 continue;
             }
-            return Some(StreamLease {
+            return StreamLeaseAttempt::Leased(StreamLease {
                 connection,
                 slot: Some(permit),
                 state: self.clone(),
+                released: StreamRelease {
+                    releases: Arc::clone(&target.stream_releases),
+                    class,
+                    subquota,
+                },
             });
         }
-        None
+        StreamLeaseAttempt::Busy(Arc::clone(&target.stream_releases))
     }
 
     #[cfg_attr(

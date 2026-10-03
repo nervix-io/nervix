@@ -412,6 +412,15 @@ connection, takes the exclusive path that starts it. A replaced endpoint gets a 
 with its own slot identities, so a lease can never select a connection that belongs to the endpoint
 it replaced.
 
+An operation that finds every stream of its class and subquota to a peer leased waits for one to be
+released, within its request deadline. Each peer keeps one wakeup for each class and subquota, and
+a released stream wakes a waiter of exactly its own class and subquota. A single wakeup shared by
+every waiter could reach one that cannot use the released slot, while the waiter that can use it
+slept on until its deadline. The waiter registers for that wakeup, and for any change of the peer's
+connections, before it checks the pools a second time, so a release between its two checks still
+wakes it. The wakeups belong to the peer rather than to one of its targets, so a waiter of a target
+that was replaced meanwhile still hears a release of the replacement.
+
 A connection stops granting stream leases the moment it begins to drain, whether it is retiring or
 the transport is shutting down. A lease checks for the drain only after it holds its slot, so it
 either returns that slot at once or was granted before the drain began and is one the drain waits
