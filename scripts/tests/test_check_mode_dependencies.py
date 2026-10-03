@@ -162,7 +162,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn(
             "the normal graph of nervix-engine with no default features contains `loom`, which "
-            "only a modeled build may contain",
+            "only a modeled or diagnostic build may contain",
             report,
         )
 
@@ -177,6 +177,30 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("contains `turmoil`", report)
         self.assertIn("contains `shuttle-tokio`", report)
+
+    def test_the_deadlock_detector_in_a_package_graph_fails(self) -> None:
+        status, report = run({("nervix-engine",): ORDINARY + "deloxide v1.1.0 \n"})
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "the normal graph of nervix-engine with default features contains `deloxide`, which "
+            "only a modeled or diagnostic build may contain",
+            report,
+        )
+
+    def test_the_diagnostic_mode_on_the_boundary_fails(self) -> None:
+        status, report = run(
+            {
+                ("nervix-engine",): ORDINARY.replace(
+                    "default,native", "default,deloxide,native"
+                )
+            }
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "the normal graph of nervix-engine with default features enables "
+            "`nervix-primitives/deloxide`, which only a modeled, diagnostic or test build selects",
+            report,
+        )
 
     def test_a_mode_or_the_paused_clock_on_the_boundary_fails(self) -> None:
         status, report = run(

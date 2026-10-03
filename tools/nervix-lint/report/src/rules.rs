@@ -123,6 +123,32 @@ pub fn acquisition(receiver: &str, defining_crate: &str, operation: &str) -> Opt
             _ => None,
         };
     }
+    // The deloxide mode's tracked mutex acquires Deloxide's lock, which the detector tracks; a held guard, get_mut and into_inner add no acquisition.
+    if matches!(
+        receiver,
+        "nervix_primitives::sync::blocking::tracked::Mutex"
+    ) && matches!(defining_crate, "nervix_primitives")
+    {
+        return match operation {
+            "lock" => Some(Acquisition::Exclusive),
+            "try_lock" => Some(Acquisition::TryExclusive),
+            _ => None,
+        };
+    }
+    // The deloxide mode's tracked read-write lock acquires the corresponding side of Deloxide's lock, including its try calls.
+    if matches!(
+        receiver,
+        "nervix_primitives::sync::blocking::tracked::RwLock"
+    ) && matches!(defining_crate, "nervix_primitives")
+    {
+        return match operation {
+            "read" => Some(Acquisition::Shared),
+            "write" => Some(Acquisition::Exclusive),
+            "try_read" => Some(Acquisition::TryShared),
+            "try_write" => Some(Acquisition::TryExclusive),
+            _ => None,
+        };
+    }
     // The primitive Shuttle adapter forwards borrowed iteration to the modeled DashMap. Its authored caller creates a lazy shard-read iterator; consuming iteration is unavailable in this mode.
     if matches!(
         receiver,

@@ -1892,8 +1892,8 @@ mod tests {
         super::{
             subscription::SessionSubscriptions,
             test_fixtures::{
-                TestService, build_test_service, named, queue_in_transaction, suggestion_values,
-                test_execution_reference,
+                TestService, build_test_service, build_test_service_inner, named,
+                queue_in_transaction, suggestion_values, test_execution_reference,
             },
             transaction::TransactionAttachment,
         },
@@ -2536,11 +2536,23 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn completion_keeps_queued_models_out_of_other_sessions() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
+        let (
+            TestService {
+                service,
+                registry,
+                path,
+            },
+            consensus,
+        ) = {
+            #[cfg(feature = "testing")]
+            {
+                build_test_service_inner(true, None, Runtime::new()).await
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                build_test_service_inner(true, Runtime::new()).await
+            }
+        };
         let mut writer = SessionSubscriptions::new();
         let mut observer = SessionSubscriptions::new();
 
@@ -2563,7 +2575,19 @@ mod tests {
 
         writer.stop_all().await;
         observer.stop_all().await;
-        let _ = std::fs::remove_dir_all(&path);
+        nervix_primitives::time::timeout(Duration::from_secs(30), async {
+            service.inner.runtime.shutdown().await;
+            consensus.shutdown().await;
+        })
+        .await
+        .expect("the completion fixture joins its runtime and consensus storage before teardown");
+        drop(writer);
+        drop(observer);
+        drop(service);
+        drop(registry);
+        drop(consensus);
+        std::fs::remove_dir_all(&path)
+            .expect("the stopped completion fixture directory is removed");
     }
 
     #[nervix_primitives::test]

@@ -1983,7 +1983,10 @@ fn parse_hex_id(
     key: &str,
 ) -> error_stack::Result<Vec<u8>, OtelRecordError> {
     let bytes = value.as_bytes();
-    if bytes.len() != byte_len * 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
+    let mut decoded = vec![0_u8; byte_len];
+    // faster-hex checks and decodes the digits of both cases in vector registers. An exact length
+    // is checked first because it decodes a longer value's leading digits without complaint.
+    if bytes.len() != byte_len * 2 || faster_hex::hex_decode(bytes, &mut decoded).is_err() {
         return Err(OtelRecordError::new(
             key,
             format!(
@@ -1992,21 +1995,6 @@ fn parse_hex_id(
             ),
         ));
     }
-    let decoded = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|digits| {
-            let digits = std::str::from_utf8(digits).verified(
-                "the guard above rejected every value that is not an even-length run of ASCII hex \
-                 digits",
-            );
-            u8::from_str_radix(digits, 16).verified(
-                "the guard above rejected every value that is not an even-length run of ASCII hex \
-                 digits",
-            )
-        })
-        .collect::<Vec<_>>();
     if decoded.iter().all(|byte| *byte == 0) {
         return Err(OtelRecordError::new(
             key,
@@ -2744,7 +2732,30 @@ mod tests {
                 .len(),
             16
         );
-        assert!(parse_hex_id("not-hex", 16, "trace_id").is_err());
+        assert_eq!(
+            parse_hex_id("00112233445566778899AaBbCcDdEeFf", 16, "trace_id")
+                .expect("hexadecimal digits of either case are valid"),
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+                0xEE, 0xFF,
+            ]
+        );
+        for invalid in [
+            "not-hex",
+            "0011223344556677889g",
+            "00112233445566",
+            "001122334455667",
+            "001122334455667788",
+            "0011223344556677 ",
+        ] {
+            let error = parse_hex_id(invalid, 8, "span_id").expect_err("not eight hex bytes");
+            let error = error.current_context();
+            assert_eq!(error.key, "span_id", "{invalid}");
+            assert_eq!(
+                error.reason, "OTEL span_id must contain exactly 16 hexadecimal characters",
+                "{invalid}"
+            );
+        }
         assert!(parse_hex_id("0000000000000000", 8, "span_id").is_err());
         assert_eq!(parse_severity_number(24).expect("valid severity"), 24);
         assert!(parse_severity_number(25).is_err());

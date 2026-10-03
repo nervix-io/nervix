@@ -537,14 +537,18 @@ pub(in crate::application) struct TestService {
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, None, Runtime::new()).await
+    build_test_service_inner(create_default_domain_flag, None, Runtime::new())
+        .await
+        .0
 }
 
 #[cfg(not(feature = "testing"))]
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, Runtime::new()).await
+    build_test_service_inner(create_default_domain_flag, Runtime::new())
+        .await
+        .0
 }
 
 /// A service whose runtime admits its work through `executor`, so a test can fill a class the
@@ -560,6 +564,7 @@ pub(in crate::application) async fn build_test_service_with_executor(
         Runtime::with_executor(executor),
     )
     .await
+    .0
 }
 
 #[cfg(feature = "testing")]
@@ -567,14 +572,17 @@ pub(in crate::application) async fn build_test_service_with_probe(
     create_default_domain_flag: bool,
     probe: ConsensusTestProbe,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, Some(probe), Runtime::new()).await
+    build_test_service_inner(create_default_domain_flag, Some(probe), Runtime::new())
+        .await
+        .0
 }
 
-async fn build_test_service_inner(
+/// Returns the running consensus owner so a test can join its storage work before removing files.
+pub(in crate::application) async fn build_test_service_inner(
     create_default_domain_flag: bool,
     #[cfg(feature = "testing")] probe: Option<ConsensusTestProbe>,
     runtime: Runtime,
-) -> TestService {
+) -> (TestService, Consensus) {
     let path = test_db_path();
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("test db directory should exist");
@@ -658,11 +666,14 @@ async fn build_test_service_inner(
         interconnect,
         runtime,
     );
-    TestService {
-        service,
-        registry,
-        path,
-    }
+    (
+        TestService {
+            service,
+            registry,
+            path,
+        },
+        consensus,
+    )
 }
 
 pub(in crate::application) async fn suggestion_values(

@@ -7,7 +7,8 @@
 //!   message body, attribute and FIFO group, request batching, and per-entry response
 //!   classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, the node
-//!   resolver, and the AWS SQS SDK with its Smithy HTTP client.
+//!   resolver, the kernel crate's XML character check, and the AWS SQS SDK with its Smithy HTTP
+//!   client.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation. A FIFO message group arrives already evaluated for its record, so
 //!   the expression behind it stays with the host.
@@ -37,6 +38,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
+use nervix_simd_kernels::{XmlChars, XmlCharsError};
 pub use source::{
     SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
     SqsSourcePosition,
@@ -126,11 +128,16 @@ impl PreparedSqsRecord {
             message_group: group_id,
             occurred_at,
         } = record;
-        let body = String::from_utf8(payload)
-            .map_err(|_| Report::new(SqsRecordError::InvalidBodyEncoding))?;
-        if !SqsSink::has_valid_message_characters(&body) {
-            return Err(Report::new(SqsRecordError::ForbiddenBodyCharacter));
-        }
+        let body = match XmlChars::into_string(payload) {
+            Ok(body) => body,
+            Err(report) => {
+                let issue = match report.current_context() {
+                    XmlCharsError::InvalidUtf8 => SqsRecordError::InvalidBodyEncoding,
+                    XmlCharsError::ExcludedCharacter => SqsRecordError::ForbiddenBodyCharacter,
+                };
+                return Err(report.change_context(issue));
+            }
+        };
         if headers.len() > 10 {
             return Err(Report::new(SqsRecordError::AttributeCount {
                 count: headers.len(),
@@ -534,13 +541,6 @@ impl SqsSink {
         }
     }
 
-    fn has_valid_message_characters(value: &str) -> bool {
-        value.chars().all(|character| {
-            matches!(character, '\u{0009}' | '\u{000A}' | '\u{000D}')
-                || matches!(u32::from(character), 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
-        })
-    }
-
     fn validate_attribute(name: &str, value: &str) -> SqsRecordResult<()> {
         let normalized = name.to_ascii_lowercase();
         if name.is_empty() || name.len() > 256 {
@@ -567,7 +567,7 @@ impl SqsSink {
                 name: name.to_string(),
             }));
         }
-        if !Self::has_valid_message_characters(value) {
+        if !XmlChars::admits(value) {
             return Err(Report::new(SqsRecordError::ForbiddenAttributeCharacter {
                 name: name.to_string(),
             }));
@@ -807,6 +807,56 @@ mod tests {
         assert_eq!(
             empty_value.current_context(),
             &SqsRecordError::EmptyAttributeValue {
+                name: "tenant".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn bodies_admit_xml_characters_and_reject_noncharacters_and_invalid_utf8() {
+        let prepare = |body: &[u8]| PreparedSqsRecord::new(record(0, body.to_vec()));
+        for admitted in [
+            "{\"note\":\"tab\tline\nreturn\r\"}",
+            "\u{7F}\u{9F}\u{D7FF}\u{E000}\u{FDD0}\u{FFFD}",
+            "\u{1_0000}\u{1F600}\u{1_FFFE}\u{10_FFFF}",
+            "",
+        ] {
+            let prepared = prepare(admitted.as_bytes()).expect("SQS admits every character");
+            assert_eq!(prepared.body, admitted);
+        }
+        for excluded in [
+            "\u{FFFE}",
+            "before \u{FFFF} after",
+            "\u{0}",
+            "\u{B}",
+            "\u{1F}",
+        ] {
+            let error = prepare(excluded.as_bytes())
+                .expect_err("SQS forbids noncharacters U+FFFE and U+FFFF and C0 controls");
+            assert_eq!(
+                error.current_context(),
+                &SqsRecordError::ForbiddenBodyCharacter
+            );
+        }
+        let mut forbidden_then_invalid = "\u{FFFF}".as_bytes().to_vec();
+        forbidden_then_invalid.push(0xFF);
+        let mut invalid_then_forbidden = vec![0xED, 0xA0, 0x80];
+        invalid_then_forbidden.extend_from_slice("\u{0}".as_bytes());
+        for invalid in [forbidden_then_invalid, invalid_then_forbidden] {
+            let error = prepare(&invalid).expect_err("the body is not UTF-8");
+            assert_eq!(
+                error.current_context(),
+                &SqsRecordError::InvalidBodyEncoding
+            );
+        }
+
+        let mut noncharacter_value = record(0, vec![b'x']);
+        noncharacter_value.headers = vec![("tenant".to_string(), "\u{FFFF}".to_string())];
+        let error = PreparedSqsRecord::new(noncharacter_value)
+            .expect_err("SQS forbids a noncharacter in an attribute value");
+        assert_eq!(
+            error.current_context(),
+            &SqsRecordError::ForbiddenAttributeCharacter {
                 name: "tenant".to_string()
             }
         );

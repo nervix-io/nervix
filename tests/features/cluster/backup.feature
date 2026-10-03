@@ -381,6 +381,7 @@ Feature: Configuration backup into a public archive
     When the CLI describes backup archive "interrupted.nvxb" as text
     Then the CLI output contains "cut: quiesced"
 
+  @restore_installation
   Scenario: A stale restore coordinator cannot republish after a new leader starts the domain
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
@@ -603,6 +604,7 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
+  @restore_installation
   Scenario Outline: A quiesced backup restores two WASM branches and Kafka domain offsets
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"

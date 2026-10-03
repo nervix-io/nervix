@@ -203,7 +203,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => {
+            | CompiledWireSchema::Syslog(_) => {
                 Err(self.contract_violation(CodecContractError::OnIngestionMissing))
             }
         }

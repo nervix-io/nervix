@@ -40,9 +40,9 @@ work instead. A use no permission lists for its file and a listed item the file 
 fail.
 
 An execution mode is a feature of the boundary and never a global cfg, which every crate of a build
-reads, Tokio's included. A bare `loom`, `shuttle` or `turmoil` in a `cfg` predicate is rejected, and
-so is `--cfg loom`, `--cfg shuttle` or `--cfg turmoil` in any `justfile` recipe, Cargo
-configuration, workflow or build script. Tokio's unstable runtime controls belong to the Turmoil
+reads, Tokio's included. A bare `loom`, `shuttle`, `turmoil` or `deloxide` in a `cfg` predicate is
+rejected, and so is `--cfg` with any of those names in any `justfile` recipe, Cargo configuration,
+workflow or build script. Tokio's unstable runtime controls belong to the Turmoil
 build alone: `--cfg tokio_unstable` may appear only in a `justfile` recipe whose name names Turmoil.
 
 The analysis cfg, `nervix_lint`, is tooling only. The synchronization analysis driver alone sets
@@ -82,10 +82,13 @@ macros. What a build wrote is not authored source: Cargo tags each build directo
 The manifest rules keep mode selection in one place, in every tracked or new manifest, whether or
 not the workspace lists it. Only the owner selects Loom, and the harness runs it, so no other
 package may depend on `loom`. Only the owner depends on the libraries whose families it selects and
-on their Shuttle wrappers. No other package renames a governed crate, which would hide its paths from
+on their Shuttle wrappers, and only the owner depends on `deloxide`, the diagnostic mode's
+detector, as an optional dependency, so no ordinary graph contains it; no other source names its
+paths, whose locks come from `nervix_primitives::sync::blocking` and whose detector from
+`nervix_primitives::deadlock`. No other package renames a governed crate, which would hide its paths from
 the source rules. Turmoil is also a runner, so beside the owner, a package whose harness drives a
 simulation may depend on it, as an optional dependency its own `turmoil` feature enables, and never
-names its network. A package that owns a `loom`, `shuttle` or `turmoil` feature depends on
+names its network. A package that owns a `loom`, `shuttle`, `turmoil` or `deloxide` feature depends on
 `nervix-primitives` directly and forwards the mode to it, and forwards it to every workspace
 dependency that owns the same mode, so the whole graph of that package uses one backend even when it
 is built on its own.
@@ -115,7 +118,7 @@ PERMISSIONS = PurePosixPath("crates/primitives/unmodeled-permissions.toml")
 BLOCKING_PERMISSIONS = PurePosixPath("crates/primitives/blocking-permissions.toml")
 BLOCKING_PERMISSION_FIELDS = ("path", "items", "owner", "reason", "bound")
 HARNESS = "nervix-model-harness"
-MODES = ("loom", "shuttle", "turmoil")
+MODES = ("loom", "shuttle", "turmoil", "deloxide")
 SELECTED = ("nervix_primitives", "sync", "atomic")
 UNMODELED_ROOT = ("nervix_primitives", "unmodeled")
 UNMODELED = UNMODELED_ROOT + ("sync", "atomic")
@@ -248,6 +251,20 @@ ROUTES = (
     Route(("shuttle_tokio_stream",), ("nervix_primitives", "stream")),
     Route(("shuttle_parking_lot",), ("nervix_primitives", "sync", "blocking")),
     Route(("shuttle_dashmap",), ("nervix_primitives", "collections")),
+    # The diagnostic mode's detector: the owner selects its locks for `sync::blocking` and installs
+    # it through `deadlock`, so nothing else names it.
+    Route(("deloxide",), ("nervix_primitives", "deadlock"), exact=True),
+    *(
+        Route(("deloxide", lock), ("nervix_primitives", "sync", "blocking", lock))
+        for lock in (
+            "Condvar",
+            "Mutex",
+            "MutexGuard",
+            "RwLock",
+            "RwLockReadGuard",
+            "RwLockWriteGuard",
+        )
+    ),
     # Shared ownership: the same library types in every mode, reached through the boundary.
     Route(("triomphe",), ("nervix_primitives", "sync")),
     *(
@@ -383,7 +400,8 @@ CACHE_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
 RELEASE_BUILD = "Dockerfile.debian"
 _RELEASE_PACKAGE = re.compile(r"(?<![A-Za-z0-9_-])--package\s+(?P<package>[A-Za-z0-9_-]+)")
 _PRODUCT_BINARY = re.compile(
-    r"nervix_primitives\s*::\s*product_binary\s*!\s*\(\s*\"(?P<name>[^\"]*)\"\s*\)"
+    r"nervix_primitives\s*::\s*product_binary\s*!\s*\(\s*\"(?P<name>[^\"]*)\"\s*"
+    r"(?:,\s*diagnostic\s*)?\)"
 )
 JUSTFILE = "justfile"
 CONFIGURATION_GLOBS = (".cargo/config.toml", ".cargo/config", ".github/workflows/*.yaml", ".github/workflows/*.yml")
@@ -397,6 +415,7 @@ OWNER_ONLY_PACKAGES = frozenset(
         "atomic-waker",
         "concurrent-queue",
         "dashmap",
+        "deloxide",
         "flume",
         "futures-channel",
         "futures-executor",
@@ -413,6 +432,8 @@ OWNER_ONLY_PACKAGES = frozenset(
 # Turmoil is a runner as well as the network the owner selects, so a package whose harness drives a
 # simulation may depend on it behind its own `turmoil` feature.
 TURMOIL = "turmoil"
+# The diagnostic mode's detector, which only the owner depends on, and optionally.
+DELOXIDE = "deloxide"
 # The WASM guest SDK. It and every guest library built on it are compiled into a user's WASM guest,
 # a single-threaded program inside the host's sandbox where no execution mode exists and that no
 # Nervix process runs, so their sources are outside the source rules; their manifests are checked.
@@ -452,7 +473,7 @@ _PATH_ATTRIBUTE = re.compile(r"#\[\s*path\s*=\s*\"(?P<path>[^\"]*)\"\s*\]")
 _MODULE_ROOT_FILES = frozenset({"build.rs", "lib.rs", "main.rs", "mod.rs"})
 _CRATE_ROOT_DIRECTORIES = frozenset({"bin", "benches", "examples", "tests"})
 _CFG_PREDICATE = re.compile(r"(?<![A-Za-z0-9_])cfg(?:_attr)?\s*!?\s*\(")
-_MODE_CFG_NAME = re.compile(r"(?<![A-Za-z0-9_])(?P<name>loom|shuttle|turmoil)(?![A-Za-z0-9_])")
+_MODE_CFG_NAME = re.compile(rf"(?<![A-Za-z0-9_])(?P<name>{'|'.join(MODES)})(?![A-Za-z0-9_])")
 # A conditional-compilation form, told apart by whether it selects code or attaches attributes.
 _CFG_USE = re.compile(r"(?<![A-Za-z0-9_])(?P<kind>cfg_attr|cfg)\s*!?\s*\(")
 _ANALYSIS_CFG_NAME = re.compile(rf"(?<![A-Za-z0-9_]){ANALYSIS_CFG}(?![A-Za-z0-9_])")
@@ -1965,6 +1986,14 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
                             f"{package.manifest}: {RULE}: `loom` must be an optional {kind} "
                             "entry, so no ordinary graph contains it"
                         )
+        deloxide = package.every_kind.get(DELOXIDE)
+        if deloxide is not None and package.name == OWNER:
+            for kind, entry in deloxide.items():
+                if not (isinstance(entry, dict) and entry.get("optional") is True):
+                    problems.append(
+                        f"{package.manifest}: {RULE}: `deloxide` must be an optional {kind} "
+                        "entry, so no ordinary graph contains it"
+                    )
         turmoil = package.every_kind.get(TURMOIL)
         if turmoil is not None:
             enabled = package.features.get(TURMOIL, ())
@@ -2024,8 +2053,8 @@ def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
     A cfg a build passes reaches every crate in it. `tokio_unstable` changes how Tokio schedules
     and reports, so only a Turmoil recipe passes it. An execution mode is never a global cfg: Tokio
     and other dependencies read the same names and would change their own behavior, so `--cfg
-    loom`, `--cfg shuttle` and `--cfg turmoil` fail in every recipe, configuration, workflow and
-    build script. `--cfg nervix_lint` fails there too: only the synchronization analysis driver,
+    loom`, `--cfg shuttle`, `--cfg turmoil` and `--cfg deloxide` fail in every recipe,
+    configuration, workflow and build script. `--cfg nervix_lint` fails there too: only the synchronization analysis driver,
     which registers the tool its annotations name, sets it for the crates it analyzes.
     """
 

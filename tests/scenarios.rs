@@ -150,6 +150,8 @@ mod client_consumers;
 mod client_producers;
 mod common;
 mod database_batches;
+#[cfg(feature = "deloxide")]
+mod deadlock_diagnostics;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
@@ -259,6 +261,13 @@ struct SavedHealthyPlacement {
     kind: String,
     name: String,
     owner: String,
+}
+
+/// A Syslog TCP or TLS connection that wrote one complete frame and the start of a second one,
+/// and the bytes of that second frame it has not written yet.
+struct SyslogSplitSender {
+    stream: Box<dyn tokio::io::AsyncWrite + Send + Sync + Unpin>,
+    rest: Vec<u8>,
 }
 
 /// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
@@ -382,6 +391,9 @@ struct ScenarioWorld {
     /// nodes and its observers bind. Given back once cleanup has stopped both.
     scenario_ports: Vec<u16>,
     syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
+    /// A Syslog stream connection holding back the end of a frame it began, until a step writes
+    /// the rest.
+    syslog_split_sender: Option<SyslogSplitSender>,
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
@@ -504,6 +516,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("mongodb_collection", &self.mongodb_collection)
             .field("mongodb_tls", &self.mongodb_tls)
             .field("syslog_udp_observer", &self.syslog_udp_observer.is_some())
+            .field("syslog_split_sender", &self.syslog_split_sender.is_some())
             .field("placeholder_count", &self.placeholders.len())
             .field(
                 "mqtt_ingestor_domain_count",
@@ -22098,19 +22111,7 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         2,
         "mixed Syslog TCP framing step requires exactly two messages"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut stream = loop {
-        match nervix_primitives::net::TcpStream::connect(&addr).await {
-            Ok(stream) => break stream,
-            Err(error) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out connecting to Syslog TCP listener '{addr}': {error}"
-                );
-                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    };
+    let mut stream = connect_syslog_tcp(&addr).await;
     let octet_counted = messages[0].as_bytes();
     stream
         .write_all(octet_counted.len().to_string().as_bytes())
@@ -22138,34 +22139,46 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         .expect("failed to close Syslog TCP test sender");
 }
 
-#[when(
-    expr = "Syslog TLS message is published to {string} using identity and CA from resource \
-            directory {string}"
-)]
-async fn when_syslog_tls_message_is_published_to(
-    world: &mut ScenarioWorld,
-    addr: String,
-    ca_resource_directory: String,
-    #[step] step: &Step,
-) {
-    use tokio::io::AsyncWriteExt as _;
+/// A TCP connection to a Syslog listener, retried while the listener starts.
+async fn connect_syslog_tcp(addr: &str) -> nervix_primitives::net::TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match nervix_primitives::net::TcpStream::connect(addr).await {
+            Ok(stream) => return stream,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out connecting to Syslog listener '{addr}': {error}"
+                );
+                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+}
 
+/// A TLS session with a Syslog listener that authenticates with the identity, and trusts the CA,
+/// of the resource directory `resource_directory`.
+async fn connect_syslog_tls(
+    world: &ScenarioWorld,
+    addr: &str,
+    resource_directory: &str,
+) -> tokio_rustls::client::TlsStream<nervix_primitives::net::TcpStream> {
     nervix_interconnect::install_rustls_crypto_provider();
-    let addr = expand_placeholders(world, &addr);
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
     let server_name = parsed
         .host_str()
         .expect("Syslog TLS test address must have a host")
         .to_string();
-    let ca_pem = resource_directory_ca_pem(world, &ca_resource_directory);
+    let ca_pem = resource_directory_ca_pem(world, resource_directory);
     let mut roots = RootCertStore::empty();
     for certificate in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
         roots
             .add(certificate.expect("Syslog TLS test CA must contain a valid certificate"))
             .expect("Syslog TLS test CA certificate must be accepted");
     }
-    let identity_dir = resource_directory_path(world, &ca_resource_directory);
+    let identity_dir = resource_directory_path(world, resource_directory);
     let certificate_pem = std::fs::read(identity_dir.join("tls.crt"))
         .expect("Syslog TLS test client certificate must be readable");
     let certificates = CertificateDer::pem_slice_iter(&certificate_pem)
@@ -22180,25 +22193,32 @@ async fn when_syslog_tls_message_is_published_to(
         .with_client_auth_cert(certificates, key)
         .expect("Syslog TLS test client identity must be valid");
     let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let stream = loop {
-        match nervix_primitives::net::TcpStream::connect(&addr).await {
-            Ok(stream) => break stream,
-            Err(error) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out connecting to Syslog TLS listener '{addr}': {error}"
-                );
-                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    };
+    let stream = connect_syslog_tcp(addr).await;
+    stream
+        .set_nodelay(true)
+        .expect("the Syslog TLS test connection must accept TCP_NODELAY");
     let server_name =
         ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
-    let mut stream = connector
+    connector
         .connect(server_name, stream)
         .await
-        .expect("failed to establish Syslog TLS test session");
+        .expect("failed to establish Syslog TLS test session")
+}
+
+#[when(
+    expr = "Syslog TLS message is published to {string} using identity and CA from resource \
+            directory {string}"
+)]
+async fn when_syslog_tls_message_is_published_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    ca_resource_directory: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    let mut stream = connect_syslog_tls(world, &addr, &ca_resource_directory).await;
     let payload = expand_placeholders(world, docstring(step));
     let payload = payload.trim().as_bytes();
     stream
@@ -22213,6 +22233,139 @@ async fn when_syslog_tls_message_is_published_to(
         .shutdown()
         .await
         .expect("failed to close Syslog TLS test sender");
+}
+
+/// One message in an RFC 6587 framing, as a stream carries it.
+fn syslog_stream_frame(framing: &str, message: &str) -> Vec<u8> {
+    match framing {
+        "octet-counted" => format!("{} {message}", message.len()).into_bytes(),
+        "non-transparent" => format!("{message}\r\n").into_bytes(),
+        other => panic!("unknown Syslog stream framing '{other}'"),
+    }
+}
+
+/// How many bytes of `frame` precede the split that `split` names.
+fn syslog_split_position(frame: &[u8], framing: &str, split: &str) -> usize {
+    match split {
+        "inside its octet count" => {
+            assert_eq!(
+                framing, "octet-counted",
+                "only an octet-counted frame has a count"
+            );
+            assert!(
+                frame
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count()
+                    > 1,
+                "splitting inside the octet count needs a count of at least two digits"
+            );
+            1
+        }
+        "inside its payload" => frame.len() / 2,
+        "between CR and LF" => {
+            assert_eq!(
+                framing, "non-transparent",
+                "only a non-transparent frame ends in CRLF"
+            );
+            frame.len() - 1
+        }
+        other => panic!("unknown Syslog frame split '{other}'"),
+    }
+}
+
+/// Writes the first docstring message as one complete frame and the second up to `split`, in one
+/// write, and keeps the connection and the rest of the second frame for a later step.
+async fn write_syslog_split_frames(
+    world: &mut ScenarioWorld,
+    mut stream: Box<dyn tokio::io::AsyncWrite + Send + Sync + Unpin>,
+    framing: &str,
+    split: &str,
+    step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let messages = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the split Syslog frame step requires exactly two messages"
+    );
+    let first = syslog_stream_frame(framing, &messages[0]);
+    let second = syslog_stream_frame(framing, &messages[1]);
+    let at = syslog_split_position(&second, framing, split);
+    let mut written = first;
+    written.extend_from_slice(&second[..at]);
+    stream
+        .write_all(&written)
+        .await
+        .expect("failed to write the frames before the split");
+    stream
+        .flush()
+        .await
+        .expect("failed to flush the frames before the split");
+    world.syslog_split_sender = Some(SyslogSplitSender {
+        stream,
+        rest: second[at..].to_vec(),
+    });
+}
+
+#[when(expr = "a Syslog TCP sender writes to {string} one {word} frame and another split {string}")]
+async fn when_syslog_tcp_sender_writes_split_frames(
+    world: &mut ScenarioWorld,
+    addr: String,
+    framing: String,
+    split: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let stream = connect_syslog_tcp(&addr).await;
+    stream
+        .set_nodelay(true)
+        .expect("the Syslog TCP test connection must accept TCP_NODELAY");
+    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+}
+
+#[when(
+    expr = "a Syslog TLS sender using identity and CA from resource directory {string} writes to \
+            {string} one {word} frame and another split {string}"
+)]
+async fn when_syslog_tls_sender_writes_split_frames(
+    world: &mut ScenarioWorld,
+    resource_directory: String,
+    addr: String,
+    framing: String,
+    split: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let stream = connect_syslog_tls(world, &addr, &resource_directory).await;
+    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+}
+
+#[when("the Syslog sender writes the rest of the split frame")]
+async fn when_syslog_sender_writes_the_rest_of_the_split_frame(world: &mut ScenarioWorld) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut sender = world
+        .syslog_split_sender
+        .take()
+        .expect("a Syslog sender must hold the rest of a split frame");
+    sender
+        .stream
+        .write_all(&sender.rest)
+        .await
+        .expect("failed to write the rest of the split frame");
+    sender
+        .stream
+        .shutdown()
+        .await
+        .expect("failed to close the split Syslog sender");
 }
 
 #[when(expr = "websocket message is published to host {string} path {string}")]
@@ -27534,6 +27687,10 @@ async fn then_node_eventually_reports_interconnect_status(
 
 fn main() {
     TestDependencies::configure_process_lifecycle();
+    // A diagnostic build tracks the blocking locks of every in-process node with one detector,
+    // installed once for the whole process before any tracked lock or runtime worker exists.
+    #[cfg(feature = "deloxide")]
+    start_deadlock_diagnostics();
     let parallelism = TestParallelism::detect();
     let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -27573,6 +27730,23 @@ fn main() {
 
     assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
+}
+
+/// The environment variable naming the directory a diagnostic scenario binary records its deadlock
+/// evidence in, the same one a diagnostic server reads.
+#[cfg(feature = "deloxide")]
+const DEADLOCK_EVIDENCE_ENV: &str = "NERVIX_DEADLOCK_EVIDENCE";
+
+/// Start this process's deadlock diagnostics, or end the process: its tracked locks refuse to run
+/// without them.
+#[cfg(feature = "deloxide")]
+fn start_deadlock_diagnostics() {
+    let directory =
+        std::env::var_os(DEADLOCK_EVIDENCE_ENV).map(nervix_deadlock::EvidenceDirectory::new);
+    if let Err(error) = nervix_deadlock::DiagnosticRun::start(directory) {
+        eprintln!("the scenario binary could not start its deadlock diagnostics: {error:?}");
+        std::process::exit(nervix_deadlock::DIAGNOSTIC_FAILURE_EXIT_STATUS);
+    }
 }
 
 /// Holds one dependency container open until the parent scenario kills this process.
@@ -27698,7 +27872,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_wire_tls_cost) and (not @client_conformance_toolchain)"
+             @client_wire_tls_cost) and (not @client_conformance_toolchain) and (not \
+             @deadlock_diagnostics)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -27805,6 +27980,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.node_trace_export = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
+                world.syslog_split_sender = None;
                 world.producers = client_producers::ScenarioProducers::default();
                 stop_receivers(world).await;
                 close_browser(world).await;

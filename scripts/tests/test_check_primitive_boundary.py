@@ -210,6 +210,19 @@ class BoundaryTests(CheckTestCase):
             "`std::sync::atomic::AtomicBool` bypasses the boundary",
         )
 
+    def test_the_diagnostic_detector_is_named_only_through_the_boundary(self) -> None:
+        self.assert_rejected(
+            "use deloxide::{Mutex, RwLockReadGuard};\n"
+            "fn start() { deloxide::Deloxide::new().start(); }\n",
+            "crates/engine/src/lib.rs:1",
+            "`deloxide::Mutex` bypasses the boundary",
+            "use `nervix_primitives::sync::blocking::Mutex`",
+            "`deloxide::RwLockReadGuard` bypasses the boundary",
+            "use `nervix_primitives::sync::blocking::RwLockReadGuard`",
+            "`deloxide::Deloxide::new` bypasses the boundary",
+            "use `nervix_primitives::deadlock`",
+        )
+
     def test_an_imported_atomic_module_fails(self) -> None:
         self.assert_rejected(
             "use core::sync::atomic as atomics;\n",
@@ -536,6 +549,58 @@ class ManifestTests(CheckTestCase):
         self.assertEqual(status, 1)
         self.assertIn("does not forward `nervix-vocabulary/shuttle`", report)
 
+    def test_a_deloxide_dependency_outside_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY
+                + '\n[dependencies.deloxide]\nversion = "=1.1.0"\noptional = true\n'
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/vocabulary/Cargo.toml: primitive boundary: only nervix-primitives depends on "
+            "`deloxide`",
+            report,
+        )
+
+    def test_a_mandatory_deloxide_dependency_of_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/primitives/Cargo.toml": PRIMITIVES
+                + '[target.\'cfg(not(target_family = "wasm"))\'.dependencies]\n'
+                'deloxide = "=1.1.0"\n'
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("`deloxide` must be an optional dependencies entry", report)
+
+    def test_an_optional_deloxide_dependency_of_the_owner_passes(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/primitives/Cargo.toml": PRIMITIVES.replace(
+                    "turmoil = []", 'turmoil = []\ndeloxide = ["dep:deloxide"]'
+                )
+                + "deloxide = { version = \"=1.1.0\", optional = true }\n"
+            },
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_the_diagnostic_mode_not_forwarded_to_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY.replace(
+                    'shuttle = ["nervix-primitives/shuttle"]',
+                    'shuttle = ["nervix-primitives/shuttle"]\ndeloxide = []',
+                )
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("feature `deloxide` does not forward `nervix-primitives/deloxide`", report)
+
 
 class FamilyTests(CheckTestCase):
     """The families beyond atomics: async and thread-blocking synchronization, tasks, the runtime
@@ -689,6 +754,35 @@ class FamilyTests(CheckTestCase):
         self.assert_rejected(
             '#[cfg(any())]\nfn never() { let _lock = parking_lot::RwLock::new(0); }\n',
             "`parking_lot::RwLock::new` bypasses the boundary",
+        )
+
+    def test_every_spelling_of_the_diagnostic_detector_fails(self) -> None:
+        self.assert_rejected(
+            "use deloxide::Mutex as TrackedMutex;\n"
+            "extern crate deloxide as detector;\n"
+            "macro_rules! tracked {\n    () => { deloxide::RwLock::new(0) };\n}\n"
+            '#[cfg(any())]\nfn never() { let _cycle = deloxide::Condvar::new(); }\n',
+            "`deloxide::Mutex` bypasses the boundary",
+            "use `nervix_primitives::sync::blocking::Mutex`",
+            "`extern crate deloxide as detector` selects a backend outside the boundary",
+            "`deloxide::RwLock::new` bypasses the boundary",
+            "`deloxide::Condvar::new` bypasses the boundary",
+        )
+
+    def test_a_renamed_diagnostic_detector_dependency_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY
+                + '\n[dev-dependencies]\ndetector = { package = "deloxide", version = "=1.1.0" }\n'
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("only nervix-primitives depends on `deloxide`", report)
+        self.assertIn(
+            "the dev-dependencies entry `detector` renames `deloxide`, which hides its governed "
+            "paths",
+            report,
         )
 
 
@@ -1694,6 +1788,22 @@ class ModeCfgTests(CheckTestCase):
         )
         self.assertIn("crates/engine/src/lib.rs:3", report)
 
+    def test_a_bare_diagnostic_mode_cfg_fails(self) -> None:
+        self.assert_rejected(
+            "#[cfg(deloxide)]\nmod diagnostics {}\n",
+            "crates/engine/src/lib.rs:1",
+            "`cfg(deloxide)` selects an execution mode through a global cfg",
+            '`feature = "deloxide"`',
+        )
+
+    def test_a_global_diagnostic_mode_cfg_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={"justfile": 'test-deloxide:\n    RUSTFLAGS="--cfg deloxide" cargo test\n'},
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("justfile:2: primitive boundary: `--cfg deloxide` selects an execution mode", report)
+
     def test_a_mode_feature_and_tokios_unstable_cfg_pass(self) -> None:
         status, report = self.check(
             {
@@ -1959,6 +2069,20 @@ class ReleaseBinaryTests(CheckTestCase):
             {
                 "crates/engine/src/main.rs": (
                     'nervix_primitives::product_binary!("nervix-engine");\nfn main() {}\n'
+                ),
+                "crates/engine/src/bin/probe.rs": (
+                    'nervix_primitives::product_binary!("probe");\nfn main() {}\n'
+                ),
+            },
+            manifests={"Dockerfile.debian": self.DOCKERFILE},
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_released_binary_with_a_diagnostic_form_declares_the_guard(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/main.rs": (
+                    'nervix_primitives::product_binary!("nervix-engine", diagnostic);\nfn main() {}\n'
                 ),
                 "crates/engine/src/bin/probe.rs": (
                     'nervix_primitives::product_binary!("probe");\nfn main() {}\n'

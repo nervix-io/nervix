@@ -129,9 +129,16 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-archived-counts",
             "simd-constant-division",
             "simd-checked-lanes",
+            "simd-byte-classes",
+            "simd-xml-chars",
+            "syslog-stream-framing",
+            "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",
             "paced-simulation-records",
+            "deadlock-evidence",
+            "deadlock-evidence-malformed",
+            "deadlock-evidence-bounds",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -142,13 +149,13 @@ class InventoryTests(unittest.TestCase):
             "nervix-backup",
             "nervix-branch-instances",
             "nervix-interconnect",
-            "nervix-server",
-            "nervix-simd-kernels",
+            "nervix-deadlock",
             "nervix-consensus",
             "nervix-lint-report",
             "nervix-server",
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
+            "nervix-connector-syslog",
             "nervix-paced-simulation",
         })
         for target in inventory.targets:
@@ -183,6 +190,10 @@ class InventoryTests(unittest.TestCase):
                 bolero.load_inventory(path)
             path.write_text(text.replace("features = []",
                                          'features = ["loom"]', 1))
+            with self.assertRaisesRegex(bolero.BoleroError, "modeled feature"):
+                bolero.load_inventory(path)
+            path.write_text(text.replace("features = []",
+                                         'features = ["deloxide"]', 1))
             with self.assertRaisesRegex(bolero.BoleroError, "modeled feature"):
                 bolero.load_inventory(path)
 

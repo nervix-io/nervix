@@ -1,12 +1,14 @@
 //! Syslog wire decoding and encoding.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages, and the RFC 5424
-//!   frame one batch of records is published in.
-//! - **Depends on.** Wire codec models, Arrow builders and UTC for omitted RFC 3164 years.
+//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages, the fixed field
+//!   contract a codec's schema is compiled against, and the RFC 5424 frame one batch of records is
+//!   published in.
+//! - **Depends on.** Wire codec models, Arrow builders, the kernel crate's byte classes and UTC for
+//!   omitted RFC 3164 years.
 //! - **Must not know.** Domains, runtime clocks, schedules or connector lifecycle.
 
-use std::fmt;
+use std::{fmt, ops::RangeInclusive};
 
 use ahash::HashSet;
 use arrow_array::{
@@ -17,6 +19,7 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{CodecEncodingRule, CodecName, ParseAsType};
+use nervix_simd_kernels::{ByteClass, ByteScanner};
 use thiserror::Error;
 
 use super::{
@@ -26,6 +29,31 @@ use super::{
 };
 
 const DEFAULT_PRIORITY: u8 = 13;
+
+/// Bytes outside RFC 5424 `PRINTUSASCII`, which no header field may hold.
+struct OutsidePrintUsAscii;
+
+impl ByteClass for OutsidePrintUsAscii {
+    const ORDINARY: RangeInclusive<u8> = b'!'..=b'~';
+}
+
+/// Bytes an RFC 5424 `SD-NAME` cannot hold: those outside `PRINTUSASCII`, and `=`, `]` and `"`.
+/// The first of them ends an `SD-ID` when it is a space or `]`, and a `PARAM-NAME` when it is `=`.
+struct SdNameEnd;
+
+impl ByteClass for SdNameEnd {
+    const ORDINARY: RangeInclusive<u8> = b'!'..=b'~';
+    const LISTED: &'static [u8] = b"=]\"";
+}
+
+/// The bytes a `PARAM-VALUE` gives meaning to: its closing `"`, the `\` that escapes, and the `]`
+/// it must escape.
+struct ParamValueSpecial;
+
+impl ByteClass for ParamValueSpecial {
+    const ORDINARY: RangeInclusive<u8> = u8::MIN..=u8::MAX;
+    const LISTED: &'static [u8] = b"\"\\]";
+}
 
 /// Why a payload is not a syslog message the codec can decode. It is the cause beneath
 /// [`CodecError::SyslogDecode`].
@@ -112,6 +140,43 @@ impl fmt::Display for SyslogFieldShape {
     }
 }
 
+/// A field of the fixed SYSLOG contract, named as a schema declares it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+enum SyslogField {
+    Facility,
+    Severity,
+    Timestamp,
+    Hostname,
+    AppName,
+    ProcId,
+    MsgId,
+    StructuredData,
+    Message,
+}
+
+impl SyslogField {
+    /// The type and optionality the contract gives this field.
+    fn shape(self) -> SyslogFieldShape {
+        let (ty, optional) = match self {
+            Self::Facility | Self::Severity => (ParseAsType::U8, false),
+            Self::Timestamp => (ParseAsType::Datetime, true),
+            Self::Hostname | Self::AppName | Self::ProcId | Self::MsgId | Self::StructuredData => {
+                (ParseAsType::String, true)
+            }
+            Self::Message => (ParseAsType::String, false),
+        };
+        SyslogFieldShape { ty, optional }
+    }
+}
+
+/// The SYSLOG contract fields a codec's schema declares, in the schema's order, resolved once when
+/// the codec is compiled so that decoding a message appends its columns without reading a name.
+#[derive(Debug, Clone)]
+pub(super) struct CompiledSyslogSchema {
+    fields: Vec<SyslogField>,
+}
+
 struct ParsedSyslog<'a> {
     facility: u8,
     severity: u8,
@@ -124,80 +189,104 @@ struct ParsedSyslog<'a> {
     message: &'a str,
 }
 
-pub(super) fn validate_compiled_schema(
-    codec: &CodecName,
-    encoding_rules: &[CodecEncodingRule],
-    schema: &CompiledSchema,
-) -> error_stack::Result<(), CodecError> {
-    if !encoding_rules.is_empty() {
-        return Err(CodecError::contract_violation(
-            codec.as_str(),
-            CodecContractError::SyslogEncodingRules,
-        ));
-    }
-    for field in &schema.fields {
-        let expected = match field.name.as_str() {
-            "facility" | "severity" => Some((ParseAsType::U8, false)),
-            "timestamp" => Some((ParseAsType::Datetime, true)),
-            "hostname" | "app_name" | "proc_id" | "msg_id" | "structured_data" => {
-                Some((ParseAsType::String, true))
-            }
-            "message" => Some((ParseAsType::String, false)),
-            _ => None,
-        };
-        let Some((expected_type, expected_optional)) = expected else {
+impl CompiledSyslogSchema {
+    /// Checks that `schema` declares only contract fields, each with its contract shape, and that
+    /// the codec has no encoding rules.
+    pub(super) fn compile(
+        codec: &CodecName,
+        encoding_rules: &[CodecEncodingRule],
+        schema: &CompiledSchema,
+    ) -> error_stack::Result<Self, CodecError> {
+        if !encoding_rules.is_empty() {
             return Err(CodecError::contract_violation(
                 codec.as_str(),
-                CodecContractError::SyslogFieldOutsideContract {
-                    field: field.name.clone(),
-                },
-            ));
-        };
-        if field.ty != expected_type || field.optional != expected_optional {
-            return Err(CodecError::contract_violation(
-                codec.as_str(),
-                CodecContractError::SyslogFieldShape {
-                    field: field.name.clone(),
-                    expected: SyslogFieldShape {
-                        ty: expected_type,
-                        optional: expected_optional,
-                    },
-                    found: SyslogFieldShape {
-                        ty: field.ty.clone(),
-                        optional: field.optional,
-                    },
-                },
+                CodecContractError::SyslogEncodingRules,
             ));
         }
+        let mut fields = Vec::with_capacity(schema.fields.len());
+        for field in &schema.fields {
+            let Ok(syslog_field) = field.name.parse::<SyslogField>() else {
+                return Err(CodecError::contract_violation(
+                    codec.as_str(),
+                    CodecContractError::SyslogFieldOutsideContract {
+                        field: field.name.clone(),
+                    },
+                ));
+            };
+            let expected = syslog_field.shape();
+            if field.ty != expected.ty || field.optional != expected.optional {
+                return Err(CodecError::contract_violation(
+                    codec.as_str(),
+                    CodecContractError::SyslogFieldShape {
+                        field: field.name.clone(),
+                        expected,
+                        found: SyslogFieldShape {
+                            ty: field.ty.clone(),
+                            optional: field.optional,
+                        },
+                    },
+                ));
+            }
+            fields.push(syslog_field);
+        }
+        Ok(Self { fields })
     }
-    Ok(())
-}
 
-pub(super) fn decode(
-    codec: &CompiledCodec,
-    payload: &[u8],
-    builder: &mut RuntimeRecordBatchBuilder,
-) -> error_stack::Result<(), CodecError> {
-    let last_kept = payload
-        .iter()
-        .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'));
-    let end = match last_kept {
-        Some(index) => index + 1,
-        None => 0,
-    };
-    let payload = &payload[..end];
-    if payload.is_empty() {
-        return Err(decode_failure(codec, SyslogDecodeError::Empty));
+    /// Decodes one RFC 3164 or RFC 5424 message into one row of `builder`.
+    pub(super) fn decode(
+        &self,
+        codec: &CompiledCodec,
+        payload: &[u8],
+        builder: &mut RuntimeRecordBatchBuilder,
+    ) -> error_stack::Result<(), CodecError> {
+        let last_kept = payload
+            .iter()
+            .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'));
+        let end = match last_kept {
+            Some(index) => index + 1,
+            None => 0,
+        };
+        let payload = &payload[..end];
+        if payload.is_empty() {
+            return Err(decode_failure(codec, SyslogDecodeError::Empty));
+        }
+        let payload = std::str::from_utf8(payload)
+            .map_err(|source| decode_failure(codec, SyslogDecodeError::InvalidUtf8 { source }))?;
+        let split = split_priority(payload);
+        let parsed = if split.has_priority && looks_like_rfc5424(split.body) {
+            parse_rfc5424(codec, split.priority, split.body)?
+        } else {
+            parse_rfc3164(codec, split.priority, split.body)?
+        };
+        self.append_row(codec, &parsed, builder)
     }
-    let payload = std::str::from_utf8(payload)
-        .map_err(|source| decode_failure(codec, SyslogDecodeError::InvalidUtf8 { source }))?;
-    let split = split_priority(payload);
-    let parsed = if split.has_priority && looks_like_rfc5424(split.body) {
-        parse_rfc5424(codec, split.priority, split.body)?
-    } else {
-        parse_rfc3164(codec, split.priority, split.body)?
-    };
-    append_row(codec, &parsed, builder)
+
+    fn append_row(
+        &self,
+        codec: &CompiledCodec,
+        parsed: &ParsedSyslog<'_>,
+        builder: &mut RuntimeRecordBatchBuilder,
+    ) -> error_stack::Result<(), CodecError> {
+        for (index, field) in self.fields.iter().enumerate() {
+            let appended = match field {
+                SyslogField::Facility => append_u8(builder, index, parsed.facility),
+                SyslogField::Severity => append_u8(builder, index, parsed.severity),
+                SyslogField::Timestamp => {
+                    append_datetime(builder, index, parsed.timestamp.as_ref())
+                }
+                SyslogField::Hostname => append_string(builder, index, parsed.hostname),
+                SyslogField::AppName => append_string(builder, index, parsed.app_name),
+                SyslogField::ProcId => append_string(builder, index, parsed.proc_id),
+                SyslogField::MsgId => append_string(builder, index, parsed.msg_id),
+                SyslogField::StructuredData => {
+                    append_string(builder, index, parsed.structured_data)
+                }
+                SyslogField::Message => append_string(builder, index, Some(parsed.message)),
+            };
+            appended.change_context_lazy(|| decode_context(codec))?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn encode_row(
@@ -785,11 +874,7 @@ fn validate_header_shape(
             },
         }));
     }
-    if let Some((position, _)) = value
-        .bytes()
-        .enumerate()
-        .find(|(_, byte)| !(b'!'..=b'~').contains(byte))
-    {
+    if let Some(position) = OutsidePrintUsAscii::first_in(value.as_bytes()) {
         return Err(Report::new(RuntimeSchemaError::InvalidSyslogHeader {
             position,
             issue: SyslogHeaderIssue::NonPrintableAscii,
@@ -798,6 +883,11 @@ fn validate_header_shape(
     Ok(())
 }
 
+/// The length of the RFC 5424 `STRUCTURED-DATA` that `value` begins with.
+///
+/// The parser walks from one meaningful byte to the next: one scanner finds the byte that ends each
+/// `SD-ID` and `PARAM-NAME`, and another the `"`, `\` or `]` in each `PARAM-VALUE`. Each scanner
+/// classifies a 64-byte block of `value` at most once, so no byte is examined by a per-byte loop.
 fn structured_data_prefix(
     value: &str,
     strict_escapes: bool,
@@ -814,25 +904,25 @@ fn structured_data_prefix(
             },
         ));
     }
+    let mut name_ends = ByteScanner::<SdNameEnd>::new(bytes);
+    let mut value_specials = ByteScanner::<ParamValueSpecial>::new(bytes);
     let mut element_ids = HashSet::default();
     let mut cursor = 0;
     while bytes.get(cursor) == Some(&b'[') {
         cursor += 1;
         let id_start = cursor;
-        while let Some(byte) = bytes.get(cursor)
-            && *byte != b' '
-            && *byte != b']'
-        {
-            if !valid_sd_name_byte(*byte) {
+        cursor = match name_ends.next(id_start) {
+            Some(end) if matches!(bytes[end], b' ' | b']') => end,
+            Some(invalid) => {
                 return Err(Report::new(
                     RuntimeSchemaError::InvalidSyslogStructuredData {
-                        position: cursor,
+                        position: invalid,
                         issue: SyslogStructuredDataIssue::InvalidElementIdCharacter,
                     },
                 ));
             }
-            cursor += 1;
-        }
+            None => bytes.len(),
+        };
         let id_len = cursor - id_start;
         if id_len == 0 || id_len > 32 {
             return Err(Report::new(
@@ -876,19 +966,18 @@ fn structured_data_prefix(
                 }
             }
             let name_start = cursor;
-            while let Some(byte) = bytes.get(cursor)
-                && *byte != b'='
-            {
-                if !valid_sd_name_byte(*byte) {
+            cursor = match name_ends.next(name_start) {
+                Some(end) if bytes[end] == b'=' => end,
+                Some(invalid) => {
                     return Err(Report::new(
                         RuntimeSchemaError::InvalidSyslogStructuredData {
-                            position: cursor,
+                            position: invalid,
                             issue: SyslogStructuredDataIssue::InvalidParameterNameCharacter,
                         },
                     ));
                 }
-                cursor += 1;
-            }
+                None => bytes.len(),
+            };
             let name_len = cursor - name_start;
             if name_len == 0 || name_len > 32 {
                 return Err(Report::new(
@@ -916,48 +1005,51 @@ fn structured_data_prefix(
             }
             cursor += 2;
             loop {
-                match bytes.get(cursor) {
-                    Some(b'"') => {
-                        cursor += 1;
+                let Some(special) = value_specials.next(cursor) else {
+                    return Err(Report::new(
+                        RuntimeSchemaError::InvalidSyslogStructuredData {
+                            position: bytes.len(),
+                            issue: SyslogStructuredDataIssue::UnterminatedParameterValue,
+                        },
+                    ));
+                };
+                match bytes[special] {
+                    b'"' => {
+                        cursor = special + 1;
                         break;
                     }
-                    Some(b'\\') => {
-                        let Some(escaped) = bytes.get(cursor + 1) else {
+                    b'\\' => {
+                        let Some(escaped) = bytes.get(special + 1) else {
                             return Err(Report::new(
                                 RuntimeSchemaError::InvalidSyslogStructuredData {
-                                    position: cursor,
+                                    position: special,
                                     issue: SyslogStructuredDataIssue::UnterminatedEscape,
                                 },
                             ));
                         };
-                        if strict_escapes && !matches!(escaped, b'"' | b'\\' | b']') {
+                        let escapes_special = matches!(escaped, b'"' | b'\\' | b']');
+                        if strict_escapes && !escapes_special {
                             return Err(Report::new(
                                 RuntimeSchemaError::InvalidSyslogStructuredData {
-                                    position: cursor + 1,
+                                    position: special + 1,
                                     issue: SyslogStructuredDataIssue::InvalidEscape,
                                 },
                             ));
                         }
-                        cursor += if matches!(escaped, b'"' | b'\\' | b']') {
-                            2
+                        // An escaped special byte is part of the value. Any other byte after the
+                        // backslash is read as an ordinary value byte from where the next search
+                        // starts.
+                        cursor = if escapes_special {
+                            special + 2
                         } else {
-                            1
+                            special + 1
                         };
                     }
-                    Some(b']') => {
+                    _ => {
                         return Err(Report::new(
                             RuntimeSchemaError::InvalidSyslogStructuredData {
-                                position: cursor,
+                                position: special,
                                 issue: SyslogStructuredDataIssue::UnescapedClosingBracket,
-                            },
-                        ));
-                    }
-                    Some(_) => cursor += 1,
-                    None => {
-                        return Err(Report::new(
-                            RuntimeSchemaError::InvalidSyslogStructuredData {
-                                position: cursor,
-                                issue: SyslogStructuredDataIssue::UnterminatedParameterValue,
                             },
                         ));
                     }
@@ -976,34 +1068,27 @@ fn structured_data_prefix(
     Ok(cursor)
 }
 
-fn valid_sd_name_byte(byte: u8) -> bool {
-    (b'!'..=b'~').contains(&byte) && !matches!(byte, b'=' | b']' | b'"')
-}
-
-fn append_row(
-    codec: &CompiledCodec,
-    parsed: &ParsedSyslog<'_>,
-    builder: &mut RuntimeRecordBatchBuilder,
-) -> error_stack::Result<(), CodecError> {
-    for index in 0..codec.schema.fields.len() {
-        let field = codec.schema.fields[index].name.as_str();
-        let appended = match field {
-            "facility" => append_u8(builder, index, parsed.facility),
-            "severity" => append_u8(builder, index, parsed.severity),
-            "timestamp" => append_datetime(builder, index, parsed.timestamp.as_ref()),
-            "hostname" => append_string(builder, index, parsed.hostname),
-            "app_name" => append_string(builder, index, parsed.app_name),
-            "proc_id" => append_string(builder, index, parsed.proc_id),
-            "msg_id" => append_string(builder, index, parsed.msg_id),
-            "structured_data" => append_string(builder, index, parsed.structured_data),
-            "message" => append_string(builder, index, Some(parsed.message)),
-            unknown => Err(Report::new(RuntimeSchemaError::UnsupportedSyslogField {
-                field: unknown.to_string(),
-            })),
-        };
-        appended.change_context_lazy(|| decode_context(codec))?;
-    }
-    Ok(())
+/// The column `index` of `builder` holding another Arrow type than the field it builds. The field's
+/// name and type are read only here, when a column does not match.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the external Arrow builder reports the type of the column it built"
+    )
+)]
+fn column_type_mismatch(
+    builder: &RuntimeRecordBatchBuilder,
+    index: usize,
+) -> Report<RuntimeSchemaError> {
+    let field = &builder.fields[index];
+    Report::new(RuntimeSchemaError::ExactTypeMismatch {
+        location: RuntimeValueLocation::CodecField {
+            field: field.name.clone(),
+            elements: Vec::new(),
+        },
+        expected: field.ty.arrow_data_type(),
+        found: builder.builders[index].finish_cloned().data_type().clone(),
+    })
 }
 
 fn prepare_append(
@@ -1030,23 +1115,13 @@ fn append_u8(
     value: u8,
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
-    let field = builder.fields[index].name.clone();
-    let expected = builder.fields[index].ty.arrow_data_type();
-    if !builder.builders[index].as_any().is::<UInt8Builder>() {
-        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
-            location: RuntimeValueLocation::CodecField {
-                field,
-                elements: Vec::new(),
-            },
-            expected,
-            found: builder.builders[index].finish_cloned().data_type().clone(),
-        }));
-    }
-    builder.builders[index]
+    let Some(column) = builder.builders[index]
         .as_any_mut()
         .downcast_mut::<UInt8Builder>()
-        .verified("the SYSLOG U8 builder's concrete type was checked immediately above")
-        .append_value(value);
+    else {
+        return Err(column_type_mismatch(builder, index));
+    };
+    column.append_value(value);
     builder.next_column += 1;
     Ok(())
 }
@@ -1061,23 +1136,13 @@ fn append_string(
     value: Option<&str>,
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
-    let field = builder.fields[index].name.clone();
-    let expected = builder.fields[index].ty.arrow_data_type();
-    if !builder.builders[index].as_any().is::<StringBuilder>() {
-        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
-            location: RuntimeValueLocation::CodecField {
-                field,
-                elements: Vec::new(),
-            },
-            expected,
-            found: builder.builders[index].finish_cloned().data_type().clone(),
-        }));
-    }
-    builder.builders[index]
+    let Some(column) = builder.builders[index]
         .as_any_mut()
         .downcast_mut::<StringBuilder>()
-        .verified("the SYSLOG STRING builder's concrete type was checked immediately above")
-        .append_option(value);
+    else {
+        return Err(column_type_mismatch(builder, index));
+    };
+    column.append_option(value);
     builder.next_column += 1;
     Ok(())
 }
@@ -1099,26 +1164,13 @@ fn append_datetime(
                 .ok_or_else(|| Report::new(RuntimeSchemaError::SyslogTimestampOutOfRange))
         })
         .transpose()?;
-    let field = builder.fields[index].name.clone();
-    let expected = builder.fields[index].ty.arrow_data_type();
-    if !builder.builders[index]
-        .as_any()
-        .is::<TimestampNanosecondBuilder>()
-    {
-        return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
-            location: RuntimeValueLocation::CodecField {
-                field,
-                elements: Vec::new(),
-            },
-            expected,
-            found: builder.builders[index].finish_cloned().data_type().clone(),
-        }));
-    }
-    builder.builders[index]
+    let Some(column) = builder.builders[index]
         .as_any_mut()
         .downcast_mut::<TimestampNanosecondBuilder>()
-        .verified("the SYSLOG DATETIME builder's concrete type was checked immediately above")
-        .append_option(value);
+    else {
+        return Err(column_type_mismatch(builder, index));
+    };
+    column.append_option(value);
     builder.next_column += 1;
     Ok(())
 }
@@ -1208,34 +1260,5 @@ fn header_value<'a>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invalid_header_reports_the_offending_byte_and_typed_reason() {
-        let error = validate_header_shape("host name", 255)
-            .expect_err("a space is not valid in an RFC 5424 header value");
-
-        assert!(matches!(
-            error.current_context(),
-            RuntimeSchemaError::InvalidSyslogHeader {
-                position: 4,
-                issue: SyslogHeaderIssue::NonPrintableAscii,
-            }
-        ));
-    }
-
-    #[test]
-    fn invalid_structured_data_reports_the_offending_byte_and_typed_reason() {
-        let error = structured_data_prefix("[bad=id]", true)
-            .expect_err("an equals sign is not valid in an SD-ID");
-
-        assert!(matches!(
-            error.current_context(),
-            RuntimeSchemaError::InvalidSyslogStructuredData {
-                position: 4,
-                issue: SyslogStructuredDataIssue::InvalidElementIdCharacter,
-            }
-        ));
-    }
-}
+#[path = "syslog_tests.rs"]
+mod tests;

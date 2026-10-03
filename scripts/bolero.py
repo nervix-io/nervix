@@ -137,7 +137,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
             raise BoleroError(f"{item['id']}: invalid cargo test target")
         if not isinstance(item["features"], list) or any(
             not isinstance(feature, str)
-            or feature in {"loom", "shuttle", "turmoil"}
+            or feature in {"loom", "shuttle", "turmoil", "deloxide"}
             for feature in item["features"]
         ):
             raise BoleroError(f"{item['id']}: invalid or modeled feature")

@@ -34,6 +34,7 @@ delivery can fail during schedule application.
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
+| Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
 The owner extends its existing error type when an operation gains another failure case. A second
@@ -840,6 +841,19 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+A diagnostic node's deadlock findings are neither errors nor recoverable outcomes. The detector
+hands each finding to the diagnostic run's recorder, which describes it on standard error, records
+it as evidence and ends the process with status `3`; a finding it cannot record, or findings the
+detector lost, end it with status `4`, a failed diagnostic execution that is never taken for a clean
+run. Nothing on that path returns an error to the code whose locks deadlocked, writes a log, or
+waits for a lock a blocked thread could hold, and the detector's callback cannot panic: Deloxide
+would catch the panic and carry on. Two diagnostic failures are panics by design. A tracked lock
+constructed in a process that has not installed the detector panics, naming the configuration
+failure, as a modeled primitive used outside its model does; and a sink that panics while handling a
+finding aborts the process, because a finding it failed to handle must not pass for no finding.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
+detector, its bounds and what it does not cover.
 
 The isolated architecture compiler emits ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and

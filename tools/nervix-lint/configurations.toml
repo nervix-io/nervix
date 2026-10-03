@@ -29,3 +29,10 @@ features = ["native", "turmoil"]
 manifest = "Cargo.toml"
 name = "turmoil"
 packages = ["nervix-primitives", "nervix-interconnect"]
+
+[[configuration]]
+features = ["native", "deloxide"]
+kinds = ["lib", "bin"]
+manifest = "Cargo.toml"
+name = "deloxide"
+packages = ["nervix-primitives", "nervix-deadlock", "nervix-server"]
