@@ -189,6 +189,7 @@ pub(crate) fn backup_tail(tokens: &[Token]) -> Vec<String> {
     if !writes_keyword(tokens, Identifier::Resources) {
         tail.push("WITHOUT RESOURCES".to_string());
     }
+    tail.sort();
     tail
 }
 
@@ -202,16 +203,16 @@ pub(crate) fn restore_tail(restore: &Restore, tokens: &[Token]) -> Vec<String> {
         "WITHOUT STATE".to_string(),
         "WITHOUT SOURCE OFFSETS".to_string(),
     ];
-    if writes_keyword(tokens, Identifier::Dry) {
-        return tail;
-    }
-    match &restore.scope {
-        RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => {
-            tail.push("ON EXISTING USER".to_string());
+    if !writes_keyword(tokens, Identifier::Dry) {
+        match &restore.scope {
+            RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => {
+                tail.push("ON EXISTING USER".to_string());
+            }
+            RestoreScope::Cluster { .. } | RestoreScope::Domain { .. } => {}
         }
-        RestoreScope::Cluster { .. } | RestoreScope::Domain { .. } => {}
+        tail.push("DRY RUN".to_string());
     }
-    tail.push("DRY RUN".to_string());
+    tail.sort();
     tail
 }
 
@@ -452,6 +453,10 @@ mod tests {
     #[case::describe_format_values("DESCRIBE BACKUP '/tmp/c.nvxb' FORMAT ", "JSON")]
     fn completion_offers_each_backup_clause(#[case] source: &str, #[case] expected: &str) {
         let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            suggestions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{source:?} must offer strictly sorted suggestions: {suggestions:?}"
+        );
         assert!(
             suggestions.contains(&expected.to_string()),
             "{source:?} must offer {expected:?}: {suggestions:?}"
@@ -710,6 +715,10 @@ mod tests {
     #[case::terminator_after_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' DRY RUN ", ";")]
     fn completion_offers_each_restore_clause(#[case] source: &str, #[case] expected: &str) {
         let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            suggestions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{source:?} must offer strictly sorted suggestions: {suggestions:?}"
+        );
         assert!(
             suggestions.contains(&expected.to_string()),
             "{source:?} must offer {expected:?}: {suggestions:?}"

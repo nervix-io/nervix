@@ -2034,6 +2034,10 @@ toolchains-install:
 test-nspl *args:
     cargo test --package nervix-nspl --package nervix-nspl-format --all-targets -- {{ args }}
 
+# Verify the backup and restore completion clauses and their public suggestion ordering.
+test-nspl-backup-completion:
+    cargo test --package nervix-nspl --lib backup::tests::completion_offers_each_
+
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
 validate-nspl-docs:
