@@ -223,7 +223,7 @@ pub(super) struct RelayConsumerFanout {
     branch_dispatch_gates: Arc<BranchRelayDispatchGates>,
     pub(super) owner_buffer: ArcSwapOption<RelayOwnerBuffer>,
     pub(super) owner_capacity: AtomicUsize,
-    pub(super) owner_pending_batches: Arc<AtomicUsize>,
+    pub(super) transit: Arc<RelayTransit>,
     pub(super) subscriptions: RelaySubscriptions,
     pub(super) attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     pub(super) detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
@@ -302,45 +302,6 @@ impl RelayOwnerBuffer {
 
     fn observe_length(&self) {
         self.metrics.observe_buffer(self.len(), self.capacity());
-    }
-}
-
-pub(super) struct RelayOwnerAdmission {
-    pub(super) pending_batches: Arc<AtomicUsize>,
-    pub(super) accepted: bool,
-}
-
-impl RelayOwnerAdmission {
-    pub(super) fn new(pending_batches: Arc<AtomicUsize>) -> Self {
-        pending_batches.fetch_add(1, Ordering::AcqRel);
-        Self {
-            pending_batches,
-            accepted: false,
-        }
-    }
-
-    pub(super) fn accept(mut self) {
-        self.accepted = true;
-    }
-}
-
-impl Drop for RelayOwnerAdmission {
-    fn drop(&mut self) {
-        if !self.accepted {
-            let previous = self.pending_batches.fetch_sub(1, Ordering::AcqRel);
-            debug_assert!(previous > 0, "relay owner pending batch count underflow");
-        }
-    }
-}
-
-pub(super) struct RelayOwnerBatchCompletion {
-    pub(super) pending_batches: Arc<AtomicUsize>,
-}
-
-impl Drop for RelayOwnerBatchCompletion {
-    fn drop(&mut self) {
-        let previous = self.pending_batches.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "relay owner pending batch count underflow");
     }
 }
 
@@ -561,7 +522,7 @@ impl RelayConsumerFanout {
             }),
             owner_buffer: ArcSwapOption::empty(),
             owner_capacity: AtomicUsize::new(capacity.get()),
-            owner_pending_batches: Arc::new(AtomicUsize::new(0)),
+            transit: Arc::new(RelayTransit::default()),
             subscriptions: RelaySubscriptions::new(),
             attached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
             detached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
@@ -610,13 +571,11 @@ impl RelayConsumerFanout {
     }
 
     pub(super) fn begin_owner_admission(&self) -> RelayOwnerAdmission {
-        RelayOwnerAdmission::new(self.owner_pending_batches.clone())
+        RelayOwnerAdmission::new(self.transit.clone())
     }
 
     pub(super) fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
-        RelayOwnerBatchCompletion {
-            pending_batches: self.owner_pending_batches.clone(),
-        }
+        RelayOwnerBatchCompletion::new(self.transit.clone())
     }
 
     pub(super) fn runtime_consumer_receiver_for_mode(
@@ -716,8 +675,8 @@ impl RelayConsumerFanout {
     }
 
     pub(super) fn outstanding_work_len(&self) -> usize {
-        self.owner_pending_batches
-            .load(Ordering::Acquire)
+        self.transit
+            .held()
             .checked_add(self.runtime_consumer_buffer_len())
             .assured("both counts total batches this node already holds in memory")
     }
