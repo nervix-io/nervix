@@ -652,7 +652,10 @@ admission worker therefore tracks the batch's ACK root with the ingestor's drain
 and only then reads the quiesce publication. Either the read comes before the engagement, so the
 drain that follows counts the root and waits for it, or the read observes the engagement and the
 batch is refused with its root resolved before anything was dispatched under it. No batch can be
-dispatched after a drain concluded that the ingestor held no admitted work.
+dispatched after a drain concluded that the ingestor held no admitted work. The admission tracks the
+root with a read-modify-write, and the drain reads each root count with a read-modify-write after
+the engagement published, so one side observes the other in the C11 memory model, not only on
+processors whose read-modify-writes are full barriers.
 
 ### Assignment generations
 
@@ -1360,7 +1363,10 @@ protocol rules out.
 Loom's own limits bound every claim. It does not model every relaxed behavior the C11 model
 permits, and an operation inside a third-party dependency, such as a `triomphe` reference count or
 an `arc-swap` publication, is invisible to it and excluded from the claim rather than given a
-fictional model. A standalone counter carries no cross-location claim, whatever its ordering. Relay
+fictional model. The client batch admission fence reads its quiesce decision from such a
+publication, so its model checks the root counts the admission and the drain reach by
+read-modify-write, and the publication's own ordering stays outside the claim. A standalone counter
+carries no cross-location claim, whatever its ordering. Relay
 branch presence is such a case: its owner lifetimes and publications are `arc-swap` compare-and-swap
 and read-copy-update operations with no Nervix-owned atomic beside them, so it has no Loom model;
 its Shuttle checks order its publications against observers and successors. Checkpoint
@@ -1380,6 +1386,7 @@ against reports and announcements.
 | `runtime.relay-dispatch-gate.reopen-publication` | A dispatch that finds the gate reopened observes what the protected mutation changed while it was closed: reopening releases and the dispatch's read of the flag acquires | `loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change` (`src/runtime/relay_channel_loom_models.rs`); fails when `.store(!state.engagements.is_empty(), Ordering::Release);` weakened to `.store(!state.engagements.is_empty(), Ordering::Relaxed);` |
 | `runtime.relay-fanout.admission-wakeup` | A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other | `loom_a_consumer_freeing_room_admits_or_wakes_the_publisher_waiting_for_it` (`src/runtime/relay_channel_loom_models.rs`); fails when `let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);` weakened to `let admitted = self.admitted.load(Ordering::Acquire);` |
 | `runtime.state-assignment.admission-fence` | An operation admitted under a runtime-state binding that a rebind supersedes either observes the new binding and is refused, or finishes before the rebind returns with everything it did visible to the rebinding side: the operation counts itself in before it reads the binding, the rebind publishes the binding before it reads the count, both reach the count by read-modify-write, and finishing releases what the read acquires | `loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebind` (`src/runtime/state_store_loom_models.rs`); fails when `while admitted.fetch_add(0, Ordering::AcqRel) != 0 {` weakened to `while admitted.load(Ordering::Acquire) != 0 {` or `.fetch_sub(1, Ordering::Release)` weakened to `.fetch_sub(1, Ordering::Relaxed)` |
+| `runtime.client-ingestor.admission-fence` | A client batch whose admission races a quiesce is either counted by the drain that follows the quiesce or refused before anything is dispatched under it: the admission tracks its root by read-modify-write before it reads the quiesce publication, the quiesce publishes before the drain reads the root counts, and the drain reads each count by read-modify-write, so one side observes the other | `loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused` (`src/runtime/client_ingestor_loom_models.rs`); fails when `self.outstanding.fetch_add(0, Ordering::AcqRel)` weakened to `self.outstanding.load(Ordering::Acquire)` or `self.ownership_handoff_outstanding.fetch_add(0, Ordering::AcqRel)` weakened to `self.ownership_handoff_outstanding.load(Ordering::Acquire)` |
 
 The cancellation protocol these models check is the bounded executor's. `Cancellation::armed`
 creates both ends of one job's cancellation: the executor keeps the obligation while its caller

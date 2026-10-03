@@ -141,3 +141,29 @@ invariant = "runtime.state-assignment.admission-fence"
 original = ".fetch_sub(1, Ordering::Release)"
 path = "src/runtime/state_store.rs"
 weakened = ".fetch_sub(1, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A client batch whose admission races a quiesce is either counted by the drain that follows the quiesce or refused before anything is dispatched under it: the admission tracks its root by read-modify-write before it reads the quiesce publication, the quiesce publishes before the drain reads the root counts, and the drain reads each count by read-modify-write, so one side observes the other."
+id = "runtime.client-ingestor.admission-fence"
+package = "nervix-server"
+test = "runtime::client_ingestor::loom_models::loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused"
+
+[[qualification]]
+failure = "a client batch was admitted after a quiesce whose drain did not count it"
+id = "runtime.client-ingestor.drain-loads-the-roots"
+invariant = "runtime.client-ingestor.admission-fence"
+original = "self.outstanding.fetch_add(0, Ordering::AcqRel)"
+path = "src/runtime_ack.rs"
+weakened = "self.outstanding.load(Ordering::Acquire)"
+
+[[qualification]]
+failure = "a client batch was admitted after a quiesce whose drain did not count it"
+id = "runtime.client-ingestor.handoff-drain-loads-the-roots"
+invariant = "runtime.client-ingestor.admission-fence"
+original = """
+        self.ownership_handoff_outstanding
+            .fetch_add(0, Ordering::AcqRel)"""
+path = "src/runtime_ack.rs"
+weakened = """
+        self.ownership_handoff_outstanding
+            .load(Ordering::Acquire)"""

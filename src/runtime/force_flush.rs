@@ -448,6 +448,12 @@ impl IngestorAckRootTrackers {
     pub(in crate::runtime) fn ingestor_outstanding(&self) -> usize {
         self.ingestor.outstanding()
     }
+
+    /// The roots of this ingestor an ownership handoff's drain still waits for.
+    #[cfg(all(test, feature = "loom"))]
+    pub(in crate::runtime) fn ingestor_outstanding_for_ownership_handoff(&self) -> usize {
+        self.ingestor.outstanding_for_ownership_handoff()
+    }
 }
 
 impl Runtime {

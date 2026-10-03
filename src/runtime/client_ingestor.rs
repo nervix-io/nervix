@@ -1932,7 +1932,9 @@ impl IngestorQuiesceControl {
     ///
     /// The root is tracked before the decision is read, so either the drain that follows a
     /// quiesce counts this root and waits for it, or this read observes the quiesce and the batch
-    /// is refused with its root resolved before anything was dispatched under it.
+    /// is refused with its root resolved before anything was dispatched under it. Tracking the
+    /// root and the drain's read of the root count are both read-modify-writes of that count, so
+    /// whichever comes second observes the first, as `AckRootTracker::outstanding` explains.
     pub(in crate::runtime) fn track_client_batch(
         &self,
         trackers: &IngestorAckRootTrackers,
@@ -1970,3 +1972,7 @@ mod tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "client_ingestor_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "client_ingestor_loom_models.rs"]
+mod loom_models;
