@@ -2,19 +2,25 @@
 //!
 //! Layer: primitives.
 //!
-//! - **Owns.** Runtime SIMD selection, exact byte masks, bitmask words packed from per-lane flags,
-//!   checked integer arithmetic and constant division whose failures come out as bitmask words, and exact elapsed-time
-//!   histograms for callers with contiguous buffers.
-//! - **Depends on.** `fearless_simd`, pointer-width conversions, and self-contained error values.
+//! - **Owns.** Runtime SIMD selection, byte classes with their exact masks and forward scans, XML
+//!   1.0 character data validated with UTF-8 in one pass, bitmask words packed from per-lane
+//!   flags, checked integer arithmetic and constant division whose failures come out as bitmask
+//!   words, and exact elapsed-time histograms for callers with contiguous buffers.
+//! - **Depends on.** `fearless_simd`, `simdutf8`, pointer-width conversions, and self-contained
+//!   error values.
 //! - **Must not know.** Arrow, Nervix models, codecs, metric recorders, or the consumers of a
 //!   classified buffer.
 
 mod admission;
+mod byte_class;
 mod checked;
 mod division;
 mod elapsed;
 mod flags;
 mod window;
+mod xml_chars;
+
+use std::ops::RangeInclusive;
 
 use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
@@ -28,6 +34,7 @@ pub use window::{
 
 pub use crate::{
     admission::AdmissionKernel,
+    byte_class::{ByteClass, ByteScanner, MAX_NAMED_BYTES},
     checked::{CheckedArithmetic, CheckedLane, CheckedLanes, LaneOperands, WidenedLane},
     division::{ConstantDivision, DivisionLane, SignedDivisor, UnsignedDivisor},
     elapsed::{
@@ -35,6 +42,7 @@ pub use crate::{
         latest_instant,
     },
     flags::{FlagPacker, WORD_LANES, lane_mask},
+    xml_chars::{XmlChars, XmlCharsError},
 };
 
 static LEVEL: OnceLock<Level> = OnceLock::new();
@@ -62,6 +70,14 @@ fn supported_levels() -> Vec<Level> {
         }
     }
     levels
+}
+
+/// The bytes a JSON string escapes: quotation marks, reverse solidi and controls below `0x20`.
+struct JsonEscape;
+
+impl ByteClass for JsonEscape {
+    const ORDINARY: RangeInclusive<u8> = 0x20..=u8::MAX;
+    const LISTED: &'static [u8] = b"\"\\";
 }
 
 /// A byte mask for each 64-byte block and a bit for each string whose offset range contains an
@@ -153,39 +169,16 @@ impl JsonEscapeClassification {
 
     #[inline(always)]
     fn classify_bytes<S: Simd>(simd: S, bytes: &[u8]) -> Vec<u64> {
-        simd.vectorize(
-            #[inline(always)]
-            || {
-                let mut masks = Vec::with_capacity(bytes.len().div_ceil(64));
-                for block in bytes.chunks(64) {
-                    masks.push(Self::classify_block(simd, block));
-                }
-                masks
-            },
-        )
-    }
-
-    #[inline(always)]
-    fn classify_block<S: Simd>(simd: S, block: &[u8]) -> u64 {
-        let quote = S::u8s::splat(simd, b'"');
-        let slash = S::u8s::splat(simd, b'\\');
-        let control_limit = S::u8s::splat(simd, 0x20);
-        let width = S::u8s::LEN;
-        let mut mask = 0_u64;
-        let mut position = 0;
-        while position + width <= block.len() {
-            let vector = S::u8s::from_slice(simd, &block[position..position + width]);
-            let escapes =
-                vector.simd_eq(quote) | vector.simd_eq(slash) | vector.simd_lt(control_limit);
-            mask |= escapes.to_bitmask() << position;
-            position += width;
+        let (blocks, tail) = bytes.as_chunks::<WORD_LANES>();
+        let mut masks = Vec::with_capacity(bytes.len().div_ceil(WORD_LANES));
+        for block in blocks {
+            masks.push(byte_class::block_mask::<S, JsonEscape>(simd, block));
         }
-        for (tail, &byte) in block[position..].iter().enumerate() {
-            if matches!(byte, b'"' | b'\\') || byte < 0x20 {
-                mask |= 1_u64 << (position + tail);
-            }
+        if !tail.is_empty() {
+            let start = bytes.len() - tail.len();
+            masks.push(byte_class::tail_mask::<S, JsonEscape>(simd, bytes, start));
         }
-        mask
+        masks
     }
 
     fn summarize_rows(offsets: &[usize], byte_masks: &[u64]) -> Vec<u64> {

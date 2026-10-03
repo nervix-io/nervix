@@ -169,7 +169,7 @@ impl CompiledCodecBatchEncoder<'_> {
                     MemberValue::Value(value),
                 )))
             }
-            CompiledWireSchema::Syslog => {
+            CompiledWireSchema::Syslog(_) => {
                 self.check_row(row_index)?;
                 let row = ArrowCodecRow::new(codec, self.batch, row_index);
                 let member = SyslogBatchMember::from_row(&row)?;
@@ -316,7 +316,7 @@ impl CompiledCodec {
                     .write_value_into(&value, output)
                     .map_err(|_| Report::new(BatchContainerError::Unwritable { encoding }))
             }
-            CompiledWireSchema::Syslog => {
+            CompiledWireSchema::Syslog(_) => {
                 let mut syslog_members = Vec::with_capacity(members.len());
                 for member in members.iter().copied() {
                     let MemberValue::Syslog(member) = &member.0 else {
@@ -346,7 +346,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => None,
+            | CompiledWireSchema::Syslog(_) => None,
         }
     }
 }

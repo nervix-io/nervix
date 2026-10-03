@@ -718,6 +718,30 @@ sequenceDiagram
   `SendError` with that error's server code and reason. The broker itself only closes the
   connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
   other message in flight on it.
+- **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
+  buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
+  frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
+  space. Framing moves a cursor through the buffer and copies each payload into the frame the
+  intake queue carries; the bytes before the cursor are discarded once, when the next read needs
+  room, so the bytes a read delivers are moved at most once however many frames they hold. The
+  decoder finds a space or LF with `memchr` and remembers how far it has examined the frame at the
+  cursor: an octet-counted frame keeps its parsed count until its payload is complete, and an
+  unterminated non-transparent frame is searched for its LF only in the bytes a read added. An
+  octet count, at most eleven bytes with its space, is read whole again when a read splits it. A
+  frame split anywhere across reads yields the same payload and the same typed framing failure as
+  one read holding the whole stream. [Syslog ingestion](./syslog.md#tcp) defines the framing rules.
+- **Syslog decoding, SQS bodies and OTEL identifiers.** The SYSLOG codec checks header fields and
+  scans `STRUCTURED-DATA` through byte classes of `nervix-simd-kernels`: the first byte outside
+  printable US-ASCII ends a header check, and two forward scans find the byte that ends each
+  `SD-ID` and `PARAM-NAME` and the `"`, `\` or `]` in each `PARAM-VALUE`, classifying each 64-byte
+  block at most once. The codec resolves its schema's fields against the fixed contract when it is
+  compiled, so decoding appends each column by a typed field rather than by reading its name. The
+  SQS sink takes a record's body in one pass that validates UTF-8 with `simdutf8` and classifies
+  characters against the XML 1.0 `Char` production over the same bytes while they are cached, and
+  turns the admitted bytes into the request body without validating them again; invalid UTF-8
+  outranks an excluded character, and either is a record rejection. Attribute values pass through
+  the same character classifier. The OTEL sink decodes trace and span identifiers with
+  `faster-hex` after checking their exact length.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
   prepares data files, and publishes a catalog update on its explicit commit cadence or maximum
   size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is

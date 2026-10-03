@@ -162,6 +162,11 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
+# beside the crate's doctests.
+test-simd-kernels *args:
+    cargo test --package nervix-simd-kernels -- {{ args }}
+
 # Focused columnar admission kernel and vocabulary tests.
 test-admission-kernels *args:
     cargo test --package nervix-simd-kernels --lib -- {{ args }}
@@ -178,6 +183,17 @@ bench-checked-lanes *args:
 # Compare constant division at every width with scalar reciprocal and checked lane loops.
 bench-constant-division *args:
     cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
+
+# Compare the byte-class scans and the XML character check with the scalar loops they replaced.
+bench-byte-classes *args:
+    cargo bench --package nervix-simd-kernels --bench byte_classes -- {{ args }}
+
+bench-byte-classes-x86-64-v3 *args:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench byte_classes -- {{ args }}
+
+# Measure RFC 6587 stream framing over a mebibyte of frames read in a connection's 8 KiB reads.
+bench-syslog-framing *args:
+    cargo bench --package nervix-connector-syslog --bench stream_framing --features benchmarks -- {{ args }}
 
 bench-constant-division-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
@@ -1137,6 +1153,8 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
+    cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test
+    cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
