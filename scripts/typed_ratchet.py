@@ -117,7 +117,7 @@ def load_configurations(root: pathlib.Path) -> list[Configuration]:
         )
         if not configuration.kinds or set(configuration.kinds) - {"lib", "bin"}:
             raise AnalysisError(f"unsupported targets in {configuration.name}")
-        modes = set(configuration.features) & {"loom", "shuttle", "turmoil"}
+        modes = set(configuration.features) & {"loom", "shuttle", "turmoil", "deloxide"}
         if len(modes) > 1:
             raise AnalysisError(f"incompatible modes in {configuration.name}")
         configurations.append(configuration)
@@ -395,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-dir", type=pathlib.Path, default=pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")))
     parser.add_argument("--configuration", action="append")
     parser.add_argument("--turmoil-child", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--fixture-mode", choices=["ordinary", "shuttle", "loom", "turmoil"])
+    parser.add_argument("--fixture-mode", choices=["ordinary", "shuttle", "loom", "turmoil", "deloxide"])
     parser.add_argument("--fresh", action="store_true", help="run Cargo even when complete evidence already exists")
     parser.add_argument("--recompile", action="store_true", help="discard authored artifacts in the isolated analysis build before running Cargo")
     parser.add_argument("--inventory", action="store_true", help="report acquisitions using ordinary warning levels; requires the full matrix for the diagnostic gate")

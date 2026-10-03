@@ -514,6 +514,15 @@ pub struct Args {
         help = "OpenTelemetry parent-based trace sample ratio used when trace export is enabled"
     )]
     pub otel_trace_sample_ratio: f64,
+    /// Where a diagnostic node records its deadlock evidence. Without it, a deadlock the detector
+    /// reports is described on standard error only. Exists only in a `deloxide` build.
+    #[cfg(feature = "deloxide")]
+    #[arg(
+        long,
+        env = "NERVIX_DEADLOCK_EVIDENCE",
+        help = "Existing directory a diagnostic node records its deadlock evidence in"
+    )]
+    pub deadlock_evidence: Option<PathBuf>,
     #[command(subcommand)]
     pub subcommand: Option<Command>,
 }

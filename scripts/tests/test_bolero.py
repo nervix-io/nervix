@@ -129,6 +129,9 @@ class InventoryTests(unittest.TestCase):
             "replica-progress",
             "replica-catch-up",
             "paced-simulation-records",
+            "deadlock-evidence",
+            "deadlock-evidence-malformed",
+            "deadlock-evidence-bounds",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -138,6 +141,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
+            "nervix-deadlock",
             "nervix-consensus",
             "nervix-lint-report",
             "nervix-server",
@@ -177,6 +181,10 @@ class InventoryTests(unittest.TestCase):
                 bolero.load_inventory(path)
             path.write_text(text.replace("features = []",
                                          'features = ["loom"]', 1))
+            with self.assertRaisesRegex(bolero.BoleroError, "modeled feature"):
+                bolero.load_inventory(path)
+            path.write_text(text.replace("features = []",
+                                         'features = ["deloxide"]', 1))
             with self.assertRaisesRegex(bolero.BoleroError, "modeled feature"):
                 bolero.load_inventory(path)
 

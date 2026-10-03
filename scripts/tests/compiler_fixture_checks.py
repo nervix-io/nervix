@@ -43,13 +43,16 @@ class CompilerFixtureTests(unittest.TestCase):
 
 class ModeledFixtureTests(unittest.TestCase):
     def test_selected_backends_preserve_authored_operations(self) -> None:
-        for mode, expected in (("shuttle", 24), ("loom", 25), ("turmoil", 25)):
+        for mode, expected in (("shuttle", 24), ("loom", 25), ("turmoil", 25), ("deloxide", 25)):
             with self.subTest(mode=mode):
                 report = json.loads((TARGET / f"typed-ratchet/fixture-{mode}.json").read_text())
                 self.assertTrue(report["complete"])
                 self.assertEqual(len(report["findings"]), expected)
                 findings = [finding for site in report["findings"] for values in site["configurations"].values() for finding in values]
                 self.assertEqual(sum("::borrowed_iteration" in finding["owner"] for finding in findings), 1)
+                if mode == "deloxide":
+                    self.assertTrue(any(finding["receiver"].startswith("nervix_primitives::sync::blocking::tracked") for finding in findings))
+                    self.assertFalse(any(finding["receiver"].startswith("lock_api") for finding in findings))
                 if mode == "shuttle":
                     self.assertTrue(any(finding["receiver"].startswith("shuttle_dashmap_impl") for finding in findings))
                     self.assertTrue(any(finding["receiver"].startswith("nervix_primitives::collections::scheduled") for finding in findings))

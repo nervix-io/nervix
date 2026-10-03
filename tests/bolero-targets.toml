@@ -114,6 +114,51 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
+domain_version = 1
+features = []
+id = "deadlock-evidence"
+invariant = "Every deadlock evidence a diagnostic process can record, with every finding variant at the edges of its bounds, decodes from its own encoding to the complete original value."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/tests.rs"
+test = "tests::bolero_deadlock_evidence_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/tests__bolero_malformed_deadlock_evidence_is_refused_or_round_trips/corpus"
+domain_version = 1
+features = []
+id = "deadlock-evidence-malformed"
+invariant = "Arbitrary bytes, bare or behind a valid evidence header, are refused with a typed error or decode to evidence within every bound that encodes back to itself."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/tests.rs"
+test = "tests::bolero_malformed_deadlock_evidence_is_refused_or_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_outside_its_bounds_is_refused/corpus"
+domain_version = 1
+features = []
+id = "deadlock-evidence-bounds"
+invariant = "A valid evidence encoding that breaks one bound, of findings, cycle threads, omitted threads, identities, lost findings or kept texts, is refused as out of bounds."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/tests.rs"
+test = "tests::bolero_deadlock_evidence_outside_its_bounds_is_refused"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/__fuzz__/tests__requests__bolero_processor_choice_request_round_trip/corpus"
 domain_version = 1
 features = []

@@ -150,6 +150,8 @@ mod client_consumers;
 mod client_producers;
 mod common;
 mod database_batches;
+#[cfg(feature = "deloxide")]
+mod deadlock_diagnostics;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
@@ -27527,6 +27529,10 @@ async fn then_node_eventually_reports_interconnect_status(
 
 fn main() {
     TestDependencies::configure_process_lifecycle();
+    // A diagnostic build tracks the blocking locks of every in-process node with one detector,
+    // installed once for the whole process before any tracked lock or runtime worker exists.
+    #[cfg(feature = "deloxide")]
+    start_deadlock_diagnostics();
     let parallelism = TestParallelism::detect();
     let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -27566,6 +27572,23 @@ fn main() {
 
     assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
+}
+
+/// The environment variable naming the directory a diagnostic scenario binary records its deadlock
+/// evidence in, the same one a diagnostic server reads.
+#[cfg(feature = "deloxide")]
+const DEADLOCK_EVIDENCE_ENV: &str = "NERVIX_DEADLOCK_EVIDENCE";
+
+/// Start this process's deadlock diagnostics, or end the process: its tracked locks refuse to run
+/// without them.
+#[cfg(feature = "deloxide")]
+fn start_deadlock_diagnostics() {
+    let directory =
+        std::env::var_os(DEADLOCK_EVIDENCE_ENV).map(nervix_deadlock::EvidenceDirectory::new);
+    if let Err(error) = nervix_deadlock::DiagnosticRun::start(directory) {
+        eprintln!("the scenario binary could not start its deadlock diagnostics: {error:?}");
+        std::process::exit(nervix_deadlock::DIAGNOSTIC_FAILURE_EXIT_STATUS);
+    }
 }
 
 /// Holds one dependency container open until the parent scenario kills this process.
@@ -27691,7 +27714,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_wire_tls_cost) and (not @client_conformance_toolchain)"
+             @client_wire_tls_cost) and (not @client_conformance_toolchain) and (not \
+             @deadlock_diagnostics)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );

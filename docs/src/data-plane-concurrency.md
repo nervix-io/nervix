@@ -822,8 +822,10 @@ records the runtime ownership review; source contracts and expectations are the 
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The matrix
 analyzes ordinary workspace libraries/binaries, the server's testing capability,
-server/interconnect/primitives under Shuttle, server/consensus/primitives under Loom, and
-interconnect/primitives under Turmoil. Turmoil's runtime cfg comes only from its just recipe,
+server/interconnect/primitives under Shuttle, server/consensus/primitives under Loom,
+interconnect/primitives under Turmoil, and the server's library and binary, the deadlock
+diagnostics and primitives under Deloxide, where every blocking acquisition resolves to a tracked
+adapter that the rules recognize as the lock it wraps. Turmoil's runtime cfg comes only from its just recipe,
 which preserves the parent's diagnostic mode. Compilation supplies no concurrency execution
 evidence. Test targets, browser analysis and undeclared feature combinations are not claimed.
 Mandatory source/manifest checks retain import provenance, inactive cfg and authored macro checks.
@@ -892,8 +894,9 @@ deletes the lock-backed form.
 
 Every execution-sensitive primitive Nervix uses comes from the `nervix-primitives` crate, which sits
 below the vocabulary and selects each family for the build's execution mode: ordinary execution,
-Shuttle, Loom or Turmoil. A build uses one mode across its whole dependency graph. Every package that
-owns a `shuttle`, `loom` or `turmoil` feature forwards it to the primitive crate, and Cargo unifies
+Shuttle, Loom, Turmoil or the Deloxide diagnostic mode. A build uses one mode across its whole
+dependency graph. Every package that owns a `shuttle`, `loom`, `turmoil` or `deloxide` feature
+forwards it to the primitive crate, and Cargo unifies
 that crate's features, so a vocabulary type, an engine and the server compiled into one test binary
 all use the same backend. Selection depends only on features, never on `cfg(test)`. Enabling two
 modes fails to compile with a diagnostic that names both, including when two different dependencies
@@ -908,7 +911,7 @@ the `native` capability requested for the browser's target fails with the bounda
 as its first error, because the libraries of every mode and of the native capability exist only for
 native targets and none of them is compiled there.
 
-| Family | Path | Ordinary and Turmoil | Shuttle | Loom |
+| Family | Path | Ordinary, Turmoil and Deloxide | Shuttle | Loom |
 | --- | --- | --- | --- | --- |
 | Atomic values, `Ordering`, `fence` | `sync::atomic` | The standard library's | Modeled: every operation is a scheduling point, and every ordering behaves as `SeqCst` | Modeled: explored under the C11 orderings Loom supports |
 | Shared ownership: Nervix-owned references, and the standard strong and weak references a weak reference or an external API such as Arrow or a Tokio semaphore requires | `sync::Arc`, `sync::StdArc`, `sync::StdWeak` | `triomphe`'s `Arc`, and the standard library's `Arc` and `Weak` | Real, with no scheduling point: no reference count is modeled | Real, outside every model |
@@ -916,7 +919,7 @@ native targets and none of them is compiled there.
 | `Notify` and the `watch` channel | `sync` | Tokio's | Modeled: the boundary's own, with Tokio's semantics and a scheduling point before every registration, notification and deciding read | Real: Tokio's, outside every model |
 | The waker registration of one waiting task | `sync::AtomicWaker` | The `futures` crate's | Opaque, with a scheduling point before and after each registration, wake and take | Real: the `futures` crate's, outside every model |
 | Cancellation tokens and their guards | `sync` | Tokio Util's | Modeled: Shuttle's token, wrapped for Tokio Util's clone identity and owned operations | Real: Tokio Util's, outside every model |
-| Blocking locks and their condition variable | `sync::blocking` | `parking_lot`'s | Modeled: Shuttle's `parking_lot` locks, and the boundary's condition variable over them | Real: `parking_lot`'s, outside every model |
+| Blocking locks and their condition variable | `sync::blocking` | `parking_lot`'s; under Deloxide, the boundary's tracked adapters over Deloxide's locks, described in [Diagnostic deadlock detection](#diagnostic-deadlock-detection) | Modeled: Shuttle's `parking_lot` locks, and the boundary's condition variable over them | Real: `parking_lot`'s, outside every model |
 | Barriers, `Once` and the synchronous channel | `sync::blocking` | The standard library's | Modeled: Shuttle's | Real: the standard library's, outside every model |
 | `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Real: the standard library's, outside every model |
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
@@ -936,6 +939,7 @@ native targets and none of them is compiled there.
 | A thread nothing joins | `thread::spawn_detached` | A named operating-system thread | A detached Shuttle task, abandoned when the model's main thread returns | Real: a named operating-system thread, outside every model |
 | Thread-local storage | `thread_local!` | The standard library's | Shuttle's, one per task | Modeled: Loom's, one per model thread |
 | The host's parallelism | `thread::available_parallelism` | The host's | The host's | The host's |
+| Deadlock findings, and the detector that reports them | `deadlock` | The findings in every mode; the detector only under Deloxide | The findings; no detector | The findings; no detector |
 | Real primitives outside every model | `unmodeled` | Real | Real | Real |
 
 Every exposed operation has one of three classifications in each mode. A **modeled** operation is
@@ -968,6 +972,12 @@ instants of `time` follow the host's simulated clock; and `task::spawn_cpu` runs
 as one task of the host's scheduler, so its synchronous body is one scheduling step. What the
 simulated hosts run, and what the simulation establishes, belong to
 [Deterministic interconnect simulation](./interconnect-simulation.md).
+
+Deloxide models nothing and replaces only the thread-blocking locks and their condition variable. A
+`deloxide` build runs every other family as ordinary execution does, and its tracked locks are real
+locks whose acquisitions a deadlock detector also observes, so it runs as a product does and claims
+no interleaving. What it reports, and what it cannot, belong to
+[Diagnostic deadlock detection](#diagnostic-deadlock-detection).
 
 The boundary supplies mechanisms and decides no policy. `net` never decides what a name means: a
 node resolves through its own resolver in `nervix-dns`, no mode but Turmoil's offers a lookup, and
@@ -1035,8 +1045,8 @@ spelled: a direct, renamed, grouped or glob import, a fully qualified path, an a
 crate, an imported `sync`, `time` or `net` module, or a path in a macro body or an inactive `cfg`
 branch. That covers shared ownership through `triomphe` or the standard library's `sync`, the
 `futures` crates' channels, locks, executors, waker registration, `select!` and abort handles,
-Tokio's `time` and `net` modules, Turmoil's `net`, and the standard library's `Instant` and sockets.
-Each rejection names the approved path; `tokio::net::lookup_host` and the `ToSocketAddrs` traits
+Tokio's `time` and `net` modules, Turmoil's `net`, Deloxide's locks and detector, and the standard
+library's `Instant` and sockets. Each rejection names the approved path; `tokio::net::lookup_host` and the `ToSocketAddrs` traits
 name the node's resolver instead. It also rejects an unmodeled use without its permission, a stale
 or misplaced permission, a dependency on a library whose family the boundary selects from any
 package but the boundary, a manifest entry that renames a governed crate, `task::spawn_cpu` in
@@ -1050,11 +1060,13 @@ crate. What a build wrote is not: Cargo tags each build directory it creates wit
 and the check reads nothing below a tagged directory, wherever it is nested. Turmoil is a runner as
 well as the network the boundary selects, so beside the boundary, a package whose harness drives a
 simulation may depend on it, only as an optional dependency its own `turmoil` feature enables.
+Deloxide is the boundary's alone: no other package depends on it, and the boundary depends on it only
+optionally, so no ordinary graph contains it.
 
 An execution mode is a feature of the boundary, never a global cfg: `--cfg loom` would reach every
 crate of a build, and Tokio and other dependencies read the same names. The check rejects a bare
-`loom`, `shuttle` or `turmoil` in a `cfg` predicate, and `--cfg loom`, `--cfg shuttle` or
-`--cfg turmoil` in any `justfile` recipe, Cargo configuration, workflow or build script. Tokio's
+`loom`, `shuttle`, `turmoil` or `deloxide` in a `cfg` predicate, and `--cfg` with any of those
+names in any `justfile` recipe, Cargo configuration, workflow or build script. Tokio's
 unstable runtime controls belong to the Turmoil build: the check rejects `--cfg tokio_unstable` in
 any `justfile` recipe but a Turmoil one, and in Cargo configuration, a workflow or a build script.
 
@@ -1093,22 +1105,134 @@ one invocation:
 | Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
 | Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, the Loom part of `just test-primitives-modeled` | Not collected: a model is evidence of an ordering, not of product coverage |
 | Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, the Turmoil part of `just test-primitives-modeled` | `just coverage-turmoil` |
+| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, the Deloxide parts of `just test-primitives-modeled` and `just test-primitives-compile` | Not collected: a diagnostic run is evidence of what its workload exercised, not of product coverage |
 
 `just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
 and of every package on its own, the way a consumer builds it, with default features and without
-them, and rejects Loom, Shuttle, a Shuttle wrapper or Turmoil in any of them, and an execution mode
-or the `test-util` capability enabled on the boundary. It also keeps the portable graphs portable:
+them, and rejects Loom, Shuttle, a Shuttle wrapper, Turmoil or Deloxide in any of them, and an
+execution mode, the diagnostic one included, or the `test-util` capability enabled on the boundary. It also keeps the portable graphs portable:
 the vocabulary crate, and the browser console and the wire crate for the browser's target, contain
 no async runtime or network library and never enable the boundary's `native` capability.
 `just validate-execution-mode-conflicts` requires the combined-mode diagnostic, including for modes
 two dependencies select separately, the boundary's own diagnostic for a mode or the native
-capability requested for the browser's target, and the product-binary diagnostic.
+capability requested for the browser's target and for the diagnostic mode requested without the
+native capability it tracks, and the product-binary diagnostics.
 
-A build that selects a mode is a test artifact. Every binary Nervix ships, the server, the CLI and
-the NSPL formatter, declares itself with `nervix_primitives::product_binary!`, which fails to
-compile in a build that selects a mode and names the binary and the mode, so no modeled binary can
-be built, let alone published. `just validate-primitive-boundary` requires the declaration in the
-crate root of every binary the release image's build compiles.
+A build that selects a modeled mode is a test artifact. Every binary Nervix ships, the server, the
+CLI and the NSPL formatter, declares itself with `nervix_primitives::product_binary!`, which fails to
+compile in a build that selects `loom`, `shuttle` or `turmoil` and names the binary and the mode, so
+no modeled binary can be built, let alone published. A `deloxide` build is a diagnostic artifact
+instead, which runs but is never released: it compiles only a binary that declares a diagnostic form,
+`product_binary!("nervix-server", diagnostic)`, and such a binary installs the deadlock detector at
+start-up. The server is the one binary that declares it; the CLI and the formatter fail to compile in
+that build, naming themselves. `just validate-primitive-boundary` requires the declaration, in either
+form, in the crate root of every binary the release image's build compiles, and the release image
+builds the ordinary server.
+
+### Diagnostic deadlock detection
+
+A diagnostic node is the server built in the `deloxide` mode, which `just build-diagnostic-server`
+builds in its own target directory so it never replaces the ordinary binary. Every thread-blocking
+lock and condition variable of `sync::blocking` is then an adapter over one of Deloxide's tracked
+locks. An acquisition that has to wait updates one process-wide wait-for graph, and when a waiting
+thread closes a cycle in it, every thread of the cycle waits for a lock another one holds and none
+can proceed: an active deadlock, which the detector reports while the cycle's threads are still
+blocked. A thread waiting for a lock it holds itself, including a writer whose own read guard is
+still held, is a cycle of one. Every other family of the build stays the ordinary library,
+untracked.
+
+**The tracked surface.** The adapters keep `parking_lot`'s interface where Deloxide keeps its
+meaning: `new`, `lock`, `try_lock`, `read`, `write`, `try_read`, `try_write`, `get_mut` and
+`into_inner`, `Default` and `From`, and guards that dereference to the value and format as it does.
+A lock is never poisoned, and `Debug` never waits: it tries the lock and prints `<locked>` while
+another thread holds it, as `parking_lot` does. Deloxide's locks hold sized values, are constructed
+at run time, and have no timed, upgradable, mapped, fair or reentrant acquisition, so those
+operations do not exist in this build, and code that uses one fails to compile there rather than
+run untracked. The condition variable has the surface the Shuttle adapter keeps, `wait` and
+`notify_all`. Deloxide's own notification returns no count, so the adapter keeps one: a waiter
+records the generation it waits in, under the condition variable's state lock, before it releases
+the caller's lock; every notification starts a new generation and returns how many waiters the one
+it ended held, and each of those returns from its wait, so the count is exactly the waiters that
+notification woke. A woken waiter reacquires the caller's lock as an ordinary tracked acquisition,
+so a waiter whose notifier still holds that lock while it waits for one the waiter holds is a
+reported cycle like any other. The compiler gate recognizes the adapters' acquisitions as the locks
+they wrap, so the same authored sites carry the same acquisition kinds in ordinary and diagnostic
+builds.
+
+**Installation.** The detector is process-wide and installs once, through
+`nervix_primitives::deadlock::install`, which the diagnostic run of `nervix-deadlock` calls. A
+diagnostic process starts its run after it has registered the signals it must not lose and before it
+constructs a tracked lock or starts a runtime worker: the server's `main` right after it registers
+its termination signals, and the scenario binary's right after it configures the lifecycle of its
+test dependencies. A tracked lock constructed in a process that has not installed the detector
+panics, naming the configuration failure, because Deloxide drops a cycle it detects while no
+callback is installed, so such a lock would deadlock unreported. A second installation is refused,
+so nothing resets the detector or configures it twice, and the in-process nodes of a scenario binary
+share the one detector their process installed. Deloxide prints a banner on standard output when it
+starts. Standard output carries a node's logs and the completion scripts it prints, so the
+installation runs with that descriptor pointed at `/dev/null`, before any other thread writes to it,
+and fails if the descriptor cannot be redirected or restored.
+
+**Reports.** Deloxide calls one callback, on a dispatcher thread of its own, through a channel it
+never bounds, and it catches a panic in that callback, so a callback cannot fail the process. The
+boundary's callback copies the report's thread and lock numbers into a bounded lock-free queue of
+64 reports, counts a report the full queue refuses, and wakes the boundary's findings thread; it
+takes no lock, writes no log and cannot panic. The findings thread correlates each report with the
+boundary's registry, which holds, under the detector's numbers, where every tracked lock was
+constructed, where every acquisition that waits is waiting, how it asked for the lock, and each
+thread's name, and it hands the resulting finding to the installer's sink. An acquisition that
+succeeds at once records nothing, because only one that waits can be part of a cycle, and the
+registry's maps are never locked across a tracked acquisition, so recording can never join the cycle
+it describes. Every record leaves with what it describes, a lock's when the lock is dropped, an
+acquisition's once it holds the lock and a thread's name when the thread exits, so the registry holds
+no more than the live locks and threads. A finding names threads and locks by their run-local numbers and source sites and
+never holds a lock's value; context the registry does not hold stays absent instead of guessed. A
+cycle describes at most 64 threads in cycle order and counts the rest, and every text keeps at most
+512 bytes, cut at a character boundary, with the length it was cut from. A sink that panics aborts
+the process, because a finding it failed to handle must not pass for no finding at all.
+
+**The diagnostic run.** The run installs the detector with a recorder as its sink, then records the
+process's evidence without findings in its evidence directory, an existing directory the server
+takes as `--deadlock-evidence` (`NERVIX_DEADLOCK_EVIDENCE`) and the scenario binary from
+`NERVIX_DEADLOCK_EVIDENCE`; without one, a finding is described on standard error only. The first
+finding ends the process. The recorder writes the finding's bounded description to the standard
+error descriptor directly, without the lock the standard library takes around it, records the
+finding over the process's evidence file, and exits without running exit handlers: with status `3`
+once the finding is recorded, or described when the run has no directory, and with status `4` when
+recording failed, findings were lost, or recording outlived its ten-second budget, which a deadline
+thread enforces. A deadlocked process cannot make progress on the work its blocked threads hold, so
+it ends rather than run on half stopped; graceful shutdown does not run, as for a
+[forced exit](./shutdown.md#exit-status). Evidence is one file per process, named after its
+identifier and the time its run started and replaced atomically, holding rkyv behind a header of its
+own: the magic `NVXDLEVD`, a record kind and a format version, checked before the payload is
+validated. Its round trip, its refusal of malformed bytes and its bounds are
+[registered properties](./property-testing-and-fuzzing.md).
+
+**What it does not cover.** The detector sees only the tracked thread-blocking locks. Tokio's async
+locks, channels and `Notify`, DashMap's shards, the locks inside every dependency, atomic protocols,
+and waits on the network or across the cluster are untracked, and a deadlock among them is not
+reported. A waiter no thread will ever notify blocks on the condition variable without a wait-for
+edge, so a lost notification is not a cycle. A cycle is reported once it forms, so a run that never
+takes a deadlocking interleaving reports nothing: the absence of a finding is no proof of deadlock
+freedom, and Shuttle, Loom, Turmoil, Chaos and Bolero evidence keep their own responsibilities.
+Every acquisition that waits, and every read, takes Deloxide's process-wide detector lock, so a
+diagnostic node is slower than an ordinary one; it is never a release product.
+
+**Verification.** `just test-deloxide` runs the deadlock probes of `nervix-deadlock`, each workload
+in a disposable process its probe bounds with a watchdog. Two threads locking two mutexes in
+opposite orders, a thread relocking its own mutex, a thread upgrading its own read lock, a writer
+and a reader across two locks, and a notified waiter whose notifier still holds its mutex must each
+be reported with every thread, lock kind, construction site and waiting acquisition, recorded, and
+end their process with status `3`. Threads taking two mutexes in one order, a condition handed
+between threads and readers sharing a lock must end cleanly, with evidence that records the process
+and no finding. A tracked lock before the run fails its process, a second run is refused, standard
+output never carries the banner, and a deadlock whose evidence cannot be recorded ends its process
+with status `4`. A child that never ends is killed by its watchdog and fails its probe. The command
+then runs the `@deadlock_diagnostics` scenarios, without retries, in a scenario binary built for the
+mode: in-process diagnostic nodes running a workload, and real diagnostic server processes that stop
+gracefully with evidence that records a running detector and no findings, each on one and three
+nodes. An invocation that executed no check fails the run, and so does a smoke whose scenarios did
+not all run and pass.
 
 ### Blocking work outside the executor
 
