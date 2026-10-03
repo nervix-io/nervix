@@ -1436,7 +1436,21 @@ impl ClusterHandle {
     pub(crate) async fn subscribe_live_node_states(
         &self,
     ) -> nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
-        self.chitchat.lock().await.live_nodes_watcher()
+        Self::live_node_changes_after(self.chitchat.lock().await.live_nodes_watcher())
+    }
+
+    /// A subscription to the live set, made from the receiver Chitchat hands out.
+    ///
+    /// Chitchat keeps one receiver and never marks what it published as seen, and a clone keeps
+    /// the version of the receiver it was cloned from, so the subscription marks the current set
+    /// seen: it reports the changes made after it, not every publication before it.
+    fn live_node_changes_after(
+        mut watcher: nervix_primitives::unmodeled::sync::watch::Receiver<
+            BTreeMap<ChitchatId, NodeState>,
+        >,
+    ) -> nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
+        watcher.mark_unchanged();
+        watcher
     }
 
     pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher {
@@ -2783,6 +2797,34 @@ mod tests {
             Some(PeerHealthObservationKind::CapacityExhausted)
         );
         assert!(capacity.unavailable_nodes().is_empty());
+    }
+
+    /// Chitchat keeps one receiver of its live set and never marks what it published as seen, and
+    /// hands out clones of it. A subscription taken after the set was published must still wait for
+    /// the next change rather than report the publications before it.
+    #[nervix_primitives::test]
+    async fn a_live_set_subscription_waits_for_a_change_made_after_it() {
+        let (live_set, chitchat_receiver) =
+            nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
+        live_set.send_replace(BTreeMap::new());
+        let (_peer_health_state, peer_health_state_receiver) =
+            watch::channel(PeerHealthStateSnapshot::default());
+        let mut watcher = ClusterStateWatcher {
+            live_node_states: ClusterHandle::live_node_changes_after(chitchat_receiver.clone()),
+            peer_health_state: PeerHealthStateWatcher::new(
+                peer_health_state_receiver,
+                Duration::from_secs(10),
+            ),
+        };
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        nervix_primitives::select! {
+            biased;
+            _ = &mut waiting => {
+                panic!("a fresh subscription to the live set reported a change made before it")
+            }
+            () = nervix_primitives::task::yield_now() => {}
+        }
     }
 
     /// A caller subscribes, reads the cluster state, and only then prepares its wait. A health
