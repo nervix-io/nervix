@@ -79,7 +79,7 @@ compilation with the production or Shuttle builds.
 | Normal | Default features | Tokio's operating-system sockets, which `nervix_primitives::net` selects, and the node's Hickory resolver | Tokio's blocking pool, through `task::spawn_cpu` | The ordinary primitives `nervix-primitives` re-exports: Tokio, Tokio Util, `parking_lot`, DashMap and the standard library's | Stable |
 | Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Tokio's, outside every model and never driven by the checks: a socket created inside a check fails it | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, timers, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
 | Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | Turmoil's simulated sockets and DNS table, which `nervix_primitives::net` selects | A task on the simulated host's scheduler, through `task::spawn_cpu`; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller, with timers that follow its clock | `--cfg tokio_unstable` |
-| Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
+| Turmoil with Shuttle, Loom or Deloxide | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes, so the deadlock detector never runs inside a simulation | | | |
 | Turmoil for the browser's target | The `turmoil` feature with `--target wasm32-unknown-unknown` | Fails to compile with the boundary's diagnostic that execution modes run on native targets only, before any simulator dependency is built | | | |
 
 Only the Turmoil recipes pass `--cfg tokio_unstable`, and `just validate-primitive-boundary` rejects
@@ -97,15 +97,15 @@ Validation keeps the modes apart:
 
 - `just validate-execution-mode-dependencies` fails when the normal dependency graph of the
   workspace, or of any package built on its own, with or without default features, contains
-  Turmoil, Loom, Shuttle or a Shuttle wrapper, or enables an execution mode on the primitive
-  boundary.
+  Turmoil, Loom, Shuttle, a Shuttle wrapper or Deloxide, or enables an execution mode on the
+  primitive boundary.
 - `just validate-primitive-boundary` rejects every path to Tokio's or Turmoil's sockets, Tokio's
   timers, or the standard library's monotonic clock and sockets outside `nervix-primitives`, and a
   `turmoil` dependency outside the boundary unless it is optional behind the package's own
   `turmoil` feature, as the interconnect's harness takes it. The simulated path therefore cannot
   name an operating-system socket or clock that would escape its host.
 - `just validate-execution-mode-conflicts` builds `nervix-primitives` with every pair of the
-  `loom`, `shuttle` and `turmoil` modes and with all three, and `nervix-interconnect` with Shuttle
+  `loom`, `shuttle`, `turmoil` and `deloxide` modes and with all four, and `nervix-interconnect` with Shuttle
   while its execution dependency selects Turmoil, and requires the diagnostic naming the modes in
   each. It builds each mode for the browser's target and requires the boundary's own diagnostic
   first, and builds the NSPL formatter, a product binary, with each mode and requires the

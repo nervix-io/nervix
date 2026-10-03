@@ -31,6 +31,9 @@ use super::{
 };
 
 const NODE_COUNT: usize = 3;
+/// The directory, under a diagnostic cluster's root, its members record deadlock evidence in.
+#[cfg(feature = "deloxide")]
+const DEADLOCK_EVIDENCE_DIRECTORY: &str = "deadlock-evidence";
 const CLUSTER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const MEMBERSHIP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -52,10 +55,48 @@ impl ServerProcessCluster {
         node_count: usize,
         options: &[ServerProcessOption],
     ) -> io::Result<Self> {
-        assert!(matches!(node_count, 1 | NODE_COUNT));
         let root = tempfile::Builder::new()
             .prefix("nervix-server-process-cluster-")
             .tempdir()?;
+        Self::start_in(root, node_count, options).await
+    }
+
+    /// Starts a one- or three-node cluster of diagnostic nodes, which a scenario binary built for
+    /// the `deloxide` mode spawns. Every member records its deadlock evidence in one directory
+    /// under the cluster's root, each in a file of its own.
+    #[cfg(feature = "deloxide")]
+    pub(crate) async fn start_diagnostic(node_count: usize) -> io::Result<Self> {
+        let root = tempfile::Builder::new()
+            .prefix("nervix-diagnostic-process-cluster-")
+            .tempdir()?;
+        let evidence = root.path().join(DEADLOCK_EVIDENCE_DIRECTORY);
+        std::fs::create_dir(&evidence)?;
+        let option = ServerProcessOption::Written {
+            option: "--deadlock-evidence".to_string(),
+            value: evidence.display().to_string(),
+        };
+        Self::start_in(root, node_count, &[option]).await
+    }
+
+    /// The directory every member of a cluster [`Self::start_diagnostic`] started records its
+    /// deadlock evidence in.
+    #[cfg(feature = "deloxide")]
+    pub(crate) fn deadlock_evidence(&self) -> nervix_deadlock::EvidenceDirectory {
+        nervix_deadlock::EvidenceDirectory::new(self._root.path().join(DEADLOCK_EVIDENCE_DIRECTORY))
+    }
+
+    /// What one member logged since its current launch.
+    #[cfg(feature = "deloxide")]
+    pub(crate) fn log(&self, node_id: &str) -> io::Result<String> {
+        self.member(node_id)?.log()
+    }
+
+    async fn start_in(
+        root: TempDir,
+        node_count: usize,
+        options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
+        assert!(matches!(node_count, 1 | NODE_COUNT));
         let certificate_authority = InterconnectTestCa::new(&root)?;
         let bootstrap_root = tempfile::Builder::new()
             .prefix("node-1-")
