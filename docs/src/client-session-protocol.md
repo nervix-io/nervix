@@ -1381,7 +1381,8 @@ close, or a close while the handle waits to be restored, finds nothing attached 
 Consumer and producer operations can share one session. A read awaiting output runs beside
 commands, producer submissions and their outcomes, clock observations, and consumer settlement.
 Each server attachment is bound to its session exchange. The Rust client keeps a desired consumer
-across reconnects and emitter relocation, reports an interruption before the next delivery, and
+across reconnects and emitter relocation, reports one interruption before the next delivery for each
+exchange it lost, whether the loss or a reply racing it is observed first, and
 opens a new attachment only while the generation, contract, schema and granted behavior still
 match its original open. Removed or changed endpoints require an explicit new consumer. A delivery
 reference remains bound to the exchange that delivered it; the client never sends its ACK on the

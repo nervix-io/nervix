@@ -34,6 +34,7 @@ name = "nervix-interconnect"
 
 [[package]]
 checks = [
+  "consumer::shuttle_tests::shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange",
   "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_interrupted_by_another_loss",
