@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from scripts.model_evidence import Evidence
+
 INVENTORY = Path("crates/model-harness/loom-inventory.toml")
 FAILURES = "loom-failures"
 QUALIFICATIONS = "loom-qualification"
@@ -266,6 +268,8 @@ def completion(output: str, invariant_id: str) -> Completion | None:
 
     for match in _COMPLETED.finditer(output):
         if match.group("id") == invariant_id:
+            if int(match.group("executions")) == 0:
+                return None
             return Completion(
                 executions=int(match.group("executions")), bounds=match.group("bounds")
             )
@@ -409,15 +413,34 @@ def checkpoint_environment(checkpoint: Path) -> dict[str, str]:
     }
 
 
-def run_models(commands: Commands, inventory: Inventory, target: Path, filter_text: str) -> int:
+def run_models(
+    commands: Commands, inventory: Inventory, target: Path, filter_text: str, report: Path | None = None
+) -> int:
+    evidence = Evidence(report, "loom", filter_text, INVENTORY)
     discoveries = [discover(commands, package) for package in inventory.packages()]
+    evidence.discover([
+        {
+            "package": discovery.package,
+            "test": test,
+            "invariant": registered.id if (registered := inventory.registered(discovery.package, test)) else None,
+            "ignored": test in discovery.ignored,
+        }
+        for discovery in discoveries for test in discovery.models
+    ])
     discovered = sum(len(discovery.models) for discovery in discoveries)
     selected = select(inventory, discoveries, filter_text)
+    evidence.select([
+        {"package": model.package, "test": model.test, "invariant": model.invariant.id}
+        for model in selected
+    ])
 
     executed = 0
     completed = 0
     failures: list[str] = []
     for model in selected:
+        check_evidence = evidence.begin({
+            "package": model.package, "test": model.test, "invariant": model.invariant.id
+        })
         directory = target / FAILURES / model.package / model.invariant.id
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
@@ -427,8 +450,18 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
         outcome = commands.run(command, environment=checkpoint_environment(checkpoint))
         executed += 1
         record = completion(outcome.output, model.invariant.id)
+        check_evidence["runs"] = [{
+            "name": "exploration",
+            "exit_status": outcome.status,
+            "completed": outcome.status == 0 and record is not None,
+            "executions": record.executions if record is not None else None,
+            "bounds": record.bounds if record is not None else exploration_bounds(outcome.output, model.invariant.id),
+        }]
+        evidence.write()
         if outcome.status == 0 and record is not None:
             completed += 1
+            check_evidence["completed"] = True
+            evidence.write()
             shutil.rmtree(directory)
             continue
         if outcome.status == 0:
@@ -450,7 +483,9 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
     for failure in failures:
         print(f"loom: {failure}", file=sys.stderr)
     if failures:
+        evidence.finish(1)
         return 1
+    evidence.finish(0)
     return 0
 
 
@@ -601,6 +636,7 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("filter", nargs="?", default="")
+    run_parser.add_argument("--report", type=Path)
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("failure", type=Path)
     subcommands.add_parser("qualify")
@@ -612,7 +648,7 @@ def main(
     try:
         inventory = parse_inventory((root / INVENTORY).read_text(encoding="utf-8"))
         if arguments.command == "run":
-            return run_models(commands, inventory, target, arguments.filter)
+            return run_models(commands, inventory, target, arguments.filter, arguments.report)
         if arguments.command == "replay":
             return replay(commands, inventory, arguments.failure.resolve())
         return qualify(commands, inventory, target)

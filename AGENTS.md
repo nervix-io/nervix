@@ -1121,19 +1121,27 @@ build and the existing tests, and nothing in it changes behavior.
   mode. `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with
   warnings denied, including each package `just test-shuttle` explores in test mode, so a warning
   in a check fails validation.
-- `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
-  natively in ordinary mode, `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
-  `nspl-completion-walk`, exactly as their recipes do but under LLVM source instrumentation, and
-  CI's extra-tests job runs them only
-  that way. Each run writes `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
+- `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
+  instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
+  `test-shuttle` and `test-loom` runners, and each `test-primitives-<mode>` conformance recipe.
+  `test-primitives` selects every native conformance mode. CI runs these checks through collection;
+  primitive compile/browser checks, replay qualification and Loom weakening qualification retain
+  independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
+  `executions.jsonl` and `export.log` to a
   fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
   beside a `complete` completion record; a failed, interrupted or incomplete collection never is
   one, and it keeps its evidence. Prerequisites build outside the instrumentation, and the parts
-  of a check that compile, target the browser or run a model checker stay uninstrumented, as do
+  of a check that compile or target the browser stay uninstrumented, as do
   Miri, mutation testing and the Loom weakening qualification. An extra check that starts
   executing Nervix code natively joins the producer inventory in `scripts/native_coverage.py`, with
   its justfile recipe composed as prepare, instrumented and finish parts. `just test-native-coverage`
   tests the collector.
+  Model producers also retain `models.json` with canonical discovery, selection, execution and
+  completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
+  bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
+  instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
+  CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
+  to the invariant.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

@@ -3,11 +3,12 @@
 """Collect LLVM source coverage from the extra checks during the runs CI already makes of them.
 
 `just coverage-native-extras [producer ...]` runs `run`. A producer is an extra check whose recipe
-executes Nervix code natively in ordinary mode: `test-typed-ratchet` qualifies compiler-resolved
+executes Nervix code natively in its declared mode: `test-typed-ratchet` qualifies compiler-resolved
 source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
-walks the NSPL completion graph. Without names every producer runs, in that order. A producer runs
+walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
+and `test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
 extra-tests job runs those checks through this command instead of beside it.
 
@@ -16,9 +17,10 @@ those parts. The prepare recipes, such as the web console the server benches lin
 ordinary environment. The instrumented recipe then runs in the environment that
 `cargo llvm-cov show-env --sh --no-rustc-wrapper` describes: every crate is built with source
 coverage instrumentation, the configured compiler wrapper stays in place so kache still serves the
-build, and the build goes to `<target>/native-coverage-build`, so ordinary builds are not
+build, and ordinary instrumentation goes to `<target>/native-coverage-build`; other modes use
+`<target>/native-coverage-build-<mode>`, so ordinary builds are not
 invalidated. The finish recipes complete the check outside instrumentation: compile-only checks,
-browser builds and modeled modes, whose coverage this command does not claim.
+browser builds. Primitive compile checks and Loom weakening qualification run independently.
 When a producer selects a compiler, its prepare recipes install that toolchain before the
 collector resolves the compiler and validates its LLVM tools. Its attempt directory uses the
 requested toolchain's name, and the record gains the installed compiler identity after preparation.
@@ -54,6 +56,11 @@ It reads `running` from the moment the directory exists, so an interrupted colle
 `failed` or `interrupted` otherwise, naming the stage. An attempt keeps its raw profiles, whatever
 its verdict, as the evidence the report was made from; `export.log` holds the LLVM tools' own
 diagnostics, each bounded.
+
+The model runners write `models.json` with the canonical discovery, selection, executions and
+completions. Shuttle retains both exploration and nondeterminism records, and Loom retains each
+InvariantId, execution count and bounds. The collector requires complete matching evidence before
+export; qualification never supplies current-source counters.
 """
 
 from __future__ import annotations
@@ -66,6 +73,7 @@ import json
 import os
 import shlex
 import signal
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -157,9 +165,13 @@ class Producer:
     instrumented: str
     finish: tuple[str, ...]
     toolchain: str | None = None
+    filterable: bool = False
 
-    def rerun(self) -> str:
-        return f"just coverage-native-extras {self.name}"
+    def rerun(self, filter_text: str = "") -> str:
+        command = f"just coverage-native-extras {self.name}"
+        if filter_text:
+            command += f" --filter {shlex.quote(filter_text)}"
+        return command
 
     def recipes(self) -> list[str]:
         return [*self.prepare, self.instrumented, *self.finish]
@@ -182,11 +194,18 @@ PRODUCERS: tuple[Producer, ...] = (
         finish=(),
     ),
     Producer(
-        name="test-primitives",
+        name="test-primitives-ordinary",
         mode="ordinary",
         prepare=(),
         instrumented="test-primitives-ordinary",
-        finish=("test-primitives-modeled", "test-primitives-compile"),
+        finish=(),
+    ),
+    *(
+        Producer(
+            name=f"test-primitives-{mode}", mode=mode, prepare=(),
+            instrumented=f"test-primitives-{mode}", finish=(),
+        )
+        for mode in ("shuttle", "loom", "turmoil", "deloxide")
     ),
     Producer(
         name="nspl-completion-walk",
@@ -194,6 +213,15 @@ PRODUCERS: tuple[Producer, ...] = (
         prepare=(),
         instrumented="nspl-completion-walk",
         finish=(),
+    ),
+    Producer(
+        name="test-shuttle", mode="shuttle",
+        prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime"),
+        instrumented="test-shuttle-checks", finish=(), filterable=True,
+    ),
+    Producer(
+        name="test-loom", mode="loom", prepare=("build-web-console",),
+        instrumented="test-loom-models", finish=(), filterable=True,
     ),
 )
 
@@ -242,6 +270,11 @@ def validate_composition(producer: Producer, recipes: Mapping[str, object]) -> N
     check = declared[producer.name]
     composition = dependency_names(check)
     expected = producer.recipes()
+    if producer.filterable:
+        expected[expected.index(producer.instrumented)] += " with arguments"
+        dependency = check["dependencies"][-1]
+        if dependency.get("arguments") != [["variable", "filter"]]:
+            raise RunnerError(f"`{producer.name}` must forward its filter to `{producer.instrumented}`")
     if composition != expected:
         raise RunnerError(
             f"`just {producer.name}` must consist of exactly {', '.join(expected)} for its "
@@ -260,12 +293,15 @@ def select_producers(names: Sequence[str], producers: Sequence[Producer]) -> lis
     known = {producer.name: producer for producer in producers}
     selected: list[Producer] = []
     for name in names:
-        producer = known.get(name)
-        if producer is None:
+        matching = [producer for producer in producers if name == "test-primitives" and producer.name.startswith("test-primitives-")]
+        if not matching and name in known:
+            matching = [known[name]]
+        if not matching:
             raise RunnerError(f"no producer `{name}`; the producers are {', '.join(known)}")
-        if producer in selected:
-            raise RunnerError(f"`{name}` is named twice")
-        selected.append(producer)
+        for producer in matching:
+            if producer in selected:
+                raise RunnerError(f"`{producer.name}` is named twice")
+            selected.append(producer)
     return selected
 
 
@@ -485,9 +521,11 @@ class Workspace:
 
     root: Path
     target: Path
+    mode: str = "ordinary"
 
     def build(self) -> Path:
-        return self.target / BUILD_DIRECTORY
+        name = BUILD_DIRECTORY if self.mode == "ordinary" else f"{BUILD_DIRECTORY}-{self.mode}"
+        return self.target / name
 
     def new_attempt(self, producer: Producer, toolchain: str, name: str) -> Path:
         directory = (
@@ -1206,10 +1244,21 @@ class Collected:
     record: Record
 
 
-def collect(commands: Commands, context: Context, producer: Producer) -> Collected:
+def collect(
+    commands: Commands, context: Context, producer: Producer, filter_text: str = ""
+) -> Collected:
     """Run one producer's check with its native executions collected, and write its record."""
 
-    workspace = context.workspace
+    # Cargo's standalone `exec` runner also runs from fixture workspaces with no Python package.
+    # Only collection needs the canonical model report reader.
+    from scripts.model_evidence import (
+        EvidenceError,
+        FILENAME as MODEL_REPORT,
+        VARIABLE as MODEL_VARIABLE,
+        read_complete,
+    )
+
+    workspace = Workspace(context.workspace.root, context.workspace.target, mode=producer.mode)
     toolchain = context.toolchain
     environment = dict(context.environment)
     label = f"rust-{producer.toolchain}" if producer.toolchain else toolchain.label()
@@ -1220,7 +1269,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
             "producer": producer.name,
             "mode": producer.mode,
             "verdict": str(Verdict.RUNNING),
-            "rerun": producer.rerun(),
+            "rerun": producer.rerun(filter_text),
             "revision": context.revision.describe(),
             "run": context.run.describe(),
             "attempt": attempt.name,
@@ -1255,18 +1304,27 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
         instrumented = instrumentation(
             commands, workspace, toolchain, attempt, environment
         )
+        if producer.filterable:
+            instrumented.environment[MODEL_VARIABLE] = str(attempt / MODEL_REPORT)
+            record.content["filter"] = filter_text
         record.content["instrumentation"] = instrumented.describe(workspace)
         record.write()
 
         stage = Stage.RUN
         with workspace.build_lock():
+            arguments = ["just", producer.instrumented]
+            if producer.filterable:
+                arguments.append(filter_text)
             status = commands.stream(
-                ["just", producer.instrumented], environment=instrumented.environment
+                arguments, environment=instrumented.environment
             )
             if status != 0:
                 detail = f"`just {producer.instrumented}` exited with status {status}"
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
                 return Collected(status, attempt, record)
+            if producer.filterable:
+                record.content["models"] = read_complete(attempt / MODEL_REPORT, producer.mode, filter_text)
+                record.write()
             stage = Stage.EXPORT
             exported = export(commands, workspace, toolchain, context.packages, attempt)
         record.content["selection"] = exported.selection.describe(workspace)
@@ -1290,7 +1348,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
         detail = f"interrupted by {interruption}"
         record.fail(Verdict.INTERRUPTED, stage, detail, context.clock())
         return Collected(128 + interruption.number, attempt, record)
-    except RunnerError as error:
+    except (RunnerError, EvidenceError) as error:
         record.fail(Verdict.FAILED, stage, str(error), context.clock())
         return Collected(1, attempt, record)
     record.conclude(Verdict.COMPLETE, context.clock())
@@ -1313,7 +1371,7 @@ def summary(workspace: Workspace, producer: Producer, collected: Collected) -> l
     if (collected.attempt / REPORT).is_file():
         lines.append(f"  report: {workspace.display(collected.attempt / REPORT)}")
     lines.append(f"  record: {workspace.display(collected.record.path)}")
-    lines.append(f"  rerun:  {producer.rerun()}")
+    lines.append(f"  rerun:  {content['rerun']}")
     return lines
 
 
@@ -1349,8 +1407,14 @@ def run(
     names: Sequence[str],
     producers: Sequence[Producer],
     environment: Mapping[str, str],
+    filter_text: str = "",
+    output: Path | None = None,
 ) -> int:
     selected = select_producers(names, producers)
+    if filter_text and any(not producer.filterable for producer in selected):
+        raise RunnerError("a filter is supported only by the canonical Shuttle and Loom producers")
+    if output is not None and len(selected) != 1:
+        raise RunnerError("an output path requires exactly one producer; each mode keeps its own report")
     dumped = commands.capture(["just", "--dump", "--dump-format", "json"])
     if dumped.status != 0:
         raise RunnerError(f"just could not describe the justfile: {dumped.stderr.strip()}")
@@ -1367,12 +1431,15 @@ def run(
         environment=environment,
     )
     for producer in selected:
-        collected = collect(commands, context, producer)
+        collected = collect(commands, context, producer, filter_text)
         lines = summary(workspace, producer, collected)
         print("\n".join(lines), flush=True)
         publish_step_summary(environment, lines)
         if collected.status != 0:
             return collected.status
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(collected.attempt / REPORT, output)
     return 0
 
 
@@ -1402,6 +1469,8 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run", help="collect the named producers, or all of them")
     run_parser.add_argument("producers", nargs="*", metavar="producer", help=f"one of {names}")
+    run_parser.add_argument("--filter", default="", help="canonical Shuttle test or Loom invariant filter")
+    run_parser.add_argument("--output", type=Path, help="copy one complete report to this path")
     subcommands.add_parser("exec", help="Cargo's runner inside `run`; not for direct use")
     parsed = parser.parse_args(arguments)
 
@@ -1410,7 +1479,7 @@ def main(
     commands = commands_for(root)
     try:
         with interruptible():
-            return run(commands, workspace, parsed.producers, producers, current)
+            return run(commands, workspace, parsed.producers, producers, current, parsed.filter, parsed.output)
     except RunnerError as error:
         print(f"native coverage: {error}", file=sys.stderr)
         return 1
