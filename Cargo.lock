@@ -7378,6 +7378,7 @@ name = "nervix-model-harness"
 version = "0.1.0-dev"
 dependencies = [
  "loom",
+ "meticulous",
  "nervix-primitives",
  "shuttle",
  "tracing",

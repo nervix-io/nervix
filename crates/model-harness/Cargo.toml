@@ -12,12 +12,15 @@ workspace = true
 [features]
 default = []
 # Runs Loom models, and selects Loom's primitives for the whole graph through nervix-primitives.
-# A crate with Loom models forwards its own `loom` feature here.
+# A crate with Loom models forwards its own `loom` feature here. The models run on the boundary's
+# threads, which the native capability provides.
 loom = [
   "dep:loom",
+  "dep:meticulous",
   "dep:tracing",
   "dep:tracing-subscriber",
   "nervix-primitives/loom",
+  "nervix-primitives/native",
 ]
 # Runs Shuttle checks, and selects Shuttle's primitives for the whole graph through
 # nervix-primitives. A crate with Shuttle checks forwards its own `shuttle` feature here.
@@ -26,6 +29,7 @@ shuttle = ["dep:shuttle", "nervix-primitives/shuttle"]
 [dependencies]
 # The checkpoint records the schedule a failed execution took, so the failure can be replayed.
 loom = { workspace = true, features = ["checkpoint"], optional = true }
+meticulous = { workspace = true, optional = true }
 nervix-primitives = { workspace = true }
 shuttle = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }

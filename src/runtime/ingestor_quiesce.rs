@@ -805,6 +805,11 @@ impl IngestorQuiesceControl {
         self.cause().is_some()
     }
 
+    /// Whether memory pressure is among the reasons engaged, whichever reason takes precedence.
+    fn paused_by_memory_pressure(&self) -> bool {
+        self.published.load().reasons.memory_pressure
+    }
+
     fn mode(&self) -> IngestQuiesceMode {
         self.published.load().modes.active.clone()
     }
@@ -1187,10 +1192,10 @@ impl Runtime {
             self.inner.metrics.clone(),
             metric_labels,
         ));
-        if self.ingestors_paused_for_memory_pressure() {
-            control.engage(IngestorQuiesceCause::MemoryPressure);
-        }
         self.inner.ingestor_quiescence.insert(key, control.clone());
+        // Read after the control is visible, and under the lock a pause marks itself under, so a
+        // memory-pressure pause either engages this control or is observed here.
+        self.inner.memory_pressure.engage_if_paused(&control);
         // Read after the control is visible, so a local intake boundary closing concurrently
         // either engages this control itself or is observed here.
         if self.local_intake_is_closed() {
@@ -1412,30 +1417,26 @@ impl Runtime {
         }
     }
 
+    /// Pauses every ingestor this node registered, including those still starting, which register
+    /// their quiesce control before they run. Returns how many it paused.
     pub(crate) async fn pause_ingestors_for_memory_pressure(&self) -> usize {
-        self.inner
-            .ingestors_paused_for_memory_pressure
-            .store(true, Ordering::SeqCst);
-        let ingestors = self
+        let registered = self
             .inner
-            .ingestors
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
-
-        let mut quiesced = 0;
-        for key in ingestors {
+            .memory_pressure
+            .pause(&self.inner.ingestor_quiescence);
+        let mut quiesced = 0_usize;
+        for RegisteredQuiesceControl { key, control } in registered {
             nervix_primitives::task::consume_budget().await;
-            if self
-                .engage_ingestor_quiesce(
-                    &key.domain,
-                    &IngestorName::from(key.identifier()),
-                    IngestorQuiesceCause::MemoryPressure,
-                )
-                .is_some()
-            {
-                quiesced += 1;
-            }
+            control.engage(IngestorQuiesceCause::MemoryPressure);
+            info!(
+                domain = key.domain.as_str(),
+                ingestor = key.identifier().as_str(),
+                cause = IngestorQuiesceCause::MemoryPressure.as_str(),
+                "ingestor entered quiesce"
+            );
+            quiesced = quiesced
+                .checked_add(1)
+                .assured("a node holds fewer than usize::MAX ingestors");
         }
         quiesced
     }
@@ -1443,20 +1444,11 @@ impl Runtime {
     pub(crate) async fn resume_one_ingestor_after_memory_pressure(
         &self,
     ) -> Result<bool, RuntimeError> {
-        let mut keys = self
+        let Some(key) = self
             .inner
-            .ingestor_quiescence
-            .iter()
-            .filter_map(|entry| {
-                (entry.value().cause() == Some(IngestorQuiesceCause::MemoryPressure))
-                    .then(|| entry.key().clone())
-            })
-            .collect::<Vec<_>>();
-        keys.sort();
-        let Some(key) = keys.first() else {
-            self.inner
-                .ingestors_paused_for_memory_pressure
-                .store(false, Ordering::SeqCst);
+            .memory_pressure
+            .next_to_resume(&self.inner.ingestor_quiescence)
+        else {
             return Ok(false);
         };
         self.release_ingestor_quiesce(
@@ -1473,9 +1465,81 @@ impl Runtime {
     }
 
     pub(crate) fn ingestors_paused_for_memory_pressure(&self) -> bool {
-        self.inner
-            .ingestors_paused_for_memory_pressure
-            .load(Ordering::SeqCst)
+        self.inner.memory_pressure.is_paused()
+    }
+}
+
+/// Whether memory pressure pauses this node's ingestors, and the one lock every decision about it
+/// takes.
+///
+/// A starting ingestor registers its quiesce control before it reads the pause under the lock. A
+/// pause marks itself and collects every registered control under the lock, and resuming clears it
+/// under the lock only once no registered control is still paused by it. A starting ingestor is
+/// therefore among the controls a pause engages, or engages itself because it observes the pause,
+/// or observes no pause; and no control is left paused by memory pressure once the pause is clear.
+#[derive(Debug, Default)]
+pub(in crate::runtime) struct MemoryPressurePause {
+    paused: nervix_primitives::sync::blocking::Mutex<bool>,
+}
+
+/// The quiesce controls of a node's ingestors, as the runtime registers them.
+type IngestorQuiesceControls = DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>;
+
+/// One registered quiesce control, and the ingestor it belongs to.
+struct RegisteredQuiesceControl {
+    key: DomainNodeRef,
+    control: Arc<IngestorQuiesceControl>,
+}
+
+impl MemoryPressurePause {
+    fn is_paused(&self) -> bool {
+        *self.paused.lock()
+    }
+
+    /// Engages `control`, which its ingestor has just registered, when memory pressure pauses
+    /// ingestors.
+    fn engage_if_paused(&self, control: &IngestorQuiesceControl) {
+        let paused = self.paused.lock();
+        if *paused {
+            control.engage(IngestorQuiesceCause::MemoryPressure);
+        }
+    }
+
+    /// Marks ingestors paused, and returns every control registered by then, which the caller
+    /// engages.
+    fn pause(&self, controls: &IngestorQuiesceControls) -> Vec<RegisteredQuiesceControl> {
+        let mut paused = self.paused.lock();
+        *paused = true;
+        controls
+            .iter()
+            .map(|entry| RegisteredQuiesceControl {
+                key: entry.key().clone(),
+                control: entry.value().clone(),
+            })
+            .collect()
+    }
+
+    /// The registered ingestor to resume next, the first in key order that memory pressure still
+    /// pauses, or `None` once it pauses none, which clears the pause.
+    fn next_to_resume(&self, controls: &IngestorQuiesceControls) -> Option<DomainNodeRef> {
+        let mut paused = self.paused.lock();
+        let mut next: Option<DomainNodeRef> = None;
+        for entry in controls.iter() {
+            if !entry.value().paused_by_memory_pressure() {
+                continue;
+            }
+            let earlier = match &next {
+                Some(current) => entry.key() < current,
+                None => true,
+            };
+            if earlier {
+                next = Some(entry.key().clone());
+            }
+        }
+        if next.is_none() {
+            *paused = false;
+        }
+        next
     }
 }
 
@@ -2057,6 +2121,30 @@ mod tests {
             IngestorQuiesceIntake::Dispatch(_)
         ));
         assert_eq!(control.counters().dropped_total, 1);
+    }
+
+    /// An ingestor registers its quiesce control before it starts running, so memory pressure that
+    /// engages while it starts must still pause it.
+    #[nervix_primitives::test]
+    async fn memory_pressure_pauses_an_ingestor_that_is_still_starting() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("source");
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let control =
+            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
+        runtime
+            .inner
+            .ingestor_quiescence
+            .insert(key.clone(), control.clone());
+
+        runtime.pause_ingestors_for_memory_pressure().await;
+
+        assert_eq!(
+            control.cause(),
+            Some(IngestorQuiesceCause::MemoryPressure),
+            "an ingestor still starting when memory pressure paused ingestors runs unpaused"
+        );
     }
 
     #[nervix_primitives::test]

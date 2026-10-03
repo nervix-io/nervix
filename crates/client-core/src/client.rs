@@ -45,8 +45,8 @@ use crate::{
     outcome::{CommandOutcome, Routing},
     restoration::Restoration,
     subscriptions::{
-        Cancellation, DeleteAttempt, DeletionResolution, DeletionTarget, RestoreAttempt,
-        SubscriptionContract, SubscriptionLifecycle,
+        Cancellation, DeleteAttempt, DeletionResolution, DeletionTarget, DesiredSubscriptionEvent,
+        RestoreAttempt, SubscriptionContract, SubscriptionLifecycle,
     },
 };
 
@@ -1200,11 +1200,11 @@ impl Client {
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if let Some(event) = self.inner.events.sinks.desired.take_event() {
-                return Ok(event);
-            }
-            let desired = &self.inner.events.sinks.desired;
-            let mut desired_changed = desired.watch();
+            let mut desired_changed = match self.inner.events.sinks.desired.next_event_or_changes()
+            {
+                DesiredSubscriptionEvent::Event(event) => return Ok(event),
+                DesiredSubscriptionEvent::Waiting(changes) => changes,
+            };
             let result = nervix_primitives::select! {
                 result = self.inner.events.sinks.subscriptions.next() => result,
                 changed = desired_changed.changed() => {
@@ -1470,7 +1470,7 @@ impl Client {
 
     /// The channel the current exchange runs on.
     pub(crate) async fn current_channel(&self) -> Channel {
-        self.inner.exchange.lock().await.requests().channel.clone()
+        self.inner.exchange.lock().await.channel.clone()
     }
 
     /// Whether a routed request may be sent again after `attempt`, counting from zero.

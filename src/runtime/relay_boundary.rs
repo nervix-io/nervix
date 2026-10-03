@@ -223,7 +223,7 @@ pub(super) struct RelayConsumerFanout {
     branch_dispatch_gates: Arc<BranchRelayDispatchGates>,
     pub(super) owner_buffer: ArcSwapOption<RelayOwnerBuffer>,
     pub(super) owner_capacity: AtomicUsize,
-    pub(super) owner_pending_batches: Arc<AtomicUsize>,
+    pub(super) transit: Arc<RelayTransit>,
     pub(super) subscriptions: RelaySubscriptions,
     pub(super) attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     pub(super) detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
@@ -302,45 +302,6 @@ impl RelayOwnerBuffer {
 
     fn observe_length(&self) {
         self.metrics.observe_buffer(self.len(), self.capacity());
-    }
-}
-
-pub(super) struct RelayOwnerAdmission {
-    pub(super) pending_batches: Arc<AtomicUsize>,
-    pub(super) accepted: bool,
-}
-
-impl RelayOwnerAdmission {
-    pub(super) fn new(pending_batches: Arc<AtomicUsize>) -> Self {
-        pending_batches.fetch_add(1, Ordering::AcqRel);
-        Self {
-            pending_batches,
-            accepted: false,
-        }
-    }
-
-    pub(super) fn accept(mut self) {
-        self.accepted = true;
-    }
-}
-
-impl Drop for RelayOwnerAdmission {
-    fn drop(&mut self) {
-        if !self.accepted {
-            let previous = self.pending_batches.fetch_sub(1, Ordering::AcqRel);
-            debug_assert!(previous > 0, "relay owner pending batch count underflow");
-        }
-    }
-}
-
-pub(super) struct RelayOwnerBatchCompletion {
-    pub(super) pending_batches: Arc<AtomicUsize>,
-}
-
-impl Drop for RelayOwnerBatchCompletion {
-    fn drop(&mut self) {
-        let previous = self.pending_batches.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "relay owner pending batch count underflow");
     }
 }
 
@@ -561,7 +522,7 @@ impl RelayConsumerFanout {
             }),
             owner_buffer: ArcSwapOption::empty(),
             owner_capacity: AtomicUsize::new(capacity.get()),
-            owner_pending_batches: Arc::new(AtomicUsize::new(0)),
+            transit: Arc::new(RelayTransit::default()),
             subscriptions: RelaySubscriptions::new(),
             attached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
             detached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
@@ -610,13 +571,11 @@ impl RelayConsumerFanout {
     }
 
     pub(super) fn begin_owner_admission(&self) -> RelayOwnerAdmission {
-        RelayOwnerAdmission::new(self.owner_pending_batches.clone())
+        RelayOwnerAdmission::new(self.transit.clone())
     }
 
     pub(super) fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
-        RelayOwnerBatchCompletion {
-            pending_batches: self.owner_pending_batches.clone(),
-        }
+        RelayOwnerBatchCompletion::new(self.transit.clone())
     }
 
     pub(super) fn runtime_consumer_receiver_for_mode(
@@ -716,8 +675,8 @@ impl RelayConsumerFanout {
     }
 
     pub(super) fn outstanding_work_len(&self) -> usize {
-        self.owner_pending_batches
-            .load(Ordering::Acquire)
+        self.transit
+            .held()
             .checked_add(self.runtime_consumer_buffer_len())
             .assured("both counts total batches this node already holds in memory")
     }
@@ -746,9 +705,13 @@ impl RelayConsumerFanout {
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        let attached_receiver_count = self
+        // The shares reserved for the attached consumers and the deliveries to them come from the
+        // same registration snapshot, so a consumer that registers meanwhile never receives the
+        // batch without a share of its own.
+        let attached = self
             .runtime_consumer_broadcast_for_mode(AckMode::Attached)
-            .receiver_count();
+            .publication();
+        let attached_receiver_count = attached.receivers();
         if attached_runtime_consumer_count > 0
             && attached_receiver_count < attached_runtime_consumer_count
         {
@@ -771,12 +734,8 @@ impl RelayConsumerFanout {
             return Err(Box::new(batch.clone()));
         }
         if attached_receiver_count > 0 {
-            let attached = batch.attached_for_receivers(attached_receiver_count);
-            if let Err(error) = self
-                .runtime_consumer_broadcast_for_mode(AckMode::Attached)
-                .broadcast(attached)
-                .await
-            {
+            let shares = batch.attached_for_receivers(attached_receiver_count);
+            if let Err(error) = attached.broadcast(shares).await {
                 let failed = error.batch;
                 for ack in failed.acks.iter() {
                     ack.no_ack("runtime consumer unavailable for attached delivery");
@@ -918,6 +877,14 @@ impl RelayBoundaryFanout {
         match self {
             Self::Direct(fanout) => fanout.begin_owner_admission(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.begin_owner_admission(),
+        }
+    }
+
+    /// The batches this relay holds in transit on this node.
+    pub(super) fn transit(&self) -> &Arc<RelayTransit> {
+        match self {
+            Self::Direct(fanout) => &fanout.transit,
+            Self::BranchCollapse(branch_collapse) => &branch_collapse.fanout.transit,
         }
     }
 
@@ -1636,6 +1603,9 @@ impl RelayBoundaryServices {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
+        // The routed batch enters this relay on this node here, and the relay holds it until its
+        // consumers here have it.
+        let _routed = RelayRoutedAdmission::new(self.fanout.transit());
         self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, batch)
             .await
     }

@@ -41,7 +41,6 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     net::{TcpListener, TcpStream},
-    publication::ArcSwap,
     sync::{
         Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -53,6 +52,10 @@ use nervix_primitives::{
 use strum::EnumCount as _;
 use tracing::{debug, warn};
 
+use self::{
+    published_tls::{ActiveTls, PublishedTls},
+    stream_releases::{StreamLeaseAttempt, StreamRelease, StreamReleases},
+};
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
     RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
@@ -76,8 +79,10 @@ use crate::{
 mod body;
 mod dial;
 mod duplex;
+mod published_tls;
 mod relay;
 mod stream;
+mod stream_releases;
 pub(crate) mod stream_slots;
 
 use body::{read_body, read_body_into, send_body, send_response, send_static_error};
@@ -186,6 +191,9 @@ struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
     slot_keys: [Box<[ConnectionSlotKey]>; PoolClass::COUNT],
+    /// The wakeups of the operations waiting for a stream of this peer. The same peer dialled
+    /// another way keeps them, so a waiter of the earlier target still hears a later release.
+    stream_releases: Arc<StreamReleases>,
 }
 
 impl OutboundTarget {
@@ -196,6 +204,7 @@ impl OutboundTarget {
             endpoint,
             dial,
             slot_keys,
+            stream_releases: Arc::new(StreamReleases::new()),
         }
     }
 
@@ -205,6 +214,7 @@ impl OutboundTarget {
             endpoint: self.endpoint.clone(),
             dial,
             slot_keys: self.slot_keys.clone(),
+            stream_releases: Arc::clone(&self.stream_releases),
         }
     }
 
@@ -228,51 +238,6 @@ impl OutboundTarget {
     /// The keys of this endpoint's connection slots in `class`, in slot order.
     fn slot_keys(&self, class: PoolClass) -> &[ConnectionSlotKey] {
         &self.slot_keys[class.index()]
-    }
-}
-
-/// The credentials new connections authenticate with, published without a lock.
-///
-/// Every connection records the generation it authenticated under and drains once the published
-/// generation moves past it. A replacement publishes its bundle before it advances the generation,
-/// and a reader loads the generation before the bundle. A connection can therefore record a
-/// generation older than the credentials it used, which only drains it early, but never a newer
-/// one, which would let replaced credentials outlive their replacement.
-struct PublishedTls {
-    generation: AtomicU64,
-    bundle: ArcSwap<TlsConfigBundle>,
-}
-
-/// The credentials one connection authenticates with, and the generation it records for them.
-struct ActiveTls {
-    generation: u64,
-    bundle: StdArc<TlsConfigBundle>,
-}
-
-impl PublishedTls {
-    fn new(bundle: TlsConfigBundle) -> Self {
-        Self {
-            generation: AtomicU64::new(1),
-            bundle: ArcSwap::from_pointee(bundle),
-        }
-    }
-
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    fn current(&self) -> ActiveTls {
-        let generation = self.generation();
-        let bundle = self.bundle.load_full();
-        ActiveTls { generation, bundle }
-    }
-
-    /// Publish `bundle` under `generation`, which the caller derived from the current generation.
-    /// The bundle is published first, and a race between replacements never moves the generation
-    /// backwards.
-    fn publish(&self, generation: u64, bundle: TlsConfigBundle) {
-        self.bundle.store(StdArc::new(bundle));
-        self.generation.fetch_max(generation, Ordering::AcqRel);
     }
 }
 
@@ -309,12 +274,18 @@ pub(crate) struct StreamLease {
     connection: Arc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
     state: TransportState,
+    released: StreamRelease,
 }
 
 impl Drop for StreamLease {
     fn drop(&mut self) {
         drop(self.slot.take());
-        self.state.inner.connection_changed.notify_one();
+        let StreamRelease {
+            releases,
+            class,
+            subquota,
+        } = &self.released;
+        releases.of(*class, *subquota).notify_one();
     }
 }
 
@@ -1673,15 +1644,30 @@ impl TransportState {
             if self.admission_closed.is_cancelled() {
                 return Err(Report::new(TransportError::ShuttingDown));
             }
-            if let Some(lease) = self.try_lease(node_id, class, subquota) {
-                return Ok(lease);
+            let releases = match self.try_lease(node_id, class, subquota) {
+                StreamLeaseAttempt::Leased(lease) => return Ok(lease),
+                StreamLeaseAttempt::Busy(releases) => Some(releases),
+                StreamLeaseAttempt::NoTarget => None,
+            };
+            // Only an operation that found no free stream registers to wait: for a stream of its
+            // own class and subquota to be released, and for any change of the peer's connections.
+            // It checks the pools again once registered, so a change between the two checks still
+            // wakes it.
+            let changed = self.connection_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let released = async {
+                match &releases {
+                    Some(releases) => releases.of(class, subquota).notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(released);
+            // Polled once so the release wait registers before the second check.
+            if let std::task::Poll::Ready(()) = futures_util::poll!(released.as_mut()) {
+                continue;
             }
-            // Only an operation that found no free stream registers to wait. It checks the pools
-            // again once registered, so a change between the two checks still wakes it.
-            let notified = self.connection_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(lease) = self.try_lease(node_id, class, subquota) {
+            if let StreamLeaseAttempt::Leased(lease) = self.try_lease(node_id, class, subquota) {
                 return Ok(lease);
             }
 
@@ -1695,7 +1681,8 @@ impl TransportState {
                         timeout: self.options.request_timeout,
                     }));
                 }
-                _ = &mut notified => {}
+                _ = &mut changed => {}
+                () = &mut released => {}
             }
         }
     }
@@ -1717,14 +1704,16 @@ impl TransportState {
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
-    ) -> Option<StreamLease> {
-        let target = nervix_primitives::expect_lint!(
+    ) -> StreamLeaseAttempt {
+        let Some(target) = nervix_primitives::expect_lint!(
             nervix::sync_acquisition,
             "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
              slot instead of reaching the shared registry per request",
             self.targets.get(node_id)
         )
-        .map(|target| Arc::clone(target.value()))?;
+        .map(|target| Arc::clone(target.value())) else {
+            return StreamLeaseAttempt::NoTarget;
+        };
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
@@ -1758,13 +1747,18 @@ impl TransportState {
             if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
                 continue;
             }
-            return Some(StreamLease {
+            return StreamLeaseAttempt::Leased(StreamLease {
                 connection,
                 slot: Some(permit),
                 state: self.clone(),
+                released: StreamRelease {
+                    releases: Arc::clone(&target.stream_releases),
+                    class,
+                    subquota,
+                },
             });
         }
-        None
+        StreamLeaseAttempt::Busy(Arc::clone(&target.stream_releases))
     }
 
     #[cfg_attr(
@@ -2701,15 +2695,12 @@ impl TransportState {
         tls.clock
             .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
-        let next_generation =
-            self.tls
-                .generation()
-                .checked_add(1)
-                .ok_or_else(|| TransportError::InvalidOptions {
-                    reason: "TLS configuration generation is exhausted".to_string(),
-                })?;
+        // Published before the slots are retired. An outbound connection set up from the replaced
+        // credentials checks the generation once it is established: one that checks after this
+        // publication is refused, and one that checked before it was registered on a slot that
+        // existed before it, which the retirement below ends.
+        self.tls.replace(tls);
         self.cancel_all_slots();
-        self.tls.publish(next_generation, tls);
         self.tls_changed.notify_waiters();
         let targets = self
             .targets

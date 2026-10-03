@@ -471,20 +471,21 @@ test-shuttle-replay-check:
 # whole run fails when a registered invariant is missing, ignored or incomplete, or when a model is
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
-# target/loom-failures for `test-loom-replay`.
-test-loom filter="":
+# target/loom-failures for `test-loom-replay`. The server's models need the web console its library
+# embeds.
+test-loom filter="": build-web-console
     python3 -m unittest --quiet scripts.tests.test_loom_models
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
 
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
-test-loom-replay failure:
+test-loom-replay failure: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
 # Show that each Loom model detects the ordering fault it exists for. Every registered weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
 # checkpoint of that failure must replay it.
-test-loom-qualification:
+test-loom-qualification: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library

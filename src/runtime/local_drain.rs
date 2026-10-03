@@ -16,7 +16,13 @@
 //! admitted work is visible anywhere in a domain, and declares the domain quiescent only when a
 //! generation requested with nothing visible completes with nothing visible still. That confirming
 //! generation catches work an upstream flush published after a downstream participant finished its
-//! own generation, and work that moved between two counters while they were being read.
+//! own generation.
+//!
+//! Work keeps moving between the counts a drain reads, and no single order of reads follows every
+//! move: a batch a node takes from a relay is counted by the node before the relay lets it go, while
+//! a batch a node publishes is counted by the relay before the node lets it go. Every observation
+//! therefore reads each relay's admission sequence before and after everything else, and a relay
+//! that admitted a batch in between shows as work still moving rather than as nothing visible.
 //!
 //! Messages parked on `REQUIRED WAIT` do not hold the drain open, exactly as in a planned handoff:
 //! their dependency is absent, and every generation re-evaluates them against the state that is
@@ -31,6 +37,8 @@
     )
 )]
 
+#[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
+use super::relay_boundary::RelayConsumerFanout;
 use super::*;
 
 /// How often a draining node re-reads its work. The read is in-process, and the interval bounds
@@ -65,6 +73,9 @@ struct LocalDomainDrainStatus {
     /// Unresolved acknowledgement roots, apart from roots whose every pending share waits on
     /// `REQUIRED WAIT`.
     outstanding_acks: usize,
+    /// Relays that admitted a batch while the observation read, which work may have reached
+    /// after the read that would have counted it.
+    admitting_relays: usize,
     buffered_relay_batches: usize,
     /// Mailbox, in-flight, collected and route-buffered work of the domain's graph nodes.
     node_work_items: usize,
@@ -76,12 +87,15 @@ struct LocalDomainDrainStatus {
 }
 
 impl LocalDomainDrainStatus {
+    /// A status showing nothing, which the tests of the drain's decisions start from.
+    #[cfg(test)]
     fn new(domain: DomainName) -> Self {
         Self {
             domain,
             admitting_ingestors: 0,
             active_generators: 0,
             outstanding_acks: 0,
+            admitting_relays: 0,
             buffered_relay_batches: 0,
             node_work_items: 0,
             buffered_emitter_messages: 0,
@@ -104,6 +118,7 @@ impl LocalDomainDrainStatus {
         self.admitting_ingestors != 0
             || self.active_generators != 0
             || self.outstanding_acks != 0
+            || self.admitting_relays != 0
             || self.buffered_relay_batches != 0
             || self.node_work_items != 0
             || self.buffered_emitter_messages != 0
@@ -120,6 +135,7 @@ impl LocalDomainDrainStatus {
                 admitting_ingestors = self.admitting_ingestors,
                 active_generators = self.active_generators,
                 outstanding_acks = self.outstanding_acks,
+                admitting_relays = self.admitting_relays,
                 buffered_relay_batches = self.buffered_relay_batches,
                 node_work_items = self.node_work_items,
                 buffered_emitter_messages = self.buffered_emitter_messages,
@@ -138,6 +154,80 @@ impl LocalDomainDrainStatus {
             timeout = ?timeout,
             "local graph drain timed out before confirming that no admitted work is still moving"
         );
+    }
+
+    /// Observes what `domain` holds, reading `sources` in the one order that keeps moving work
+    /// visible.
+    ///
+    /// Force-flush obligations are read first. An obligation seen complete makes everything its
+    /// participant did for the flush visible to the reads that follow, including a parked message
+    /// the flush resumed. The relays' admission sequences are read next and once more at the end:
+    /// a batch that reached a relay or a node only after the read that would have counted it
+    /// entered some relay while the observation read, so the two readings differ.
+    fn observe(domain: DomainName, sources: &impl LocalDomainDrainSources) -> Self {
+        let force_flush_obligations = sources.force_flush_obligations();
+        let admissions_before = sources.relay_admissions();
+        let admitting_ingestors = sources.admitting_ingestors();
+        let active_generators = sources.active_generators();
+        let outstanding_acks = sources.outstanding_acks();
+        let buffered_relay_batches = sources.buffered_relay_batches();
+        let node_work = sources.node_work();
+        let buffered_emitter_messages = sources.buffered_emitter_messages();
+        let publishing_emitters = sources.publishing_emitters();
+        let admissions_after = sources.relay_admissions();
+        let admitting_relays = admissions_after.relays_admitting_since(&admissions_before);
+        Self {
+            domain,
+            admitting_ingestors,
+            active_generators,
+            outstanding_acks,
+            admitting_relays,
+            buffered_relay_batches,
+            node_work_items: node_work.admitted,
+            buffered_emitter_messages,
+            publishing_emitters,
+            required_waits: node_work.parked,
+            force_flush_obligations,
+        }
+    }
+}
+
+/// Where a drain observation reads the work one domain holds.
+///
+/// [`LocalDomainDrainStatus::observe`] owns the order of the reads, and each read answers what its
+/// owners hold when it is asked.
+trait LocalDomainDrainSources {
+    /// Force-flush obligations the domain's nodes took on and have not completed.
+    fn force_flush_obligations(&self) -> usize;
+    /// The admission sequence of each of the domain's relays.
+    fn relay_admissions(&self) -> RelayAdmissions;
+    /// Ingestors that have not stopped admitting new work.
+    fn admitting_ingestors(&self) -> usize;
+    fn active_generators(&self) -> usize;
+    /// Unresolved acknowledgement roots, apart from roots whose every pending share waits on
+    /// `REQUIRED WAIT`.
+    fn outstanding_acks(&self) -> usize;
+    fn buffered_relay_batches(&self) -> usize;
+    fn node_work(&self) -> LocalNodeWork;
+    fn buffered_emitter_messages(&self) -> usize;
+    /// Emitter publishes awaiting sink confirmation or retrying, counted once per state.
+    fn publishing_emitters(&self) -> usize;
+}
+
+/// The work the domain's graph nodes hold, read node by node.
+#[derive(Debug, Default)]
+struct LocalNodeWork {
+    /// Mailbox, in-flight, collected and route-buffered work.
+    admitted: usize,
+    /// Messages parked on `REQUIRED WAIT`.
+    parked: usize,
+}
+
+impl LocalNodeWork {
+    /// Adds what one node's counts show now.
+    fn count(&mut self, counters: &NodeQuiesceCounters) {
+        LocalDomainDrainStatus::tally(&mut self.admitted, counters.admitted_work());
+        LocalDomainDrainStatus::tally(&mut self.parked, counters.parked_work());
     }
 }
 
@@ -268,69 +358,132 @@ impl Runtime {
     }
 
     fn local_domain_drain_status(&self, domain: &DomainName) -> LocalDomainDrainStatus {
-        let mut status = LocalDomainDrainStatus::new(domain.clone());
-        for ingestor in self.inner.ingestors.iter() {
-            if &ingestor.key().domain != domain {
+        let sources = RuntimeDomainDrainSources {
+            runtime: self,
+            domain,
+        };
+        LocalDomainDrainStatus::observe(domain.clone(), &sources)
+    }
+}
+
+/// One domain's work as this node's runtime holds it.
+struct RuntimeDomainDrainSources<'a> {
+    runtime: &'a Runtime,
+    domain: &'a DomainName,
+}
+
+impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
+    fn force_flush_obligations(&self) -> usize {
+        let mut obligations = 0;
+        for counters in self.runtime.inner.node_quiesce_counters.iter() {
+            if &counters.key().domain == self.domain {
+                LocalDomainDrainStatus::tally(
+                    &mut obligations,
+                    counters.value().force_flush_obligations(),
+                );
+            }
+        }
+        obligations
+    }
+
+    fn relay_admissions(&self) -> RelayAdmissions {
+        let mut admissions = RelayAdmissions::default();
+        for fanout in self.runtime.inner.relay_boundary_fanouts.iter() {
+            if &fanout.key().domain == self.domain {
+                admissions.record(fanout.key().clone(), fanout.value().transit().clone());
+            }
+        }
+        admissions
+    }
+
+    fn admitting_ingestors(&self) -> usize {
+        let mut admitting = 0;
+        for ingestor in self.runtime.inner.ingestors.iter() {
+            if &ingestor.key().domain != self.domain {
                 continue;
             }
-            let stopped_admitting = match self.inner.ingestor_quiescence.get(ingestor.key()) {
+            let stopped_admitting = match self.runtime.inner.ingestor_quiescence.get(ingestor.key())
+            {
                 Some(control) => control.cause() == Some(IngestorQuiesceCause::Shutdown),
                 None => false,
             };
             if !stopped_admitting {
-                LocalDomainDrainStatus::tally(&mut status.admitting_ingestors, 1);
+                LocalDomainDrainStatus::tally(&mut admitting, 1);
             }
         }
-        if let Some(activity) = self.inner.generator_activity_by_domain.get(domain) {
-            status.active_generators = activity.load(Ordering::Acquire);
+        admitting
+    }
+
+    fn active_generators(&self) -> usize {
+        match self
+            .runtime
+            .inner
+            .generator_activity_by_domain
+            .get(self.domain)
+        {
+            Some(activity) => activity.load(Ordering::Acquire),
+            None => 0,
         }
-        if let Some(tracker) = self.inner.in_flight_by_domain.get(domain) {
+    }
+
+    fn outstanding_acks(&self) -> usize {
+        match self.runtime.inner.in_flight_by_domain.get(self.domain) {
             // A root whose every pending share waits on `REQUIRED WAIT` is exempt here exactly as
             // it is from a planned handoff.
-            status.outstanding_acks = tracker.outstanding_for_ownership_handoff();
+            Some(tracker) => tracker.outstanding_for_ownership_handoff(),
+            None => 0,
         }
-        for fanout in self.inner.relay_boundary_fanouts.iter() {
-            if &fanout.key().domain == domain {
+    }
+
+    fn buffered_relay_batches(&self) -> usize {
+        let mut buffered = 0;
+        for fanout in self.runtime.inner.relay_boundary_fanouts.iter() {
+            if &fanout.key().domain == self.domain {
+                LocalDomainDrainStatus::tally(&mut buffered, fanout.value().outstanding_work_len());
+            }
+        }
+        buffered
+    }
+
+    fn node_work(&self) -> LocalNodeWork {
+        let mut work = LocalNodeWork::default();
+        for counters in self.runtime.inner.node_quiesce_counters.iter() {
+            if &counters.key().domain == self.domain {
+                work.count(counters.value());
+            }
+        }
+        work
+    }
+
+    fn buffered_emitter_messages(&self) -> usize {
+        let mut buffered = 0;
+        for messages in self.runtime.inner.emitter_buffers.iter() {
+            if &messages.key().domain == self.domain {
                 LocalDomainDrainStatus::tally(
-                    &mut status.buffered_relay_batches,
-                    fanout.value().outstanding_work_len(),
+                    &mut buffered,
+                    messages.value().load(Ordering::Acquire),
                 );
             }
         }
-        for counters in self.inner.node_quiesce_counters.iter() {
-            if &counters.key().domain != domain {
-                continue;
-            }
-            let counters = counters.value();
-            LocalDomainDrainStatus::tally(&mut status.node_work_items, counters.admitted_work());
-            LocalDomainDrainStatus::tally(&mut status.required_waits, counters.parked_work());
-            LocalDomainDrainStatus::tally(
-                &mut status.force_flush_obligations,
-                counters.force_flush_obligations(),
-            );
-        }
-        for buffered in self.inner.emitter_buffers.iter() {
-            if &buffered.key().domain == domain {
-                LocalDomainDrainStatus::tally(
-                    &mut status.buffered_emitter_messages,
-                    buffered.value().load(Ordering::Acquire),
-                );
+        buffered
+    }
+
+    fn publishing_emitters(&self) -> usize {
+        let mut publishing = 0;
+        for waits in self.runtime.inner.emitter_confirmation_waits.iter() {
+            if &waits.key().domain == self.domain && waits.value().load(Ordering::Acquire) != 0 {
+                LocalDomainDrainStatus::tally(&mut publishing, 1);
             }
         }
-        for waits in self.inner.emitter_confirmation_waits.iter() {
-            if &waits.key().domain == domain && waits.value().load(Ordering::Acquire) != 0 {
-                LocalDomainDrainStatus::tally(&mut status.publishing_emitters, 1);
-            }
-        }
-        for status_entry in self.inner.emitter_statuses.iter() {
-            if &status_entry.key().domain == domain
-                && let Some(failure) = status_entry.value().snapshot()
+        for status in self.runtime.inner.emitter_statuses.iter() {
+            if &status.key().domain == self.domain
+                && let Some(failure) = status.value().snapshot()
                 && failure.retry.is_some()
             {
-                LocalDomainDrainStatus::tally(&mut status.publishing_emitters, 1);
+                LocalDomainDrainStatus::tally(&mut publishing, 1);
             }
         }
-        status
+        publishing
     }
 }
 
@@ -410,3 +563,115 @@ mod tests {
         assert_eq!(control.cause(), Some(IngestorQuiesceCause::Shutdown));
     }
 }
+
+/// One relay and one node's counts, as a drain observes them, for the checks that move work between
+/// the two while an observation reads them.
+#[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
+struct OneRelayAndNode {
+    relay: DomainNodeRef,
+    fanout: RelayConsumerFanout,
+    counters: Arc<NodeQuiesceCounters>,
+}
+
+#[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
+impl OneRelayAndNode {
+    fn new() -> Self {
+        Self {
+            relay: DomainNodeRef::node_in(
+                domain("default"),
+                ModelKind::Relay,
+                named::<RelayName>("orders"),
+            ),
+            fanout: RelayConsumerFanout::with_capacity(NonZeroUsize::MIN),
+            counters: Arc::new(NodeQuiesceCounters::default()),
+        }
+    }
+
+    /// A batch for the relay, which carries no acknowledgement.
+    fn batch() -> RelayRecordBatch {
+        RelayRecordBatch::single(
+            test_schema(&[("id", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("id".to_string(), RuntimeValue::I64(1))]),
+            AckSet::empty(),
+        )
+        .assured("a one-field test row matches its one-field test schema")
+    }
+
+    /// Registers the relay's one attached consumer, as a node that runs it does.
+    fn attach_consumer(&self) -> RelayRuntimeFanIn {
+        RelayRuntimeFanIn::new(
+            self.fanout
+                .runtime_consumer_receiver_for_mode(AckMode::Attached),
+        )
+    }
+
+    /// Delivers a batch to the relay's attached consumers, as its owner task fans one out. The one
+    /// consumer has room, so the delivery completes without waiting.
+    fn deliver_to_consumers(&self) {
+        let delivery = std::pin::pin!(
+            self.fanout
+                .attached_runtime_consumers
+                .broadcast(Self::batch())
+        );
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let delivered = match delivery.poll(&mut context) {
+            std::task::Poll::Ready(delivered) => Some(delivered),
+            std::task::Poll::Pending => None,
+        };
+        delivered
+            .assured("a consumer with room admits the batch without waiting")
+            .assured("the relay's consumer stays registered while the batch is delivered");
+    }
+}
+
+#[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
+impl LocalDomainDrainSources for OneRelayAndNode {
+    fn force_flush_obligations(&self) -> usize {
+        self.counters.force_flush_obligations()
+    }
+
+    fn relay_admissions(&self) -> RelayAdmissions {
+        let mut admissions = RelayAdmissions::default();
+        admissions.record(self.relay.clone(), self.fanout.transit.clone());
+        admissions
+    }
+
+    fn admitting_ingestors(&self) -> usize {
+        0
+    }
+
+    fn active_generators(&self) -> usize {
+        0
+    }
+
+    fn outstanding_acks(&self) -> usize {
+        0
+    }
+
+    fn buffered_relay_batches(&self) -> usize {
+        self.fanout.outstanding_work_len()
+    }
+
+    fn node_work(&self) -> LocalNodeWork {
+        let mut work = LocalNodeWork::default();
+        work.count(&self.counters);
+        work
+    }
+
+    fn buffered_emitter_messages(&self) -> usize {
+        0
+    }
+
+    fn publishing_emitters(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "local_drain_shuttle_tests.rs"]
+mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "local_drain_loom_models.rs"]
+mod loom_models;

@@ -24,10 +24,11 @@ deloxide = [
   "nervix-deadlock/deloxide",
   "nervix-primitives/deloxide",
 ]
-# Selects Loom's primitives for the whole graph, so a Loom model of a server owner runs on them.
+# Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
   "nervix-consensus/loom",
   "nervix-execution/loom",
+  "nervix-model-harness/loom",
   "nervix-primitives/loom",
 ]
 # Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
