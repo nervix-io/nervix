@@ -697,7 +697,10 @@ it:
 - a WASM branch waits for its own checkpoint after each guest callback, bounded by the checkpoint
   deadline. The state store's durability barrier lets one writer at a time run a storage
   synchronization for every writer waiting, through one atomic runner slot and a ticket watermark;
-  it holds no lock across that wait, and the synchronization runs on the storage workers. Replica
+  it holds no lock across that wait, and the synchronization runs on the storage workers. The round
+  of a synchronization belongs to the storage job that flushes: it frees the runner slot and
+  records its outcome when that job ends, so a writer that stops waiting neither frees the slot
+  while the flush still runs nor loses a failed flush. Replica
   progress reaches the waiting branch through the replication of its own state.
 - one placement's replication changes its announcement, its replicas' reported progress and the
   handover between its announcers under a lock scoped to that placement, taken by its originator,
@@ -1300,7 +1303,10 @@ A family of names means each member runs independently through the recipe.
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
-contract. Their state semantics live in the WASM state documentation; they do not turn Shuttle
+contract. Among them, `shuttle_an_abandoned_writers_synchronization_keeps_the_barrier_until_it_ends`
+and `shuttle_an_abandoned_writers_failed_synchronization_still_refuses_what_it_covered` hold a
+synchronization round to the storage job that runs it: a writer that stops waiting frees neither the
+barrier nor the round's failure. Their state semantics live in the WASM state documentation; they do not turn Shuttle
 into a disk or replica simulator. [Deterministic interconnect simulation](./interconnect-simulation.md)
 and Cucumber cover the network and process behavior outside this in-process scheduling boundary.
 
@@ -1371,8 +1377,12 @@ permits, and an operation inside a third-party dependency, such as a `triomphe` 
 an `arc-swap` publication, is invisible to it and excluded from the claim rather than given a
 fictional model. The client batch admission fence reads its quiesce decision from such a
 publication, so its model checks the root counts the admission and the drain reach by
-read-modify-write, and the publication's own ordering stays outside the claim. A standalone counter
-carries no cross-location claim, whatever its ordering. Relay
+read-modify-write, and the publication's own ordering stays outside the claim. The state store's
+durability barrier orders each writer's ticket after the write it covers and each
+synchronization's start before its flush, but those writes and the flush are the database's,
+inside its own synchronization, so it has no Loom model; its Shuttle checks hold which tickets a
+synchronization covers. A standalone counter carries no cross-location claim, whatever its
+ordering. Relay
 branch presence is such a case: its owner lifetimes and publications are `arc-swap` compare-and-swap
 and read-copy-update operations with no Nervix-owned atomic beside them, so it has no Loom model;
 its Shuttle checks order its publications against observers and successors. Checkpoint
