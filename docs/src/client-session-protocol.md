@@ -1377,6 +1377,8 @@ attachment receives its reply instead of sending a read of its own; a read of an
 has since ended is dropped with it. Closing a consumer, like closing a producer, sends the close
 from a task of its own, so a caller that stops waiting still releases the attachment, and a second
 close, or a close while the handle waits to be restored, finds nothing attached and returns at once.
+The close also ends every read left with the consumer, including one left while the close ran, so
+no read outlives the close of its consumer.
 
 Consumer and producer operations can share one session. A read awaiting output runs beside
 commands, producer submissions and their outcomes, clock observations, and consumer settlement.

@@ -61,9 +61,14 @@ pub(crate) struct ConsumerHandle {
     registry: DesiredConsumers,
     initial_id: ConsumerId,
     lifecycle: ConsumerLifecycle,
-    /// Reads whose callers stopped waiting before their replies arrived, oldest first. Each is
-    /// taken over by a later read of its attachment; the rest end with their attachment.
-    parked: SyncMutex<VecDeque<ParkedRead>>,
+    parked: ParkedReads,
+}
+
+/// Reads whose callers stopped waiting before their replies arrived, oldest first. Each is taken
+/// over by a later read of its attachment; the rest end with their attachment.
+#[derive(Default)]
+struct ParkedReads {
+    reads: SyncMutex<VecDeque<ParkedRead>>,
 }
 
 /// A batch read sent on one attachment, whose reply nobody waits for right now.
@@ -236,7 +241,7 @@ impl Client {
                                 lifecycle: ConsumerLifecycle::new(ConsumerPhase::Active(
                                     attachment.clone(),
                                 )),
-                                parked: SyncMutex::new(VecDeque::new()),
+                                parked: ParkedReads::default(),
                             });
                             registry.register(&inner);
                             if !attachment.exchange.pending.lock().is_open() {
@@ -619,12 +624,8 @@ impl ConsumerHandle {
     }
 
     fn stop(&self) -> Option<Arc<ConsumerAttachment>> {
-        let attachment = self.lifecycle.close();
+        let attachment = self.parked.close(&self.lifecycle);
         self.registry.unregister(self);
-        // A closed consumer reads nothing again; the attempts its parked reads may hold are
-        // revoked with its attachment.
-        let parked = std::mem::take(&mut *self.parked.lock());
-        drop(parked);
         attachment
     }
 
@@ -634,7 +635,7 @@ impl ConsumerHandle {
         &self,
         attachment: &Arc<ConsumerAttachment>,
     ) -> error_stack::Result<Answered, ClientError> {
-        let request = match self.adopt(attachment) {
+        let request = match self.parked.adopt(attachment) {
             Some(request) => request,
             None => {
                 let read = ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
@@ -652,13 +653,15 @@ impl ConsumerHandle {
         };
         waiting.reply().await
     }
+}
 
+impl ParkedReads {
     /// Takes over the oldest parked read of `attachment`. Parked reads of an earlier attachment
     /// ended with it, and are dropped on the way.
     fn adopt(&self, attachment: &Arc<ConsumerAttachment>) -> Option<PendingRequest> {
         let mut stale = Vec::new();
         let adopted = {
-            let mut parked = self.parked.lock();
+            let mut parked = self.reads.lock();
             loop {
                 let Some(read) = parked.pop_front() else {
                     break None;
@@ -675,11 +678,26 @@ impl ConsumerHandle {
 
     /// Keeps a read whose caller stopped waiting for a later read of its attachment. A read of an
     /// attachment that already ended has no reply left to take over.
+    ///
+    /// The attachment is checked under the lock [`Self::close`] takes after ending it, so a read
+    /// either parks before a close revokes every parked read or finds its attachment ended.
     fn park(&self, read: ParkedRead) {
+        let mut reads = self.reads.lock();
         if read.attachment.closed.load(Ordering::Acquire) {
+            drop(reads);
+            drop(read);
             return;
         }
-        self.parked.lock().push_back(read);
+        reads.push_back(read);
+    }
+
+    /// Closes the consumer `lifecycle` follows, and revokes every parked read: a closed consumer
+    /// reads nothing again, so the attempts its parked reads may hold end with its attachment.
+    fn close(&self, lifecycle: &ConsumerLifecycle) -> Option<Arc<ConsumerAttachment>> {
+        let attachment = lifecycle.close();
+        let parked = std::mem::take(&mut *self.reads.lock());
+        drop(parked);
+        attachment
     }
 }
 
@@ -706,7 +724,7 @@ impl WaitingRead<'_> {
 impl Drop for WaitingRead<'_> {
     fn drop(&mut self) {
         if let Some(read) = self.read.take() {
-            self.handle.park(read);
+            self.handle.parked.park(read);
         }
     }
 }
@@ -951,6 +969,48 @@ mod shuttle_tests {
         });
     }
 
+    /// A read whose caller stops waiting parks while the consumer closes: the close revokes it,
+    /// or the read finds the attachment ended and never parks.
+    #[test]
+    fn shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let generation = Arc::new(());
+                let attachment = attachment_on(&generation);
+                let lifecycle = StdArc::new(ConsumerLifecycle::new(ConsumerPhase::Active(
+                    attachment.clone(),
+                )));
+                let parked = StdArc::new(ParkedReads::default());
+                let request = attachment
+                    .exchange
+                    .register()
+                    .assured("a fresh exchange registers requests");
+                let parking = {
+                    let parked = parked.clone();
+                    nervix_primitives::task::spawn(async move {
+                        parked.park(ParkedRead {
+                            attachment,
+                            request,
+                        });
+                    })
+                };
+                let closing = {
+                    let parked = parked.clone();
+                    nervix_primitives::task::spawn(async move { parked.close(&lifecycle) })
+                };
+                parking
+                    .await
+                    .assured("the parking side only parks its read");
+                closing
+                    .await
+                    .assured("the closing side only closes the consumer");
+                assert!(
+                    parked.reads.lock().is_empty(),
+                    "a read parked while its consumer closed outlived the close"
+                );
+            });
+        });
+    }
 
     #[test]
     fn shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange() {
