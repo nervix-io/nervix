@@ -1159,6 +1159,10 @@ mod tests {
             "wasm_dual",
             include_str!("../../../examples/wasm-processors/wasm-dual.nspl"),
         );
+        parse_example_script(
+            "paced_simulation",
+            include_str!("../../../examples/paced-simulation/paced_simulation.nspl"),
+        );
     }
 
     /// Renders every statement of `source` and asserts each one reparses to the same statement.

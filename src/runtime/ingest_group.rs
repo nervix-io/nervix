@@ -377,20 +377,6 @@ pub(super) struct ClientBatchDispatch<'a> {
     pub(super) ingested_at: Timestamp,
 }
 
-pub(super) struct RawIngestDispatch<'a> {
-    pub(super) handles: &'a IngestTaskHandles,
-    pub(super) domain: &'a DomainName,
-    pub(super) ingestor: &'a IngestorName,
-    pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
-    pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
-    pub(super) codec: Arc<CompiledCodec>,
-    pub(super) payload: &'a BufferedIngestPayload,
-    pub(super) collector: &'a mut IngestRouteCollector,
-    pub(super) flush: bool,
-}
-
 /// The payloads of one [`BufferedIngestPayload`] that decoded into their ingest group, which the
 /// group now accepts. None of them carries an acknowledgement of its own: each message takes a
 /// share of a root the group tracks.
@@ -2065,25 +2051,26 @@ impl Runtime {
             .await
     }
 
-    /// Decodes every payload `payload` holds into `collector`'s open group, their unfoldings
-    /// admitted as `admission` says.
+    /// Decodes every one of `payloads` into `collector`'s open group, their unfoldings admitted as
+    /// `admission` says.
     ///
     /// The payloads are delivered together or not at all, so a payload that fails to decode takes
     /// the payloads decoded before it back out of the group. A caller that drops this future before
     /// it completes discards what it decoded itself.
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "the retained payload exposes its selected message iterator \
-                                   for one admitted batch")
+        nervix::dispatch(
+            reason = "the caller's payload iterator selects the messages of one admitted batch"
+        )
     )]
-    pub(in crate::runtime) async fn decode_raw_ingest_payload(
+    pub(in crate::runtime) async fn decode_raw_ingest_payload<'p>(
         &self,
         collector: &mut IngestRouteCollector,
         admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
-        payload: &BufferedIngestPayload,
+        payloads: impl IntoIterator<Item = &'p [u8]>,
     ) -> Result<(), PayloadDecodeFailure> {
-        for source_payload in payload.payloads() {
+        for source_payload in payloads {
             nervix_primitives::task::consume_budget().await;
             if let Err(failure) = collector
                 .decode_payload(self.executor(), admission, codec, source_payload)
@@ -2126,50 +2113,6 @@ impl Runtime {
             acks: vec![AckSet::empty(); payload.len()],
         })
         .await
-    }
-
-    /// Decodes and dispatches the payloads a source loop was just handed. An unfolding the
-    /// extension workers have no room for is refused, and the dispatch fails for the loop to
-    /// handle as its source's contract says.
-    pub(in crate::runtime) async fn dispatch_raw_ingest_payload(
-        &self,
-        dispatch: RawIngestDispatch<'_>,
-    ) -> error_stack::Result<(), IngestGroupError> {
-        let RawIngestDispatch {
-            handles,
-            domain,
-            ingestor,
-            timestamp_source,
-            output_routes,
-            filter_where,
-            branched_senders,
-            codec,
-            payload,
-            collector,
-            flush,
-        } = dispatch;
-        let decoded = self
-            .decode_raw_ingest_payload(collector, QueueAdmission::RefuseWhenFull, &codec, payload)
-            .await;
-        if let Err(failure) = decoded {
-            return Err(failure.into_group_error(ingestor));
-        }
-        self.accept_raw_ingest_payload(RawIngestAcceptance {
-            handles,
-            domain,
-            ingestor,
-            timestamp_source,
-            output_routes,
-            filter_where,
-            payload,
-            collector: &mut *collector,
-        })
-        .await?;
-        if flush {
-            self.flush_ingest_collector(domain, ingestor, branched_senders, collector)
-                .await?;
-        }
-        Ok(())
     }
 }
 

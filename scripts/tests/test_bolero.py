@@ -132,6 +132,7 @@ class InventoryTests(unittest.TestCase):
             "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",
+            "paced-simulation-records",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -147,6 +148,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
+            "nervix-paced-simulation",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

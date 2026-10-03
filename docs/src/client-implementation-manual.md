@@ -879,6 +879,14 @@ reads the state and the first tick of the generation the scenario starts, and de
 their output one level at a time, and retries, rejects, and acknowledges it across a session the
 scenario cuts.
 
+The [Paced Simulation Drivers](paced-simulation-drivers.md) are runnable applications rather than
+qualification clients. `examples/paced-simulation/python/paced_simulation.py` follows B-11 through
+the binding: it reads the attached clock before it submits anything, waits with
+`nx_domain_clock_wall_duration_until`, stamps its readings within `nx_domain_clock_admission_window`,
+pauses from `NX_CLOCK_EVENT_INTERRUPTED` until the next `NX_CLOCK_EVENT_STATE`, and runs its
+consumers beside its producer on one session, as emitter consumer rule E-6 allows. The Rust driver
+beside it does the same with the Rust client.
+
 `just test-client-conformance` builds every probe and runs it against one- and three-node clusters;
 [`tests/client-conformance-ledger.md`](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
 records the runtimes, the build commands, and what each probe checks. The core of the TypeScript

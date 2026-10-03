@@ -40,6 +40,10 @@ impl NatsIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: false,
+            // The client reads the subscription and answers the server from its own task while the
+            // loop waits, holding at most its subscription capacity of 65,536 messages before it
+            // drops the newest as a slow consumer.
+            unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "nats",
         }

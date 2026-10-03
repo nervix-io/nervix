@@ -54,6 +54,7 @@
   - [Rust Client Library](./client-library.md)
   - [Client Implementation Manual](./client-implementation-manual.md)
   - [Examples](./examples.md)
+    - [Paced Simulation Drivers](./paced-simulation-drivers.md)
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md)
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)
