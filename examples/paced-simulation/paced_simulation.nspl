@@ -1,0 +1,101 @@
+// Paced sensor simulation driven by client applications.
+//
+// A simulation driver attaches to the domain clock, submits sensor readings stamped with the
+// tick centers the clock has reached through a client ingestor, and acknowledges the constructed
+// readings it receives through an attached client emitter. Readings stamped outside the admission
+// window reach a second attached client emitter as rejection notices. The `live_readings`
+// ingestor admits the same schema with `TIMESTAMP NOW` for comparison.
+//
+// SKEW equals PERIOD: a TIMESTAMP NOW reading is stamped with the logical time it arrives at, which
+// lies less than one period after the newest reached tick center and is admitted within the skew
+// of it. A smaller skew would reject the arrivals that fall between two windows.
+//
+// Load this file, then start the clock at the rate the simulation should run at, for example
+// `START AT NOW TIME RATE 4.0;`. See examples/paced-simulation/README.md.
+
+CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;
+
+USE paced_simulation;
+
+BEGIN;
+
+CREATE SCHEMA reading (
+  reading_id STRING,
+  sensor STRING,
+  tick U64,
+  occurred_at DATETIME,
+  value I64
+);
+
+CREATE SCHEMA observed_reading (
+  reading_id STRING,
+  sensor STRING,
+  tick U64,
+  occurred_at DATETIME,
+  admitted_at DATETIME,
+  timestamp_source STRING,
+  value I64
+);
+
+CREATE SCHEMA rejected_reading (
+  reading_id STRING,
+  occurred_at DATETIME,
+  error_code STRING,
+  error_message STRING
+);
+
+CREATE SCHEMA sensor_branch (
+  sensor STRING
+);
+
+CREATE BRANCH by_sensor SCHEMA sensor_branch TTL 10m;
+
+CREATE RELAY readings SCHEMA observed_reading BRANCHED BY by_sensor CAPACITY 1;
+
+CREATE RELAY rejected_readings SCHEMA rejected_reading UNBRANCHED CAPACITY 1;
+
+CREATE INGESTOR simulated_readings
+  FROM CLIENT SCHEMA reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
+  TIMESTAMP AT occurred_at
+  TO readings
+    INHERIT ALL
+    SET admitted_at = now(),
+        timestamp_source = 'at'
+    BRANCHED BY by_sensor SET sensor = message.sensor
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.code, error_message = error.message
+  ON GENERAL ERROR LOG;
+
+CREATE INGESTOR live_readings
+  FROM CLIENT SCHEMA reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
+  TIMESTAMP NOW
+  TO readings
+    INHERIT ALL
+    SET admitted_at = now(),
+        timestamp_source = 'now'
+    BRANCHED BY by_sensor SET sensor = message.sensor
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.code, error_message = error.message
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED EMITTER observed_readings
+  FROM readings
+  TO CLIENT SCHEMA observed_reading
+    MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
+  INHERIT ALL
+  BATCH MAX MESSAGES 256 MAX SIZE 256KiB
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED EMITTER rejection_notices
+  FROM rejected_readings
+  TO CLIENT SCHEMA rejected_reading
+    MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
+  INHERIT ALL
+  BATCH MAX MESSAGES 64 MAX SIZE 64KiB
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

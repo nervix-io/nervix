@@ -41,6 +41,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Configuration backups, their archives, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
+| Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
 | Writing Rust WASM guests with the SDK | `Rust WASM Guest SDK` |
 

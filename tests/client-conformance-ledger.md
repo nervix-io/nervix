@@ -199,6 +199,18 @@ reader and the TypeScript reader on Node.js and Bun to the same report. Together
 scenarios, where the Go and TypeScript clients write every request the Rust server reads, this is
 the independent interoperation with Rust in both encoding directions.
 
+## Runnable applications
+
+[Client I/O 05](https://app.clickup.com/t/86bc8bj8d) added
+`examples/paced-simulation/python/paced_simulation.py`, a runnable application rather than a probe.
+It reaches the binding through the same `ctypes` path as the Python probe, with nothing but the
+standard library: it follows the domain clock and projects every wait and admission check through
+`nx_domain_clock_*`, builds its batches with `nx_batch_builder_*`, reads deliveries with
+`nx_batch_*`, and runs its producer, consumers, clock and inspection loops on one session from
+several threads. `paced_simulation.feature` runs it with `just test-scenarios` beside the Rust
+driver, on one and three nodes, against the published example graph; `just tests-deps` builds the
+binding it loads.
+
 ## Findings
 
 | Finding | Resolution |

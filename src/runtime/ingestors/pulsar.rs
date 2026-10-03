@@ -48,6 +48,10 @@ impl PulsarIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
+            // A consumer whose receive queue fills while the loop is held cannot complete its close,
+            // so a later suspension or stop would wait on it. A refused message stays
+            // unacknowledged until the consumer reconnects and the broker delivers it again.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "pulsar",
         }

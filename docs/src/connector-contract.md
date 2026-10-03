@@ -312,8 +312,9 @@ attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
 The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
 partition, offset, and headers; Syslog carries the peer address. Transport headers are visited
-from the borrowed message in arrival order. The host copies them only when quiesce buffering or a
-WebSocket session must retain them after the source message ends. Header support and each
+from the borrowed message in arrival order. The host copies them only when the quiesce control
+decides on a payload, which may retain it, or a WebSocket session must retain them after the source
+message ends. Header support and each
 system's mapping are explicit: HTTP endpoint and polling headers, WebSocket upgrade headers,
 Kafka record headers, NATS headers, Pulsar properties, RabbitMQ AMQP headers, and SQS attributes
 retain their connector-specific semantics. Other source families do not offer header reads.
@@ -351,10 +352,35 @@ retained once the ingestor resumes, oldest first. A retained payload stays in it
 with its bytes, until its messages enter their ingest group, and the buffer hands out nothing
 behind it until then. Its sender was already answered and its source has moved past it, so the
 host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
-than to be refused, ahead of work that asks afterwards; the unfolding of a live payload is refused
-when they are full, and the source's own contract handles that failure. A shutdown or a new quiesce
-ends the wait and returns the payload to the front of its buffer, so a drain delays neither. A
-payload its codec rejects leaves the buffer and is reported.
+than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
+and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
+rejects leaves the buffer and is reported.
+
+A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
+`NO_ACK` mode, cannot be presented again either. An acknowledged batch the extension workers refuse
+is rejected for its source to deliver again, and an endpoint refuses a body its sender sends again;
+a live unacknowledged payload follows its source's unacknowledged admission instead, which each
+source's composition declares. Waiting holds the source's loop, so a source waits for a place only
+when its transport stays connected with bounded memory while nothing reads it:
+
+| Source | Unacknowledged admission | The transport while its loop is held |
+| --- | --- | --- |
+| HTTP polling, Prometheus | Waits for a place | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
+| NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
+| ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
+| Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
+| MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
+| WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
+| Kafka `NO_ACK PARALLEL` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
+| Pulsar `NO_ACK PARALLEL` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
+
+A waiting payload races the ingestor's stop and every new quiesce decision. The stop drops it. A
+new decision, for a source whose input passes through the quiesce control, hands the payload to the
+control as input that arrived under that decision: `BUFFER` retains it, `DROP` drops and counts it,
+and a suspension lets it dispatch, so it waits on. A refused payload is reported as an ingestor
+error and counted in `nervix_ingestor_unfolding_refused_total`. A Pulsar message the host refused
+stays unacknowledged until its consumer reconnects.
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch

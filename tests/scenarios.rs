@@ -153,6 +153,7 @@ mod database_batches;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod paced_simulation;
 mod process_cluster;
 mod session_protocol;
 
@@ -279,6 +280,8 @@ struct ScenarioWorld {
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     transaction_clients: BTreeMap<String, Client>,
+    /// The paced simulation drivers a scenario ran, and the files their runs share.
+    paced_simulation: paced_simulation::PacedSimulation,
     /// Rows a named client received and a step has not taken yet, as the client displays them.
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
@@ -15227,6 +15230,359 @@ async fn when_extension_execution_is_released_on_every_node(world: &mut Scenario
     }
 }
 
+/// Waits until the HTTP mock has answered this scenario's one polled payload, so the steps after
+/// it know the poll's payload has left for the node that polled it.
+#[then("the HTTP mock eventually answers a poll with its payload")]
+async fn then_the_http_mock_eventually_answers_a_poll_with_its_payload(world: &mut ScenarioWorld) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let answered = world
+            .dependencies
+            .http_poll_answered(&world.test_id)
+            .await
+            .expect("the HTTP mock reports whether it answered a poll");
+        if answered {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the HTTP mock never answered a poll for '{}'",
+            world.test_id
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The ingestor every unacknowledged source fixture creates.
+const UNACKNOWLEDGED_SOURCE_INGESTOR: &str = "unacknowledged_source";
+
+/// A transport an ingestor reads in an unacknowledged mode, through a codec whose `ON INGESTION`
+/// transformation unfolds every payload on the node's extension workers.
+#[derive(Clone, Copy, Debug)]
+enum UnacknowledgedSourceFixture {
+    Kafka,
+    Mqtt,
+    Nats,
+    Pulsar,
+    RedisPubSub,
+    Syslog,
+    WebsocketClient,
+    ZeroMq,
+}
+
+impl UnacknowledgedSourceFixture {
+    fn parse(value: &str) -> Self {
+        match value {
+            "kafka" => Self::Kafka,
+            "mqtt" => Self::Mqtt,
+            "nats" => Self::Nats,
+            "pulsar" => Self::Pulsar,
+            "redis" => Self::RedisPubSub,
+            "syslog" => Self::Syslog,
+            "websocket client" => Self::WebsocketClient,
+            "zeromq" => Self::ZeroMq,
+            other => panic!("unsupported unacknowledged source fixture '{other}'"),
+        }
+    }
+
+    async fn start_dependency(self, world: &mut ScenarioWorld) {
+        let started = match self {
+            Self::Kafka => world.dependencies.start_kafka(&world.test_id).await,
+            Self::Mqtt => world.dependencies.start_mqtt(&world.test_id).await,
+            Self::Nats => world.dependencies.start_nats(&world.test_id).await,
+            Self::Pulsar => world.dependencies.start_pulsar(&world.test_id).await,
+            Self::RedisPubSub => world.dependencies.start_redis(&world.test_id).await,
+            Self::WebsocketClient => world.dependencies.start_mock_server(&world.test_id).await,
+            // The ingestor binds the address the scenario sends to, so nothing else runs.
+            Self::Syslog | Self::ZeroMq => Ok(()),
+        };
+        if let Err(error) = started {
+            panic!("the {self:?} test dependency should start: {error}");
+        }
+    }
+
+    /// Provisions what the transport needs before the ingestor reads it.
+    async fn prepare(self, world: &mut ScenarioWorld) {
+        if let Self::Kafka = self {
+            let topic = expand_placeholders(world, "unacknowledged_{{test_id}}");
+            world
+                .cluster()
+                .ensure_kafka_topic_partitions(&topic, 1)
+                .await
+                .expect("failed to provision the unacknowledged source's Kafka topic");
+        }
+    }
+
+    /// The client the ingestor reads through, named `unacknowledged_client`.
+    fn client_fragment(self) -> &'static str {
+        match self {
+            Self::Kafka => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };"#
+            }
+            Self::Mqtt => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-unacknowledged-{{test_id}}'
+      };"#
+            }
+            Self::Nats => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE NATS CONFIG {
+        'addr' = '{{nats_addr}}'
+      };"#
+            }
+            Self::Pulsar => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE PULSAR CONFIG {
+        'addr' = '{{pulsar_addr}}'
+      };"#
+            }
+            Self::RedisPubSub => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+        'addr' = '{{redis_addr}}'
+      };"#
+            }
+            Self::Syslog => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE SYSLOG CONFIG {
+        'protocol' = 'udp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };"#
+            }
+            Self::WebsocketClient => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE WEBSOCKETS CONFIG {
+        'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
+      };"#
+            }
+            Self::ZeroMq => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_ingest_addr}}',
+        'bind' = 'true'
+      };"#
+            }
+        }
+    }
+
+    /// What the ingestor reads, in the transport's unacknowledged mode, and its quiesce mode.
+    fn source_fragment(self) -> &'static str {
+        match self {
+            Self::Kafka => {
+                "FROM KAFKA unacknowledged_client TOPIC unacknowledged_{{test_id}}
+          OFFSET BY CONSUMER GROUP unacknowledged_group_{{test_id}}
+          MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND"
+            }
+            Self::Mqtt => {
+                "FROM MQTT unacknowledged_client TOPIC unacknowledged_{{test_id}} MODE NO_ACK \
+                 SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::Nats => {
+                "FROM NATS unacknowledged_client SUBJECT unacknowledged_{{test_id}}
+          QUEUE GROUP unacknowledged_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::Pulsar => {
+                "FROM PULSAR unacknowledged_client TOPIC unacknowledged_{{test_id}}
+          SUBSCRIPTION unacknowledged_{{test_id}} INSTANCES 1 MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND"
+            }
+            Self::RedisPubSub => {
+                "FROM REDIS PUBSUB unacknowledged_client CHANNEL unacknowledged_{{test_id}}
+          MODE NO_ACK SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::Syslog => {
+                "FROM SYSLOG unacknowledged_client MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND"
+            }
+            Self::WebsocketClient => {
+                "FROM WEBSOCKETS unacknowledged_client MODE NO_ACK SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::ZeroMq => {
+                "FROM ZEROMQ unacknowledged_client MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND"
+            }
+        }
+    }
+
+    /// The models of a domain whose one ingestor reads this transport into `unacknowledged_events`,
+    /// and a subscription to that relay. Nothing starts until the scenario starts the domain.
+    fn commands(self) -> String {
+        format!(
+            r#"
+      CREATE SCHEMA unacknowledged_event ( user_id I64 );
+      CREATE CODEC unacknowledged_codec FROM JSON TO SCHEMA unacknowledged_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY unacknowledged_events SCHEMA unacknowledged_event UNBRANCHED;{client}
+      CREATE INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}
+        {source}
+        DECODE USING unacknowledged_codec
+        TO unacknowledged_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION unacknowledged_subscription TO unacknowledged_events;
+"#,
+            client = self.client_fragment(),
+            source = self.source_fragment(),
+        )
+    }
+
+    /// Sends `{"user_id":<user_id>}` through the transport once.
+    async fn deliver(self, world: &mut ScenarioWorld, user_id: i64) {
+        let payload = format!(r#"{{"user_id":{user_id}}}"#);
+        let destination = expand_placeholders(world, "unacknowledged_{{test_id}}");
+        match self {
+            Self::Kafka => world
+                .cluster()
+                .publish_kafka(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged Kafka payload"),
+            Self::Mqtt => world
+                .cluster()
+                .publish_mqtt_burst(&destination, &payload, 1)
+                .await
+                .expect("failed to publish the unacknowledged MQTT payload"),
+            Self::Nats => world
+                .cluster()
+                .publish_nats_payloads(&destination, std::slice::from_ref(&payload))
+                .await
+                .expect("failed to publish the unacknowledged NATS payload"),
+            Self::Pulsar => world
+                .cluster()
+                .publish_pulsar(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged Pulsar payload"),
+            Self::RedisPubSub => world
+                .cluster()
+                .publish_redis(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged Redis payload"),
+            Self::Syslog => {
+                let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind the unacknowledged Syslog sender");
+                socket
+                    .send_to(payload.as_bytes(), &world.syslog_ingest_addr)
+                    .await
+                    .expect("failed to send the unacknowledged Syslog datagram");
+            }
+            Self::WebsocketClient => {
+                send_websocket_client_test_server_payload(world, &payload).await;
+            }
+            Self::ZeroMq => world
+                .cluster()
+                .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+                .await
+                .expect("failed to publish the unacknowledged ZeroMQ payload"),
+        }
+    }
+}
+
+#[given(expr = "unacknowledged source {string} is running")]
+async fn given_unacknowledged_source_is_running(world: &mut ScenarioWorld, source: String) {
+    initialize_scenario_identity(world);
+    UnacknowledgedSourceFixture::parse(&source)
+        .start_dependency(world)
+        .await;
+    refresh_dependency_configuration(world);
+}
+
+/// Creates the fixture's models on the leader through a session that keeps the relay
+/// subscription, so a later `START;` runs on that session.
+#[when(expr = "the unacknowledged source {string} ingestor is created")]
+async fn when_the_unacknowledged_source_ingestor_is_created(
+    world: &mut ScenarioWorld,
+    source: String,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_server_error = None;
+    let source = UnacknowledgedSourceFixture::parse(&source);
+    source.prepare(world).await;
+    let commands = expand_placeholders(world, &source.commands());
+    let leader = current_leader_node(world).await;
+    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+        .await
+        .expect("failed to create the unacknowledged source's models on the leader");
+    world.active_session = Some(session);
+    world.active_session_node = Some(leader);
+    world.active_session_has_subscription = true;
+}
+
+/// The WebSocket client fixture's mock server sends `{"user_id":42}` itself two seconds after the
+/// ingestor connects, so delivering that payload sends nothing more.
+#[when(expr = "the unacknowledged source {string} delivers the payload of user {int}")]
+async fn when_the_unacknowledged_source_delivers_the_payload_of_user(
+    world: &mut ScenarioWorld,
+    source: String,
+    user_id: i64,
+) {
+    let source = UnacknowledgedSourceFixture::parse(&source);
+    if let (UnacknowledgedSourceFixture::WebsocketClient, 42) = (source, user_id) {
+        return;
+    }
+    source.deliver(world, user_id).await;
+}
+
+/// Waits until the node that executes the fixture's ingestor counts `refused` of its payloads as
+/// refused for want of room on that node's extension workers.
+#[then(expr = "the unacknowledged source ingestor eventually counts {int} refused payload(s)")]
+async fn then_the_unacknowledged_source_ingestor_eventually_counts_refused_payloads(
+    world: &mut ScenarioWorld,
+    refused: i64,
+) {
+    let leader = current_leader_node(world).await;
+    let placement = PhaseDeadline::after(Duration::from_secs(30));
+    let owner = loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for the unacknowledged source ingestor's placement"
+        );
+        let output = world
+            .cluster()
+            .status_text(&leader, placement)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read the cluster status: {error:#}"));
+        if let Some((owner, _)) = scheduled_node_placement_from_status(
+            &output,
+            &world.domain,
+            "ingestor",
+            UNACKNOWLEDGED_SOURCE_INGESTOR,
+        ) {
+            break owner.to_string();
+        }
+        placement.pause(Duration::from_millis(50)).await;
+    };
+    let labels = [
+        format!(r#"domain="{}""#, world.domain),
+        format!(r#"ingestor="{UNACKNOWLEDGED_SOURCE_INGESTOR}""#),
+    ];
+    world
+        .cluster()
+        .wait_for_observability_metric_value(
+            &owner,
+            "nervix_ingestor_unfolding_refused_total",
+            &labels,
+            refused,
+            Some(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("node '{owner}' never counted {refused} refused payloads: {error}")
+        });
+}
+
 #[when(expr = "bulk execution on node {string} is released")]
 async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -21881,6 +22237,13 @@ async fn when_websocket_client_test_server_sends_a_payload(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
+    let payload = expand_placeholders(world, docstring(step));
+    send_websocket_client_test_server_payload(world, &payload).await;
+}
+
+/// Has the mock server send `payload` to every WebSocket client connected to this scenario's path,
+/// retrying until a client is connected.
+async fn send_websocket_client_test_server_payload(world: &mut ScenarioWorld, payload: &str) {
     let base = world
         .dependencies
         .endpoints()
@@ -21888,7 +22251,7 @@ async fn when_websocket_client_test_server_sends_a_payload(
         .expect("HTTP mock server endpoint must be available");
     let mut url = url::Url::parse(base).expect("HTTP mock server endpoint must be a valid URL");
     url.set_path(&format!("/ws/{}", world.test_id));
-    let payload = expand_placeholders(world, docstring(step));
+    let payload = payload.to_string();
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(10);
 

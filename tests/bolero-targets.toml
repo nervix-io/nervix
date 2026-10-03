@@ -683,3 +683,18 @@ random_iterations = 256
 source = "src/runtime/entity_gate.rs"
 test = "runtime::entity_gate::tests::bolero_freeze_sequences_publish_exact_coordination_owners"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "examples/paced-simulation/rust/src/__fuzz__/file_records_tests__bolero_ledger_and_effect_records_read_back_whole/corpus"
+domain_version = 1
+features = []
+id = "paced-simulation-records"
+invariant = "Every ledger and effect-store record the paced simulation driver writes reads back from its one JSON line as the complete original record, timestamps to the nanosecond and escaped text included."
+manifest = "Cargo.toml"
+max_input_bytes = 96
+package = "nervix-paced-simulation"
+random_iterations = 256
+source = "examples/paced-simulation/rust/src/file_records_tests.rs"
+test = "file_records_tests::bolero_ledger_and_effect_records_read_back_whole"
+test_target = "lib"

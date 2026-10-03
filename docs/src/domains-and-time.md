@@ -241,7 +241,8 @@ chapter describes, so a client projects the domain's logical time for its own UT
 the same arithmetic every node uses, including rounding down, and reconstructs the admission window
 from the origin, `PERIOD`, and `SKEW`. A driver of a paced simulation can therefore choose
 `TIMESTAMP AT` values the ingestor admits, such as the newest reached center, and compute how long
-to wait until a logical instant. The projection uses the client host's UTC, so the synchronization
+to wait until a logical instant; the [Paced Simulation Drivers](paced-simulation-drivers.md) are
+two runnable such drivers. The projection uses the client host's UTC, so the synchronization
 requirement above extends to such a client: its offset from the cluster's hosts, multiplied by
 `TIME RATE`, shifts every projection. The session also receives each newest accepted tick as a
 replaceable frame with its id, logical boundary, authority UTC observation, and serving node's
@@ -318,7 +319,10 @@ Timestamp sources:
 
 - `TIMESTAMP NOW` selects the installed domain's logical time when the ingest group is delivered.
   Buffered intake released after automatic quiescing receives that delivery time. In an unpaced
-  domain, the same clock capability supplies actual UTC.
+  domain, the same clock capability supplies actual UTC. In a paced domain that delivery time is
+  tested against the admission window like any event time: it lies less than one `PERIOD` after
+  the newest reached tick center, so a `SKEW` smaller than `PERIOD` rejects the records delivered
+  between two windows, and a `SKEW` of at least `PERIOD` admits every delivery.
 - `TIMESTAMP AT <field>` preserves the decoded `DATETIME` field as the event time. Connector
   timestamps selected when this clause is omitted in an unpaced domain, and broker metadata,
   retain their external values. None of these values is multiplied by `TIME RATE`.
