@@ -709,6 +709,25 @@ pub(in crate::runtime) struct IngestorQuiesceObservation {
     publication: StdArc<IngestorQuiescePublication>,
 }
 
+impl IngestorQuiesceObservation {
+    /// Whether the observed publication quiesces the ingestor.
+    pub(in crate::runtime) fn is_quiesced(&self) -> bool {
+        self.publication.decision.cause().is_some()
+    }
+}
+
+/// How the wait of a live payload on its way to its ingest group ended.
+#[derive(Debug)]
+pub(in crate::runtime) enum LiveDeliveryEnd<T> {
+    /// The delivery completed with its output.
+    Completed(T),
+    /// The ingestor stopped first.
+    Stopped,
+    /// A quiesce publication newer than the decision the payload was taken in under arrived first,
+    /// so the payload is decided again.
+    Redecide,
+}
+
 impl IngestorQuiesceControl {
     pub(super) fn new(
         mode: IngestQuiesceMode,
@@ -952,6 +971,27 @@ impl IngestorQuiesceControl {
                 return;
             }
             self.wait_for_change_since(&mut observation).await;
+        }
+    }
+
+    /// Runs `delivery`, the work that brings a live payload to its ingest group, until it
+    /// completes, `stop` turns true, or a publication newer than `decided` replaces the decision
+    /// the payload was taken in under. A new decision leaves `decided` observing it, and ends
+    /// `delivery` wherever it waits so that the payload can be decided again.
+    ///
+    /// `stop` is a receiver the caller keeps for this race alone: the wait marks the stop as seen
+    /// on it.
+    pub(in crate::runtime) async fn run_until_redecided<T>(
+        &self,
+        decided: &mut IngestorQuiesceObservation,
+        stop: &mut watch::Receiver<bool>,
+        delivery: impl Future<Output = T>,
+    ) -> LiveDeliveryEnd<T> {
+        nervix_primitives::select! {
+            biased;
+            output = delivery => LiveDeliveryEnd::Completed(output),
+            _ = stop.wait_for(|stop| *stop) => LiveDeliveryEnd::Stopped,
+            () = self.wait_for_change_since(decided) => LiveDeliveryEnd::Redecide,
         }
     }
 
@@ -2418,6 +2458,125 @@ mod tests {
         #[test]
         fn shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room() {
             check_interleavings(|| interrupted_delivery_keeps_its_payload(Interruption::Shutdown));
+        }
+
+        /// What ends the wait of a live payload for a place the extension class never frees.
+        #[derive(Debug, Clone, Copy)]
+        enum LiveInterruption {
+            BufferingQuiesce,
+            Stop,
+        }
+
+        /// A live payload the open control let dispatch waits for a place on a full extension
+        /// class while another task quiesces the ingestor under `BUFFER` or stops it. Only that
+        /// interruption can end the wait, so a waiter that registered after reading the decision
+        /// it watches would never wake, which Shuttle reports as a deadlock. A new decision is the
+        /// one the payload is decided under next, and the buffer retains it, counted with its
+        /// bytes; a stop leaves nothing retained.
+        fn interrupted_live_delivery(interruption: LiveInterruption) {
+            shuttle::future::block_on(async move {
+                let metrics = RuntimeMetrics::default();
+                let metric_labels =
+                    metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+                let control = Arc::new(IngestorQuiesceControl::new(
+                    IngestQuiesceMode::Buffer {
+                        max_size: "1MiB".to_string(),
+                        overflow: IngestQuiesceOverflow::DropOldest,
+                    },
+                    metrics,
+                    metric_labels,
+                ));
+                let mut decided = control.observation();
+                let intake = control.intake(
+                    0,
+                    BufferedIngestPayload::new(
+                        b"live",
+                        BufferedIngestMetadata::without_headers(),
+                        Timestamp::from_unix_nanos(1),
+                    ),
+                    false,
+                );
+                let IngestorQuiesceIntake::Dispatch(live) = intake else {
+                    panic!("an open control lets a live payload dispatch");
+                };
+
+                let executor = single_worker_executor();
+                let held = HeldExtensionQueue::hold(&executor).await;
+                let (stop_tx, mut stop) = watch::channel(false);
+                let interrupter = nervix_primitives::task::spawn({
+                    let control = control.clone();
+                    async move {
+                        match interruption {
+                            LiveInterruption::BufferingQuiesce => {
+                                control.engage(IngestorQuiesceCause::EntityHold);
+                            }
+                            LiveInterruption::Stop => {
+                                stop_tx.send_replace(true);
+                            }
+                        }
+                        // The sender outlives the delivery either way, so a dropped sender never
+                        // stands in for the interruption under check.
+                        stop_tx
+                    }
+                });
+
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1)
+                    .assured("the relay class has room for one more byte");
+                let unfolding = executor.run_cpu_with(
+                    CpuClass::Extension,
+                    QueueAdmission::WaitForPlace,
+                    charge,
+                    |_charge, _cancellation| (),
+                );
+                let end = control
+                    .run_until_redecided(&mut decided, &mut stop, unfolding)
+                    .await;
+                let _stop_tx = interrupter
+                    .await
+                    .assured("the interrupting task returns the stop sender");
+
+                match interruption {
+                    LiveInterruption::BufferingQuiesce => {
+                        assert!(
+                            matches!(end, LiveDeliveryEnd::Redecide),
+                            "only the new decision ends a wait for a place that never frees: \
+                             {end:?}"
+                        );
+                        assert!(
+                            decided.is_quiesced(),
+                            "the payload is decided next under the decision that ended its wait"
+                        );
+                        assert!(matches!(
+                            control.intake(0, live, false),
+                            IngestorQuiesceIntake::Buffered
+                        ));
+                        assert_eq!(control.counters().buffered_records, 1);
+                        assert_eq!(control.counters().buffered_bytes, b"live".len());
+                        control.release(IngestorQuiesceCause::EntityHold);
+                    }
+                    LiveInterruption::Stop => {
+                        assert!(
+                            matches!(end, LiveDeliveryEnd::Stopped),
+                            "only the stop ends a wait for a place that never frees: {end:?}"
+                        );
+                        assert_eq!(control.counters(), IngestorQuiesceCounters::default());
+                    }
+                }
+                held.release().await;
+            });
+        }
+
+        #[test]
+        fn shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room() {
+            check_interleavings(|| {
+                interrupted_live_delivery(LiveInterruption::BufferingQuiesce);
+            });
+        }
+
+        #[test]
+        fn shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room() {
+            check_interleavings(|| interrupted_live_delivery(LiveInterruption::Stop));
         }
     }
 }

@@ -55,6 +55,10 @@ impl WebsocketsIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: true,
+            // The client answers the server's pings only while the loop reads, so a held loop would
+            // let a server that pings close the connection and lose what it sent until the source
+            // reconnects.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "websockets",
         }

@@ -357,8 +357,11 @@ choose a backend.
   stays retryable rather than becoming a decode, encode or authentication failure. A class whose
   wait queue is full refuses work that answers a request, because its sender can present it again.
   Work the node already accepted and keeps, which nothing can present again, such as a payload a
-  quiesce buffer retained, states `QueueAdmission::WaitForPlace` and waits for a place instead; its
-  owner lets shutdown and a new quiesce end that wait, and keeps the work where it was until then.
+  quiesce buffer retained or a poll a paced source moved past, states
+  `QueueAdmission::WaitForPlace` and waits for a place instead; its owner lets shutdown and a new
+  quiesce end that wait, and keeps the work where it was until then or decides on it again. A
+  payload a source hands over without an acknowledgement waits only when holding the source's loop
+  keeps its transport connected with bounded memory; otherwise its refusal is reported and counted.
   `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers, and
   `nervix_primitives::task::block_in_place`, which blocks the runtime worker thread that calls it,
   belongs to no file by default. Any other file that names either needs a permission in

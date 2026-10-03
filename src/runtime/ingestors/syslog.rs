@@ -39,6 +39,10 @@ impl SyslogIngestorStartPlan {
             acknowledgement: IngestAcknowledgement::Unacknowledged,
             buffered_intake: true,
             flush_each_intake: false,
+            // The listener stays bound while the loop waits: the kernel drops UDP datagrams beyond
+            // its receive buffer, and TCP and TLS senders wait once the listener's bounded frame
+            // queue is full.
+            unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "syslog",
         }
