@@ -887,6 +887,10 @@ the binding: it reads the attached clock before it submits anything, waits with
 pauses from `NX_CLOCK_EVENT_INTERRUPTED` until the next `NX_CLOCK_EVENT_STATE`, and runs its
 consumers beside its producer on one session, as emitter consumer rule E-6 allows. The Rust driver
 beside it does the same with the Rust client.
+Both drivers explicitly reopen changed contracts within the current START generation, retaining
+the original handle for outstanding producer outcomes. Only `domain_stopped` and
+`generation_changed` wait for a later generation. Removed endpoints, incompatible fields, and
+unusable consumer credit produce configuration errors; no unknown submission is resent.
 
 `just test-client-conformance` builds every probe and runs it against one- and three-node clusters;
 [`tests/client-conformance-ledger.md`](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)

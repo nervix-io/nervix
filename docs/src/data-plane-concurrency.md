@@ -1176,7 +1176,8 @@ builds.
 diagnostic process starts its run after it has registered the signals it must not lose and before it
 constructs a tracked lock or starts a runtime worker: the server's `main` right after it registers
 its termination signals, and the scenario binary's right after it configures the lifecycle of its
-test dependencies. A tracked lock constructed in a process that has not installed the detector
+test dependencies. The Rust paced driver's diagnostic `main` installs it before entering the
+runtime that runs the application. A tracked lock constructed in a process that has not installed the detector
 panics, naming the configuration failure, because Deloxide drops a cycle it detects while no
 callback is installed, so such a lock would deadlock unreported. A second installation is refused,
 so nothing resets the detector or configures it twice, and the in-process nodes of a scenario binary
@@ -1248,6 +1249,10 @@ the blocking applied-state authority guard through staging failure, complete pub
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 Those restore scenarios also run in the ordinary public suite. An invocation that executed no
 check fails the run, and so does a diagnostic workload whose scenarios did not all run and pass.
+The command also runs `@paced_simulation_reopen` on one and three nodes, with the diagnostic
+Rust driver replacing producer credit owners, retaining pending submission owners, reopening
+consumers and publishing replacement refusals. Python runs against diagnostic nodes with its
+ordinary shared binding; Python's own locks and condition variables are outside this detector.
 The retained diagnostic evidence covers the tracked locks acquired by those workloads; async
 coordination, atomic capture fencing, database dependency locks and network waits keep their
 Shuttle, Loom, Turmoil and Chaos evidence.

@@ -210,6 +210,15 @@ standard library: it follows the domain clock and projects every wait and admiss
 several threads. `paced_simulation.feature` runs it with `just test-scenarios` beside the Rust
 driver, on one and three nodes, against the published example graph; `just tests-deps` builds the
 binding it loads.
+The contract-change outline alters both emitters and the ingestor within one START generation and
+checks reopening, completed outcomes, and each ledger reading's exact effect. Separate one- and
+three-node cases check refusal after endpoint removal, schema change, and an unusable consumer
+credit request. Outcome threads retain the Python producer handle and its credit independently
+of the replacement, so neither a late outcome nor handle cleanup affects the replacement.
+The credit-wait outline changes the ingestor while a tick waits for the first batch's outcome,
+checks that its refusal leaves that reading unapplied, and explicitly replays it exactly once.
+A delayed consumer refusal after the last submitted tick also exits promptly instead of waiting
+for the outstanding-outcome deadline or a producer close that cannot drain that output.
 
 ## Findings
 

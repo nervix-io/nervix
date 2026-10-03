@@ -161,6 +161,183 @@ Feature: Paced simulation drivers
       | python | 1            |
       | python | 3            |
 
+  @paced_simulation @paced_simulation_reopen
+  Scenario Outline: The <driver> driver reopens its consumers and producer after contract changes within one START generation on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER INGESTOR simulated_readings REPLACE ROUTE TO readings
+        INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
+        BRANCHED BY by_sensor SET sensor = message.sensor
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
+          occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
+      ALTER EMITTER observed_readings SET FLUSH IMMEDIATE;
+      ALTER EMITTER rejection_notices SET FLUSH IMMEDIATE;
+      START AT NOW TIME RATE 0.005;
+      """
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 4 --sensors 2 --credit-batches 2"
+    Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER EMITTER observed_readings SET TO CLIENT SCHEMA observed_reading
+        MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
+      ALTER EMITTER rejection_notices SET TO CLIENT SCHEMA rejected_reading
+        MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
+      """
+    Then within "60s" the paced simulation driver prints a line starting with "CONSUMER reopen_required consumer=output-1 emitter=observed_readings reason=contract_changed"
+    And within "60s" the paced simulation driver prints a line starting with "CONSUMER reopened consumer=output-1 emitter=observed_readings generation=1"
+    And within "60s" the paced simulation driver prints a line starting with "CONSUMER reopened consumer=rejections emitter=rejection_notices generation=1"
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER INGESTOR simulated_readings SET FROM CLIENT SCHEMA reading
+        MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
+        ON QUIESCE SUSPEND;
+      """
+    Then within "10s" the paced simulation driver prints a line starting with "REOPENED generation=1 ingestor=simulated_readings"
+    And within "180s" the paced simulation driver exits with status 0
+    And the paced simulation driver reports
+      | completed         | 8 |
+      | effects           | 8 |
+      | not_admitted      | 0 |
+      | processing_failed | 0 |
+      | outcome_unknown   | 0 |
+      | duplicates        | 0 |
+      | generations       | 1 |
+    And the paced simulation effects hold every reading of its ledger exactly once
+
+    Examples:
+      | driver | cluster_size |
+      | rust   | 1            |
+      | rust   | 3            |
+      | python | 1            |
+      | python | 3            |
+
+  @paced_simulation @paced_simulation_reopen
+  Scenario Outline: The <driver> driver retains a refused tick across a producer contract change and explicitly replays it on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER INGESTOR simulated_readings REPLACE ROUTE TO readings
+        INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
+        BRANCHED BY by_sensor SET sensor = message.sensor
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
+          occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
+      ALTER EMITTER observed_readings SET FLUSH IMMEDIATE;
+      ALTER EMITTER rejection_notices SET FLUSH IMMEDIATE;
+      START AT NOW TIME RATE 0.5;
+      """
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 8 --sensors 1 --credit-batches 1 --processing-time 2s"
+    Then within "60s" the paced simulation driver prints a line starting with "WAITING credit"
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER INGESTOR simulated_readings SET FROM CLIENT SCHEMA reading
+        MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
+        ON QUIESCE SUSPEND;
+      """
+    Then within "60s" the paced simulation driver prints a line containing "not_admitted "
+    And within "60s" the paced simulation driver prints a line starting with "REOPENED generation=1 ingestor=simulated_readings"
+    And within "120s" the paced simulation driver exits with status 3
+    And the paced simulation driver reports
+      | completed         | 7 |
+      | effects           | 7 |
+      | not_admitted      | 1 |
+      | processing_failed | 0 |
+      | outcome_unknown   | 0 |
+      | generations       | 1 |
+    When the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 0 --replay"
+    Then within "120s" the paced simulation driver exits with status 0
+    And the paced simulation driver reports
+      | completed    | 1 |
+      | effects      | 1 |
+      | not_admitted | 0 |
+      | duplicates   | 0 |
+      | generations  | 1 |
+    And the paced simulation effects hold every reading of its ledger exactly once
+
+    Examples:
+      | driver | cluster_size |
+      | rust   | 1            |
+      | rust   | 3            |
+      | python | 1            |
+      | python | 3            |
+
+  @paced_simulation @paced_simulation_reopen
+  Scenario Outline: The <driver> driver reports a delayed refusal while awaiting its final outcome on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;
+      START AT NOW TIME RATE 0.5;
+      """
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 1 --sensors 1 --consumer-delay 5s --deadline 2m"
+    Then within "60s" the paced simulation driver prints a line starting with "SUBMITTED tick="
+    And within "15s" the paced simulation driver exits with status 2
+    And the paced simulation driver's errors contain "emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits"
+
+    Examples:
+      | driver | cluster_size |
+      | rust   | 1            |
+      | rust   | 3            |
+      | python | 1            |
+      | python | 3            |
+
+  @paced_simulation @paced_simulation_reopen
+  Scenario Outline: The <driver> driver fails clearly when reopening a <change_kind> <endpoint> on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER INGESTOR simulated_readings REPLACE ROUTE TO readings
+        INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
+        BRANCHED BY by_sensor SET sensor = message.sensor
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
+          occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
+      CREATE SCHEMA revised_reading (sensor STRING, reading_id STRING, tick U64, occurred_at DATETIME, value I64);
+      CREATE SCHEMA revised_observed_reading (sensor STRING, reading_id STRING, tick U64, occurred_at DATETIME, admitted_at DATETIME, timestamp_source STRING, value I64);
+      START AT NOW TIME RATE 0.05;
+      """
+    And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 30 --sensors 2 --deadline 5s"
+    Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
+    When these NSPL commands are executed on the leader node
+      """
+      <change>
+      """
+    Then within "60s" the paced simulation driver exits with status 2
+    And the paced simulation driver's errors contain "<error>"
+
+    Examples:
+      | driver | cluster_size | change_kind       | endpoint | change                                                                                                                                                                 | error                                                                                               |
+      | rust   | 1            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
+      | rust   | 1            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | rust   | 1            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                              | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | rust   | 1            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                      | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
+      | rust   | 1            | schema-mismatched | producer | ALTER INGESTOR simulated_readings SET FROM CLIENT SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
+      | rust   | 3            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
+      | rust   | 3            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | rust   | 3            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                              | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | rust   | 3            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                      | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
+      | rust   | 3            | schema-mismatched | producer | ALTER INGESTOR simulated_readings SET FROM CLIENT SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
+      | python | 1            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
+      | python | 1            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | python | 1            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                              | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | python | 1            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                      | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
+      | python | 1            | schema-mismatched | producer | ALTER INGESTOR simulated_readings SET FROM CLIENT SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
+      | python | 3            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
+      | python | 3            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | python | 3            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                              | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | python | 3            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                      | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
+      | python | 3            | schema-mismatched | producer | ALTER INGESTOR simulated_readings SET FROM CLIENT SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
+
   @paced_simulation
   Scenario Outline: The <driver> driver reports unknown outcomes after its session is cut, and the <replayer> driver replays them without repeating an effect
     Given a 1 node nervix cluster is started

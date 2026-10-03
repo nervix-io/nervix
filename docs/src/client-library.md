@@ -457,7 +457,9 @@ The [Paced Simulation Drivers](paced-simulation-drivers.md) are complete program
 followed domain clock, a producer and competing consumers on one session, in Rust and through the
 shared C binding: they start their consumers before they await an attached outcome, pace their
 `TIMESTAMP AT` values by the attached clock's projections, and make their effects idempotent across
-redeliveries and deliberate replays.
+redeliveries and deliberate replays. They explicitly reopen changed endpoint contracts within a
+START generation, validate the same expected fields and credit requests again, and keep unknown
+submissions with their original handle rather than resending them.
 
 ### Through The Shared C Binding
 

@@ -66,6 +66,15 @@ scenario accounting requires every selected diagnostic workload to run and pass 
 covers tracked blocking locks reached by those workloads; async waits, capture atomics, dependency
 locks and cross-node waits retain their other concurrency checks.
 
+The command also selects `@paced_simulation_reopen` from the public paced-driver feature. It
+builds the Rust driver in diagnostic mode and supplies its path to the same scenario fixture,
+so the driver installs its own detector before entering its runtime. Both drivers exercise
+endpoint replacement, pending submission ownership, explicit replay and replacement refusal
+against diagnostic nodes on one and three nodes, without retries. Python uses the ordinary
+shared binding; its locks and condition variables are outside this detector. The command keeps
+this workload's console output beside its probe and cluster logs and applies the same nonempty,
+all-passed scenario accounting.
+
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
 up to three more times with a new port selection. It also removes the failed container when those
