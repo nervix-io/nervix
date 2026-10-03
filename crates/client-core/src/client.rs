@@ -1470,7 +1470,7 @@ impl Client {
 
     /// The channel the current exchange runs on.
     pub(crate) async fn current_channel(&self) -> Channel {
-        self.inner.exchange.lock().await.requests().channel.clone()
+        self.inner.exchange.lock().await.channel.clone()
     }
 
     /// Whether a routed request may be sent again after `attempt`, counting from zero.
