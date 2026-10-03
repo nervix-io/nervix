@@ -41,7 +41,6 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     net::{TcpListener, TcpStream},
-    publication::ArcSwap,
     sync::{
         Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -53,7 +52,10 @@ use nervix_primitives::{
 use strum::EnumCount as _;
 use tracing::{debug, warn};
 
-use self::stream_releases::{StreamLeaseAttempt, StreamRelease, StreamReleases};
+use self::{
+    published_tls::{ActiveTls, PublishedTls},
+    stream_releases::{StreamLeaseAttempt, StreamRelease, StreamReleases},
+};
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
     RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
@@ -77,6 +79,7 @@ use crate::{
 mod body;
 mod dial;
 mod duplex;
+mod published_tls;
 mod relay;
 mod stream;
 mod stream_releases;
@@ -235,51 +238,6 @@ impl OutboundTarget {
     /// The keys of this endpoint's connection slots in `class`, in slot order.
     fn slot_keys(&self, class: PoolClass) -> &[ConnectionSlotKey] {
         &self.slot_keys[class.index()]
-    }
-}
-
-/// The credentials new connections authenticate with, published without a lock.
-///
-/// Every connection records the generation it authenticated under and drains once the published
-/// generation moves past it. A replacement publishes its bundle before it advances the generation,
-/// and a reader loads the generation before the bundle. A connection can therefore record a
-/// generation older than the credentials it used, which only drains it early, but never a newer
-/// one, which would let replaced credentials outlive their replacement.
-struct PublishedTls {
-    generation: AtomicU64,
-    bundle: ArcSwap<TlsConfigBundle>,
-}
-
-/// The credentials one connection authenticates with, and the generation it records for them.
-struct ActiveTls {
-    generation: u64,
-    bundle: StdArc<TlsConfigBundle>,
-}
-
-impl PublishedTls {
-    fn new(bundle: TlsConfigBundle) -> Self {
-        Self {
-            generation: AtomicU64::new(1),
-            bundle: ArcSwap::from_pointee(bundle),
-        }
-    }
-
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    fn current(&self) -> ActiveTls {
-        let generation = self.generation();
-        let bundle = self.bundle.load_full();
-        ActiveTls { generation, bundle }
-    }
-
-    /// Publish `bundle` under `generation`, which the caller derived from the current generation.
-    /// The bundle is published first, and a race between replacements never moves the generation
-    /// backwards.
-    fn publish(&self, generation: u64, bundle: TlsConfigBundle) {
-        self.bundle.store(StdArc::new(bundle));
-        self.generation.fetch_max(generation, Ordering::AcqRel);
     }
 }
 
@@ -2737,15 +2695,12 @@ impl TransportState {
         tls.clock
             .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
-        let next_generation =
-            self.tls
-                .generation()
-                .checked_add(1)
-                .ok_or_else(|| TransportError::InvalidOptions {
-                    reason: "TLS configuration generation is exhausted".to_string(),
-                })?;
+        // Published before the slots are retired. An outbound connection set up from the replaced
+        // credentials checks the generation once it is established: one that checks after this
+        // publication is refused, and one that checked before it was registered on a slot that
+        // existed before it, which the retirement below ends.
+        self.tls.replace(tls);
         self.cancel_all_slots();
-        self.tls.publish(next_generation, tls);
         self.tls_changed.notify_waiters();
         let targets = self
             .targets

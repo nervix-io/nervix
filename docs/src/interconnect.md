@@ -1179,13 +1179,15 @@ connections begin graceful shutdown. Certificate expiration is also mapped to a 
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
 of either peer certificate even if the wall clock later moves.
 
-A replacement publishes the new bundle before it advances the credential generation, and each
-connection records the generation it authenticated under. An inbound connection compares that
-record with the published generation, without a lock, whenever it accepts a stream and whenever a
-replacement is announced, and begins graceful shutdown once the published generation has moved past
-it. Because a connection reads the generation before the bundle, it can record a generation older
-than its credentials, which only drains it early, but never a newer one that would let replaced
-credentials outlive their replacement.
+A replacement publishes the new bundle and its generation as one value, under the generation after
+the one it replaces, so two replacements that race still publish distinct generations. Each
+connection records the generation of exactly the credentials it authenticated with. An inbound
+connection compares that record with the published generation, without a lock, whenever it accepts
+a stream and whenever a replacement is announced, and begins graceful shutdown once the published
+generation has moved past it. The replacement publishes before it retires the outbound pool slots.
+An outbound connection set up from the replaced credentials checks the published generation once it
+is established: one that checks after the publication is refused, and one that checked before it is
+held by a slot the retirement then ends, so replaced credentials never outlive their replacement.
 
 Application shutdown has three ordered phases. A server process issues the stop request that
 starts them when it receives its first `SIGINT` or `SIGTERM`, and one shutdown deadline measured
