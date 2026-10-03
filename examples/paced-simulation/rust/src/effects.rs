@@ -289,4 +289,15 @@ mod tests {
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("\"occurred_at\":\"1970-01-01T00:00:00.000000400Z\""));
     }
+
+    #[nervix_primitives::test]
+    async fn a_store_path_that_is_not_a_file_is_named_when_it_cannot_be_opened() {
+        let directory = tempfile::tempdir().assured("a test can create a directory");
+        let expected = directory.path().display().to_string();
+        let opened = EffectStore::open(directory.path()).await.err();
+        assert!(matches!(
+            opened,
+            Some(EffectError::Open { path, .. }) if path == expected
+        ));
+    }
 }

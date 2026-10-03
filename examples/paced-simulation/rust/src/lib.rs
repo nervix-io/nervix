@@ -34,6 +34,8 @@ mod readings;
 mod refusal;
 mod report;
 mod simulation;
+#[cfg(test)]
+mod vocabulary_tests;
 
 pub use options::Options;
 pub use simulation::{Finish, run};

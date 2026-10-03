@@ -355,4 +355,20 @@ mod tests {
             Some(LedgerError::Malformed { line: 2, .. })
         ));
     }
+
+    #[nervix_primitives::test]
+    async fn a_ledger_path_that_is_not_a_file_is_named_when_it_cannot_be_opened() {
+        let directory = tempfile::tempdir().assured("a test can create a directory");
+        let expected = directory.path().display().to_string();
+        let appended = Ledger::open(directory.path()).await.err();
+        assert!(matches!(
+            appended,
+            Some(LedgerError::Open { path, .. }) if path == expected
+        ));
+        let replayed = Ledger::unresolved(directory.path()).await.err();
+        assert!(matches!(
+            replayed,
+            Some(LedgerError::Open { path, .. }) if path == expected
+        ));
+    }
 }

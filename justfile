@@ -751,10 +751,9 @@ test-scenarios-coverage: tests-deps
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    # The paced simulation drivers run as published, from the artifacts `tests-deps` built: coverage
-    # ignores sources under examples/, so an instrumented build of them would add nothing.
-    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/debug/nervix-paced-simulation") }}
-    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
+    just coverage-paced-simulation-binaries
+    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
@@ -847,6 +846,15 @@ coverage-cli-binary:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
         cargo build --package nervix-cli --bin nervix-cli
 
+# Build the paced simulation's Rust driver, and the shared C binding its Python driver loads, with
+# the same coverage flags, so the public scenarios that run both drivers count the lines they reach.
+coverage-paced-simulation-binaries:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cargo llvm-cov show-env --sh 2>/dev/null)
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo build --package nervix-paced-simulation --package nervix-client-ffi
+
 coverage-clients-units:
     cargo llvm-cov --no-report --bins \
         --package nervix-web-console --package nervix-cli
@@ -936,6 +944,9 @@ coverage-scenarios output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    just coverage-paced-simulation-binaries
+    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
@@ -947,6 +958,9 @@ coverage-scenarios-append output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    just coverage-paced-simulation-binaries
+    export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}

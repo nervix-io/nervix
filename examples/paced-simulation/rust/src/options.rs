@@ -383,5 +383,20 @@ mod tests {
             refused(&["--domain", "not a name"]),
             Some(OptionsError::InvalidName { kind: "domain", .. })
         ));
+        assert!(matches!(
+            refused(&["--ingestor", "not a name"]),
+            Some(OptionsError::InvalidName {
+                kind: "ingestor",
+                ..
+            })
+        ));
+        assert!(matches!(
+            refused(&["--emitter", "not a name"]),
+            Some(OptionsError::InvalidName { kind: "emitter", name }) if name == "not a name"
+        ));
+        assert!(matches!(
+            refused(&["--rejections", "also not a name"]),
+            Some(OptionsError::InvalidName { kind: "emitter", name }) if name == "also not a name"
+        ));
     }
 }

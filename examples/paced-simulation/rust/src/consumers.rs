@@ -55,7 +55,7 @@ fn consumer_limits() -> ClientConsumerLimits {
 }
 
 /// The text of a consumer's reason to need a new open.
-fn reopen_reason(reason: &ConsumerReopenReason) -> String {
+pub(crate) fn reopen_reason(reason: &ConsumerReopenReason) -> String {
     match reason {
         ConsumerReopenReason::DomainStopped => "domain_stopped".to_string(),
         ConsumerReopenReason::EndpointRemoved => "endpoint_removed".to_string(),
@@ -70,7 +70,7 @@ fn reopen_reason(reason: &ConsumerReopenReason) -> String {
 }
 
 /// The text of a settlement the server confirmed or refused.
-const fn settlement(settlement: EmitterSettlement) -> &'static str {
+pub(crate) const fn settlement(settlement: EmitterSettlement) -> &'static str {
     match settlement {
         EmitterSettlement::Confirmed => "confirmed",
         EmitterSettlement::StaleReference => "stale_reference",

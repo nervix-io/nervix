@@ -284,7 +284,7 @@ async fn starting_generation(
 }
 
 /// The text of an outcome's cause, as the ledger and the report write it.
-fn outcome_of(outcome: &ProducerOutcome) -> (OutcomeKind, &'static str) {
+pub(crate) fn outcome_of(outcome: &ProducerOutcome) -> (OutcomeKind, &'static str) {
     match outcome {
         ProducerOutcome::Completed => (OutcomeKind::Completed, ""),
         ProducerOutcome::NotAdmitted { refusal, .. } => (OutcomeKind::NotAdmitted, refusal.label()),
