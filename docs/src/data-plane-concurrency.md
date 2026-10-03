@@ -827,7 +827,7 @@ Bounded retained placement progress remains explicitly documented. Testing fault
 their exact emitter, ingestor, domain/branch, checkpoint window or acknowledgement link and finite
 read/removal steps; they release map guards before a scenario-controlled pause. These contracts
 describe test selection, not a product wait deadline. The executor-saturation lookup belongs to
-testing fault control. The [concurrent map inventory](../../tests/concurrent-map-inventory-ledger.md)
+testing fault control. The [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
 records the runtime ownership review; source contracts and expectations are the executable policy.
 
 ### Complete analysis and qualification
