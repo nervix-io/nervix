@@ -59,6 +59,62 @@ jobs:
       - name: Fetch and validate the pinned public artifact
         run: just fetch-onnxruntime '${{ matrix.platform }}' --variant '${{ matrix.variant }}'
 
+  onnxruntime-macos:
+    name: onnxruntime-macos-arm64
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
+
+      - name: Install artifact recipe tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli
+
+      - name: Select the current macOS artifact
+        id: artifact
+        run: |
+          uv run --locked python - <<'PY'
+          import os
+          from scripts.onnxruntime.artifacts import build_spec
+          spec = build_spec("darwin/arm64")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"fingerprint={spec.fingerprint}\n")
+              output.write(f"published={'true' if spec.artifact_checksum else 'false'}\n")
+          PY
+
+      - name: Fetch and verify the published macOS artifact
+        if: steps.artifact.outputs.published == 'true'
+        run: just verify-onnxruntime darwin/arm64 --stage "${RUNNER_TEMP}/onnxruntime"
+
+      - name: Download the maintainer candidate for native qualification
+        if: steps.artifact.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FINGERPRINT: ${{ steps.artifact.outputs.fingerprint }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/onnxruntime-candidate"
+          gh release download "onnxruntime-macos-${FINGERPRINT}" \
+            --repo "${GITHUB_REPOSITORY}" --pattern "${FINGERPRINT}.tar.gz" \
+            --dir "${RUNNER_TEMP}/onnxruntime-candidate"
+          just qualify-onnxruntime-macos \
+            "${RUNNER_TEMP}/onnxruntime-candidate/${FINGERPRINT}.tar.gz" \
+            "${RUNNER_TEMP}/macos-qualification.json"
+
+      - name: Retain the native candidate qualification receipt
+        if: steps.artifact.outputs.published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-qualification-${{ steps.artifact.outputs.fingerprint }}
+          path: ${{ runner.temp }}/macos-qualification.json
+          if-no-files-found: error
+
   checks:
     name: checks
     runs-on: blacksmith-8vcpu-ubuntu-2404

@@ -21,7 +21,7 @@ help:
 
 # Exercise ONNX artifact preparation and its local and R2 cache failure paths.
 test-onnxruntime-tooling:
-    uv run --locked python -m unittest scripts.tests.test_build_onnxruntime scripts.tests.test_onnxruntime_toolchain scripts.tests.test_onnxruntime_bootstrap scripts.tests.test_onnxruntime_recipes
+    uv run --locked python -m unittest scripts.tests.test_build_onnxruntime scripts.tests.test_onnxruntime_toolchain scripts.tests.test_onnxruntime_bootstrap scripts.tests.test_onnxruntime_recipes scripts.tests.test_onnxruntime_macos
 # Start one bounded invocation and retain the caller's repository variable overrides.
 [private]
 run-with-jobs recipe jobs:
@@ -2304,7 +2304,8 @@ generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_outp
 fetch-onnxruntime platform="native" *args:
     uv run --locked python -m scripts.onnxruntime.artifacts fetch --platform {{ quote(platform) }} {{ args }}
 
-# Maintainer only: compile Linux variants in the pinned Docker builder; --force starts with an empty compiler tree.
+# Maintainer only: compile in pinned Linux Docker builders, including macOS ARM64 through OSXCross.
+# --force starts with an empty compiler tree.
 # Normal development and CI depend on fetch-onnxruntime.
 build-onnxruntime platform="native" *args:
     uv run --locked python -m scripts.onnxruntime.artifacts build --platform {{ quote(platform) }} {{ args }}
@@ -2313,7 +2314,7 @@ build-onnxruntime platform="native" *args:
 verify-onnxruntime platform="native" *args: (fetch-onnxruntime platform args)
     uv run --locked python -m scripts.onnxruntime.artifacts verify --platform {{ quote(platform) }} {{ args }}
 
-# Manual task: compile external artifacts and pin their checksums for local use.
+# Manual task: compile external artifacts; macOS requires native qualification before pinning.
 # Normal development and CI recipes never depend on this task.
 build-artifacts platform="native" *args: (build-onnxruntime platform args)
 
@@ -2324,6 +2325,10 @@ pin-onnxruntime platform="native" *args:
 # Maintainer only: upload the completed, locally pinned artifact to R2.
 publish-onnxruntime platform="native" *args:
     uv run --locked python -m scripts.onnxruntime.artifacts publish --platform {{ quote(platform) }} {{ args }}
+
+# Execute a Linux-built macOS candidate on ARM64 macOS and retain its inference receipt.
+qualify-onnxruntime-macos archive receipt *args:
+    uv run --locked python -m scripts.onnxruntime.artifacts qualify --platform darwin/arm64 --archive {{ quote(archive) }} --qualification {{ quote(receipt) }} {{ args }}
 
 [private]
 prepare-server-package package:
@@ -2358,7 +2363,7 @@ cluster-dashboard: build-all
 dockerfmt:
     #!/usr/bin/env bash
     set -euo pipefail
-    for file in Dockerfile* scripts/onnxruntime/Dockerfile; do
+    for file in Dockerfile* scripts/onnxruntime/Dockerfile*; do
         tmp="$(mktemp)"
         dockerfmt < "${file}" > "${tmp}"
         mv "${tmp}" "${file}"
@@ -2368,7 +2373,7 @@ dockerfmt-check:
     #!/usr/bin/env bash
     set -euo pipefail
     failed=0
-    for file in Dockerfile* scripts/onnxruntime/Dockerfile; do
+    for file in Dockerfile* scripts/onnxruntime/Dockerfile*; do
         tmp="$(mktemp)"
         dockerfmt < "${file}" > "${tmp}"
         if ! cmp -s "${file}" "${tmp}"; then

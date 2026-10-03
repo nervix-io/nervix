@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.build_onnxruntime import BuildSpec, RuntimeBuild, file_digest, native_platform
+from scripts.onnxruntime.artifacts import build_spec
 from scripts.tests.test_build_onnxruntime import construct_package, fixture_repository
 
 
@@ -264,7 +265,7 @@ sys.exit(0)
         self.assertFalse(self.log.exists())
 
     def test_force_rebuild_replaces_and_repins_each_platform_without_publication(self) -> None:
-        for platform in ("linux/amd64", "linux/arm64", "darwin/arm64"):
+        for platform in ("linux/amd64", "linux/arm64"):
             with self.subTest(platform=platform):
                 self.environment["RECIPE_GENERATION"] = "first"
                 result = subprocess.run(["just", "build-onnxruntime", platform], cwd=self.repo,
@@ -286,12 +287,12 @@ sys.exit(0)
                     self.assertEqual(result.returncode, 0, result.stderr)
                 self.environment.pop("RECIPE_REQUIRE_REUSE")
         self.assertEqual(Path(self.environment["RECIPE_COMPILATION"]).read_text().splitlines(),
-                         [platform for platform in ("linux/amd64", "linux/arm64", "darwin/arm64") for _ in range(2)])
+                         [platform for platform in ("linux/amd64", "linux/arm64") for _ in range(2)])
         self.assertFalse(self.log.exists())
 
     def test_pin_records_completed_artifacts_without_compilation_or_publication(self) -> None:
         pin_file = self.repo / "scripts/onnxruntime/checksums.toml"
-        for platform in ("linux/amd64", "linux/arm64", "darwin/arm64"):
+        for platform in ("linux/amd64", "linux/arm64"):
             with self.subTest(platform=platform):
                 previous = tomllib.loads(pin_file.read_text())
                 build = RuntimeBuild(BuildSpec.create(platform, repo=self.repo), self.root / "stage")
@@ -328,6 +329,26 @@ sys.exit(0)
                 self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(Path(self.environment["RECIPE_COMPILATION"]).exists())
         self.assertFalse(self.log.exists())
+
+    def test_mac_candidate_is_pinned_and_fetchable_after_importing_native_qualification(self) -> None:
+        result = subprocess.run(["just", "build-onnxruntime", "darwin/arm64"], cwd=self.repo,
+                                env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("qualify it on ARM64 macOS before pinning", result.stderr)
+        build = RuntimeBuild(build_spec("darwin/arm64", self.repo), self.root / "stage")
+        receipt = self.root / "qualification.json"
+        receipt.write_text(json.dumps({"fingerprint": build.spec.fingerprint,
+                                      "archive_sha256": file_digest(build.archive()),
+                                      "manifest_sha256": file_digest(build.package_dir / "manifest.json"),
+                                      "platform": "darwin/arm64", "inference": "passed"}))
+        result = subprocess.run(["just", "pin-onnxruntime", "darwin/arm64", "--qualification", str(receipt)],
+                                cwd=self.repo, env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(build.spec.artifact_checksum, file_digest(build.archive()))
+        result = subprocess.run(["just", "fetch-onnxruntime", "darwin/arm64"], cwd=self.repo,
+                                env=self.environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(build.package_dir / "lib"))
 
     def test_pin_rejects_missing_or_damaged_packages_and_ci_without_changing_pins(self) -> None:
         pin_file = self.repo / "scripts/onnxruntime/checksums.toml"

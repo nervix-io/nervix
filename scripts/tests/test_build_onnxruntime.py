@@ -62,7 +62,8 @@ def fixture_repository(destination: Path) -> Path:
              "scripts/onnxruntime/manifest.toml", "scripts/onnxruntime/upload.py",
              "scripts/onnxruntime/artifacts.py", "scripts/onnxruntime/bootstrap.py",
              "scripts/onnxruntime/downloads.json", "justfile", "rust-toolchain.toml",
-             "pyproject.toml", "uv.lock", "scripts/build_web_console.py"]
+             "pyproject.toml", "uv.lock", "scripts/build_web_console.py",
+             "scripts/onnxruntime/macos.py", "scripts/onnxruntime/Dockerfile.macos"]
     for name in names:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -282,7 +282,7 @@ class BootstrapTests(unittest.TestCase):
         construct_package(build.package_dir, platform=build.spec.platform)
         build._seal(build.package_dir)
         build.checksum()
-        with patch("scripts.onnxruntime.artifacts.Bootstrap", side_effect=AssertionError("unnecessary tools")):
+        with patch("scripts.onnxruntime.artifacts.ManagedRuntimeBuild._build", side_effect=AssertionError("unnecessary compilation")):
             self.assertEqual(build.build_source(), build.package_dir / "lib")
 
     def test_configured_versioned_llvm_commands_and_flags_are_preserved(self) -> None:

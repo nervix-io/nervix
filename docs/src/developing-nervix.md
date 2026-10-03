@@ -83,13 +83,14 @@ invocations share a file lock. Interrupted maintainer builds retain compiler int
 
 ### Maintainer Source Builds
 
-`just build-onnxruntime [platform]` performs the complete manual build for local use. It reuses a
+`just build-onnxruntime [platform]` performs the manual build for local use. It reuses a
 completed package first. When a build is needed, it downloads the pinned sources, prepares
-the pinned compiler container and target SDK, compiles with LLVM, verifies the package, and records
-its SHA-256 in
+the pinned compiler container and target SDK, compiles with LLVM, and verifies the package. Linux
+builds also execute inference and record the SHA-256 in
 `scripts/onnxruntime/checksums.toml`. A workflow lock covers the build and pinning, and packages are
 installed atomically after validation. Repeating the command skips downloads, compilation, and
-compression for an already verified package. Normal recipes can immediately reuse the local result.
+compression for an already verified Linux package. Normal recipes can immediately reuse the pinned
+local result. macOS builds require the native qualification described below before pinning.
 
 `just pin-onnxruntime [platform]` records the fingerprint and archive SHA-256 for a completed local
 artifact in `scripts/onnxruntime/checksums.toml` and prints its TOML entry. It validates the package,
@@ -98,7 +99,8 @@ It requires a completed package matching the current manifest and build identity
 compiler or R2 credentials and performs no downloads, source compilation, or publication.
 
 `just build-onnxruntime native --force` recompiles a completed package and updates its local
-checksum pin. Use `just build-onnxruntime linux/arm64 --force` for the arm64 cross-build, or pass
+checksum pin on Linux. macOS replacements require native qualification before updating the pin.
+Use `just build-onnxruntime linux/arm64 --force` for the arm64 cross-build, or pass
 `--force` to `just build-artifacts [platform]`. A forced build cleans the selected compiler tree's
 entire contents while retaining the pinned source checkout and downloaded SDKs outside that tree. The existing
 package stays available until its replacement builds and validates successfully. A compilation
@@ -159,11 +161,40 @@ retains source and SDK downloads; `--force` deletes the selected compiler tree b
 Builds support matching Linux amd64 and Linux arm64 hosts, and cross-compilation from Linux amd64
 to Linux arm64. Cross builds use QEMU for CPU inference and CUDA provider loading. Provider loading
 uses a private CUDA driver stub when no GPU inference is requested; that stub is never packaged.
-Native GPU verification still requires a matching host and NVIDIA GPU. macOS arm64 source builds
-use locally installed LLVM and the Xcode command line tools and SDK.
+Native GPU verification still requires a matching host and NVIDIA GPU.
 A C API program links the archive and executes a generated ONNX model before installation. Linux
 builds also initialize and load the packaged CUDA provider before running CPU inference. This
 check can run without a GPU.
+
+macOS ARM64 source builds also run inside Linux Docker. The builder combines the pinned Debian
+base and LLVM 23 with a digest-pinned [OSXCross SDK image](https://github.com/crazy-max/docker-osxcross).
+It compiles a CPU-only static archive against the macOS 14.5 SDK with a macOS 14.0 deployment
+target. The SDK, container recipe, and cross compiler implementation participate in the macOS
+artifact identity independently of the Linux producer inputs. Xcode is unnecessary on the
+Linux build host. Docker can build this artifact from Linux amd64 or arm64.
+
+Linux cannot execute the macOS ARM64 verification program. `just build-onnxruntime darwin/arm64`
+therefore creates a candidate archive without pinning it. `just qualify-onnxruntime-macos
+<archive> <receipt>` runs its linked public C API program on ARM64 macOS 14 or newer and records
+successful inference against the exact archive and checksum manifest. Qualification signs a
+disposable executable copy with an ad hoc macOS signature; it leaves the candidate unchanged.
+Only a matching successful receipt permits pinning or publication:
+
+```sh
+just build-onnxruntime darwin/arm64 --jobs 16 --force
+# On ARM64 macOS, using the candidate archive copied from the build host:
+just qualify-onnxruntime-macos artifact.tar.gz macos-qualification.json
+# On the build host, using the qualification receipt copied from macOS:
+just pin-onnxruntime darwin/arm64 --qualification macos-qualification.json
+just publish-onnxruntime darwin/arm64
+```
+
+The Check workflow verifies all four Linux artifacts by fresh public download. Its macOS ARM64
+job downloads and executes the pinned macOS artifact. For an unpublished macOS fingerprint,
+maintainers stage the candidate as `<fingerprint>.tar.gz` in a public GitHub prerelease named
+`onnxruntime-macos-<fingerprint>`; that job validates its current producer identity, runs native
+inference, and retains the qualification receipt as a workflow artifact. Source compilation,
+pinning, and R2 publication remain manual operations.
 
 The pinned runtime forces warnings to errors on its core and CUDA targets. Release builds pass
 CMake's `--compile-no-warning-as-error` switch so newer LLVM diagnostics remain visible warnings.

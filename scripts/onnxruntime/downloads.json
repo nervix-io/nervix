@@ -223,6 +223,10 @@
       ]
     }
   },
+  "macos_sdk": {
+    "sdk_image": "crazymax/osxcross:14.5-debian@sha256:0acf53a39359e051a0eabd335fceaf39477172b9bdb2a8a919e9a19bb58e2a4c",
+    "sdk_directory": "MacOSX14.5.sdk"
+  },
   "builder": {
     "image": "debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a",
     "llvm_key_sha256": "8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d",

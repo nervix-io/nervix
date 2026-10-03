@@ -14,12 +14,19 @@ import sys
 import tempfile
 
 from scripts.build_onnxruntime import BuildSpec, R2Publisher, RuntimeBuild, lock
-from scripts.onnxruntime.bootstrap import Bootstrap
 from scripts.onnxruntime.toolchain import BuildError
 
 
 def cache_root() -> Path:
     return Path(os.environ.get("NERVIX_ONNXRUNTIME_DIR") or Path.home() / ".cache/nervix-build/onnxruntime")
+
+
+def build_spec(platform: str = "native", repo: Path | None = None, *, variant: str = "portable") -> BuildSpec:
+    spec = BuildSpec.create(platform, **({"repo": repo} if repo else {}), variant=variant)
+    if spec.platform.startswith("darwin/"):
+        from scripts.onnxruntime.macos import artifact_spec
+        return artifact_spec(spec)
+    return spec
 
 
 class ManagedRuntimeBuild(RuntimeBuild):
@@ -60,41 +67,71 @@ class ManagedRuntimeBuild(RuntimeBuild):
             from scripts.onnxruntime.containers import DockerBuilder
             DockerBuilder(self).compile(destination, force=self.force_rebuild)
             return
-        bootstrap = Bootstrap(self.stage_root, self.spec.platform)
-        with bootstrap.environment():
-            super()._build(destination)
-        self.provenance["downloaded_tools"] = bootstrap.installer.receipts
+        from scripts.onnxruntime.macos import DockerBuilder
+        DockerBuilder(self).compile(destination, force=self.force_rebuild)
 
-    def compile(self, destination: Path) -> None:
-        # macOS uses its local Xcode SDK; Linux compilation belongs to DockerBuilder.
-        if self.force_rebuild and self.build_dir.exists():
-            shutil.rmtree(self.build_dir)
-        super().compile(destination)
+    def checksum(self) -> str:
+        if os.environ.get("CI") == "true":
+            raise BuildError("pinning artifact checksums is a manual operation and is disabled in CI")
+        if not self.spec.cuda_enabled:
+            from scripts.onnxruntime.macos import require_qualification
+            require_qualification(self)
+        return super().checksum()
+
+    def verify(self) -> None:
+        if self.spec.cuda_enabled:
+            return super().verify()
+        self.validate_package()
+        self._validate_verification()
+        from scripts.onnxruntime.macos import qualification_path, qualify_native
+        qualify_native(self, self.archive(), qualification_path(self))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["build", "fetch", "pin", "publish", "path", "verify"])
+    parser.add_argument("operation", choices=["build", "fetch", "pin", "publish", "path", "verify", "qualify"])
     parser.add_argument("--platform", default="native")
     parser.add_argument("--variant", choices=("portable", "docker"), default="portable")
     parser.add_argument("--stage", type=Path, default=cache_root())
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 4))
     parser.add_argument("--unchecked", action="store_true")
     parser.add_argument("--force", action="store_true", help="rebuild in an empty compiler tree; reuse source and SDK downloads")
+    parser.add_argument("--archive", type=Path, help="completed macOS candidate archive for native qualification")
+    parser.add_argument("--qualification", type=Path, help="native macOS inference receipt to write or import")
     arguments = parser.parse_args()
     if arguments.jobs < 1:
         parser.error("--jobs must be positive")
     if arguments.force and arguments.operation != "build":
         parser.error("--force is only valid for build")
     try:
-        spec = BuildSpec.create(arguments.platform, variant=arguments.variant)
+        spec = build_spec(arguments.platform, variant=arguments.variant)
         build = ManagedRuntimeBuild(spec, arguments.stage, arguments.jobs)
         if arguments.operation == "path" and arguments.unchecked:
             print(build.package_dir / "lib")
             return 0
         with lock(build.stage_root / "locks" / f"workflow-{spec.fingerprint}.lock"):
+            if arguments.operation == "qualify":
+                if spec.cuda_enabled or arguments.archive is None or arguments.qualification is None:
+                    raise BuildError("qualify requires darwin/arm64, --archive and --qualification")
+                from scripts.onnxruntime.macos import qualify_native
+                qualify_native(build, arguments.archive, arguments.qualification)
+                print(arguments.qualification)
+                return 0
+            if arguments.qualification is not None:
+                if spec.cuda_enabled or arguments.operation not in ("pin", "publish"):
+                    raise BuildError("import --qualification only for macOS pinning or publication")
+                from scripts.onnxruntime.macos import qualification_path, require_qualification
+                destination = qualification_path(build)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if arguments.qualification.resolve() != destination.resolve():
+                    shutil.copyfile(arguments.qualification, destination)
+                require_qualification(build)
             if arguments.operation == "build":
                 path = build.build_source(force=arguments.force)
+                if not spec.cuda_enabled:
+                    print(f"compiled macOS candidate {build.archive()}; qualify it on ARM64 macOS before pinning", file=sys.stderr)
+                    print(path)
+                    return 0
                 checksum = None
                 if (build.stage_root / "verified" / f"{spec.fingerprint}.json").is_file():
                     try:
@@ -127,6 +164,9 @@ def main() -> int:
                     raise BuildError(f"no completed ONNX Runtime package to publish; build it with just build-onnxruntime {spec.platform}")
                 build.validate_package()
                 build._validate_verification()
+                if not spec.cuda_enabled:
+                    from scripts.onnxruntime.macos import require_qualification
+                    require_qualification(build)
                 remote = R2Publisher.configured()
                 build.publish(remote)
                 print(f"published ONNX Runtime to R2: {remote.bucket}/{remote.key(spec)}")
