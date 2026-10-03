@@ -111,11 +111,14 @@ class InventoryTests(unittest.TestCase):
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.PRODUCERS],
-            ["test-typed-ratchet", "bench-smoke", "test-primitives", "nspl-completion-walk"],
+            ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
+             "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
+             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom"],
         )
         for producer in native_coverage.PRODUCERS:
-            self.assertEqual(producer.mode, "ordinary")
             self.assertEqual(producer.rerun(), f"just coverage-native-extras {producer.name}")
+            if producer.name.startswith("test-primitives-"):
+                self.assertEqual(producer.name, f"test-primitives-{producer.mode}")
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -182,11 +185,15 @@ class InventoryTests(unittest.TestCase):
         workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
         job = job_section(workflow, "extra-tests")
         self.assertRegex(job, r"tool: [^\n]*\bcargo-llvm-cov\b")
-        self.assertIn("run: just test-native-coverage\n", job)
+        self.assertIn("run: just coverage-model-runner\n", job)
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
-                self.assertIn(f"run: just coverage-native-extras {producer.name}\n", job)
-                self.assertNotIn(f"run: just {producer.name}\n", job)
+                if producer.name == "test-shuttle":
+                    selected_job = job_section(workflow, "shuttle")
+                else:
+                    selected_job = job
+                name = "test-primitives" if producer.name.startswith("test-primitives-") else producer.name
+                self.assertIn(f"just coverage-native-extras {name}\n", selected_job)
         upload = step_section(job, "Upload native extra coverage")
         self.assertIn("if: always()", upload)
         self.assertIn("name: coverage-native-extras", upload)

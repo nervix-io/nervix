@@ -468,11 +468,16 @@ lines they execute. Run them the way CI does:
 just coverage-native-extras
 ```
 
-Name producers to run only those, one or more of `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
-`nspl-completion-walk`:
+Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
+`test-shuttle`, `test-loom`, or an individual `test-primitives-<mode>` recipe. `test-primitives`
+selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash
 just coverage-native-extras nspl-completion-walk
+just coverage-native-extras test-primitives
+just coverage-native-extras test-shuttle test-loom
+just coverage-native-extras test-shuttle --filter cancellation
+just coverage-loom target/loom.lcov execution.cancellation
 ```
 
 A producer runs its check exactly as `just <producer>` does and fails when the check fails.
@@ -481,9 +486,13 @@ tools read its profiles. What the check needs first, such as the web console the
 link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
-`target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a
-check that only compile, target the browser or run under a model checker stay uninstrumented, and
-Miri, mutation testing and the Loom weakening qualification never run under this command.
+`target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
+each other mode, and the configured kache wrapper stays in place. Each mode has a separate build
+lock through export. The parts that only compile or target the browser stay uninstrumented;
+`just test-primitives-compile` retains their independent verdict. Miri, mutation testing and
+`just test-loom-qualification` never run under this command. The compile and qualification
+commands run without the collector's profile environment, so altered source cannot contribute to
+the current-source report.
 
 Every run collects into a directory of its own,
 `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. The attempt is the GitHub
@@ -495,6 +504,7 @@ another run's directory, so no run can count another's counters. The directory h
 | `lcov.info` | The LCOV report of the repository's sources, with the absolute paths `llvm-cov` writes |
 | `completion.json` | The completion record: the verdict and everything it covers |
 | `executions.jsonl` | Every executable Cargo ran, with its arguments and build ID |
+| `models.json` | For Shuttle and Loom, canonical discovery, selection, execution and completion evidence |
 | `export.log` | The diagnostics of `llvm-profdata` and `llvm-cov`, each bounded |
 | `profiles/` and `merged.profdata` | The raw counters and their merge; they stay on the machine |
 
@@ -513,7 +523,12 @@ It keeps the files inside the repository and leaves out dependencies, harness co
 modified, the CI run and attempt, the compiler and its LLVM version, the instrumentation flags, the
 recipes that make up the check, the executions and child executables selected, the profile files
 with the binary IDs they name, the warnings `llvm-cov` printed, and the executable and covered lines
-of each package. Its `verdict` reads `running` from the moment the directory exists. It becomes
+of each package. Model producers also embed `models.json`: exact package/test identities,
+InvariantIds and bounds for Loom, and paired exploration/nondeterminism records for Shuttle.
+The canonical runners validate their own inventories and filters. Missing or ignored checks,
+zero overall selection, incomplete exploration and nondeterminism failures retain their failure
+verdicts. A package with no filter match is allowed within a nonempty cross-package selection.
+Its `verdict` reads `running` from the moment the directory exists. It becomes
 `complete` only once the whole check passed and the report was written, and `failed` or
 `interrupted` otherwise, with a `failure` naming the stage, `prepare`, `instrument`, `run`, `export`
 or `finish`, and what went wrong. A collection fails when the recipe ran no executable, when an
@@ -528,9 +543,18 @@ them run, such as an inlined dependency function, the copies that never ran can 
 hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
 executables that ran it.
 
-CI's extra-tests job runs the four checks through this command and uploads the `lcov.info`,
-`completion.json`, `executions.jsonl` and `export.log` of every collection as the
-`coverage-native-extras` artifact, whatever the verdict. The benchmark bodies run instrumented, so
+CI's extra-tests job collects native extras, per-mode primitive conformance and the complete Loom
+inventory, and runs primitive compile checks and Loom weakening qualification independently.
+The Shuttle job collects its complete inventory, including random/PCT exploration and paired
+nondeterminism checking, and runs schedule replay qualification independently. The jobs upload
+`lcov.info`, `completion.json`, `executions.jsonl`, `export.log` and model evidence as
+`coverage-native-extras` and `coverage-shuttle`, whatever the verdict. The ordinary coverage/CRAP
+gate merges ordinary artifacts only; mode reports describe modeled or diagnostic execution and
+retain separate attribution. `just coverage-shuttle <output> [filter]` and
+`just coverage-loom <output> [filter]` copy a successfully completed canonical report to the
+requested path while retaining its attempt evidence. Replay uses the unchanged exact-check
+commands and the failure directory under the matching mode build directory.
+The benchmark bodies run instrumented, so
 their Criterion test mode shows that each body executes and measures nothing. The collector itself,
 including real instrumented runs of a fixture crate and its refusal of every incomplete collection,
 is tested with:

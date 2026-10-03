@@ -1113,11 +1113,23 @@ one invocation:
 
 | Mode | Lint | Tests | Coverage |
 | --- | --- | --- | --- |
-| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`, `just coverage-native-extras` |
-| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
-| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, the Loom part of `just test-primitives-modeled` | Not collected: a model is evidence of an ordering, not of product coverage |
-| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, the Turmoil part of `just test-primitives-modeled` | `just coverage-turmoil` |
-| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, the Deloxide parts of `just test-primitives-modeled` and `just test-primitives-compile` | Not collected: a diagnostic run is evidence of what its workload exercised, not of product coverage |
+| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`; ordinary extras and `test-primitives-ordinary` through `just coverage-native-extras` |
+| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, `just test-primitives-shuttle` | `just coverage-native-extras test-shuttle test-primitives-shuttle`; `just coverage-shuttle <output> [filter]` |
+| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, `just test-primitives-loom` | `just coverage-native-extras test-loom test-primitives-loom`; `just coverage-loom <output> [filter]` |
+| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | `just coverage-turmoil`; native conformance through `just coverage-native-extras test-primitives-turmoil` |
+| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, `just test-primitives-deloxide`, diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; full diagnostic workloads retain separate evidence |
+
+Model coverage uses the canonical inventories and runners, including per-test process isolation,
+Shuttle random/PCT exploration and nondeterminism checking, and Loom InvariantIds and exhaustive
+completion. `models.json` retains discovered/selected/executed/completed counts and exact check
+identities; the coverage collector requires matching complete evidence before exporting LCOV.
+Loom weakening qualification runs independently outside instrumentation. Coverage bookkeeping
+runs in the command processes and supplies no ordering, wakeups or branches inside a model.
+The per-mode build directories and fresh attempt directories prevent one mode from replacing
+another's executable or counters. Native source-line execution complements each model's claim;
+it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
+the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
+collection, artifacts, filtering and replay commands.
 
 `just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
 and of every package on its own, the way a consumer builds it, with default features and without

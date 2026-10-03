@@ -374,10 +374,18 @@ test-primitives-ordinary:
 
 # The conformance checks under each other execution mode's backend, each mode its own build: the
 # model checkers, the simulator, and the diagnostic mode's tracked locks.
-test-primitives-modeled:
+test-primitives-modeled: test-primitives-shuttle test-primitives-loom test-primitives-turmoil test-primitives-deloxide
+
+test-primitives-shuttle:
     cargo test --package nervix-primitives --features 'shuttle native' --lib
+
+test-primitives-loom:
     cargo test --package nervix-primitives --features 'loom native' --lib
+
+test-primitives-turmoil:
     cargo test --package nervix-primitives --features 'turmoil native' --lib
+
+test-primitives-deloxide:
     cargo test --package nervix-primitives --features 'deloxide native' --lib
 
 # The conformance checks that compile rather than run: the documentation tests that a runtime
@@ -465,12 +473,18 @@ shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-cli
 # every package, and fails when it selects none at all. A failed check leaves its persisted
 # schedule, output and metadata under target/shuttle-failures for `test-shuttle-replay`. The server's
 # checks need the build dependencies this recipe prepares.
-test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
+test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime (test-shuttle-checks filter)
+
+[private]
+test-shuttle-checks filter="":
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     python3 -m unittest --quiet scripts.tests.test_shuttle_checks
-    python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
+    evidence="${NERVIX_MODEL_EVIDENCE:-}"
+    report=()
+    if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
+    python3 -m scripts.shuttle_checks --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
 
 # Replay a schedule `test-shuttle` persisted under target/shuttle-failures in a fresh process. Its
 # parent directories name the exact package and check, so the schedule cannot run against another
@@ -494,9 +508,17 @@ test-shuttle-replay-check:
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
 # target/loom-failures for `test-loom-replay`.
-test-loom filter="": build-web-console
+test-loom filter="": build-web-console (test-loom-models filter)
+
+[private]
+test-loom-models filter="":
+    #!/usr/bin/env bash
+    set -euo pipefail
     python3 -m unittest --quiet scripts.tests.test_loom_models
-    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
+    evidence="${NERVIX_MODEL_EVIDENCE:-}"
+    report=()
+    if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }} "${report[@]}"
 
 # Measure the native runner's inventory, completion and failure artifact paths.
 coverage-loom-runner:
@@ -1211,20 +1233,13 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-interconnect
 
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
-# The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
-# so Shuttle's scheduler state is not shared between tests.
-coverage-shuttle output: build-web-console wasm-processor-guests download-onnxruntime
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo llvm-cov clean --workspace
-    for shuttle_package in nervix-execution nervix-interconnect nervix-server; do
-        SHUTTLE_REPORT_STEPS=1 cargo llvm-cov test --no-report \
-            --package "${shuttle_package}" --features shuttle --lib shuttle_ -- --test-threads=1
-        SHUTTLE_CHECK_NONDETERMINISM=1 cargo llvm-cov test --no-report \
-            --package "${shuttle_package}" --features shuttle --lib shuttle_ -- --test-threads=1
-    done
-    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+# The canonical runner owns packages, per-check exploration, paired nondeterminism and replay.
+coverage-shuttle output filter="":
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run test-shuttle --output {{ quote(output) }} --filter {{ quote(filter) }}
+
+# Run the canonical current-source Loom inventory; weakening qualification remains independent.
+coverage-loom output filter="":
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run test-loom --output {{ quote(output) }} --filter {{ quote(filter) }}
 
 # Write line coverage for binary unit tests, such as the CLI's main target.
 coverage-bins output *args:
@@ -1272,20 +1287,31 @@ coverage-turmoil output:
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
-# Run the extra checks that execute Nervix code natively in ordinary mode, `bench-smoke`,
-# `test-primitives` and `nspl-completion-walk`, exactly as their recipes do but with LLVM source
-# coverage, and fail as they do. Prerequisites build outside the instrumentation, and the parts of a
-# check that compile, target the browser or run a model checker stay uninstrumented. Each producer
+# Run the eligible native extras in their declared modes, with the canonical Shuttle and Loom
+# runners and each primitive conformance mode. `test-primitives` selects all native conformance.
+# Prerequisites build outside instrumentation. Compile/browser checks and weakening qualification
+# run independently. Each producer
 # writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
 # target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
-# Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
+# Run all: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
 coverage-native-extras *producers:
-    python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
 
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
 test-native-coverage:
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage scripts.tests.test_model_coverage
+
+# Line coverage of collection and canonical runner changes, with actual command/artifact fixtures.
+coverage-model-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/model-coverage
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    export COVERAGE_FILE="{{ cargo_target_dir }}/model-coverage/python.coverage"
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models
+    "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/model-coverage/python.lcov"
+    "${coverage[@]}" report
 
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
