@@ -148,13 +148,13 @@ mod shuttle_tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_models {
     use meticulous::ResultExt as _;
-    use nervix_model_harness::{InvariantId, loom::explore};
-    use nervix_primitives::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        thread,
+    use nervix_model_harness::{
+        InvariantId,
+        loom::{explore, spawn},
+    };
+    use nervix_primitives::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use super::BackupCaptureFence;
@@ -168,7 +168,7 @@ mod loom_models {
             let fence = Arc::new(BackupCaptureFence::default());
             let payload = Arc::new(AtomicUsize::new(0));
             let publication = BackupCaptureFence::publication(&fence);
-            let publisher = thread::spawn({
+            let publisher = spawn({
                 let payload = payload.clone();
                 move || {
                     payload.store(7, Ordering::Relaxed);
@@ -193,7 +193,7 @@ mod loom_models {
         explore(GENERATION, || {
             let fence = Arc::new(BackupCaptureFence::default());
             let marker = Arc::new(AtomicUsize::new(0));
-            let publisher = thread::spawn({
+            let publisher = spawn({
                 let (fence, marker) = (fence.clone(), marker.clone());
                 move || {
                     let publication = BackupCaptureFence::publication(&fence);

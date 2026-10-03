@@ -320,8 +320,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(status, 0, report)
         self.assertIn("discovered 2, selected 2, executed 2, completed 2", report)
         failures = target / "loom-failures" / "nervix-execution"
-        self.assertFalse((failures / PUBLICATION_TEST).exists())
-        self.assertFalse((failures / DISARM_TEST).exists())
+        self.assertFalse((failures / "execution.cancellation.publication").exists())
+        self.assertFalse((failures / "execution.cancellation.disarm").exists())
 
     def test_a_model_that_passes_without_completing_fails_with_its_evidence(self) -> None:
         def respond(arguments: Sequence[str]) -> Outcome:
@@ -341,9 +341,12 @@ class RunTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("completed 1", report)
         self.assertIn("passed without the record of an exhaustive exploration", report)
-        evidence = target / "loom-failures" / "nervix-execution" / PUBLICATION_TEST
+        evidence = (
+            target / "loom-failures" / "nervix-execution" / "execution.cancellation.publication"
+        )
         metadata = json.loads((evidence / "metadata.json").read_text(encoding="utf-8"))
         self.assertEqual(metadata["invariant"], "execution.cancellation.publication")
+        self.assertEqual(metadata["test"], PUBLICATION_TEST)
         self.assertEqual(metadata["revision"], "0123abcd")
         self.assertEqual(metadata["loom"], "0.7.2")
         self.assertTrue((evidence / "output.log").is_file())

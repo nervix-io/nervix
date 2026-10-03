@@ -14,7 +14,7 @@ record of an exhaustive exploration for the model's own invariant; a passing tes
 record is an incomplete run. It reports how many models it discovered, selected, executed and saw
 complete, and a filter that selects nothing fails.
 
-A failed model leaves `<target>/loom-failures/<package>/<test>/` behind: Loom's checkpoint of the
+A failed model leaves `<target>/loom-failures/<package>/<invariant>/` behind: Loom's checkpoint of the
 failed execution, the run's output, and `metadata.json` with the invariant, revision, toolchain,
 Loom version and exploration bounds. `replay` resumes Loom from that checkpoint with location
 tracking and tracing enabled, so the failed execution runs first. The artifacts hold model output
@@ -415,7 +415,7 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
     completed = 0
     failures: list[str] = []
     for model in selected:
-        directory = target / FAILURES / model.package / model.test
+        directory = target / FAILURES / model.package / model.invariant.id
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         checkpoint = directory / "checkpoint.json"

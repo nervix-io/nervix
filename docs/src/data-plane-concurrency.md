@@ -1463,17 +1463,27 @@ model rather than ending the search, and Loom's full thread count. A Loom settin
 that would change that search is refused. A completed search prints a record naming its invariant,
 its execution count and its bounds, and `just test-loom` accepts nothing else as a completed model.
 
+The coordinator starts and joins the model body without touching protocol state. The body and
+participants started through `nervix_model_harness::loom::spawn` each request a 1 MiB coroutine
+stack, so instrumented allocators and debug frames fit before reaching the owner's first atomic.
+Loom forwards that request to its coroutine implementation, whose allocation units need not be
+bytes. Its five thread slots include the coordinator, body and at most three other participants.
+The harness stack model executes a 64 KiB frame on both the body and a participant; reducing the
+stack request must reproduce the overflow and replay it from its checkpoint. Scheduling and
+memory-ordering checks still explore to exhaustion.
+
 `crates/model-harness/loom-inventory.toml` registers every model by invariant. `just test-loom`
 lists the `loom_*` library tests of every registered package built with its `loom` feature, and a
 run over the whole inventory fails when a registered invariant's test is missing, ignored or did not
 complete, or when a discovered model is unregistered. Each model runs in its own process, and the
 command reports how many models it discovered, selected, executed and saw complete; a filter that
-selects none fails. A failed model leaves `target/loom-failures/<package>/<test>/`: the Loom
+selects none fails. A failed model leaves `target/loom-failures/<package>/<invariant>/`: the Loom
 checkpoint of the failed execution, the run's output, and metadata naming the invariant, revision,
 toolchain, Loom version and exploration bounds. `just test-loom-replay` resumes Loom from that
 checkpoint with location tracking and tracing, so the failed execution runs first. The artifacts
 hold model output only, never payloads or secrets. CI runs the models on every change and uploads
-the failure directory.
+the failure directory. Invariant IDs use ASCII letters, digits, dots and hyphens, so these paths
+are valid artifact names; metadata retains the exact Rust test name used for replay.
 
 Every model also registers a weakening that must make it fail. `just test-loom-qualification`
 applies each to a copy of the working tree, requires the model to fail with the registered message,

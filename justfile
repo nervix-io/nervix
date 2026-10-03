@@ -498,12 +498,21 @@ test-loom filter="": build-web-console
     python3 -m unittest --quiet scripts.tests.test_loom_models
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
 
+# Measure the native runner's inventory, completion and failure artifact paths.
+coverage-loom-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/loom-coverage
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file target/loom-coverage/runner.coverage --branch --source=scripts.loom_models,scripts.tests.test_loom_models -m unittest scripts.tests.test_loom_models
+    "${coverage[@]}" lcov --data-file target/loom-coverage/runner.coverage -o target/loom-coverage/python-runner.lcov
+
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
 test-loom-replay failure:
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
-# Show that each Loom model detects the ordering fault it exists for. Every registered weakening is
+# Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
 # checkpoint of that failure must replay it.
 test-loom-qualification: build-web-console
