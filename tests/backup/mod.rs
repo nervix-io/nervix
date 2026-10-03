@@ -126,6 +126,113 @@ async fn when_cli_backs_up(world: &mut ScenarioWorld, scope: String, node: Strin
     run_cli(world, &node, arguments).await;
 }
 
+#[given(expr = "the backup cut for domain {string} will pause after draining")]
+fn given_backup_cut_pauses(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world.fault_injection.pause_backup_cut_on(domain);
+}
+
+#[when(
+    expr = "the CLI begins backing up {string} from node {string} into {string} in the background"
+)]
+fn when_cli_backup_begins_in_background(
+    world: &mut ScenarioWorld,
+    scope: String,
+    node: String,
+    file: String,
+) {
+    assert!(
+        world.background_backup.is_none(),
+        "a backup is already running"
+    );
+    let archive = archive_path(world, &file);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world.cluster().grpc_uri(&node).expect("the node exists");
+    let selected_domain = world.domain.clone();
+    let scope = expand_placeholders(world, &scope);
+    world.background_backup = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut command = tokio::process::Command::new(scenario_cli_binary());
+            command.args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &selected_domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+            ]);
+            command.arg("backup");
+            command.args(scope.split_whitespace());
+            command
+                .arg("--output")
+                .arg(&archive)
+                .args(["--format", "json"]);
+            nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+                .await
+                .expect("the background backup finishes within its budget")
+                .expect("the CLI process starts")
+        },
+    )));
+}
+
+#[then(expr = "the backup cut for domain {string} has reached its pause")]
+async fn then_backup_cut_paused(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world.fault_injection.wait_for_backup_cut_pause(&domain),
+    )
+    .await
+    .expect("the backup reaches its quiesced cut");
+}
+
+#[when(expr = "the backup cut pause for domain {string} is released")]
+fn when_backup_cut_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world.fault_injection.release_backup_cut_pause(&domain);
+}
+
+#[then("the background CLI backup finishes")]
+async fn then_background_backup_finishes(world: &mut ScenarioWorld) {
+    let task = world
+        .background_backup
+        .take()
+        .expect("a preceding step started a backup in the background");
+    world.last_cli_output = Some(task.await.expect("the background backup does not panic"));
+}
+
+#[then(expr = "the background CLI backup remains pending for {string}")]
+async fn then_background_backup_remains_pending(world: &mut ScenarioWorld, duration: String) {
+    let duration = nervix_models::parse_duration_text(&duration).expect("a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    assert!(
+        !world
+            .background_backup
+            .as_ref()
+            .expect("a backup is running")
+            .is_finished(),
+        "the backup completed before the domain mutation lease was released"
+    );
+}
+
+#[then(expr = "the CLI backup reports at least {int} records dropped during quiesce")]
+fn then_backup_reports_dropped_records(world: &mut ScenarioWorld, minimum: u64) {
+    let report = cli_json(last_cli_output(world));
+    let domains = report["domains"]
+        .as_array()
+        .expect("the report names domains");
+    let dropped = domains
+        .iter()
+        .filter_map(|domain| domain["cut"]["dropped_records"].as_u64())
+        .sum::<u64>();
+    assert!(
+        dropped >= minimum,
+        "quiesce dropped {dropped} records, expected at least {minimum}: {report}"
+    );
+}
+
 #[then(expr = "the CLI backup succeeded with a JSON report naming domain {string}")]
 fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -200,6 +307,15 @@ fn then_cli_backup_failed(world: &mut ScenarioWorld, code: String) {
         code.as_str(),
         "the report: {report}"
     );
+}
+
+#[then(expr = "the CLI backup failure mentions {string}")]
+fn then_cli_backup_failure_mentions(world: &mut ScenarioWorld, expected: String) {
+    let report = cli_json(last_cli_output(world));
+    let message = report["error"]["message"]
+        .as_str()
+        .expect("the backup failure reports a message");
+    assert!(message.contains(&expected), "{message}");
 }
 
 #[then(expr = "backup archive {string} does not exist")]
@@ -365,6 +481,27 @@ fn described_backup(world: &ScenarioWorld) -> serde_json::Value {
         String::from_utf8_lossy(&output.stderr)
     );
     cli_json(output)
+}
+
+#[then(expr = "the described backup has exactly {int} {string} state sections")]
+fn then_described_backup_has_state_sections(
+    world: &mut ScenarioWorld,
+    expected: usize,
+    kind: String,
+) {
+    let description = described_backup(world);
+    let actual = description["domains"]
+        .as_array()
+        .expect("the archive lists its domains")
+        .iter()
+        .flat_map(|domain| {
+            domain["runtime_state"]
+                .as_array()
+                .expect("the domain lists its state")
+        })
+        .filter(|section| kind == "any" || section["kind"].as_str() == Some(kind.as_str()))
+        .count();
+    assert_eq!(actual, expected, "the described backup: {description}");
 }
 
 #[then(expr = "the described backup lists the scenario user")]

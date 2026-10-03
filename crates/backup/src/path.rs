@@ -7,6 +7,10 @@
 //! domains/<domain>/models.nspl
 //! domains/<domain>/resources/<resource>/<version>/version.rkyv
 //! domains/<domain>/resources/<resource>/<version>/archive.tar   (unless WITHOUT RESOURCES)
+//! domains/<domain>/state/wasm_processor/<processor>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/wasm_processor/<processor>/<branch>/guest.bin
+//! domains/<domain>/state/kafka_offset/<ingestor>/offsets.rkyv
+//! domains/<domain>/state/branch_lifecycle/<kind>/<processor>/branches.rkyv
 //! ```
 //!
 //! A path is for people and for tar tools; a reader identifies each section by the manifest entry
@@ -17,7 +21,7 @@
 use std::{borrow::Cow, fmt, num::NonZeroU64};
 
 use error_stack::Report;
-use nervix_models::{DomainName, ResourceName};
+use nervix_models::{BranchKeyFingerprint, DomainName, ModelKind, ModelName, ResourceName};
 
 use crate::error::ArchiveReadError;
 
@@ -71,13 +75,58 @@ impl SectionPath {
         ))
     }
 
+    /// The descriptor of one WASM processor branch's saved guest state.
+    pub fn wasm_state_descriptor(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Self {
+        Self(format!(
+            "{}/state/wasm_processor/{}/{}/descriptor.rkyv",
+            domain_directory(domain),
+            segment(entity.as_str()),
+            branch_segment(branch)
+        ))
+    }
+
+    /// The raw guest save named by a WASM state descriptor.
+    pub fn wasm_guest_blob(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Self {
+        Self(format!(
+            "{}/state/wasm_processor/{}/{}/guest.bin",
+            domain_directory(domain),
+            segment(entity.as_str()),
+            branch_segment(branch)
+        ))
+    }
+
+    pub fn kafka_offsets(domain: &DomainName, entity: &ModelName) -> Self {
+        Self(format!(
+            "{}/state/kafka_offset/{}/offsets.rkyv",
+            domain_directory(domain),
+            segment(entity.as_str())
+        ))
+    }
+
+    pub fn branch_lifecycle(domain: &DomainName, kind: ModelKind, entity: &ModelName) -> Self {
+        Self(format!(
+            "{}/state/branch_lifecycle/{}/{}/branches.rkyv",
+            domain_directory(domain),
+            kind.as_str(),
+            segment(entity.as_str())
+        ))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Validates a path a manifest names: relative, made of non-empty segments, none of them `.`
     /// or `..`, and within the length a tar header can carry.
-    pub(crate) fn parse(raw: &str) -> Result<Self, Report<ArchiveReadError>> {
+    pub fn parse(raw: &str) -> Result<Self, Report<ArchiveReadError>> {
         let valid = !raw.is_empty()
             && raw.len() <= MAX_PATH_BYTES
             && raw != MANIFEST_PATH
@@ -100,6 +149,17 @@ impl fmt::Display for SectionPath {
 
 fn domain_directory(domain: &DomainName) -> String {
     format!("domains/{}", segment(domain.as_str()))
+}
+
+fn branch_segment(branch: Option<&BranchKeyFingerprint>) -> String {
+    match branch {
+        Some(fingerprint) => fingerprint
+            .fingerprint()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        None => "unbranched".to_string(),
+    }
 }
 
 fn version_directory(domain: &DomainName, resource: &ResourceName, version: NonZeroU64) -> String {

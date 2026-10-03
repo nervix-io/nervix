@@ -9,8 +9,23 @@
 # `just test-loom-qualification` applies each `[[qualification]]` weakening to a copy of the working
 # tree and requires the named invariant's model to fail with the stated message. It proves the model
 # detects the ordering fault it exists for, rather than passing because something else synchronizes
-# its threads. A qualification whose `original` text no longer appears exactly once fails too, so
+# its threads. A stack capacity check instead reduces its declared stack request. A qualification
+# whose `original` text no longer appears exactly once fails too, so
 # changing the owner's ordering means revisiting its qualification.
+
+[[invariant]]
+claim = "The model body and its participants execute instrumented debug frames on their modeled coroutine stacks, while the coordinator only joins the body."
+id = "harness.loom.coroutine-stack"
+package = "nervix-model-harness"
+test = "loom::tests::loom_model_coroutines_support_instrumented_debug_frames"
+
+[[qualification]]
+failure = "overflowed its stack"
+id = "harness.loom.insufficient-stack"
+invariant = "harness.loom.coroutine-stack"
+original = "const MODEL_STACK_REQUEST: usize = 1_048_576;"
+path = "crates/model-harness/src/loom.rs"
+weakened = "const MODEL_STACK_REQUEST: usize = 4_096;"
 
 [[invariant]]
 claim = "A job that observes its cancellation also observes every write its awaiting caller made before the cancellation: raising the flag releases and observing it acquires."
@@ -45,3 +60,31 @@ invariant = "execution.cancellation.publication"
 original = "self.cancelled.load(Ordering::Acquire)"
 path = "crates/execution/src/cancellation.rs"
 weakened = "self.cancelled.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads all writes those publications completed."
+id = "server.backup.cut-includes-publication"
+package = "nervix-server"
+test = "runtime::backup_capture_fence::loom_models::loom_a_cut_includes_every_registered_publication"
+
+[[invariant]]
+claim = "A branch state publisher entering after a backup cut acquires the cut generation and sees the coordinator's preceding writes."
+id = "server.backup.cut-generation"
+package = "nervix-server"
+test = "runtime::backup_capture_fence::loom_models::loom_a_publisher_acquires_the_cut_generation"
+
+[[qualification]]
+failure = "the cut omitted a publication registered before it closed"
+id = "server.backup.relaxed-publication-completion"
+invariant = "server.backup.cut-includes-publication"
+original = "self.fence.state.fetch_sub(1, Ordering::Release);"
+path = "src/runtime/backup_capture_fence.rs"
+weakened = "self.fence.state.fetch_sub(1, Ordering::Relaxed);"
+
+[[qualification]]
+failure = "a publisher observed the cut generation without its prior writes"
+id = "server.backup.missing-publisher-acquire"
+invariant = "server.backup.cut-generation"
+original = ".compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Relaxed)"
+path = "src/runtime/backup_capture_fence.rs"
+weakened = ".compare_exchange_weak(state, state + 1, Ordering::Release, Ordering::Relaxed)"

@@ -166,6 +166,7 @@ pub(super) async fn checkpoint_wasm_instance(
     live: &mut WasmLiveInstance,
     execution_now: Timestamp,
 ) -> error_stack::Result<(), WasmInstanceError> {
+    let _publication = runtime.backup_publication(&state.placement.domain);
     #[cfg(feature = "testing")]
     hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::BeforeCapture).await;
     let deadline = Instant::now()

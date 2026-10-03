@@ -36,10 +36,12 @@ mod enabled {
     }
 
     impl ConnectivityFault {
+        #[cfg(feature = "testing")]
         pub fn block(&self) {
             self.blocked.store(true, Ordering::Release);
         }
 
+        #[cfg(feature = "testing")]
         pub fn restore(&self) {
             self.blocked.store(false, Ordering::Release);
         }

@@ -237,7 +237,8 @@ Coordination operations use a typed identity composed of the authenticated coord
 current process epoch, and a process-local sequence. The sequence begins independently in every
 process; the node and process epoch make equal sequence values distinct across concurrent leaders
 and restarts. For every coordination request, the receiver verifies the node and process epoch
-against the bound connection before the application handler can observe the request. A process
+against the bound connection before the application handler can observe the request or open a
+coordinated response stream. A process
 therefore cannot issue or replay an identity that belongs to another node or to an earlier run of
 the same node.
 
@@ -578,6 +579,11 @@ the sender waits for an attached record acknowledgement only while the receiver 
 and fails one the receiver reports nothing about for fifteen seconds, as
 [Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
 attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
+For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
+remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
+own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
+The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
+source or persist an acknowledgement. Admission progress carries no parked state.
 
 ### Acknowledgement Registrations
 
@@ -836,12 +842,51 @@ the active decoded section are resident at once.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
+Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
+each node's admitted work through a management-class drain request and requests a separate
+confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
+request with its coordination identity and applied cut revision to each live node, then reads each
+node's management-class inventory of staged sections. A receiver waits up to five seconds for its
+state machine to apply that revision, installs its current runtime plan, and rechecks the sending
+leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
+capture; a follower that is still applying the cut does not produce an archive from earlier state.
+A captured section is fetched over a
+snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
+and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
+staged section only for the coordinator process that requested it and releases expired stages.
+The fetch stream authenticates that process identity before its handler can consume the stage; a
+partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
+
+Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
+published. The leader admits a replicated installation authority carrying its identity and term,
+the restore execution, mutation lease revision and installation generation. Every request carries
+that authority. A receiver waits for its generation to apply and authenticates the sending leader.
+A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
+finish verifies the staged file and stages the checkpoint without changing published state.
+Incomplete transfers expire under the node's staging quota.
+
+After all checkpoints are staged, the leader sends each target node a publish request with the
+complete checkpoint and byte counts. The receiver admits the database batch's memory, validates
+that inventory, and atomically replaces the domain's checkpoints with durable synchronization.
+An empty inventory clears unassigned nodes and implements configuration-only restoration. Local
+and remote mutations revalidate the exact authority under the applied-state read guard, held
+through the storage mutation and clearing of runtime handles. Publication of a new authority or
+release of the replicated start gate requires the corresponding write guard, so a delayed
+coordinator cannot mutate after its successor completes installation. The store also retains the
+published generation to reject lower or competing generations and make exact retries idempotent.
+The domain's replicated start gate is released only after all nodes acknowledge publication.
+Staging and publication run on the admitted filesystem worker class. Authority is checked inside
+the storage job after admission, so waiting for a worker cannot preserve an expired installation
+right. Durable synchronization does not run on the async reactor.
+
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
 the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
 generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
 offsets depend on no schema, so their placements carry no fingerprint and stay current across every
-schema change of their entity. A checkpoint carries no identity of its own: a synchronization reply,
+schema change of their entity. A backup archive separately records the Kafka ingestor's schema
+fingerprint and checks it against the restore target before installing offsets. A checkpoint carries
+no identity of its own: a synchronization reply,
 a handoff checkpoint, and a forced-recovery preparation each carry it beside the placement that
 names it. A node answers a synchronization request, and acts on a checkpoint announcement or a
 handoff checkpoint, only while the placement is current on that node, so an owner never serves, and

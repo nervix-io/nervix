@@ -47,8 +47,9 @@ pub enum Domain {
     /// This excludes vocabulary states NSPL has no spelling for: a negative or non-finite numeric
     /// literal (a negative number is written as a negation of its magnitude), an empty array or a
     /// `CASE` without a `WHEN`, a cast to a collection type, a `DROP` of a kind NSPL cannot drop, a
-    /// batching HTTP emitter, a correlator filter, a relay named `message` or `branch`, and a
-    /// placement member named like an `ALTER` operation keyword.
+    /// batching HTTP emitter, a correlator filter, a relay named `message` or `branch`, a
+    /// placement member named like an `ALTER` operation keyword, and a Postgres update whose
+    /// conflict target includes every mapped column.
     Nspl,
     /// Every value the vocabulary types hold, including the states NSPL cannot spell. Stored and
     /// archived forms carry these, so their round trips draw from this domain.

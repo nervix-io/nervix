@@ -7,14 +7,14 @@
 `crates/model-harness/loom-inventory.toml` registers every model by the invariant it checks.
 
 `run` lists the library tests named `loom_*` of every inventory package, built with its `loom`
-feature, and checks them against the inventory: a run over the whole inventory fails when a
-registered test is missing or ignored, or when a discovered model is not registered. It then runs
-each selected model in its own process and accepts it only when the model's harness printed the
+feature and build profile, and checks them against the inventory: a run over the whole inventory
+fails when a registered test is missing or ignored, or when a discovered model is not registered.
+It then runs each selected model in its own process and accepts it only when the model's harness printed the
 record of an exhaustive exploration for the model's own invariant; a passing test without that
 record is an incomplete run. It reports how many models it discovered, selected, executed and saw
 complete, and a filter that selects nothing fails.
 
-A failed model leaves `<target>/loom-failures/<package>/<test>/` behind: Loom's checkpoint of the
+A failed model leaves `<target>/loom-failures/<package>/<invariant>/` behind: Loom's checkpoint of the
 failed execution, the run's output, and `metadata.json` with the invariant, revision, toolchain,
 Loom version and exploration bounds. `replay` resumes Loom from that checkpoint with location
 tracking and tracing enabled, so the failed execution runs first. The artifacts hold model output
@@ -22,7 +22,9 @@ only; a model has no payloads or secrets to leak.
 
 `qualify` applies each registered weakening to a copy of the working tree, requires the named
 model to fail with the registered message, and requires the checkpoint of that failure to replay
-it. The copy shares the target directory, so only the mutated packages are rebuilt.
+it. The copy shares the target directory, so only the mutated packages are rebuilt. Discovery,
+execution, replay and qualification use the same profile, and qualification clears only that
+profile's package artifacts before and after each mutation.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ FAILURES = "loom-failures"
 QUALIFICATIONS = "loom-qualification"
 MODEL_PREFIX = "loom_"
 LOOM_FEATURE = "loom"
+LOOM_PROFILE = "loom"
 
 _INVARIANT_ID = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 # The test harness prints `test <name> ... ` before a test's own output, so a record can share its
@@ -331,7 +334,7 @@ class Commands:
 
 
 def cargo_test(package: str, *arguments: str, manifest: Path | None = None) -> list[str]:
-    command = ["cargo", "test"]
+    command = ["cargo", "test", "--profile", LOOM_PROFILE]
     if manifest is not None:
         command += ["--manifest-path", str(manifest)]
     return [*command, "--package", package, "--features", LOOM_FEATURE, "--lib", *arguments]
@@ -415,7 +418,7 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
     completed = 0
     failures: list[str] = []
     for model in selected:
-        directory = target / FAILURES / model.package / model.test
+        directory = target / FAILURES / model.package / model.invariant.id
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         checkpoint = directory / "checkpoint.json"
@@ -492,6 +495,11 @@ def copy_working_tree(commands: Commands, destination: Path) -> None:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    # Server models embed the generated web console at compile time. It is ignored by Git, so
+    # tracked-source copies need this build input alongside the source under qualification.
+    console_dist = Path("crates/web-console/dist")
+    if (commands.root / console_dist).is_dir():
+        shutil.copytree(commands.root / console_dist, destination / console_dist)
 
 
 def qualification_failure(outcome: Outcome, qualification: Qualification) -> str | None:
@@ -522,6 +530,17 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
         )
         manifest = tree / "Cargo.toml"
         environment = {"CARGO_TARGET_DIR": str(target)}
+        clean_command = [
+            "cargo", "clean", "--profile", LOOM_PROFILE,
+            "--manifest-path", str(manifest), "--package", model.package,
+        ]
+        cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
+        if cleaned.status != 0:
+            problems.append(
+                f"qualification {qualification.id}: could not clear a previous package build; "
+                f"{cleaned.output}"
+            )
+            continue
         checkpoint = directory / "checkpoint.json"
         checkpoint.unlink(missing_ok=True)
         print(f"loom: qualifying {invariant.id} against {qualification.id}", flush=True)
@@ -546,6 +565,9 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
             replay_problem = qualification_failure(replayed, qualification)
             if replay_problem is not None:
                 problem = f"its checkpoint does not replay the failure: {replay_problem}"
+        cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
+        if cleaned.status != 0:
+            problem = f"could not clear its weakened package build: {cleaned.output}"
         if problem is not None:
             problems.append(f"qualification {qualification.id}: {problem}; see {directory}")
             continue

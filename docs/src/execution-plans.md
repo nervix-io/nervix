@@ -219,6 +219,18 @@ passive surfaces; a running or paused domain reconstructs the applicable executi
 state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wasm-state.md) own
 the detailed handoff, checkpoint, duplicate-window, and restart guarantees.
 
+An archive restore first publishes the restored models as a stopped domain and recomputes its
+schedule. Archived node assignments are never installation authority. The coordinator requires
+each archived entity's schema fingerprint to match the new schedule and stages its checkpoints on
+the scheduled owner and replicas. Branch lifecycle is staged before WASM guest saves, and each
+save uses the state generation from the published schedule. Each node atomically publishes its
+complete replacement set, including an empty set on unassigned nodes, then clears passive handles.
+The replicated installation gate prevents `START` until all nodes finish. A retry of an unfinished
+model step admits a new installation generation bound to its leader tenure, execution and lease;
+a delayed preceding attempt cannot mutate the state or its handles after completion.
+[Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
+sections, and the operator-visible restore guarantees.
+
 Resource plans carry concrete pinned version numbers from the committed Models. Node binding
 loads exactly those versions from its local resource store; it never resolves `LATEST` or reads
 the catalog during execution. A rebinding is a validated model mutation that produces another

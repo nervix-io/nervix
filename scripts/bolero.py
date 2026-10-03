@@ -229,10 +229,11 @@ def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
     for directory, children, files in os.walk(manifest.parent):
         parent = pathlib.Path(directory)
         # Nested Cargo packages own their Rust, including a workspace's qualification crate.
-        # Build output and Git metadata are not authored sources of the package being checked.
+        # Build output, hidden metadata and dependency trees are not package-authored sources.
         children[:] = sorted(
             child for child in children
-            if child not in {".git", "target", ".venv", ".nervix-deps", "node_modules", "__fuzz__"}
+            if not child.startswith(".")
+            and child not in {"target", "node_modules", "__fuzz__"}
             and not (parent / child / "Cargo.toml").is_file()
         )
         for name in sorted(files):
@@ -803,8 +804,9 @@ def replay(target: Target, failure: pathlib.Path) -> int:
         r"test result: FAILED\. 0 passed; 1 failed", output
     ):
         raise BoleroError(f"{target.id}: replay failed outside the selected property")
+    # Bolero omits zero counters: corpus-only completion ends after the corpus count.
     if result.returncode == 0 and not re.search(
-        r"corpus inputs: [1-9]\d* \| rng inputs: 0", output
+        r"corpus inputs: [1-9]\d*(?:\r?\n|$)", output
     ):
         raise BoleroError(f"{target.id}: saved input was not replayed")
     print(output[-4000:])

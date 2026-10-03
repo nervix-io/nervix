@@ -6611,6 +6611,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "error-stack",
+ "humantime",
  "meticulous",
  "nervix-backup",
  "nervix-client-core",
@@ -7212,6 +7213,7 @@ dependencies = [
  "nervix-arbitrary",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7320,6 +7322,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
@@ -7378,6 +7381,7 @@ name = "nervix-model-harness"
 version = "0.1.0-dev"
 dependencies = [
  "loom",
+ "meticulous",
  "nervix-primitives",
  "shuttle",
  "tracing",

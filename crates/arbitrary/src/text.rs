@@ -26,7 +26,7 @@ const NAME_TAIL: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
 /// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 354] = [
+pub const KEYWORDS: [&str; 357] = [
     "create",
     "delete",
     "add",
@@ -133,6 +133,7 @@ pub const KEYWORDS: [&str; 354] = [
     "with",
     "materialized",
     "state",
+    "source",
     "last",
     "tls",
     "jaq",
@@ -222,6 +223,7 @@ pub const KEYWORDS: [&str; 354] = [
     "queue",
     "channel",
     "offset",
+    "offsets",
     "consumer",
     "group",
     "instances",
@@ -232,6 +234,7 @@ pub const KEYWORDS: [&str; 354] = [
     "qos",
     "mode",
     "quiesce",
+    "pause",
     "suspend",
     "buffer",
     "overflow",

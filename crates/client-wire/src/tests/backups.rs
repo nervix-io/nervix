@@ -37,6 +37,7 @@ fn summary(domains: &[&str]) -> BackupArchiveSummary {
             .map(|domain| BackupDomainSummary {
                 domain: name(domain),
                 revision: 42,
+                cut: nervix_models::BackupCut::ConfigurationOnly,
                 sections: 3,
                 section_bytes: 1024,
             })

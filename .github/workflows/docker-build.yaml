@@ -59,7 +59,7 @@ jobs:
             platform: linux/arm64
             arch: arm64
             llvm: "23"
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: blacksmith-8vcpu-ubuntu-2404
           # - image: alpine
           #   version: "3.23"
           #   platform: linux/amd64

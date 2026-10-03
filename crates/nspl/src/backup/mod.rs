@@ -11,15 +11,15 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    Backup, BackupResources, BackupScope, DescribeBackup, ExistingUserPolicy, InspectionFormat,
-    Restore, RestoreMode, RestoreScope,
+    Backup, BackupCapture, BackupResources, BackupScope, DescribeBackup, ExistingUserPolicy,
+    InspectionFormat, Restore, RestoreMode, RestoreScope, RestoreState,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, domain_name, domain_ref, inspection_format, kw, kw_phrase2, kw_phrase3,
-        local_path, tok,
+        ParseError, domain_name, domain_ref, duration_lit, inspection_format, kw, kw_phrase2,
+        kw_phrase3, local_path, tok,
     },
 };
 
@@ -43,15 +43,38 @@ pub fn backup_parser<'src>()
             Some(()) => BackupResources::Omitted,
             None => BackupResources::Included,
         });
+    let timeout = kw(Identifier::Timeout)
+        .ignore_then(duration_lit())
+        .try_map(|raw, span| {
+            nervix_models::parse_duration_text(&raw)
+                .map(|timeout| BackupCapture::Quiesced {
+                    timeout: Some(timeout),
+                })
+                .map_err(|report| {
+                    Rich::custom(
+                        span,
+                        format!("invalid backup timeout: {}", report.current_context()),
+                    )
+                })
+        });
+    let capture = choice((
+        kw_phrase2(Identifier::Without, Identifier::State).to(BackupCapture::ConfigurationOnly),
+        kw_phrase2(Identifier::Without, Identifier::Pause).to(BackupCapture::Live),
+        timeout,
+    ))
+    .or_not()
+    .map(Option::unwrap_or_default);
     kw(Identifier::Backup)
         .ignore_then(scope)
         .then_ignore(kw(Identifier::To))
         .then(local_path())
         .then(resources)
-        .map(|((scope, destination), resources)| Backup {
+        .then(capture)
+        .map(|(((scope, destination), resources), capture)| Backup {
             scope,
             destination,
             resources,
+            capture,
         })
         .then_ignore(tok(Token::Semicolon).or_not())
         .boxed()
@@ -72,6 +95,13 @@ pub fn restore_parser<'src>()
                 Some(()) => RestoreMode::DryRun,
                 None => RestoreMode::Apply,
             });
+    let state = choice((
+        kw_phrase2(Identifier::Without, Identifier::State).to(RestoreState::ConfigurationOnly),
+        kw_phrase3(Identifier::Without, Identifier::Source, Identifier::Offsets)
+            .to(RestoreState::WithoutSourceOffsets),
+    ))
+    .or_not()
+    .map(Option::unwrap_or_default);
     let existing_users = kw_phrase3(Identifier::On, Identifier::Existing, Identifier::User)
         .ignore_then(choice((
             kw(Identifier::Fail).to(ExistingUserPolicy::Fail),
@@ -85,10 +115,12 @@ pub fn restore_parser<'src>()
         .ignore_then(local_path())
         .then(existing_users)
         .then(dry_run.clone())
-        .map(|((source, existing_users), mode)| Restore {
+        .then(state.clone())
+        .map(|(((source, existing_users), mode), state)| Restore {
             scope: RestoreScope::Cluster { existing_users },
             source,
             mode,
+            state,
         });
     let domain = kw(Identifier::Domain)
         .ignore_then(domain_name())
@@ -96,10 +128,12 @@ pub fn restore_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(local_path())
         .then(dry_run)
-        .map(|(((domain, target), source), mode)| Restore {
+        .then(state)
+        .map(|((((domain, target), source), mode), state)| Restore {
             scope: RestoreScope::Domain { domain, target },
             source,
             mode,
+            state,
         });
     kw(Identifier::Restore)
         .ignore_then(choice((cluster, domain)))
@@ -139,28 +173,44 @@ fn writes_keyword(tokens: &[Token], keyword: Identifier) -> bool {
 }
 
 /// The clauses that may still follow a complete `BACKUP`, as completion offers them.
-pub(crate) fn backup_tail(tokens: &[Token]) -> Vec<String> {
-    if writes_keyword(tokens, Identifier::Without) {
+pub(crate) fn backup_tail(backup: &Backup) -> Vec<String> {
+    if backup.capture != BackupCapture::default() {
         return vec![";".to_string()];
     }
-    vec![";".to_string(), "WITHOUT RESOURCES".to_string()]
+    let mut tail = vec![
+        ";".to_string(),
+        "WITHOUT STATE".to_string(),
+        "WITHOUT PAUSE".to_string(),
+        "TIMEOUT".to_string(),
+    ];
+    if backup.resources == BackupResources::Included {
+        tail.push("WITHOUT RESOURCES".to_string());
+    }
+    tail.sort();
+    tail
 }
 
 /// The clauses that may still follow a complete `RESTORE`, as completion offers them.
 pub(crate) fn restore_tail(restore: &Restore, tokens: &[Token]) -> Vec<String> {
-    if writes_keyword(tokens, Identifier::Dry) {
+    if restore.state != RestoreState::All {
         return vec![";".to_string()];
     }
-    match &restore.scope {
-        RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => vec![
-            ";".to_string(),
-            "DRY RUN".to_string(),
-            "ON EXISTING USER".to_string(),
-        ],
-        RestoreScope::Cluster { .. } | RestoreScope::Domain { .. } => {
-            vec![";".to_string(), "DRY RUN".to_string()]
+    let mut tail = vec![
+        ";".to_string(),
+        "WITHOUT STATE".to_string(),
+        "WITHOUT SOURCE OFFSETS".to_string(),
+    ];
+    if restore.mode == RestoreMode::Apply {
+        match &restore.scope {
+            RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => {
+                tail.push("ON EXISTING USER".to_string());
+            }
+            RestoreScope::Cluster { .. } | RestoreScope::Domain { .. } => {}
         }
+        tail.push("DRY RUN".to_string());
     }
+    tail.sort();
+    tail
 }
 
 /// The clauses that may still follow a complete `DESCRIBE BACKUP`, as completion offers them.
@@ -193,6 +243,7 @@ mod tests {
             scope,
             destination: destination.to_string(),
             resources,
+            capture: BackupCapture::default(),
         })
     }
 
@@ -247,6 +298,21 @@ mod tests {
         assert!(client.requires_local_handling());
     }
 
+    #[rstest]
+    #[case::configuration_only(
+        "BACKUP DOMAIN prod TO 'a.nvxb' WITHOUT STATE;",
+        BackupCapture::ConfigurationOnly
+    )]
+    #[case::live("BACKUP DOMAIN prod TO 'a.nvxb' WITHOUT PAUSE;", BackupCapture::Live)]
+    #[case::quiesced_timeout("BACKUP DOMAIN prod TO 'a.nvxb' TIMEOUT 5s;", BackupCapture::Quiesced { timeout: Some(std::time::Duration::from_secs(5)) })]
+    fn backup_capture_options_are_semantic(#[case] source: &str, #[case] capture: BackupCapture) {
+        let parsed = parse_client_statement(source).expect("the capture option parses");
+        let ClientStatement::Server(Statement::Backup(backup)) = parsed else {
+            panic!("the statement is a backup");
+        };
+        assert_eq!(backup.capture, capture);
+    }
+
     /// A backup writes a file on the client's machine, so only the client grammar reads it; the
     /// server receives it as the command a client sends.
     #[test]
@@ -263,8 +329,9 @@ mod tests {
     #[case::cluster_with_domain("BACKUP CLUSTER prod TO '/tmp/c.nvxb';")]
     #[case::two_domains("BACKUP DOMAIN a b TO '/tmp/c.nvxb';")]
     #[case::without_alone("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT;")]
-    #[case::without_state("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT STATE;")]
     #[case::repeated_option("BACKUP CLUSTER TO 'c' WITHOUT RESOURCES WITHOUT RESOURCES;")]
+    #[case::conflicting_capture("BACKUP CLUSTER TO 'c' WITHOUT PAUSE WITHOUT STATE;")]
+    #[case::timeout_without_value("BACKUP CLUSTER TO 'c' TIMEOUT;")]
     #[case::trailing_word("BACKUP CLUSTER TO '/tmp/c.nvxb' NOW;")]
     fn rejects_malformed_backups(#[case] source: &str) {
         assert!(
@@ -290,6 +357,14 @@ mod tests {
     #[rstest]
     #[case::cluster("BACKUP CLUSTER TO '/tmp/c.nvxb';")]
     #[case::without_resources("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT RESOURCES;")]
+    #[case::without_state("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT STATE;")]
+    #[case::without_pause("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT PAUSE;")]
+    #[case::timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 5s;")]
+    #[case::fractional_second_timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 1500ms;")]
+    #[case::mixed_hour_timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 90m;")]
+    #[case::nanosecond_timeout_boundary(
+        "BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 18446744073709551615ns;"
+    )]
     #[case::named_domain("BACKUP DOMAIN prod TO '/tmp/p.nvxb';")]
     #[case::session_domain("BACKUP DOMAIN TO '/tmp/p.nvxb' WITHOUT RESOURCES;")]
     #[case::quote_in_path("BACKUP DOMAIN prod TO \"it's.nvxb\";")]
@@ -364,6 +439,16 @@ mod tests {
     #[case::named_domain_target("BACKUP DOMAIN prod ", "TO")]
     #[case::destination("BACKUP CLUSTER TO ", "local_path")]
     #[case::optional_tail("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "WITHOUT RESOURCES")]
+    #[case::without_state("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "WITHOUT STATE")]
+    #[case::without_pause("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "WITHOUT PAUSE")]
+    #[case::timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "TIMEOUT")]
+    #[case::domain_named_timeout("BACKUP DOMAIN timeout TO '/tmp/c.nvxb' ", "TIMEOUT")]
+    #[case::domain_named_pause("BACKUP DOMAIN pause TO '/tmp/c.nvxb' ", "WITHOUT PAUSE")]
+    #[case::domain_named_state("BACKUP DOMAIN state TO '/tmp/c.nvxb' ", "WITHOUT STATE")]
+    #[case::domain_named_resources(
+        "BACKUP DOMAIN resources TO '/tmp/c.nvxb' ",
+        "WITHOUT RESOURCES"
+    )]
     #[case::optional_tail_prefix("BACKUP DOMAIN TO '/tmp/c.nvxb' WI", "WITHOUT RESOURCES")]
     #[case::terminator("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT RESOURCES ", ";")]
     #[case::describe_after_describe("DESCRIBE ", "BACKUP")]
@@ -372,6 +457,10 @@ mod tests {
     #[case::describe_format_values("DESCRIBE BACKUP '/tmp/c.nvxb' FORMAT ", "JSON")]
     fn completion_offers_each_backup_clause(#[case] source: &str, #[case] expected: &str) {
         let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            suggestions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{source:?} must offer strictly sorted suggestions: {suggestions:?}"
+        );
         assert!(
             suggestions.contains(&expected.to_string()),
             "{source:?} must offer {expected:?}: {suggestions:?}"
@@ -428,6 +517,7 @@ mod tests {
             scope,
             source: source.to_string(),
             mode,
+            state: RestoreState::default(),
         })
     }
 
@@ -517,6 +607,23 @@ mod tests {
         assert!(client.requires_local_handling());
     }
 
+    #[rstest]
+    #[case::configuration_only(
+        "RESTORE DOMAIN prod FROM 'a.nvxb' WITHOUT STATE;",
+        RestoreState::ConfigurationOnly
+    )]
+    #[case::without_offsets(
+        "RESTORE DOMAIN prod FROM 'a.nvxb' WITHOUT SOURCE OFFSETS;",
+        RestoreState::WithoutSourceOffsets
+    )]
+    fn restore_state_options_are_semantic(#[case] source: &str, #[case] state: RestoreState) {
+        let parsed = parse_client_statement(source).expect("the restore state option parses");
+        let ClientStatement::Server(Statement::Restore(restore)) = parsed else {
+            panic!("the statement is a restore");
+        };
+        assert_eq!(restore.state, state);
+    }
+
     /// A restore reads a file on the client's machine, so only the client grammar reads it; the
     /// server receives it on the stream that carries the archive.
     #[test]
@@ -544,6 +651,9 @@ mod tests {
     #[case::dry_alone("RESTORE CLUSTER FROM 'c.nvxb' DRY;")]
     #[case::dry_run_before_policy("RESTORE CLUSTER FROM 'c.nvxb' DRY RUN ON EXISTING USER SKIP;")]
     #[case::repeated_dry_run("RESTORE CLUSTER FROM 'c.nvxb' DRY RUN DRY RUN;")]
+    #[case::conflicting_state(
+        "RESTORE CLUSTER FROM 'c.nvxb' WITHOUT STATE WITHOUT SOURCE OFFSETS;"
+    )]
     #[case::trailing_word("RESTORE CLUSTER FROM 'c.nvxb' NOW;")]
     #[case::two_domains("RESTORE DOMAIN a b FROM 'c.nvxb';")]
     fn rejects_malformed_restores(#[case] source: &str) {
@@ -560,6 +670,10 @@ mod tests {
         "RESTORE CLUSTER FROM '/tmp/c.nvxb' ON EXISTING USER REPLACE DRY RUN;"
     )]
     #[case::domain("RESTORE DOMAIN prod FROM '/tmp/p.nvxb';")]
+    #[case::without_state("RESTORE DOMAIN prod FROM '/tmp/p.nvxb' WITHOUT STATE;")]
+    #[case::without_source_offsets(
+        "RESTORE DOMAIN prod FROM '/tmp/p.nvxb' WITHOUT SOURCE OFFSETS;"
+    )]
     #[case::domain_as_dry_run("RESTORE DOMAIN prod AS prod_copy FROM '/tmp/p.nvxb' DRY RUN;")]
     #[case::quote_in_path("RESTORE DOMAIN prod FROM \"it's.nvxb\";")]
     fn renders_a_canonical_restore_that_parses_back(#[case] source: &str) {
@@ -592,6 +706,8 @@ mod tests {
     #[case::source_path("RESTORE CLUSTER FROM ", "local_path")]
     #[case::cluster_policy("RESTORE CLUSTER FROM 'c.nvxb' ", "ON EXISTING USER")]
     #[case::cluster_dry_run("RESTORE CLUSTER FROM 'c.nvxb' ", "DRY RUN")]
+    #[case::without_state("RESTORE CLUSTER FROM 'c.nvxb' ", "WITHOUT STATE")]
+    #[case::without_source_offsets("RESTORE CLUSTER FROM 'c.nvxb' ", "WITHOUT SOURCE OFFSETS")]
     #[case::cluster_terminator("RESTORE CLUSTER FROM 'c.nvxb' ", ";")]
     #[case::policy_prefix("RESTORE CLUSTER FROM 'c.nvxb' ON", "ON EXISTING USER")]
     #[case::policy_fail("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER ", "FAIL")]
@@ -599,10 +715,17 @@ mod tests {
     #[case::policy_replace("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER ", "REPLACE")]
     #[case::dry_run_after_policy("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER SKIP ", "DRY RUN")]
     #[case::domain_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' ", "DRY RUN")]
+    #[case::domain_named_dry("RESTORE DOMAIN dry FROM 'p.nvxb' ", "DRY RUN")]
+    #[case::domain_named_offsets("RESTORE DOMAIN offsets FROM 'p.nvxb' ", "WITHOUT SOURCE OFFSETS")]
+    #[case::target_named_state("RESTORE DOMAIN prod AS state FROM 'p.nvxb' ", "WITHOUT STATE")]
     #[case::dry_run_prefix("RESTORE DOMAIN prod FROM 'p.nvxb' DR", "DRY RUN")]
     #[case::terminator_after_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' DRY RUN ", ";")]
     fn completion_offers_each_restore_clause(#[case] source: &str, #[case] expected: &str) {
         let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            suggestions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{source:?} must offer strictly sorted suggestions: {suggestions:?}"
+        );
         assert!(
             suggestions.contains(&expected.to_string()),
             "{source:?} must offer {expected:?}: {suggestions:?}"
@@ -619,7 +742,8 @@ mod tests {
         );
         let source = "RESTORE CLUSTER FROM 'c.nvxb' DRY RUN ";
         let suggestions = suggest_client_statement(source, source.len());
-        assert_eq!(suggestions, [";"]);
+        assert!(suggestions.contains(&"WITHOUT STATE".to_string()));
+        assert!(suggestions.contains(&"WITHOUT SOURCE OFFSETS".to_string()));
         let source = "RESTORE DOMAIN prod FROM 'p.nvxb' ";
         let suggestions = suggest_client_statement(source, source.len());
         assert!(

@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 use error_stack::Report;
 
 use crate::{
-    backup::{ALL_BACKUP_DOWNLOAD_FAILURES, ALL_BACKUP_RESOURCES},
+    backup::{ALL_BACKUP_CUT_KINDS, ALL_BACKUP_DOWNLOAD_FAILURES, ALL_BACKUP_RESOURCES},
     choice::{
         ALL_CHOICE_PLACEMENT_POLICIES, ALL_CHOICE_STATUSES, ALL_CHOICE_TARGETS,
         ALL_DOMAIN_PACE_CHOICES,
@@ -153,6 +153,7 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
     );
     assert_exact_mapping(ALL_UPLOAD_FAILURES, wire::UploadFailure::ENUM_VALUES);
     assert_exact_mapping(ALL_BACKUP_RESOURCES, wire::BackupResources::ENUM_VALUES);
+    assert_exact_mapping(ALL_BACKUP_CUT_KINDS, wire::BackupCutKind::ENUM_VALUES);
     assert_exact_mapping(
         ALL_BACKUP_DOWNLOAD_FAILURES,
         wire::BackupDownloadFailure::ENUM_VALUES,

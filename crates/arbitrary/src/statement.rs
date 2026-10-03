@@ -10,20 +10,20 @@ use nervix_models::{
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-    AlterWireSchemaOperation, Backup, BackupResources, BackupScope, CordonNode, CreateDomain,
-    CreateResource, CreateStatement, CreateUser, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope, CordonNode,
+    CreateDomain, CreateResource, CreateStatement, CreateUser, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainTimeRate, DrainNode,
     DropModel, DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName, InspectionFormat,
     LookupQuery, ModelKind, ModelName, NodeRef, PlacementPolicy, RebindResource,
     RebindResourceMembers, RebindResourceSelection, RelayBranching, RelayName, Relocation,
     RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
-    RestoreMode, RestoreScope, ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, StartDomain, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionLiteral, Timestamp, TransactionInspectionRequest,
+    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowIngestors,
+    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, StartDomain, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionLiteral, Timestamp, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
 };
 use strum::IntoEnumIterator as _;
@@ -322,8 +322,17 @@ impl Arbitrary<'_> {
                     1 => BackupScope::Domain(None),
                     _ => BackupScope::Domain(Some(self.name())),
                 };
+                let capture = match self.entropy.byte() % 4 {
+                    0 => BackupCapture::Quiesced { timeout: None },
+                    1 => BackupCapture::Quiesced {
+                        timeout: Some(std::time::Duration::from_nanos(self.entropy.any_u64())),
+                    },
+                    2 => BackupCapture::Live,
+                    _ => BackupCapture::ConfigurationOnly,
+                };
                 Statement::Backup(Backup {
                     scope,
+                    capture,
                     destination: self.non_empty_string(),
                     resources: self
                         .entropy
@@ -353,6 +362,11 @@ impl Arbitrary<'_> {
                     scope,
                     source: self.non_empty_string(),
                     mode: self.entropy.pick([RestoreMode::Apply, RestoreMode::DryRun]),
+                    state: self.entropy.pick([
+                        RestoreState::All,
+                        RestoreState::WithoutSourceOffsets,
+                        RestoreState::ConfigurationOnly,
+                    ]),
                 })
             }
             StatementVariant::StartDomain => {

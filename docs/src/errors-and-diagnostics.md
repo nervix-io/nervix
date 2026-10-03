@@ -286,7 +286,14 @@ bytes. The control plane's backup execution reports a `BackupError`: no configur
 selected or no existing domain, models that are not a valid graph or do not render or parse back to
 themselves, a clock mapping that cannot be projected, a resource version that is missing on the
 leader or differs from its catalog entry, a record that does not encode, and an archive the
-staging area cannot hold. The failed command's message is `backup failed:` followed by that
+staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
+drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
+under which it acquired the cut. Owner capture failures are classified at the
+interconnect boundary without guest bytes in the failure. An owner still applying the selected
+revision waits within a five-second bound; a closed applied-state authority or an expired catch-up
+wait is a domain capture failure. A leadership change during that wait refuses the capture before
+state is read. The failed command's message is
+`backup failed:` followed by that
 error's text. A download the server does not serve is answered with a typed refusal,
 `InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
 leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
@@ -318,9 +325,19 @@ version other than a restored one by number. Each of these is reported as `resto
 its reason, and changes nothing. Once admitted, a step that fails ends the restore as
 `restore failed at step '<step>':` and its reason, with the restore's report: the consensus command
 that records a step refuses it with a `RestoreStepConflict` naming the step and the domain, user,
-resource, or version, and a resource import or the domain's model batch keeps its own failure
-beneath the step. The steps before it stay applied, and the message says so. No restore
-diagnostic includes password hashes or resource bytes. The client reports an archive it cannot read
+resource, or version, and a resource import, domain model batch, or state installation keeps its own failure
+beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
+blocks starting a domain from authority that no longer permits mutation. The runtime store reports
+a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
+Staging or publication failure leaves the durable start gate in place. The steps before it stay
+applied, and the message says so. Transaction planning reports a blocked `START` as
+`TransactionPlanningError::RestoreInstallation`, naming the domain and restore execution before
+lifecycle admission. The client receives a definitive failure. No restore
+diagnostic includes password hashes or resource bytes. When a state section's entity is absent
+from the restored schedule or its schema fingerprint differs, installation skips that section and
+the successful command carries an unlocated warning diagnostic. The same applies to a verified
+state record whose kind tag or version is unsupported. The CLI includes those warnings
+in text and JSON reports. The client reports an archive it cannot read
 as `ClientError::ReadRestoreArchive` with the path and the I/O error kind, an empty file as
 `ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
 reply that does not decode as `ClientError::InvalidRestoreReply`; an error that may hide an

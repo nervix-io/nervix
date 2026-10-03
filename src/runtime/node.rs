@@ -140,6 +140,9 @@ pub(in crate::runtime) struct RuntimeInner {
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    /// Immutable registry of per-domain publication handles shared by branch tasks and backup.
+    pub(in crate::runtime) backup_capture_fences:
+        ArcSwap<HashMap<DomainName, Arc<backup_capture_fence::BackupCaptureFence>>>,
     /// The branch lifecycle this node holds for each branch-keyed entity, as its owner or as a
     /// replica, with the catalog of the branch checkpoints it owns for the entity and the owner's
     /// announcements a replica has not acted on yet. The replica task that keeps an entity current

@@ -96,9 +96,12 @@ class InventoryTests(unittest.TestCase):
             "nspl-model",
             "nspl-archive-model",
             "backup-record-manifest",
+            "backup-runtime-state-records",
             "client-processor-choice-request",
             "client-ffi-host-columns",
             "branch-membership",
+            "restore-installation-wire",
+            "restore-installation-storage",
             "typed-report", "typed-source-contract", "typed-site-union",
             "nspl-statement",
             "nspl-statement-text",
@@ -145,6 +148,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
+            "nervix-interconnect",
             "nervix-deadlock",
             "nervix-consensus",
             "nervix-lint-report",
@@ -354,25 +358,28 @@ class DiscoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(bolero.BoleroError, message):
                     bolero.static_targets(manifest)
 
-    def test_source_scan_stays_within_its_package(self) -> None:
+    def test_source_scan_obeys_package_ownership_and_excludes_generated_trees(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             manifest = root / "Cargo.toml"
             manifest.write_text("[package]\nname = 'root'\n")
-            source = root / "src/lib.rs"
+            source = root / "src" / "lib.rs"
             source.parent.mkdir()
             source.write_text("fn bolero_root() { bolero::check!(); }")
-            nested = root / "crates/nested/Cargo.toml"
-            nested.parent.mkdir(parents=True)
-            nested.write_text("[package]\nname = 'nested'\n")
-            nested_source = nested.parent / "src/lib.rs"
-            nested_source.parent.mkdir()
-            nested_source.write_text("fn bolero_nested() { bolero::check!(); }")
-            generated = root / "target/generated.rs"
-            generated.parent.mkdir()
-            generated.write_text("fn bolero_generated() { bolero::check!(); }")
+            (source.parent / "notes.txt").write_text("check!();")
+            member = root / "crates" / "member"
+            member.mkdir(parents=True)
+            member_manifest = member / "Cargo.toml"
+            member_manifest.write_text("[package]\nname = 'member'\n")
+            member_source = member / "lib.rs"
+            member_source.write_text("fn bolero_member() { bolero::check!(); }")
+            for generated in ("target", "node_modules", ".cache", "__fuzz__"):
+                tree = root / generated
+                tree.mkdir()
+                (tree / "generated.rs").write_text("check!();")
             self.assertEqual(bolero.static_targets(manifest), {"bolero_root": source})
-            self.assertEqual(bolero.static_targets(nested), {"bolero_nested": nested_source})
+            self.assertEqual(bolero.static_targets(member_manifest),
+                             {"bolero_member": member_source})
 
     def test_compiled_selection_must_match_inventory_and_work_directory(self) -> None:
         def listed(package: str, test_target: str, ignored: bool, manifest: pathlib.Path | None = None) -> list[str]:
@@ -785,6 +792,19 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(execute.call_args.kwargs["env"]["BOLERO_RANDOM_ITERATIONS"],
                              "0")
 
+    def test_replay_accepts_corpus_only_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            target = dataclasses.replace(self.target, corpus=temporary / "corpus")
+            failure = temporary / "failure"
+            failure.write_bytes(b"\x42")
+            output = subprocess.CompletedProcess(
+                [], 0, "run time: 1ms | corpus inputs: 1\n"
+                "test result: ok. 1 passed; 0 failed\n", ""
+            )
+            with mock.patch.object(bolero, "command", return_value=output):
+                self.assertEqual(bolero.replay(target, failure), 0)
+
     def test_replay_rejects_missing_large_or_unconfirmed_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)
@@ -801,6 +821,9 @@ class ExecutionTests(unittest.TestCase):
                 (subprocess.CompletedProcess([], 101, "unrelated test failed", ""),
                  "outside the selected property"),
                 (subprocess.CompletedProcess([], 0, "test result: ok. 1 passed", ""),
+                 "saved input was not replayed"),
+                (subprocess.CompletedProcess([], 0, "corpus inputs: 1 | rng inputs: 1\n"
+                                             "test result: ok. 1 passed", ""),
                  "saved input was not replayed"),
             ):
                 with self.subTest(message=message), mock.patch.object(

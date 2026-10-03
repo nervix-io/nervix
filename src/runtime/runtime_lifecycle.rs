@@ -150,6 +150,7 @@ impl Runtime {
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: TaskTracker::new(),
                 passive_runtime_state_snapshots: DashMap::default(),
+                backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
@@ -333,6 +334,37 @@ impl Runtime {
             .fault_injection
             .pause_restore_step_if_armed(node_id, step)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_backup_cut_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_state_publication_if_armed(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_restore_state_publication_if_armed(domain, coordinator)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn mark_restore_state_publication_refused(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .mark_restore_state_publication_refused(domain, coordinator);
     }
 
     #[cfg(feature = "testing")]

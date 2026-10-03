@@ -3,7 +3,7 @@ use std::ops::Range;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription,
+    Backup, BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription,
     DescribeBackup, DomainName, EmitSinkKind, IngestSourceKind, ModelKind, RelayName, Restore,
     SchemaName, SemanticReference, Statement, UploadResource, WireSchemaName,
 };
@@ -658,8 +658,8 @@ fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
         suggestions_from_errors(out.into_errors(), &prefix)
     } else {
         match out.into_output() {
-            Some(ClientStatement::Server(Statement::Backup(_))) => {
-                backup_tail(&tokens, &source, &prefix)
+            Some(ClientStatement::Server(Statement::Backup(backup))) => {
+                backup_tail(&backup, &source, &prefix)
             }
             Some(ClientStatement::Server(Statement::Restore(restore))) => {
                 restore_tail(&restore, &tokens, &source, &prefix)
@@ -680,13 +680,13 @@ fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
 ///
 /// Nothing may follow a terminated statement, and a clause is offered only once the word before
 /// it has ended, so a statement still being typed is left to its own expectations.
-fn backup_tail(tokens: &[Token], source: &str, prefix: &str) -> Vec<String> {
+fn backup_tail(backup: &Backup, source: &str, prefix: &str) -> Vec<String> {
     let trimmed = source.trim_end();
     let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
     if !open {
         return Vec::new();
     }
-    filter_by_prefix(crate::backup::backup_tail(tokens), prefix)
+    filter_by_prefix(crate::backup::backup_tail(backup), prefix)
 }
 
 /// The optional clauses completion offers after a complete `RESTORE`.

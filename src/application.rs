@@ -1889,6 +1889,8 @@ impl Application {
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
+                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
+                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
                 restore_archives: Default::default(),
             }),
         };
@@ -1928,6 +1930,9 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let resource_replica_service = service.clone();
+        service
+            .register_backup_state_handlers(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();

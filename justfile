@@ -109,6 +109,22 @@ coverage-bolero duration="2": bolero-deps
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
 
+# Qualify the restore installation properties while measuring the runner during focused iteration.
+coverage-bolero-restore duration="30": build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" erase
+    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch -a scripts/bolero.py test restore-installation
+    for target in restore-installation-wire restore-installation-storage; do
+        "${coverage[@]}" run --branch -a scripts/bolero.py fuzz "${target}" {{ quote(duration) }}
+    done
+    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    mkdir -p target/bolero
+    "${coverage[@]}" lcov -o target/bolero/python.lcov
+    "${coverage[@]}" report --fail-under=80
+
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format build-test-cli build-paced-simulation
@@ -188,6 +204,10 @@ test-scenarios *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
+
+# Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
+test-scenarios-binary binary *args: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
@@ -376,8 +396,9 @@ test-primitives-compile:
 # consistent-order controls must end cleanly with evidence that records no finding; and the
 # start-up, quiet-output and recording-failure cases end as their contract says. A child that never
 # ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
-# `@deadlock_diagnostics` scenarios, without retries, in a scenario binary built for the mode:
-# in-process nodes and real diagnostic server processes, each on one and three nodes. Each
+# `@deadlock_diagnostics` and `@restore_installation` scenarios, without retries, in a scenario
+# binary built for the mode: in-process nodes, real diagnostic server processes on one and three
+# nodes, interrupted restore installation and stale publication after leadership transfer. Each
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
 # evidence under its evidence directory there. An invocation that executed no check fails the run,
 # and so does a smoke whose scenarios did not all run and pass. The whole run is bounded by
@@ -386,6 +407,7 @@ test-deloxide budget_seconds="2400": tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }}
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
     logs="${CARGO_TARGET_DIR}/test-deloxide"
     rm -rf "${logs}"
     mkdir -p "${logs}/evidence"
@@ -419,8 +441,8 @@ test-deloxide budget_seconds="2400": tests-deps
     cargo test --no-run --features 'testing deloxide' --test scenarios
     within_budget scenarios \
         cargo test --features 'testing deloxide' --test scenarios -- \
-            --input tests/features/cluster/deadlock_diagnostics.feature \
-            --tags @deadlock_diagnostics \
+            --input 'tests/features/cluster/*.feature' \
+            --tags '@deadlock_diagnostics or @restore_installation' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
@@ -433,7 +455,7 @@ test-deloxide budget_seconds="2400": tests-deps
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-server"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -472,19 +494,28 @@ test-shuttle-replay-check:
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
 # target/loom-failures for `test-loom-replay`.
-test-loom filter="":
+test-loom filter="": build-web-console
     python3 -m unittest --quiet scripts.tests.test_loom_models
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
+
+# Measure the native runner's inventory, completion and failure artifact paths.
+coverage-loom-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/loom-coverage
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file target/loom-coverage/runner.coverage --branch --source=scripts.loom_models,scripts.tests.test_loom_models -m unittest scripts.tests.test_loom_models
+    "${coverage[@]}" lcov --data-file target/loom-coverage/runner.coverage -o target/loom-coverage/python-runner.lcov
 
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
 test-loom-replay failure:
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
-# Show that each Loom model detects the ordering fault it exists for. Every registered weakening is
+# Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
 # checkpoint of that failure must replay it.
-test-loom-qualification:
+test-loom-qualification: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
@@ -890,6 +921,23 @@ test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core --package nervix-client-wire \
         --package nervix-models --package nervix-cli --package nervix-web-console
+
+# Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
+test-coverage-backup-packages:
+    cargo llvm-cov --no-report --lib \
+        --package nervix-backup --package nervix-nspl --package nervix-models \
+        --package nervix-client-wire --package nervix-consensus --package nervix-interconnect \
+        --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-primitives
+
+# Extend an existing instrumented profile with focused public regressions after a correction.
+test-coverage-scenario-filter feature filter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server \
+        --test scenarios -- --input {{ quote(feature) }} --name {{ quote(filter) }} \
+        --concurrency 1 --retry 0
 
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps
@@ -1986,6 +2034,10 @@ toolchains-install:
 test-nspl *args:
     cargo test --package nervix-nspl --package nervix-nspl-format --all-targets -- {{ args }}
 
+# Verify the backup and restore completion clauses and their public suggestion ordering.
+test-nspl-backup-completion:
+    cargo test --package nervix-nspl --lib backup::tests::completion_offers_each_
+
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
 validate-nspl-docs:
@@ -2111,6 +2163,26 @@ build-web-console:
 
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server
+
+# Reuse an already available packaged image's runtime libraries for a local Chaos candidate.
+# The two binaries are built from this checkout in the ordinary target directory, then stripped
+# into a small, temporary Docker context so the source tree is never sent to the builder.
+build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
+    stage="$(mktemp -d {{ quote(cargo_target_dir + "/backup-chaos-image.XXXXXX") }})"
+    trap 'rm -rf "${stage}"' EXIT
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-server") }} "${stage}/nervix-server"
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} "${stage}/nervix-cli"
+    llvm-strip-23 "${stage}/nervix-server" "${stage}/nervix-cli"
+    cat >"${stage}/Dockerfile" <<'EOF'
+    ARG BASE
+    FROM ${BASE}
+    COPY nervix-server /usr/local/bin/nervix-server
+    COPY nervix-cli /usr/local/bin/nervix-cli
+    EOF
+    docker build --build-arg BASE={{ quote(base) }} --tag {{ quote(tag) }} "${stage}"
 
 # Build a diagnostic node: nervix-server in the `deloxide` mode, whose tracked locks report an active
 # deadlock with evidence and end the process. Its own target directory keeps it from replacing the

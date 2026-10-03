@@ -308,6 +308,8 @@ struct ScenarioWorld {
     backup_directory: Option<TempDir>,
     /// The backup a scenario ran through its own session, whose archive it downloads itself.
     last_backup: Option<backup::TestBackup>,
+    /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
+    background_backup: Option<AbortOnDropHandle<std::process::Output>>,
     /// How the last backup download a scenario shaped itself ended.
     last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
     /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
@@ -12122,6 +12124,11 @@ async fn given_the_active_domain_is(world: &mut ScenarioWorld, raw_domain: Strin
     world.active_session_has_subscription = false;
     world.last_command_error = None;
     world.last_command_output = None;
+}
+
+#[given(expr = "the active domain is saved as placeholder {string}")]
+fn given_active_domain_is_saved_as_placeholder(world: &mut ScenarioWorld, placeholder: String) {
+    world.placeholders.insert(placeholder, world.domain.clone());
 }
 
 async fn run_nspl_commands_on_node(

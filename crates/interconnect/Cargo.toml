@@ -62,6 +62,7 @@ alloc_count = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
+bolero = { workspace = true }
 nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }

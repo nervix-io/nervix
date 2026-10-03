@@ -596,7 +596,8 @@ payload, infinity, and nullable and sensitive branch key fields.
 - **A-1.** A client MUST send `BACKUP` as a `CommandRequest` on its own, under an execution reference
   that follows E-1 to E-4, and MUST download the archive only after a `CommandCompleted` outcome
   that carries a `backup` summary. It MUST keep the reference and the summary until the archive is
-  downloaded or its retention ends.
+  downloaded or its retention ends. Each domain summary includes the capture cut kind and, for a
+  quiesced cut, its engagement and release times and quiesce counters.
 - **A-2.** A client MUST download one archive per `DownloadBackup` call, sending exactly one
   `BackupDownloadRequest` that names the backup's execution reference. The answer is one
   `BackupDownloadFailed` or `LeaderRedirect` frame, or a `BackupArchiveStart`, the archive as

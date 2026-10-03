@@ -291,6 +291,12 @@ Draining ends with a confirmation pass. After a flush generation observes nothin
 more generation must also observe nothing, so work that an upstream node publishes after a
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
 confirming generation completes with nothing visible.
+Quiesced backup applies the same admitted-work view to its selected domain across all live nodes.
+It requests a separate cluster-wide confirming generation before capturing checkpoints. Parked
+`REQUIRED WAIT` messages do not hold that cut open, and a failed drain resumes the domain.
+When a parked message has crossed nodes, remote ACK progress carries its parked state back through
+the source's acknowledgement chain. The drain excludes that chain while the message is parked;
+resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
 
 Each domain therefore advances independently through three states:
 
@@ -650,6 +656,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
+| Restored backup state: WASM guest saves, Kafka domain offsets and branch lifecycle | A restore installs the archive's verified checkpoints into the stopped domain before its next `START` | Reopens from the installed checkpoints on each assigned owner and replica; the next `START` continues the saved guest generation, source positions and branch incarnations |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |

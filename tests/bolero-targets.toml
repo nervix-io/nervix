@@ -55,7 +55,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "nspl-expression"
 invariant = "A generated current expression of every form renders to text that a statement and every standalone expression reader read back as the complete structured expression."
@@ -70,7 +70,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "nspl-model"
 invariant = "Canonical NSPL of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -85,7 +85,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "nspl-archive-model"
 invariant = "An archived canonical document of generated Models of every family reparses to the complete ordered Model sequence."
@@ -110,6 +110,21 @@ package = "nervix-backup"
 random_iterations = 256
 source = "crates/backup/src/tests.rs"
 test = "tests::bolero_domain_records_and_manifests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/tests__bolero_runtime_state_records_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-runtime-state-records"
+invariant = "Current WASM descriptors, Kafka offsets, and branch lifecycle records decode from their own encoding to complete equal values."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/tests.rs"
+test = "tests::bolero_runtime_state_records_round_trip"
 test_target = "lib"
 
 [[target]]
@@ -205,7 +220,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-statement"
 invariant = "Canonical NSPL of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -220,7 +235,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_text_reads_alike_at_every_entry_point/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-expression-text"
 invariant = "Edited expression text reads as the same expression through a statement and every standalone expression reader, or none of them reads it as one."
@@ -235,7 +250,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical NSPL reparses to them."
@@ -250,7 +265,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -265,7 +280,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -501,6 +516,36 @@ random_iterations = 256
 source = "crates/models/tests/representations/models.rs"
 test = "models::bolero_models_and_statements_round_trip_through_their_archives"
 test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
+domain_version = 1
+features = []
+id = "restore-installation-wire"
+invariant = "Every current restore installation action retains its complete authority, coordination, placement, payload and inventory through the production wire encoder and decoder."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup.rs"
+test = "backup::wire_properties::bolero_restore_installation_requests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__backup__tests__bolero_restore_staging_and_publication_records_round_trip/corpus"
+domain_version = 1
+features = []
+id = "restore-installation-storage"
+invariant = "Current staged checkpoints and durable publication records decode to their complete original authority, placement, revision, payload and inventory."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/backup.rs"
+test = "runtime::state_store::backup::tests::bolero_restore_staging_and_publication_records_round_trip"
+test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10

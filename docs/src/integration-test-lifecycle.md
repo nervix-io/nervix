@@ -56,6 +56,16 @@ records its own evidence under its root, and is a diagnostic node only when the 
 scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
+The diagnostic command also selects the ordinary `@restore_installation` scenarios. They exercise
+the blocking applied-state guard through interrupted checkpoint staging, complete publication and
+runtime handle clearing, including a delayed coordinator after leadership transfer and a
+successor's START. The ordinary CLI built by the test dependencies drives these diagnostic nodes
+through its public protocol; the command supplies its path explicitly because the diagnostic
+binary has a separate build directory. The feature input is a quoted file glob, and the shared
+scenario accounting requires every selected diagnostic workload to run and pass without retries. The recorded evidence
+covers tracked blocking locks reached by those workloads; async waits, capture atomics, dependency
+locks and cross-node waits retain their other concurrency checks.
+
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
 up to three more times with a new port selection. It also removes the failed container when those
