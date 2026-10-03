@@ -227,3 +227,17 @@ invariant = "runtime.local-drain.flush-completion"
 original = "self.force_flushes.load(Ordering::Acquire)"
 path = "src/runtime/entity_gate.rs"
 weakened = "self.force_flushes.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A Kafka offset snapshot stamped with a commit's revision encodes that commit's offset: the commit stores the partition's offset before it advances the revision, the snapshot reads the revision before the offsets, and advancing releases what reading the revision acquires."
+id = "runtime.kafka-offset-state.snapshot-revision"
+package = "nervix-server"
+test = "runtime::kafka_offset_state::tests::loom_models::loom_a_snapshot_carrying_a_commits_revision_carries_its_offset"
+
+[[qualification]]
+failure = "a snapshot carried the revision of a commit without its offset"
+id = "runtime.kafka-offset-state.relaxed-revision-advance"
+invariant = "runtime.kafka-offset-state.snapshot-revision"
+original = ".fetch_add(1, Ordering::SeqCst)"
+path = "src/runtime/lsm_sequence.rs"
+weakened = ".fetch_add(1, Ordering::Relaxed)"
