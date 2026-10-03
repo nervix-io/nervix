@@ -1463,9 +1463,17 @@ model rather than ending the search, and Loom's full thread count. A Loom settin
 that would change that search is refused. A completed search prints a record naming its invariant,
 its execution count and its bounds, and `just test-loom` accepts nothing else as a completed model.
 
+Discovery, model execution, qualification and checkpoint replay use the workspace's `loom` build
+profile. It inherits `dev`, retains debug assertions, overflow checks, debug information and the
+server's allocation instrumentation, and compiles with optimization level one to reduce the
+allocation frames on Loom's fixed coordinator stack. Qualification cleans only this profile's
+package artifacts before and after each weakening, so a weakened artifact cannot become an
+ordinary build input or satisfy another qualification.
+
 The coordinator starts and joins the model body without touching protocol state. The body and
 participants started through `nervix_model_harness::loom::spawn` each request a 1 MiB coroutine
-stack, so instrumented allocators and debug frames fit before reaching the owner's first atomic.
+stack for instrumented allocators and debug frames. The coordinator retains Loom's fixed default
+stack; its initial allocation and spawn path must fit before the larger body stack can run.
 Loom forwards that request to its coroutine implementation, whose allocation units need not be
 bytes. Its five thread slots include the coordinator, body and at most three other participants.
 The harness stack model executes a 64 KiB frame on both the body and a participant; reducing the

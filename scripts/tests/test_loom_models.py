@@ -21,6 +21,7 @@ from scripts.loom_models import (
     parse_inventory,
     qualify,
     qualification_failure,
+    replay,
     run_models,
     select,
     weaken,
@@ -290,6 +291,10 @@ class QualificationCopyTests(unittest.TestCase):
                 [command[1] for command in commands.commands if command[0] == "cargo"],
                 ["clean", "test", "clean"],
             )
+            for command in commands.commands:
+                if command[0] == "cargo":
+                    self.assertIn("--profile", command)
+                    self.assertEqual(command[command.index("--profile") + 1], "loom")
 
 
 class RunTests(unittest.TestCase):
@@ -308,6 +313,8 @@ class RunTests(unittest.TestCase):
 
     def test_a_gate_passes_when_every_model_completes(self) -> None:
         def respond(arguments: Sequence[str]) -> Outcome:
+            self.assertIn("--profile", arguments)
+            self.assertEqual(arguments[arguments.index("--profile") + 1], "loom")
             if "--ignored" in arguments:
                 return listing()
             if "--list" in arguments:
@@ -350,6 +357,39 @@ class RunTests(unittest.TestCase):
         self.assertEqual(metadata["revision"], "0123abcd")
         self.assertEqual(metadata["loom"], "0.7.2")
         self.assertTrue((evidence / "output.log").is_file())
+
+
+class ReplayTests(unittest.TestCase):
+    def test_replay_uses_the_model_profile_and_preserves_the_recorded_checkpoint(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            checkpoint = directory / "checkpoint.json"
+            checkpoint.write_text('{"pos": 0}\n', encoding="utf-8")
+            (directory / "metadata.json").write_text(
+                json.dumps({"invariant": "execution.cancellation.publication"}),
+                encoding="utf-8",
+            )
+
+            def respond(arguments: Sequence[str]) -> Outcome:
+                self.assertIn("--profile", arguments)
+                self.assertEqual(arguments[arguments.index("--profile") + 1], "loom")
+                self.assertIn(PUBLICATION_TEST, arguments)
+                self.assertIn("--exact", arguments)
+                (directory / "replay-checkpoint.json").write_text(
+                    '{"pos": 1}\n', encoding="utf-8"
+                )
+                return Outcome(101, "the recorded assertion failed\n")
+
+            commands = ScriptedCommands(directory, respond)
+            with redirect_stderr(io.StringIO()):
+                status = replay(commands, inventory(), directory)
+
+            self.assertEqual(status, 101)
+            self.assertEqual(checkpoint.read_text(encoding="utf-8"), '{"pos": 0}\n')
+            self.assertEqual(
+                (directory / "replay-checkpoint.json").read_text(encoding="utf-8"),
+                '{"pos": 1}\n',
+            )
 
 
 if __name__ == "__main__":

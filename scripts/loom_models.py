@@ -7,9 +7,9 @@
 `crates/model-harness/loom-inventory.toml` registers every model by the invariant it checks.
 
 `run` lists the library tests named `loom_*` of every inventory package, built with its `loom`
-feature, and checks them against the inventory: a run over the whole inventory fails when a
-registered test is missing or ignored, or when a discovered model is not registered. It then runs
-each selected model in its own process and accepts it only when the model's harness printed the
+feature and build profile, and checks them against the inventory: a run over the whole inventory
+fails when a registered test is missing or ignored, or when a discovered model is not registered.
+It then runs each selected model in its own process and accepts it only when the model's harness printed the
 record of an exhaustive exploration for the model's own invariant; a passing test without that
 record is an incomplete run. It reports how many models it discovered, selected, executed and saw
 complete, and a filter that selects nothing fails.
@@ -22,7 +22,9 @@ only; a model has no payloads or secrets to leak.
 
 `qualify` applies each registered weakening to a copy of the working tree, requires the named
 model to fail with the registered message, and requires the checkpoint of that failure to replay
-it. The copy shares the target directory, so only the mutated packages are rebuilt.
+it. The copy shares the target directory, so only the mutated packages are rebuilt. Discovery,
+execution, replay and qualification use the same profile, and qualification clears only that
+profile's package artifacts before and after each mutation.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ FAILURES = "loom-failures"
 QUALIFICATIONS = "loom-qualification"
 MODEL_PREFIX = "loom_"
 LOOM_FEATURE = "loom"
+LOOM_PROFILE = "loom"
 
 _INVARIANT_ID = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 # The test harness prints `test <name> ... ` before a test's own output, so a record can share its
@@ -331,7 +334,7 @@ class Commands:
 
 
 def cargo_test(package: str, *arguments: str, manifest: Path | None = None) -> list[str]:
-    command = ["cargo", "test"]
+    command = ["cargo", "test", "--profile", LOOM_PROFILE]
     if manifest is not None:
         command += ["--manifest-path", str(manifest)]
     return [*command, "--package", package, "--features", LOOM_FEATURE, "--lib", *arguments]
@@ -528,7 +531,8 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
         manifest = tree / "Cargo.toml"
         environment = {"CARGO_TARGET_DIR": str(target)}
         clean_command = [
-            "cargo", "clean", "--manifest-path", str(manifest), "--package", model.package,
+            "cargo", "clean", "--profile", LOOM_PROFILE,
+            "--manifest-path", str(manifest), "--package", model.package,
         ]
         cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
         if cleaned.status != 0:

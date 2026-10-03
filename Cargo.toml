@@ -768,6 +768,14 @@ proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", 
 [profile.release]
 panic = "unwind"
 
+# Loom's coordinator has a fixed coroutine stack before it can start our larger model stacks.
+# Reduce instrumented allocation frames while retaining the dev profile's diagnostics and checks.
+[profile.loom]
+debug-assertions = true
+inherits = "dev"
+opt-level = 1
+overflow-checks = true
+
 [profile.fuzz]
 codegen-units = 1
 debug = 1

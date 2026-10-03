@@ -9,8 +9,10 @@
 //!
 //! The default coordinator only starts and joins the model body. The body and every participant
 //! started by [`spawn`] request larger coroutine stacks, so allocator instrumentation and debug
-//! frames cannot exhaust Loom's small default before reaching the owner. The coordinator carries
-//! no protocol state; it occupies one of Loom's five thread slots, alongside the body and actors.
+//! frames execute on those stacks. The coordinator retains Loom's fixed default stack, so the
+//! runner uses the workspace's `loom` build profile to reduce its initial allocation frames while
+//! preserving debug assertions, overflow checks and allocation instrumentation. It carries no
+//! protocol state and occupies one of Loom's five thread slots, alongside the body and actors.
 //!
 //! Every run prints one record for its runner. A completed search prints
 //! `nervix-model-harness: loom invariant <name> explored to exhaustion in <n> executions` followed by
