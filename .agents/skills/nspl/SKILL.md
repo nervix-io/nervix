@@ -252,6 +252,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   without a message. A payload is decoded or rejected as a whole, unfolds into at most 65,536
   messages, and stays the unit of source acknowledgement. `ON EMITTING` must yield exactly one
   value per record.
+- Unfolding runs on the node's extension workers. Before relying on a `NO_ACK` source to keep its
+  payloads while those workers are full, read `Ingestors` → `When The Extension Workers Are Full`:
+  some sources wait for them, and others refuse the payload and count it.
 - Give every signaling protocol an explicit `FORMAT` and express the handshake as JAQ:
   `SEND JAQ` programs must each yield exactly one value, and `WAIT JAQ` matchers accept any output
   that is neither null nor false. Match only the fields that matter so acknowledgements carrying

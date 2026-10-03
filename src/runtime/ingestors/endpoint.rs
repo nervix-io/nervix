@@ -157,6 +157,9 @@ impl EndpointIngestorStartPlan {
             // them. What the endpoint buffer retained replays one request per ingest group.
             buffered_intake: false,
             flush_each_intake: true,
+            // The request path answers a body the extension workers cannot unfold now with a
+            // refusal its sender retries, so no request reaches the loop's live intake.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
             connector_label: "endpoint",
         })
@@ -164,7 +167,7 @@ impl EndpointIngestorStartPlan {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::BTreeMap;
 
     use futures_util::FutureExt as _;
@@ -203,7 +206,7 @@ mod tests {
 
     /// Starts, on `runtime`, a running domain whose one endpoint ingestor reads `/events` on
     /// `edge.example.com` through a codec of `wire_format`.
-    async fn start_endpoint_ingestor(
+    pub(in crate::runtime::ingestors) async fn start_endpoint_ingestor(
         runtime: Runtime,
         domain: &DomainName,
         ingestor: &IngestorName,
@@ -511,7 +514,7 @@ mod tests {
 
     /// A JSON codec whose `ON INGESTION` transformation passes each payload through, so every
     /// payload is unfolded on the node's extension workers.
-    fn unfolding_wire_format() -> CodecWireFormat {
+    pub(in crate::runtime::ingestors) fn unfolding_wire_format() -> CodecWireFormat {
         CodecWireFormat::JaqNative {
             format: CodecJaqFormat::Json,
             transformations: CodecJaqTransformations {

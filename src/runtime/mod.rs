@@ -418,7 +418,7 @@ pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestAcceptance, RawIngestDispatch, decode_ingested_payload,
+    PayloadDecodeFailure, RawIngestAcceptance, decode_ingested_payload,
     prepare_branched_entrypoint_input,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
