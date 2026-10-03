@@ -107,6 +107,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY benches/*.rs ./benches/
 COPY src ./src
 COPY crates ./crates
+COPY examples/paced-simulation/rust ./examples/paced-simulation/rust
 COPY tests/scenarios.rs ./tests/scenarios.rs
 COPY scripts/configure_kache_remote.sh ./scripts/configure_kache_remote.sh
 COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
