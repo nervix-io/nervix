@@ -130,6 +130,11 @@ exact placement's dirty mark. Client batch outcome counters, quiesced payload co
 subscription drop counters retain their Prometheus children, including every declared outcome
 label combination, so recording resolves no label set.
 
+Subscription generations also retain the node's executor and pass it directly to predicate
+evaluation. Executor admission continues to own worker and memory bounds for extension calls.
+The admission benchmark also constructs the current emitter context, resolving its routing,
+metrics mark, status publication and confirmation counter before the timed encoding runs.
+
 Each handoff entity has one immutable coordination-owner set and notification owner. Tasks retain
 that entity slot across repeated freezes. A watch registers before reading the publication;
 engagement and release replace it before notifying. Concurrent owners derive their replacement

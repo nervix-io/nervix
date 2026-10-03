@@ -18,18 +18,18 @@ use nervix_models::{
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainTimeRate, DrainNode,
     DropModel, DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName, InspectionFormat,
     LookupQuery, ModelKind, ModelName, NodeRef, PlacementPolicy, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RelayBranching, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreMode, RestoreScope,
-    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionLiteral, Timestamp, TransactionInspectionRequest, TransactionInspectionTarget,
-    TransactionOperationNumber, UncordonNode, UploadResource,
+    RebindResourceMembers, RebindResourceSelection, RelayBranching, RelayName, Relocation,
+    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
+    RestoreMode, RestoreScope, ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements,
+    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionLiteral, Timestamp, TransactionInspectionRequest,
+    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
 };
 use strum::IntoEnumIterator as _;
 
 use crate::{
-    Arbitrary, Domain,
+    Arbitrary, Domain, GeneratedName,
     route::{RouteBranch, RouteFlush, RouteShape},
 };
 
@@ -488,10 +488,13 @@ impl Arbitrary<'_> {
                     operations,
                 })
             }
-            StatementVariant::Drop => Statement::Drop(DropModel {
-                kind: self.drop_kind(),
-                name: self.name(),
-            }),
+            StatementVariant::Drop => {
+                let kind = self.drop_kind();
+                Statement::Drop(DropModel {
+                    kind,
+                    name: self.model_name_of(kind),
+                })
+            }
             StatementVariant::DropNode => Statement::DropNode(DropNode {
                 node_id: self.cluster_node(),
             }),
@@ -577,10 +580,13 @@ impl Arbitrary<'_> {
                 name: self.name(),
                 key: self.subscription_literal(),
             }),
-            StatementVariant::ShowCreate => Statement::ShowCreate(ShowCreate {
-                kind: self.model_kind(),
-                name: self.name(),
-            }),
+            StatementVariant::ShowCreate => {
+                let kind = self.model_kind();
+                Statement::ShowCreate(ShowCreate {
+                    kind,
+                    name: self.model_name_of(kind),
+                })
+            }
             StatementVariant::ShowUdfs => Statement::ShowUdfs(ShowUdfs),
             StatementVariant::ShowIngestors => Statement::ShowIngestors(ShowIngestors),
             StatementVariant::ShowPlacements => Statement::ShowPlacements(ShowPlacements),
@@ -600,9 +606,7 @@ impl Arbitrary<'_> {
                     }
                 };
                 let operation = if self.entropy.flag() {
-                    let number = self
-                        .entropy
-                        .boundary_biased(1..=self.largest_archived_count());
+                    let number = self.entropy.boundary_biased(1..=u64::MAX);
                     let number =
                         usize::try_from(number).assured("supported targets address 64 bits");
                     Some(TransactionOperationNumber::new(
@@ -691,7 +695,16 @@ impl Arbitrary<'_> {
     /// A kind-qualified reference to a Model that binds a resource version.
     pub fn resource_binding_ref(&mut self) -> NodeRef {
         let kind = self.entropy.pick(RESOURCE_BINDING_KINDS);
-        NodeRef::new(kind, self.name::<ModelName>())
+        NodeRef::new(kind, self.model_name_of(kind))
+    }
+
+    /// The name of a Model of `kind`. NSPL reads a relay's name wherever it names a relay, so in
+    /// the NSPL domain the name of a relay avoids the words NSPL refuses for one.
+    fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
+        match kind {
+            ModelKind::Relay => self.name_refusing::<ModelName>(RelayName::REFUSED_IN_NSPL),
+            _ => self.name(),
+        }
     }
 
     /// A cluster node's name, which a statement writes as a hostname. Its parts stay short enough
@@ -704,7 +717,8 @@ impl Arbitrary<'_> {
     }
 
     fn relocation_member(&mut self) -> RelocationMember {
-        RelocationMember::new(self.entropy.pick(RELOCATABLE_KINDS), self.name())
+        let kind = self.entropy.pick(RELOCATABLE_KINDS);
+        RelocationMember::new(kind, self.model_name_of(kind))
     }
 
     /// A publishing mode written on its own, without the sink it applies to.

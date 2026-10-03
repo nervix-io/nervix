@@ -796,7 +796,7 @@ pub fn alter_ingestor_parser<'src>()
         .to(AlterIngestorOperation::DropTimestamp);
     let set_filter = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Filter))
-        .ignore_then(where_expression(alter_op_separator()))
+        .ignore_then(where_expression())
         .map(|where_clause| AlterIngestorOperation::SetFilterWhere { where_clause });
     let drop_filter = kw(Identifier::Drop)
         .ignore_then(kw(Identifier::Filter))

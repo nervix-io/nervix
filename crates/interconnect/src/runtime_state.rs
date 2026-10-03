@@ -56,7 +56,7 @@ declare_runtime_state_kinds! {
     KafkaOffset = 3,
     MaterializedRelay = 4,
     WasmProcessor = 5,
-    WindowProcessor = 6,
+    WindowProcessor = 8,
     BranchLru = 7,
 }
 

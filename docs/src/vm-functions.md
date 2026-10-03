@@ -990,8 +990,10 @@ than encoding a different instant. No VM or datetime code calls `SystemTime` or 
 
 Processor and materialized relay tasks retain the installed domain clock that supplies each unit's
 snapshot. Filtered subscriptions retain its lifecycle owner so a subscription opened before
-`START DOMAIN` follows the subsequently installed generation. Batch evaluation reads these
-publications directly; it does not discover its clock through the runtime registry.
+`START DOMAIN` follows the subsequently installed generation. Each subscription generation also
+retains the node's executor and supplies it directly to predicate evaluation, preserving bounded
+admission for extension calls. Batch evaluation reads these publications directly; it does not
+discover its clock through the runtime registry.
 
 ### Deterministic And Volatile Functions
 
@@ -1194,6 +1196,12 @@ row views of its input and argument columns. It does not carry the accumulators 
 snapshot codec seals those views as bounded Arrow sections on the bulk executor. Only the
 histogram's delayed removals ride beside them in a typed section, because the retained rows cannot
 reproduce them.
+
+Each delayed removal archives its bucket index as a fixed-width 64-bit count, with checked native
+decoding. The current snapshot frame begins with `NVXWIN64`, and window state uses runtime-state
+kind tag `8`. These identify the current stored and transferred shape before decoding; an
+unrecognized frame fails validation, and stored state outside the current namespace must be
+recreated. The count contract is defined in [Archived Counts](./typed-states.md#archived-counts).
 
 A snapshot from an earlier incarnation of the branch restores an empty window and marks it for
 publication, so a late checkpoint of a previous lifetime cannot restore its panes. Otherwise,
