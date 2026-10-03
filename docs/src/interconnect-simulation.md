@@ -565,6 +565,8 @@ a typed request carrying an Arrow batch and the same batch as a relay payload, a
 it with the production codec and checks the values without printing them. The three-host case adds a
 second peer and a rejected dial whose DNS name the certificate does not carry, so authentication
 failure is proven over the same connection path that succeeds.
+The typed Arrow reply archives its native row count with the vocabulary's fixed-width 64-bit
+adapter, matching the product's [count representation](./typed-states.md#archived-counts).
 The rejection assertions inspect the `TransportError` at the report's current context; relay
 timeout, cancellation, and indeterminate-delivery assertions do the same. This keeps the simulated
 failure class independent of the report's diagnostic text while production transport and wire

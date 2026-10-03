@@ -8,7 +8,7 @@
 use std::str::FromStr;
 
 use chumsky::prelude::*;
-use strum::{AsRefStr, EnumString, IntoStaticStr};
+use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
 
 pub type LexError<'src> = Rich<'src, char>;
 pub type Span = SimpleSpan<usize>;
@@ -49,33 +49,22 @@ pub enum Token {
     Percent,
 }
 
-impl Token {
-    /// Whether the token opens or closes a parenthesized or bracketed group of an expression.
-    pub fn is_group_delimiter(&self) -> bool {
-        matches!(
-            self,
-            Self::LParen | Self::RParen | Self::LBracket | Self::RBracket
-        )
-    }
-
-    /// Whether an expression may write this token as the name of a call or the scope of a field:
-    /// any word but a keyword an expression follows directly.
-    pub fn may_name_a_term(&self) -> bool {
-        match self {
-            Self::Word(Word::KnownWord { iden, .. }) => !iden.precedes_expression(),
-            Self::Word(Word::UnknownWord(_)) => true,
-            _ => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Word {
-    KnownWord { iden: Identifier, raw: String },
+    KnownWord {
+        iden: Identifier,
+        raw: String,
+    },
     UnknownWord(String),
+    /// A name written between backticks, such as `` `end` `` or `` `a-b` ``, holding the text
+    /// between them. It is never a keyword, whatever it spells, and the name it stands for checks
+    /// that text by its own rule.
+    Quoted(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, AsRefStr, IntoStaticStr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, EnumString, AsRefStr, IntoStaticStr,
+)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum Identifier {
     Create,
@@ -436,23 +425,14 @@ pub enum Identifier {
 }
 
 impl Identifier {
-    /// Whether this keyword can begin a clause that goes straight on with an expression, as
-    /// `WHERE <expression>`, a reorderer's `BY <expressions>` and an HTTP sink's `METHOD` and
-    /// `PATH` do.
-    ///
-    /// Where such a keyword ends an expression region, a `(` after it opens that clause, never the
-    /// arguments of a call named like the keyword.
-    pub fn precedes_expression(self) -> bool {
-        matches!(self, Self::Where | Self::By | Self::Method | Self::Path)
-    }
-
     /// Whether an expression reserves this keyword, which spells one of its operators, literals or
-    /// forms, or a clause of a route construction, and so never names a field, a scope or a
-    /// function there.
+    /// forms, or a clause of a route construction. Where a keyword could stand, such a word names a
+    /// field or a function only between backticks; after a scope's `.` and after `udf::`, where no
+    /// keyword stands, it is the name as written.
     ///
     /// Every other keyword is an ordinary name inside an expression: `max(input.readings)`,
-    /// `first(...)`, `output.total` and `input.status` read the statement keywords they spell as
-    /// names.
+    /// `first(...)`, `output.total`, `input.status` and a bare `to` read the statement keywords they
+    /// spell as names.
     pub fn is_expression_keyword(self) -> bool {
         matches!(
             self,
@@ -601,8 +581,26 @@ fn string_literal<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Lex
     ))
 }
 
+/// A name written between backticks: any text but a backtick or a line break.
+///
+/// A name that spells a reserved word, or holds a character a plain word cannot, is written this
+/// way. The text is not checked here: the name it stands for checks it by its own rule, which says
+/// what is wrong with it.
+fn quoted_name<'src>() -> impl Parser<'src, &'src str, String, extra::Err<LexError<'src>>> + Clone {
+    just('`')
+        .ignore_then(
+            any()
+                .filter(|c: &char| *c != '`' && *c != '\n')
+                .repeated()
+                .to_slice(),
+        )
+        .then_ignore(just('`'))
+        .map(str::to_string)
+}
+
 fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
     let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
+    let quoted = quoted_name().map(|text| Token::Word(Word::Quoted(text)));
 
     let number = text::int(10)
         .then(just('.').then(text::digits(10)).or_not())
@@ -642,7 +640,7 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
         just('%').to(Token::Percent),
     ));
 
-    choice((string, number, word, punctuation)).map_with(|token, e| SpannedToken {
+    choice((string, number, word, quoted, punctuation)).map_with(|token, e| SpannedToken {
         token,
         span: e.span(),
     })
@@ -671,20 +669,42 @@ pub fn lex(input: &str) -> Result<Vec<SpannedToken>, Vec<LexError<'_>>> {
 
 #[cfg(test)]
 mod tests {
+    use strum::IntoEnumIterator as _;
+
     use super::*;
 
     #[test]
-    fn only_a_word_no_expression_follows_directly_may_name_a_term() {
-        let tokens =
-            lex("max output readings BY path WHERE method ( .").expect("lex should succeed");
-        let may_name = tokens
+    fn the_generators_spell_a_name_like_every_keyword() {
+        let lexed = Identifier::iter()
+            .map(|keyword| <&'static str>::from(keyword).to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        let generated = nervix_arbitrary::KEYWORDS
             .iter()
-            .map(|spanned| spanned.token.may_name_a_term())
+            .map(|word| (*word).to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(generated, lexed);
+    }
+
+    #[test]
+    fn a_name_between_backticks_is_never_a_keyword() {
+        let tokens = lex("`end` `input` `a-b` `9 lives` ``")
+            .expect("quoted names lex")
+            .into_iter()
+            .map(|spanned| spanned.token)
             .collect::<Vec<_>>();
         assert_eq!(
-            may_name,
-            vec![true, true, true, false, false, false, false, false, false]
+            tokens,
+            ["end", "input", "a-b", "9 lives", ""]
+                .map(|text| Token::Word(Word::Quoted(text.to_string())))
+                .to_vec()
         );
+    }
+
+    #[test]
+    fn a_quoted_name_ends_at_its_closing_backtick_on_its_own_line() {
+        for source in ["`end", "`a\nb`", "`a` `b"] {
+            assert!(lex(source).is_err(), "{source:?} must be rejected");
+        }
     }
 
     #[test]

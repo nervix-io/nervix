@@ -171,6 +171,8 @@ relay. Do not use them to scan across branches.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
+  On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
+  replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
   branch names, but each source retains its own branch through collection and external publish;

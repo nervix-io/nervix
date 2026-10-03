@@ -102,7 +102,7 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server and CLI, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After both jobs, merge their workspace reports for CRAP, merge their public-scope reports for one Codecov upload |
+| `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP and one Codecov upload |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
 | `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 
@@ -964,8 +964,16 @@ current profiles and reuses unchanged instrumented artifacts for another scenari
 When collecting a different source revision, first run `just coverage-clean-workspace` so
 instrumented binaries and line mappings from earlier sources cannot enter the new report.
 After collecting unit and scenario profiles, `just coverage-report-workspace` exports all
-workspace packages; pass `--no-default-ignore-filename-regex` when measuring changed test files
-as well as product files.
+workspace packages, including executed test files.
+
+Both CI collectors export `lcov-workspace.info` with an explicit `--workspace` report scope and
+`--no-default-ignore-filename-regex`. Test lines stay in these reports, so merging native extra
+reports cannot make executed library properties appear uncovered because their files were filtered.
+Executing a crate's tests does not include that crate in a report whose package selection names
+only the root package. The coverage job merges these workspace reports with completed native
+extra reports and uploads that combined workspace report to Codecov, so library properties
+contribute to patch coverage alongside server and client tests. The separate `lcov.info` artifact
+retains the focused server, CLI and web-console view.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |

@@ -6,38 +6,20 @@ use nervix_models::{
 };
 
 use crate::{
-    lexer::{Identifier, Token, Word},
+    lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for,
-        correlator_name, duration_lit, embedded, flushed_explicit_processor_outputs,
-        from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
-        relay_ref, suggest_from, tok,
+        correlator_name, duration_lit, embedded_expression, flushed_explicit_processor_outputs,
+        from_relay_clause, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
+        lex_input, materialized_state_dependencies, relay_ref, suggest_from, tok,
     },
-    semantic_program::read_expression,
 };
-
-fn correlate_where_boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Word(Word::KnownWord {
-            iden: Identifier::Match,
-            ..
-        })
-    )
-}
 
 fn correlate_where_clause<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    kw_phrase2(Identifier::Correlate, Identifier::Where).ignore_then(embedded(
-        any()
-            .filter(|token: &Token| !correlate_where_boundary_token(token))
-            .repeated()
-            .at_least(1)
-            .labelled("correlate_expression"),
-        read_expression,
-    ))
+    kw_phrase2(Identifier::Correlate, Identifier::Where)
+        .ignore_then(embedded_expression("correlate_expression"))
 }
 
 fn match_policy<'src>()
@@ -48,40 +30,13 @@ fn match_policy<'src>()
     )))
 }
 
-fn left_from_where_boundary_token(token: &Token) -> bool {
-    from_where_boundary_token(token)
-        || matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Identifier::Right | Identifier::Correlate,
-                ..
-            })
-        )
-}
-
-fn right_from_where_boundary_token(token: &Token) -> bool {
-    from_where_boundary_token(token)
-        || matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Identifier::Correlate,
-                ..
-            })
-        )
-}
-
 fn side_from_clauses<'src>(
     side: Identifier,
 ) -> impl Parser<'src, &'src [Token], ProcessorInputs, extra::Err<ParseError<'src>>> + Clone {
-    let boundary: fn(&Token) -> bool = match side {
-        Identifier::Left => left_from_where_boundary_token,
-        Identifier::Right => right_from_where_boundary_token,
-        _ => unreachable!("correlator inputs expose only left and right sides"),
-    };
     kw(side)
         .ignore_then(kw(Identifier::From))
         .ignore_then(
-            from_relay_clause_with_boundary(boundary)
+            from_relay_clause()
                 .separated_by(tok(Token::Comma))
                 .at_least(1)
                 .collect::<Vec<_>>(),
@@ -348,17 +303,38 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_right_still_begins_the_right_inputs() {
-        assert!(
-            parse_create_correlator(
-                "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE left.name = right RIGHT \
-                 FROM labels CORRELATE WHERE left.id = right.id MATCH EARLIEST MAX TIME 5s ON \
-                 CORRELATION TIMEOUT DROP, DROP UNBRANCHED TO matched SET id = left.id FLUSH \
-                 IMMEDIATE ON MESSAGE ERROR LOG;"
-            )
-            .is_err(),
-            "a bare right heads the RIGHT FROM clause, so the left filter before it is unfinished"
+    fn a_bare_right_where_an_operand_belongs_is_a_field_and_the_next_right_begins_the_inputs() {
+        let parsed = parse_create_correlator(
+            "CREATE CORRELATOR suffix_matches LEFT FROM sensors WHERE left.name = right RIGHT \
+             FROM labels CORRELATE WHERE left.id = right.id MATCH EARLIEST MAX TIME 5s ON \
+             CORRELATION TIMEOUT DROP, DROP UNBRANCHED TO matched SET id = left.id FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("a bare right completes the left filter, which the RIGHT after it follows");
+
+        assert_eq!(
+            parsed.left.where_clauses()[0].where_clause,
+            crate::parse_expression("left.name = right").expect("valid expression")
         );
+        assert_eq!(parsed.right.relays()[0].as_str(), "labels");
+    }
+
+    #[test]
+    fn a_field_named_like_the_match_clause_stays_in_the_correlation() {
+        let parsed = parse_create_correlator(
+            "CREATE CORRELATOR suffix_matches LEFT FROM sensors RIGHT FROM labels CORRELATE WHERE \
+             left.match = right.match AND match > 0 MATCH EARLIEST MAX TIME 5s ON CORRELATION \
+             TIMEOUT DROP, DROP UNBRANCHED TO matched SET id = left.id FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG;",
+        )
+        .expect("fields named match stay in the correlation, and MATCH follows it");
+
+        assert_eq!(
+            parsed.correlate_where,
+            crate::parse_expression("left.match = right.match AND match > 0")
+                .expect("valid expression")
+        );
+        assert_eq!(parsed.match_policy, CorrelatorMatchPolicy::Earliest);
     }
 
     #[test]
@@ -428,6 +404,23 @@ mod tests {
              IMMEDIATE ON MESSAGE ERROR LOG;",
         );
         assert!(parse_create_correlator_tokens(&tokens).is_err());
+    }
+
+    #[test]
+    fn completion_after_keyword_named_fields_offers_the_next_side_and_match() {
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 WHERE left.to > right ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(
+            suggestions.contains(&"RIGHT".to_string()),
+            "{suggestions:?}"
+        );
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+                     WHERE left.match = right.match AND match > 0 ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(
+            suggestions.contains(&"MATCH".to_string()),
+            "{suggestions:?}"
+        );
     }
 
     #[test]

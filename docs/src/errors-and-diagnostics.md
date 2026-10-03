@@ -122,6 +122,16 @@ These failures name the owning node and relevant relay, codec, or field. A missi
 lookup file is rejected during candidate binding validation; malformed records remain a loader
 failure when the pinned file is decoded. Neither failure silently selects another resource version.
 
+The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
+target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
+transport failure. Registry Model records validate their current frame signature and report
+`RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape.
+Consensus validates its complete current keyspace namespace and state encoding and reports
+`StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
+`WindowSnapshotIssue::Header` with a recreation instruction for an invalid current frame signature.
+These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
+truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).
+
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and
@@ -343,11 +353,16 @@ is parsed from its own run of those tokens, so a diagnostic indexes the whole su
 wherever in the batch the rejected statement starts. The session edge turns the stage into the
 failed command's `lex error` or `parse error` message and passes every span through unchanged, so a
 client underlines it in the text it sent. A statement grammar reads an expression it embeds from
-the statement's own tokens, with the reader a standalone expression uses, and reports the reader's
-first diagnostic at the tokens of the statement where the reader failed, with the message the
-standalone reader gives the same text. It carries no expectations of the expression grammar, so
-completion inside an unfinished expression offers nothing rather than guessing at expression
-syntax. A caller that owns a larger operation adds its own context above the
+the statement's own tokens, with the grammar a standalone expression uses, for as long as that
+grammar can go on, and its next clause begins where the expression ends. Where the expression
+cannot begin at all, the diagnostic expects the placeholder the clause names, such as
+`where_expression`. Where the expression goes on with a token and then fails, the statement reports
+the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
+message the standalone reader gives the same text. Where a complete expression is followed by a token
+no clause of the statement expects, the statement reports that token with its own expectations. An
+expression's diagnostic carries no expectations of the expression grammar, so completion inside an
+unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
+a larger operation adds its own context above the
 language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning

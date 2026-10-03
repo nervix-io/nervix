@@ -1887,7 +1887,7 @@ counts are exported by the node that executes the client ingestor, not per sessi
 A subscription generation retains its domain lifecycle when delivery starts. Filtered batches read
 the currently installed clock through that capability, including a domain started after the
 subscription opened. Unavailable-clock skipped-row outcomes remain unchanged.
-Predicate execution receives the serving node's bounded executor separately from the retained clock.
+It also retains the node's executor and passes it to predicate evaluation for bounded execution.
 Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
 public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
 These internal ownership rules change neither session framing nor client recovery behavior.

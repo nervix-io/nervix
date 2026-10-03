@@ -51,7 +51,7 @@ use crate::{
     RkyvDeserialize,
 )]
 #[serde(transparent)]
-pub struct TransactionOperationNumber(NonZeroUsize);
+pub struct TransactionOperationNumber(#[rkyv(with = crate::CountAsU64)] NonZeroUsize);
 
 impl TransactionOperationNumber {
     pub const fn new(number: NonZeroUsize) -> Self {
@@ -107,7 +107,7 @@ impl std::fmt::Display for TransactionOperationNumber {
     RkyvDeserialize,
 )]
 #[serde(transparent)]
-pub struct TransactionPosition(usize);
+pub struct TransactionPosition(#[rkyv(with = crate::CountAsU64)] usize);
 
 impl TransactionPosition {
     pub const fn new(accepted_operations: usize) -> Self {

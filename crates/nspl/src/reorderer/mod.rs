@@ -5,28 +5,16 @@ use nervix_models::{
 };
 
 use crate::{
-    lexer::{Identifier, Token, Word},
+    lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        completion_tokens, duration_lit, embedded, filter_where_clause, flushed_processor_outputs,
-        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, nested_expression_tokens, reorderer_name, reorderer_ref,
+        completion_tokens, duration_lit, expression_list, filter_where_clause,
+        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, lex_input, materialized_state_dependencies, reorderer_name, reorderer_ref,
         suggest_from, suggestions_from_errors, tok,
     },
-    semantic_program::read_expression_list,
 };
-
-fn boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::Max,
-                ..
-            })
-    )
-}
 
 fn by_exprs<'src>()
 -> impl Parser<'src, &'src [Token], Vec<nervix_models::Expression>, extra::Err<ParseError<'src>>> + Clone
@@ -34,10 +22,7 @@ fn by_exprs<'src>()
     // The label covers the expressions only, not the `BY` that introduces them, so it means the
     // same thing here as in `ALTER REORDERER ... SET BY <expressions>`. Labelling the keyword too
     // would give one completion label two different contracts.
-    kw(Identifier::By).ignore_then(embedded(
-        nested_expression_tokens(boundary_token).labelled("reorder_by"),
-        read_expression_list,
-    ))
+    kw(Identifier::By).ignore_then(expression_list("reorder_by"))
 }
 
 pub fn create_reorderer_parser<'src>()
@@ -95,7 +80,7 @@ pub fn alter_reorderer_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterReorderer, extra::Err<ParseError<'src>>> + Clone {
     let set_order_by = kw(Identifier::Set)
         .ignore_then(kw(Identifier::By))
-        .ignore_then(alter_expression_list(alter_op_separator(), "reorder_by"))
+        .ignore_then(alter_expression_list("reorder_by"))
         .map(|expressions| AlterReordererOperation::SetOrderBy { expressions });
     let set_max_time = kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Max, Identifier::Time))
@@ -302,15 +287,43 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_max_still_begins_max_time() {
-        assert!(
-            parse_create_reorderer(
-                "CREATE REORDERER peaks_in_order FROM readings BY input.id, max MAX TIME 10s \
-                 UNBRANCHED TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"
-            )
-            .is_err(),
-            "a bare max heads the MAX TIME clause, so the ordering before it ends in a comma"
+    fn a_bare_max_after_a_comma_is_an_ordering_and_the_next_max_begins_max_time() {
+        let parsed = parse_create_reorderer(
+            "CREATE REORDERER peaks_in_order FROM readings BY input.id, max MAX TIME 10s \
+             UNBRANCHED TO ordered_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("an ordering is due after the comma, so the bare max is a field");
+
+        assert_eq!(
+            parsed.order_by,
+            crate::parse_expression_list("input.id, max").expect("valid expressions")
         );
+        assert_eq!(parsed.max_time, "10s");
+    }
+
+    #[test]
+    fn a_bare_operation_keyword_after_a_comma_in_an_alter_ordering_begins_the_next_operation() {
+        assert!(
+            parse_alter_reorderer("ALTER REORDERER peaks_in_order SET BY input.id, drop;").is_err(),
+            "a bare drop after a comma heads an operation, and DROP alone is none"
+        );
+        let parsed =
+            parse_alter_reorderer("ALTER REORDERER peaks_in_order SET BY input.id, `drop`;")
+                .expect("a quoted drop is a field");
+        assert_eq!(
+            parsed.operations,
+            vec![AlterReordererOperation::SetOrderBy {
+                expressions: crate::parse_expression_list("input.id, `drop`")
+                    .expect("valid expressions"),
+            }]
+        );
+    }
+
+    #[test]
+    fn completion_after_a_keyword_named_ordering_offers_max() {
+        let input = "CREATE REORDERER peaks_in_order FROM readings BY input.id, max ";
+        let suggestions = suggest_create_reorderer(input, input.len());
+        assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
     }
 
     #[test]

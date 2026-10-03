@@ -173,7 +173,7 @@ impl Arbitrary<'_> {
                 arguments: self.expression_list(below, 0),
             },
             ExpressionForm::UdfCall => Expression::UdfCall {
-                function: self.name(),
+                function: self.expression_name(),
                 arguments: self.expression_list(below, 0),
             },
             ExpressionForm::Array => {
@@ -352,14 +352,16 @@ impl Arbitrary<'_> {
             4 => FieldScope::Branch,
             5 => FieldScope::Left,
             6 => FieldScope::Right,
-            7 => FieldScope::RelayState { relay: self.name() },
+            7 => FieldScope::RelayState {
+                relay: self.expression_name(),
+            },
             8 => FieldScope::Metadata,
             9 => FieldScope::PartialOutput,
             _ => FieldScope::Error,
         };
         FieldReference {
             scope,
-            field: self.name(),
+            field: self.expression_name(),
         }
     }
 
@@ -372,7 +374,7 @@ impl Arbitrary<'_> {
                 .parse()
                 .assured("every listed built-in function spells a valid name")
         } else {
-            self.name()
+            self.expression_name()
         }
     }
 

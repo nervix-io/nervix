@@ -51,6 +51,7 @@ use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
 };
+use nervix_execution::Executor;
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
@@ -615,7 +616,7 @@ struct SubscriptionSelection {
 /// evaluate is skipped and counted, and the first failure is reported for the batch. Sampling
 /// takes its draws from the node's `sampler`.
 async fn select_subscription_rows(
-    executor: &nervix_execution::Executor,
+    executor: &Executor,
     batch: &RelayRecordBatch,
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,

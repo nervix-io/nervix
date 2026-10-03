@@ -11,13 +11,12 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, braced_list_value_tokens,
-        branch_selection, embedded, filter_where_clause, flushed_processor_outputs,
-        from_relay_clauses, if_not_exists_clause, inferencer_name, into_parse_error, kw,
-        kw_phrase2, lex_input, materialized_state_dependencies, resource_ref,
-        resource_version_clause, string_lit, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection,
+        embedded_expression, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
+        if_not_exists_clause, inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, resource_ref, resource_version_clause, string_lit,
+        suggest_from, tok,
     },
-    semantic_program::read_expression,
 };
 
 fn field_mapping<'src>()
@@ -25,7 +24,7 @@ fn field_mapping<'src>()
     string_lit()
         .then(tensor_schema())
         .then_ignore(tok(Token::Eq))
-        .then(embedded(braced_list_value_tokens(), read_expression))
+        .then(embedded_expression("value_expression"))
         .map(|((tensor, schema), expression)| InferencerTensorMapping {
             tensor,
             schema,
@@ -295,6 +294,26 @@ mod tests {
         let parsed = parse_create_inferencer(input).expect("parse should work");
 
         assert_eq!(parsed.resource_version, RequestedResourceVersion::Latest);
+    }
+
+    #[test]
+    fn a_tensor_input_reads_a_field_named_like_a_keyword() {
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' INPUTS { \
+                     \"x\" DENSE TENSOR<F32>[1] = output, \"z\" DENSE TENSOR<F32>[1] = `in` } \
+                     OUTPUT SCHEMA { \"y\" DENSE TENSOR<F32>[1] } UNBRANCHED TO b SET y = y FLUSH \
+                     IMMEDIATE ON MESSAGE ERROR LOG;";
+
+        let parsed = parse_create_inferencer(input).expect("parse should work");
+
+        let expressions = parsed
+            .inputs
+            .iter()
+            .map(|mapping| mapping.expression.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expressions,
+            crate::parse_expression_list("output, `in`").expect("valid expressions")
+        );
     }
 
     #[test]
