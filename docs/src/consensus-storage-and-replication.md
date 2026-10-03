@@ -315,12 +315,17 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-This layout has one current shape. A node database containing the earlier shared `raft_*` keyspaces
-fails startup with `consensus storage shares the node database; recreate the node's stored state for
-the dedicated consensus database layout`. A consensus database containing an unknown keyspace, a
-malformed current archive, or incomplete current state fails with `invalid consensus record
-storage; recreate the node's stored state`. Nervix does not migrate, reinterpret, or default those
-records; recreate the node's stored state and let it rejoin from the cluster.
+The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
+`raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
+before reading any records. Its state metadata requires the current `WideCounts` encoding. Native
+counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
+and snapshot installation therefore retain their complete magnitudes. See
+[Archived Counts](./typed-states.md#archived-counts).
+
+This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
+current archive, or incomplete current state fails with `invalid consensus record storage; recreate
+the node's stored state`. Recreate the node's stored state and let it rejoin from the cluster.
 
 ## Shutdown And Forced Endings
 

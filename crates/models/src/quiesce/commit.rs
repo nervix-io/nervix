@@ -104,5 +104,6 @@ pub struct TransactionCommitPlan {
 )]
 pub struct TransactionCommitPlanHeader {
     pub preview: TransactionPreviewIdentity,
+    #[rkyv(with = crate::CountAsU64)]
     pub step_count: usize,
 }

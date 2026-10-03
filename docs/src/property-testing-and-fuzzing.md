@@ -53,7 +53,11 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v2 | 256 | 4096 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v3 | 256 | 4096 bytes |
+| `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v1 | 256 | 16 bytes |
+| `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
+| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v1 | 256 | 4096 bytes |
+| `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 | `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
@@ -61,8 +65,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `replica-progress` | `nervix-checkpoint-replication` replica reports, offers and announcer steps against the monotonic quorum contract: each replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone | bounded report, offer, step, cancel and retire sequences over four replicas and sixteen revisions, v1 | 256 | 256 bytes |
 | `replica-catch-up` | `nervix-server` an owner's catalog of branch checkpoints and a replica's catch-up rounds against convergence: whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, the replica holds every branch its lifecycle names at the owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form and encoding unchanged | bounded start, publish, stop, catalog replacement, naming, eviction, lifecycle, announcement and round sequences over four branches, unbranched work included, v1 | 256 | 256 bytes |
 | `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
-| `typed-catalog-scope` | `nervix-lint-report` complete catalog/scope parsing equality | resolved identities and all reviewed disposition variants, v1 | 256 | 32 bytes |
-| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration and review | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+| `typed-source-contract` | `nervix-lint-report` complete source-contract parsing equality | bounded current execution-contract annotations, v1 | 256 | 32 bytes |
+| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
 
 Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
 properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
@@ -75,8 +79,8 @@ tests in folders and explicitly configured library or test paths. A missing or a
 target or executable fails the run before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
-bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
-remain enforced by the shared runner. Validation uses a 4-CPU runner and the same overall limit
+bounded campaign. Its overall limit is three hours; per-build, per-case and per-campaign deadlines
+remain enforced by the shared runner. Validation uses an 8-CPU runner and a two-hour limit
 to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
 inventory and compiled discovery run through the dedicated Bolero commands and workflow.
 The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
@@ -123,6 +127,13 @@ The language properties also sweep sixteen deterministic byte sequences through 
 family, every emitter sink and every statement form on every ordinary run, so none is left to the
 random cases.
 
+Relay capacities in both domains reach `u64::MAX` on native 64-bit targets. Archived native counts
+use the vocabulary's fixed-width [count representation](./typed-states.md#archived-counts).
+Dedicated count properties assert complete current-record equality at zero where permitted,
+`u32::MAX + 1`, `u64::MAX`, and generated values. The public scenario **Relay capacities keep every
+bit through replication and a full cluster restart** checks creation and alteration at both positive
+boundaries in one-node and three-node clusters, including a follower read and full restart.
+
 Rejection targets start from valid canonical text and edit up to three characters, inserting,
 deleting or replacing delimiters, quotes, comment markers, line endings, digits and non-ASCII
 characters. The result is mostly no longer NSPL and sometimes still is, so both the rejection and
@@ -152,13 +163,28 @@ recorded boundary, not a claim:
   spelling, and a Postgres `ON CONFLICT DO UPDATE` whose target names every mapped column is
   rejected, because it leaves no column to update. Only the vocabulary domain generates those
   states, for the archive properties.
-- The archived form of a `usize` count, such as a relay's `CAPACITY`, is 32 bits wide and
-  truncates a larger count without an error. The vocabulary domain draws those counts only from the
-  range the archive keeps.
 - A time rate's JSON form is not asserted: `serde_json` reads a float without correct rounding, so
   it may land one unit in the last place away. Its text and archived forms keep every bit.
 
 ## Commands And Enforcement
+
+Server properties embed the real web console assets. The Bolero recipes build them before
+discovery, requiring Trunk and the repository Rust toolchain's `wasm32-unknown-unknown` target.
+Both CI modes install those prerequisites.
+Asset builds stage Trunk's complete output and preserve byte-identical published files, including
+their timestamps, so preparing assets again keeps the native server's compiled artifacts reusable.
+
+On a shared host, a cold sanitizer build can exceed the runner's build deadline.
+`just prepare-bolero <id>` prepares one exact registered target through the same instrumented
+build path that runs its campaigns. `CARGO_BUILD_JOBS=1 just prepare-archive-counts-fuzz` uses that
+command for the declared server library shared by the registry and window count properties.
+Then run the registered campaigns with `just fuzz`. Preparation records its own build log and
+metadata with a 7,200-second compilation deadline; it does not count as a completed fuzz campaign.
+The sanitizer CI job runs only on PRs labeled `fuzz`, prepares that server binary with one Cargo
+build job to bound compiler memory, and allows 180 minutes for preparation, all target campaigns,
+failure qualification and artifact upload. An expected sanitizer skip contributes no execution or
+coverage evidence. The Check workflow's validation job and the dedicated Bolero discovery job
+retain their separate scopes and limits.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
@@ -189,7 +215,9 @@ just fuzz-reduce nspl-model <saved-input>
 `just validate-bolero` compares the inventory with all workspace packages declaring
 Bolero, scans their property macros, and queries compiled targets through filtered library-test
 discovery. It rejects missing, unregistered, duplicate, ignored and zero-selected targets, plus
-corpus paths different from Bolero's actual work directory. Discovery executes only
+corpus paths different from Bolero's actual work directory. Each source scan stays within its owning
+Cargo package, excluding generated build directories and packages nested beneath the server's root
+manifest. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.

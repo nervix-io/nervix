@@ -325,6 +325,12 @@ requires a coordinated cluster stop and start with all nodes on the same version
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
+The fingerprint also covers fixed-width 64-bit counts in Models, transaction commands and records,
+and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
+native decoding; an unrepresentable count fails decoding. Window processor state has current
+runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
+before decoding histogram delayed-removal bucket indices in the same count representation.
+
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed

@@ -15,6 +15,7 @@
 //! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
 //! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
 
+mod archived_count;
 #[cfg(feature = "arrow")]
 mod arrow_types;
 mod backup;
@@ -51,6 +52,7 @@ mod udf;
 mod wasm_state_generation;
 mod wasm_state_inspection;
 
+pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupDomainSummary, BackupResources, BackupScope,
     DescribeBackup,
