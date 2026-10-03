@@ -26,6 +26,7 @@
 )]
 
 use std::{
+    collections::BTreeMap,
     fs::OpenOptions,
     io::{self, Write as _},
     num::NonZeroU64,
@@ -229,15 +230,13 @@ impl CycleReport {
     /// The cycle in source terms: every thread in cycle order, up to the bound, with what the
     /// registry recorded for it.
     fn describe(self, registry: &Registry) -> ActiveCycle {
+        let mut waited = BTreeMap::new();
+        for wait in &self.waits {
+            waited.insert(wait.thread, wait.lock);
+        }
         let mut threads = Vec::with_capacity(self.threads.len().min(MAX_CYCLE_THREADS));
         for thread in self.threads.iter().take(MAX_CYCLE_THREADS) {
-            let mut waits_for = None;
-            for wait in &self.waits {
-                if wait.thread == *thread {
-                    waits_for = Some(wait.lock);
-                }
-            }
-            threads.push(registry.blocked_thread(*thread, waits_for));
+            threads.push(registry.blocked_thread(*thread, waited.get(thread).copied()));
         }
         let omitted = self
             .threads

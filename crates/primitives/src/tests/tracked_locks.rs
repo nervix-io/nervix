@@ -177,6 +177,22 @@ fn a_second_installation_is_refused() {
     assert!(deadlock::is_installed());
 }
 
+/// A thread the registry learned is forgotten when it exits, so the registry holds no more threads
+/// than are alive.
+#[test]
+fn an_exited_thread_leaves_the_registry() {
+    detector_installed();
+    let registry = crate::deadlock::registry::Registry::global();
+    let learned = thread::spawn(move || {
+        let thread = registry.current_thread();
+        let thread = thread.assured("a live thread learns its number");
+        assert!(registry.knows_thread(thread));
+        thread
+    });
+    let thread = learned.join().assured(PARTICIPANT_JOINS);
+    assert!(!registry.knows_thread(thread));
+}
+
 /// A thread that waits for a lock another one holds proceeds once it is released: tracking a wait
 /// changes nothing about it.
 #[test]

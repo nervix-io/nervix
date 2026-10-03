@@ -1183,7 +1183,9 @@ constructed, where every acquisition that waits is waiting, how it asked for the
 thread's name, and it hands the resulting finding to the installer's sink. An acquisition that
 succeeds at once records nothing, because only one that waits can be part of a cycle, and the
 registry's maps are never locked across a tracked acquisition, so recording can never join the cycle
-it describes. A finding names threads and locks by their run-local numbers and source sites and
+it describes. Every record leaves with what it describes, a lock's when the lock is dropped, an
+acquisition's once it holds the lock and a thread's name when the thread exits, so the registry holds
+no more than the live locks and threads. A finding names threads and locks by their run-local numbers and source sites and
 never holds a lock's value; context the registry does not hold stays absent instead of guessed. A
 cycle describes at most 64 threads in cycle order and counts the rest, and every text keeps at most
 512 bytes, cut at a character boundary, with the length it was cut from. A sink that panics aborts
