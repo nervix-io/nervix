@@ -1,6 +1,10 @@
 # SHA-256 pins for manually published ONNX Runtime archives.
 # These pins are excluded from the build identity.
 
+["darwin/arm64/portable"]
+fingerprint = "3ee44e7b624ca03f53a05ec3f340a303882c45c2f6f44ea8947c159538666392"
+sha256 = "01919bbc8542d2b34ec588f14b51a874adff7f909d821a1be4939dd8b457f062"
+
 ["linux/amd64/docker"]
 fingerprint = "9fd4d7d7c436caeea2f3459e16f69581716db933a4819d2573bb725ec89bec7c"
 sha256 = "7084d39bbd9c3f862ad4d71dd96cf13a2db04d1a24faec55293ecb124e38b9e6"
