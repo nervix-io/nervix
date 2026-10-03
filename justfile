@@ -1993,7 +1993,7 @@ generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_outp
 fetch-onnxruntime platform="native" *args:
     uv run --locked python -m scripts.onnxruntime.artifacts fetch --platform {{ quote(platform) }} {{ args }}
 
-# Maintainer only: compile directly with local LLVM; use [platform] --force to rebuild a completed artifact.
+# Maintainer only: compile Linux variants in the pinned Docker builder; --force starts with an empty compiler tree.
 # Normal development and CI depend on fetch-onnxruntime.
 build-onnxruntime platform="native" *args:
     uv run --locked python -m scripts.onnxruntime.artifacts build --platform {{ quote(platform) }} {{ args }}
@@ -2019,8 +2019,8 @@ prepare-server-package package:
     @if [ {{ quote(package) }} = nervix-server ]; then just fetch-onnxruntime; fi
 
 # Print the absolute library directory of a validated, prepared ONNX Runtime package.
-onnxruntime-path platform="native":
-    python3 -m scripts.onnxruntime.artifacts path --platform {{ quote(platform) }}
+onnxruntime-path platform="native" variant="portable":
+    python3 -m scripts.onnxruntime.artifacts path --platform {{ quote(platform) }} --variant {{ quote(variant) }}
 
 reset-local-dashboard-state:
     #!/usr/bin/env bash
@@ -2047,7 +2047,7 @@ cluster-dashboard: build-all
 dockerfmt:
     #!/usr/bin/env bash
     set -euo pipefail
-    for file in Dockerfile*; do
+    for file in Dockerfile* scripts/onnxruntime/Dockerfile; do
         tmp="$(mktemp)"
         dockerfmt < "${file}" > "${tmp}"
         mv "${tmp}" "${file}"
@@ -2057,7 +2057,7 @@ dockerfmt-check:
     #!/usr/bin/env bash
     set -euo pipefail
     failed=0
-    for file in Dockerfile*; do
+    for file in Dockerfile* scripts/onnxruntime/Dockerfile; do
         tmp="$(mktemp)"
         dockerfmt < "${file}" > "${tmp}"
         if ! cmp -s "${file}" "${tmp}"; then
@@ -2096,7 +2096,7 @@ validate-docker-kache:
     : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}"
     : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
 
-docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="": validate-docker-kache (fetch-onnxruntime platform) (docker-prepare-qemu platform)
+docker-build-debian tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="": validate-docker-kache (fetch-onnxruntime platform "--variant docker") (docker-prepare-qemu platform)
     #!/usr/bin/env bash
     set -euo pipefail
     normalized_platform="{{ platform }}"
@@ -2107,8 +2107,9 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         linux/amd64|linux/arm64) ;;
         *) echo "unsupported ONNX Runtime platform: ${normalized_platform}" >&2; exit 1 ;;
     esac
-    onnx_lib_dir="$(just onnxruntime-path "${normalized_platform}")"
+    onnx_lib_dir="$(just onnxruntime-path "${normalized_platform}" docker)"
     onnx_package_dir="$(dirname "${onnx_lib_dir}")"
+    debian_image="$(python3 -c 'import json; print(json.load(open("scripts/onnxruntime/downloads.json"))["builder"]["image"])')"
     output_flag="--load"
     if [[ "{{ push }}" == "true" ]]; then
         output_flag="--push"
@@ -2128,8 +2129,8 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         --platform "${normalized_platform}" \
         --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
-        --build-arg DEBIAN_VERSION={{ debian_version }} \
-        --build-arg LLVM_VERSION={{ llvm_version }} \
+        --build-arg "DEBIAN_IMAGE=${debian_image}" \
+        --build-arg LLVM_VERSION=23 \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
         --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
         --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \

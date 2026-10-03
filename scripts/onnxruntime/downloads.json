@@ -191,63 +191,41 @@
       "strip_root": true
     }
   },
-  "arm64_sysroot": [
-    {
-      "url": "https://deb.debian.org/debian/pool/main/c/cross-toolchain-base/libc6-arm64-cross_2.41-11cross1_all.deb",
-      "sha256": "82cd3a0c6754d36cb5a7acbd9fa64c38080a681608c41165736dc88438acfc71",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/c/cross-toolchain-base/libc6-dev-arm64-cross_2.41-11cross1_all.deb",
-      "sha256": "61e0b87dec4929abc9fb345ef324139498bf23ddbf0b10ca3a743b59c8ddf8bb",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/c/cross-toolchain-base/linux-libc-dev-arm64-cross_6.12.38-1cross1_all.deb",
-      "sha256": "fd77c13fedf057038732ef1c4fc06edd753d08092fd5f92c4629551f1f69870f",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libstdc++6-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "81e667b7dad2d378defcc502e9772fe4f435a27e62b7a33a20576885b02e9693",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libstdc++-14-dev-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "dc2d2e1e59f2687a6cb30f3f5ed25e795f2769482ee8f7c5835f00481bf5ad65",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libgcc-14-dev-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "44d31567993f2f138638e3088cc75240d13c7d8a2ebe69032aafd37bc35c7a6f",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libgcc-s1-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "272751f04dc1669c6368005ccea3496b28626c720c64c98980f705350f4c6b6b",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libatomic1-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "4a8636b3c0ab2b0a568d0b7fc6ab089d5b22f7a3e696fe8784acef594c88dc1c",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libgomp1-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "6ef2c0825f2edd319d333fe6db721e1efa79bd595a5149c9f5a17af04dd40978",
-      "strip_root": false
-    },
-    {
-      "url": "https://deb.debian.org/debian/pool/main/g/gcc-14-cross/libitm1-arm64-cross_14.2.0-19cross1_all.deb",
-      "sha256": "61e0bc450632165ef442d0db2902831c878fe24bb89f08e7257e02d4eff92b40",
-      "strip_root": false
-    }
-  ],
-  "qemu": {
+  "linux_sysroot": {
     "linux/amd64": {
-      "url": "https://deb.debian.org/debian/pool/main/q/qemu/qemu-user_10.0.13+ds-0+deb13u1_amd64.deb",
-      "sha256": "ca6ede739327a20ae5a3498230c8a3a9a072c586e131bc6bcc1201eb1725e336",
-      "strip_root": false
+      "image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:1e102f2e9ed9b7fd8d64b29f798c76078c3fa8f14d34914d7a4045e39419d8e0",
+      "platform": "linux/amd64",
+      "glibc": "2.28",
+      "paths": [
+        "usr/include",
+        "usr/lib",
+        "usr/lib64",
+        "usr/share/licenses",
+        "opt/rh/gcc-toolset-14/root/usr/include",
+        "opt/rh/gcc-toolset-14/root/usr/lib",
+        "opt/rh/gcc-toolset-14/root/usr/lib64",
+        "opt/rh/gcc-toolset-14/root/usr/share/licenses"
+      ]
+    },
+    "linux/arm64": {
+      "image": "quay.io/pypa/manylinux_2_28_aarch64@sha256:017c91801301dee044fdf5e48f0291071a471f493a2f047c10d39987fe219536",
+      "platform": "linux/arm64",
+      "glibc": "2.28",
+      "paths": [
+        "usr/include",
+        "usr/lib",
+        "usr/lib64",
+        "usr/share/licenses",
+        "opt/rh/gcc-toolset-14/root/usr/include",
+        "opt/rh/gcc-toolset-14/root/usr/lib",
+        "opt/rh/gcc-toolset-14/root/usr/lib64",
+        "opt/rh/gcc-toolset-14/root/usr/share/licenses"
+      ]
     }
+  },
+  "builder": {
+    "image": "debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a",
+    "llvm_key_sha256": "8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d",
+    "glibc": "2.41"
   }
 }

@@ -22,6 +22,41 @@ from scripts.build_onnxruntime import BuildError, BuildSpec, R2Cache, R2Publishe
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class ArtifactVariantTests(unittest.TestCase):
+    def test_both_linux_variants_have_independent_packages_and_checksum_pins(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = fixture_repository(Path(temporary) / "repository")
+            specs = [BuildSpec.create(platform, repo, variant=variant)
+                     for platform in ("linux/amd64", "linux/arm64")
+                     for variant in ("portable", "docker")]
+            self.assertEqual(len({spec.fingerprint for spec in specs}), 4)
+            self.assertEqual(len({spec.object_key for spec in specs}), 4)
+            for index, spec in enumerate(specs):
+                spec.pin_checksum(str(index + 1) * 64)
+            for index, spec in enumerate(specs):
+                self.assertEqual(spec.artifact_checksum, str(index + 1) * 64)
+
+    def test_docker_variant_uses_the_application_base_and_portable_uses_its_baseline(self) -> None:
+        for platform in ("linux/amd64", "linux/arm64"):
+            portable = BuildSpec.create(platform, variant="portable")
+            docker = BuildSpec.create(platform, variant="docker")
+            self.assertEqual(portable.identity["linux_runtime"]["glibc"], "2.28")
+            self.assertEqual(docker.identity["linux_runtime"]["image"], docker.identity["builder"]["image"])
+            self.assertIn("@sha256:", docker.identity["builder"]["image"])
+
+    def test_downloaded_cross_compiler_inputs_change_the_artifact_identity(self) -> None:
+        for component in ("libnvvm", "cmake"):
+            with self.subTest(component=component), tempfile.TemporaryDirectory() as temporary:
+                repo = fixture_repository(Path(temporary) / "repository")
+                spec = BuildSpec.create("linux/arm64", repo)
+                path = repo / "scripts/onnxruntime/downloads.json"
+                catalog = json.loads(path.read_text())
+                entries = catalog["cuda"][component] if component == "libnvvm" else catalog[component]
+                entries["linux/amd64"]["sha256"] = "0" * 64
+                path.write_text(json.dumps(catalog))
+                self.assertNotEqual(spec.fingerprint, BuildSpec.create("linux/arm64", repo).fingerprint)
+
+
 def fixture_repository(destination: Path) -> Path:
     names = [*BuildSpec.create(repo=ROOT).identity["build_files"],
              "scripts/onnxruntime/manifest.toml", "scripts/onnxruntime/upload.py",
@@ -41,7 +76,7 @@ def fixture_repository(destination: Path) -> Path:
 
 def pin_checksum(spec: BuildSpec, checksum: str) -> None:
     (spec.repo / "scripts/onnxruntime/checksums.toml").write_text(
-        f'[{json.dumps(spec.platform)}]\nfingerprint = "{spec.fingerprint}"\nsha256 = "{checksum}"\n'
+        f'[{json.dumps(spec.artifact_id)}]\nfingerprint = "{spec.fingerprint}"\nsha256 = "{checksum}"\n'
     )
 
 
@@ -72,6 +107,18 @@ def construct_package(destination: Path, *, platform: str = "linux/amd64") -> No
 
 
 class BuildCacheTests(unittest.TestCase):
+    def test_linux_shared_libraries_respect_the_portable_abi(self) -> None:
+        from scripts import build_onnxruntime
+        for version in ("GLIBC_2.28", "GLIBCXX_3.4.25", "CXXABI_1.3.11"):
+            with self.subTest(version=version), patch("scripts.build_onnxruntime.subprocess.check_output",
+                                                    return_value=f"0 *UND* ({version}) symbol\n"):
+                build_onnxruntime.validate_linux_abi(Path("provider.so"))
+        for version in ("GLIBC_2.43", "GLIBCXX_3.4.31", "CXXABI_1.3.15", "GLIBC_PRIVATE"):
+            with self.subTest(version=version), patch("scripts.build_onnxruntime.subprocess.check_output",
+                                                    return_value=f"0 *UND* ({version}) symbol\n"):
+                with self.assertRaisesRegex(BuildError, "Linux ABI baseline"):
+                    build_onnxruntime.validate_linux_abi(Path("provider.so"))
+
     def setUp(self) -> None:
         environment = patch.dict(os.environ, {"CI": ""})
         environment.start()
@@ -228,6 +275,17 @@ class BuildCacheTests(unittest.TestCase):
             stream.write("\n# Transfer display settings do not affect compiled packages.\n")
         self.assertEqual(BuildSpec.create(self.spec.platform, repo=self.repo).fingerprint, self.spec.fingerprint)
 
+    def test_target_runtime_sdk_pin_owns_the_linux_artifact_identity(self) -> None:
+        before = {platform: BuildSpec.create(platform, repo=self.repo).fingerprint
+                  for platform in ("linux/amd64", "linux/arm64")}
+        path = self.repo / "scripts/onnxruntime/downloads.json"
+        catalog = json.loads(path.read_text())
+        image = catalog["linux_sysroot"]["linux/amd64"]["image"].split("@sha256:")[0]
+        catalog["linux_sysroot"]["linux/amd64"]["image"] = image + "@sha256:" + "a" * 64
+        path.write_text(json.dumps(catalog))
+        self.assertNotEqual(BuildSpec.create("linux/amd64", repo=self.repo).fingerprint, before["linux/amd64"])
+        self.assertEqual(BuildSpec.create("linux/arm64", repo=self.repo).fingerprint, before["linux/arm64"])
+
     def test_native_build_compiles_on_the_host(self) -> None:
         with patch.object(self.build, "_source"):
             with patch.object(self.build, "compile") as compiler:
@@ -243,6 +301,7 @@ class BuildCacheTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
         shutil.copyfile(ROOT / "scripts/onnxruntime/manifest.toml", checkout / "scripts/onnxruntime/manifest.toml")
+        shutil.copyfile(ROOT / "scripts/onnxruntime/downloads.json", checkout / "scripts/onnxruntime/downloads.json")
         with (checkout / "scripts/onnxruntime/smoke.cc").open("a") as stream:
             stream.write("\n// Additional package verification.\n")
         changed = RuntimeBuild(BuildSpec.create("linux/amd64", repo=checkout), self.root)
@@ -581,7 +640,7 @@ class BuildCacheTests(unittest.TestCase):
         self.build_package().assert_called_once()
         self.build.validate_package()
 
-    def test_each_platform_has_one_artifact_with_its_required_execution_support(self) -> None:
+    def test_each_platform_variant_has_its_required_execution_support(self) -> None:
         arm = BuildSpec.create("linux/arm64", repo=ROOT)
         mac = BuildSpec.create("darwin/arm64", repo=ROOT)
         self.assertEqual(len({self.spec.fingerprint, arm.fingerprint, mac.fingerprint}), 3)
@@ -590,7 +649,7 @@ class BuildCacheTests(unittest.TestCase):
         self.assertFalse(mac.cuda_enabled)
         for spec in (self.spec, arm, mac):
             self.assertEqual(spec.object_key,
-                             f"{spec.configuration['version']}/{spec.platform}/{spec.fingerprint}.tar.gz")
+                             f"{spec.configuration['version']}/{spec.artifact_id}/{spec.fingerprint}.tar.gz")
 
     def test_manifest_covers_all_packaged_files(self) -> None:
         self.build_package()
@@ -672,7 +731,7 @@ class BuildCacheTests(unittest.TestCase):
             (cuda / "lib64").mkdir()
             (cuda / "lib64/libnvrtc.so.13").write_bytes(elf_fixture("linux/amd64"))
         destination = root / "package"
-        tools = Mock(cuda_home=cuda, cudnn_home=cudnn, cross=Mock() if cross else None)
+        tools = Mock(cuda_home=cuda, cudnn_home=cudnn, cross=Mock() if cross else None, linux_target=None)
 
         def inspect_library(command: list[str], **kwargs: object) -> str:
             self.assertEqual(command[0], "objdump")
@@ -700,7 +759,11 @@ class BuildCacheTests(unittest.TestCase):
         (destination / "runtime/lib").mkdir(parents=True)
         for name in ("libonnxruntime_providers_shared.so", "libonnxruntime_providers_cuda.so"):
             (destination / "runtime/lib" / name).write_bytes(b"provider fixture")
-        tools = Mock(cxx=Mock(command=["kache", "clang++-22"]), cross=None)
+        stub = self.root / "cuda/lib64/stubs/libcuda.so"
+        stub.parent.mkdir(parents=True)
+        stub.write_text("target driver stub")
+        tools = Mock(cxx=Mock(command=["kache", "clang++-22"]), cross=None, linux_target=None,
+                     cuda_home=self.root / "cuda")
         with patch("scripts.build_onnxruntime.run") as command:
             build._smoke(destination, tools)
             load = command.call_args
@@ -798,6 +861,7 @@ class BuildCacheTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
         shutil.copyfile(ROOT / "scripts/onnxruntime/manifest.toml", checkout / "scripts/onnxruntime/manifest.toml")
+        shutil.copyfile(ROOT / "scripts/onnxruntime/downloads.json", checkout / "scripts/onnxruntime/downloads.json")
         before = BuildSpec.create("linux/amd64", repo=checkout)
         with (checkout / "scripts/onnxruntime/aggregate.cmake").open("a") as stream:
             stream.write("\n# changed build input\n")
@@ -848,6 +912,9 @@ class BuildCacheTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("just") and shutil.which("uv"), "requires just and uv")
 class RecipePreparationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch.dict(os.environ, {"CI": ""}))
+
     def test_install_reuses_the_runtime_and_passes_cargo_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -916,7 +983,7 @@ with pathlib.Path(os.environ['RECIPE_TEST_LOG']).open('a') as stream:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = fixture_repository(root / "repository")
-            spec = BuildSpec.create(platform, repo=repo)
+            spec = BuildSpec.create(platform, repo=repo, variant="docker")
             build = RuntimeBuild(spec, root / "stage")
             build.package_dir.mkdir(parents=True)
             construct_package(build.package_dir, platform=build.spec.platform)
@@ -950,7 +1017,7 @@ pathlib.Path(os.environ['DOCKER_TEST_LOG']).write_text(json.dumps(arguments))
                 "KACHE_S3_ENDPOINT": "https://fixture.r2.cloudflarestorage.com",
                 "KACHE_S3_ACCESS_KEY": "fixture", "KACHE_S3_SECRET_KEY": "fixture",
             })
-            recipe = ["just", "docker-build-debian", "trixie", "23", "fixture:debian", platform]
+            recipe = ["just", "docker-build-debian", "fixture:debian", platform]
             environment.update({
                 "CI": "true", "CC": "unavailable-clang", "CXX": "unavailable-clang++",
             })
@@ -960,6 +1027,7 @@ pathlib.Path(os.environ['DOCKER_TEST_LOG']).write_text(json.dumps(arguments))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 arguments = json.loads(log.read_text())
                 self.assertIn(f"onnxruntime={build.package_dir}", arguments)
+                self.assertIn(f"DEBIAN_IMAGE={spec.identity['builder']['image']}", arguments)
                 self.assertIn(f"KACHE_S3_ENDPOINT={environment['KACHE_S3_ENDPOINT']}", arguments)
                 self.assertEqual(arguments[arguments.index("--platform") + 1], spec.platform)
 

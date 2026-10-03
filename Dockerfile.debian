@@ -2,7 +2,7 @@
 
 ARG RUST_VERSION=1.99
 ARG KACHE_VERSION=0.28.1
-ARG DEBIAN_VERSION=trixie
+ARG DEBIAN_IMAGE
 ARG LLVM_VERSION=23
 ARG FLATBUFFERS_VERSION=25.12.19
 ARG FLATBUFFERS_SHA256=f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04d90696a
@@ -11,7 +11,7 @@ ARG SONIC_PARALLELISM=2
 # cargo-sonic filters the list to the selected target architecture.
 ARG SONIC_TARGET_CPUS=x86-64-v3,neoverse-n1
 
-FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS builder
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
@@ -19,7 +19,6 @@ ARG BUILDARCH
 ARG TARGETARCH
 ARG RUST_VERSION
 ARG KACHE_VERSION
-ARG DEBIAN_VERSION
 ARG LLVM_VERSION
 ARG FLATBUFFERS_VERSION
 ARG FLATBUFFERS_SHA256
@@ -82,7 +81,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/llvm.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" \
+    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/trixie/ llvm-toolchain-trixie-${LLVM_VERSION} main" \
         >/etc/apt/sources.list.d/llvm.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -197,8 +196,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       fi; \
     done
 
-ARG DEBIAN_VERSION=trixie
-FROM debian:${DEBIAN_VERSION}-slim AS runtime
+FROM ${DEBIAN_IMAGE} AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

@@ -13,7 +13,7 @@ import shutil
 import sys
 import tempfile
 
-from scripts.build_onnxruntime import BuildSpec, R2Publisher, RuntimeBuild, lock, run
+from scripts.build_onnxruntime import BuildSpec, R2Publisher, RuntimeBuild, lock
 from scripts.onnxruntime.bootstrap import Bootstrap
 from scripts.onnxruntime.toolchain import BuildError
 
@@ -56,16 +56,19 @@ class ManagedRuntimeBuild(RuntimeBuild):
             return self.package_dir / "lib"
 
     def _build(self, destination: Path) -> None:
+        if self.spec.cuda_enabled:
+            from scripts.onnxruntime.containers import DockerBuilder
+            DockerBuilder(self).compile(destination, force=self.force_rebuild)
+            return
         bootstrap = Bootstrap(self.stage_root, self.spec.platform)
         with bootstrap.environment():
             super()._build(destination)
         self.provenance["downloaded_tools"] = bootstrap.installer.receipts
 
     def compile(self, destination: Path) -> None:
-        # RuntimeBuild holds the compiler lock here. Keep sources and fetched dependencies while
-        # removing Ninja's outputs so a forced build recompiles them with the selected compilers.
-        if self.force_rebuild and (self.build_dir / "build.ninja").is_file():
-            run(["cmake", "--build", str(self.build_dir), "--target", "clean"])
+        # macOS uses its local Xcode SDK; Linux compilation belongs to DockerBuilder.
+        if self.force_rebuild and self.build_dir.exists():
+            shutil.rmtree(self.build_dir)
         super().compile(destination)
 
 
@@ -73,17 +76,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["build", "fetch", "pin", "publish", "path", "verify"])
     parser.add_argument("--platform", default="native")
+    parser.add_argument("--variant", choices=("portable", "docker"), default="portable")
     parser.add_argument("--stage", type=Path, default=cache_root())
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 4))
     parser.add_argument("--unchecked", action="store_true")
-    parser.add_argument("--force", action="store_true", help="recompile a completed package; reuse cached sources and SDKs")
+    parser.add_argument("--force", action="store_true", help="rebuild in an empty compiler tree; reuse source and SDK downloads")
     arguments = parser.parse_args()
     if arguments.jobs < 1:
         parser.error("--jobs must be positive")
     if arguments.force and arguments.operation != "build":
         parser.error("--force is only valid for build")
     try:
-        spec = BuildSpec.create(arguments.platform)
+        spec = BuildSpec.create(arguments.platform, variant=arguments.variant)
         build = ManagedRuntimeBuild(spec, arguments.stage, arguments.jobs)
         if arguments.operation == "path" and arguments.unchecked:
             print(build.package_dir / "lib")
@@ -100,7 +104,7 @@ def main() -> int:
                         pass
                 if checksum is None:
                     checksum = build.checksum()
-                print(f"pinned SHA-256 {checksum} for {spec.platform} in scripts/onnxruntime/checksums.toml", file=sys.stderr)
+                print(f"pinned SHA-256 {checksum} for {spec.artifact_id} in scripts/onnxruntime/checksums.toml", file=sys.stderr)
                 print(path)
             elif arguments.operation == "fetch":
                 print(build.prepare())
@@ -109,9 +113,10 @@ def main() -> int:
                     raise BuildError("pinning artifact checksums is a manual operation and is disabled in CI")
                 if not build.package_dir.exists():
                     raise BuildError(f"no completed ONNX Runtime package to pin for {spec.configuration['version']} "
-                                     f"{spec.platform}; build it with just build-onnxruntime {spec.platform}")
+                                     f"{spec.artifact_id}; build it with just build-onnxruntime {spec.platform} "
+                                     f"--variant {spec.variant}")
                 checksum = build.checksum()
-                print(f'["{spec.platform}"]')
+                print(f'["{spec.artifact_id}"]')
                 print(f'fingerprint = "{spec.fingerprint}"')
                 print(f'sha256 = "{checksum}"')
                 print("updated scripts/onnxruntime/checksums.toml", file=sys.stderr)

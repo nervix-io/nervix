@@ -13,9 +13,12 @@ cd nervix
 ## Prerequisites
 
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The server statically links the
-pinned ONNX Runtime core. There is one artifact per OS and architecture: Linux amd64 and arm64
-include CUDA 13 and CPU execution; macOS arm64 uses CPU execution because CUDA is unavailable there.
-Native server recipes fetch the platform's published artifact automatically.
+pinned ONNX Runtime core. Linux amd64 and arm64 each have a portable GNU/Linux variant and a
+variant for the product's pinned Debian Docker base. Both include CUDA 13 and CPU execution.
+macOS arm64 uses CPU execution because CUDA is unavailable there. Native server recipes fetch
+the portable variant; Debian image recipes fetch the matching Docker variant. Portable Linux
+artifacts require glibc 2.28 or newer and include their C++ runtime dependencies. NVIDIA's packaged
+CUDA libraries use glibc; native musl systems such as Alpine require a separate runtime contract.
 
 Install:
 
@@ -70,8 +73,9 @@ checksum pin match, without another download. Completed packages are installed a
 `packages`. Version, source revision, target, build scripts,
 and build configuration determine the artifact identity. Cache lookup does not require compilers,
 CMake, Ninja, or an SDK. The package manifest records the producing host's compiler commands,
-versions, launchers, flags, and SDK. Manual maintainer builds share sources by revision and retain
-compiler intermediates using the host toolchain identity, source revision, and target. Package validation changes reuse
+versions, launchers, flags, SDK, and container image identity. Manual maintainer builds share sources
+by revision and retain compiler intermediates using the compiler identity, source revision, target,
+and artifact variant. Package validation changes reuse
 unchanged compiler outputs; CMake and Ninja track changes to compilation settings and dependencies.
 Builds sharing compiler intermediates also share a file lock.
 Repeated fetches reuse the validated package without network requests or compilation. Concurrent
@@ -80,22 +84,23 @@ invocations share a file lock. Interrupted maintainer builds retain compiler int
 ### Maintainer Source Builds
 
 `just build-onnxruntime [platform]` performs the complete manual build for local use. It reuses a
-completed package first. When a build is needed, it downloads the pinned sources, prepares missing
-host tools and target SDKs, compiles with LLVM, verifies the package, and records its SHA-256 in
+completed package first. When a build is needed, it downloads the pinned sources, prepares
+the pinned compiler container and target SDK, compiles with LLVM, verifies the package, and records
+its SHA-256 in
 `scripts/onnxruntime/checksums.toml`. A workflow lock covers the build and pinning, and packages are
 installed atomically after validation. Repeating the command skips downloads, compilation, and
 compression for an already verified package. Normal recipes can immediately reuse the local result.
 
 `just pin-onnxruntime [platform]` records the fingerprint and archive SHA-256 for a completed local
 artifact in `scripts/onnxruntime/checksums.toml` and prints its TOML entry. It validates the package,
-reuses its cached archive or creates one when needed, and updates only the selected platform's pin.
+reuses its cached archive or creates one when needed, and updates only the selected platform and variant's pin.
 It requires a completed package matching the current manifest and build identity. Pinning needs no
 compiler or R2 credentials and performs no downloads, source compilation, or publication.
 
 `just build-onnxruntime native --force` recompiles a completed package and updates its local
 checksum pin. Use `just build-onnxruntime linux/arm64 --force` for the arm64 cross-build, or pass
 `--force` to `just build-artifacts [platform]`. A forced build cleans the selected compiler tree's
-outputs while retaining downloaded sources, fetched dependencies, and SDKs. The existing
+entire contents while retaining the pinned source checkout and downloaded SDKs outside that tree. The existing
 package stays available until its replacement builds and validates successfully. A compilation
 failure leaves the existing verified package and checksum pin usable.
 
@@ -104,23 +109,58 @@ failure leaves the existing verified package and checksum pin usable.
 require no R2 credentials; `just publish-onnxruntime` uploads a completed package separately.
 Source compilation, checksum pinning, and publication are disabled in CI.
 
-Git, locally installed LLVM tools, and the repository's Python/uv environment are host prerequisites.
-macOS also requires the Xcode command line tools and SDK. CMake, Ninja, CUDA, cuDNN, and arm64
-build inputs are
-downloaded as needed under `~/.cache/nervix-build/onnxruntime/tools`; sources and compiler
-intermediates live under the same stage root. `scripts/onnxruntime/downloads.json` pins the tool
-archives and their SHA-256 checksums. Downloads are verified before extraction and installed
-atomically under shared file locks. Interrupted setup retains completed downloads for reuse.
+Linux source builds require Docker and the repository's Python/uv environment on the host. They
+run inside a Debian builder whose base image digest is pinned in
+`scripts/onnxruntime/downloads.json`. Apt installs current packages from the normal Debian and
+LLVM repositories, including Ninja, QEMU, LLVM 23, and LLVM 21. CMake, CUDA, and cuDNN use
+checksum-pinned archives. Host compiler settings and compiler caches do not enter the build
+container. LLVM 23 compiles the C++ sources; CUDA uses LLVM 21 as its supported host compiler. Both compiler
+provenance and the producing container image are recorded in each package manifest. Package
+revision numbers are recorded after installation; apt selects available updates within the
+chosen Debian release and LLVM major versions.
+Compiler intermediates are separated by the actual builder image ID, so an image rebuilt with
+updated packages gets its own compiler tree even when Clang's version string stays the same.
 
-Builds support matching Linux amd64, Linux arm64, and macOS arm64 hosts, and cross-compilation
-from Linux amd64 to Linux arm64. `CC` and `CXX` select the host LLVM compilers and their arguments.
-The build invokes compiler executables directly, with compiler launchers empty in its temporary
-environment. Host environment settings are restored when setup or compilation ends. Configured
-LLVM 23 compilers remain in use. Unconfigured compilers prefer versioned local commands such as
-`clang-21` and `clang++-21`.
-Missing LLVM tools stop the build with an installation error. Linux uses `AR` or the local LLVM
-archiver accompanying Clang, including `llvm-ar-21`. macOS uses the Xcode SDK and native
-archive tools. Native builds run the smoke program directly; arm64 cross-builds use QEMU.
+Linux has two artifact variants for each architecture:
+
+| Variant | Runtime target | Selection |
+| --- | --- | --- |
+| `docker` | The exact Debian base image used by `Dockerfile.debian` | Debian image recipes select it automatically |
+| `portable` | GNU/Linux with glibc 2.28 or newer | Native development and installation select it by default |
+
+The portable variant compiles against private headers and libraries from digest-pinned
+[PyPA manylinux 2.28 images](https://github.com/pypa/manylinux), based on AlmaLinux 8 with GCC 14.
+This baseline follows the pinned [CUDA 13.2 Linux support table](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-installation-guide-linux/index.html#system-requirements),
+which includes RHEL 8 with glibc 2.28 for amd64 and arm64 SBSA.
+Its static archive contains the C++ runtime, and CUDA providers link their C++ runtime statically.
+Packaging rejects shared libraries or the linked smoke executable that require a newer glibc than
+the selected variant. CUDA vendor libraries keep their own documented driver and hardware
+requirements. These are GNU/glibc artifacts; Alpine's native musl runtime requires a separate CUDA
+support contract.
+
+Build and publish both variants explicitly:
+
+```sh
+just build-onnxruntime linux/amd64 --variant portable --force
+just build-onnxruntime linux/arm64 --variant portable --force
+just build-onnxruntime linux/amd64 --variant docker --force
+just build-onnxruntime linux/arm64 --variant docker --force
+just publish-onnxruntime linux/amd64 --variant portable
+just publish-onnxruntime linux/arm64 --variant portable
+just publish-onnxruntime linux/amd64 --variant docker
+just publish-onnxruntime linux/arm64 --variant docker
+```
+
+`--variant` also selects artifacts for fetching, pinning, and verification. Each platform and
+variant has its own checksum pin and R2 object. Changing the Docker base updates the Docker
+artifact identity and keeps the application and dependency bases aligned. The shared stage root
+retains source and SDK downloads; `--force` deletes the selected compiler tree before compilation.
+
+Builds support matching Linux amd64 and Linux arm64 hosts, and cross-compilation from Linux amd64
+to Linux arm64. Cross builds use QEMU for CPU inference and CUDA provider loading. Provider loading
+uses a private CUDA driver stub when no GPU inference is requested; that stub is never packaged.
+Native GPU verification still requires a matching host and NVIDIA GPU. macOS arm64 source builds
+use locally installed LLVM and the Xcode command line tools and SDK.
 A C API program links the archive and executes a generated ONNX model before installation. Linux
 builds also initialize and load the packaged CUDA provider before running CPU inference. This
 check can run without a GPU.
@@ -147,49 +187,29 @@ invalid aggregate initialization in the host code while preserving both packed v
 
 Every Linux package is built with CUDA 13 enabled. Linux amd64 and
 [arm64 SBSA](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-installation-guide-linux/index.html#system-requirements)
-source builds automatically prepare CUDA 13.2 and cuDNN 9.20 when suitable SDKs are unavailable.
-`CUDA_HOME` and `CUDNN_HOME` optionally select existing installation roots; `CUDACXX` selects the
-CUDA compiler command. `CUDAHOSTCXX` selects the LLVM host compiler for CUDA;
-use a Clang release [supported by the installed CUDA toolkit](https://docs.nvidia.com/cuda/archive/13.2.0/cuda-installation-guide-linux/index.html#host-compiler-support-policy).
-CUDA 13.0 supports Clang through version 20; CUDA 13.2 supports Clang through version 21. The
-build selects local `clang++-21` for CUDA 13.2, or `clang++-20` for CUDA 13.0 and 13.1, when `CXX`
-is newer and `CUDAHOSTCXX` is unset, retaining its compiler arguments. Install
-the required Clang release locally; missing CUDA host compilers fail before CUDA SDK downloads.
-Other host compilation uses the LLVM executables selected by `CC` and `CXX`. CUDA compiler flags
-and `CUDAHOSTCXX` arguments are preserved. `CUDAHOSTCXX` names the direct host compiler and its
-arguments; CMake receives that compiler's executable for NVCC's `-ccbin`. NVCC is also invoked
-directly. Compiler cache setup is a host concern and is outside these build commands.
-The CUDA provider's host C++ sources are checked before compiling its GPU kernels, so a host
-compiler error fails without starting the full kernel build.
-The package includes the provider shared libraries, their CUDA user-space dependency closure,
+source builds prepare checksum-pinned CUDA 13.2 and cuDNN 9.20 SDKs inside the compiler container.
+The builder uses LLVM 23 for ordinary C++ compilation and LLVM 21, the supported CUDA host
+compiler, for NVCC. Compiler launchers remain empty. The CUDA provider's host C++ sources are
+checked before compiling its GPU kernels, so a host compiler error fails before the kernel build.
+The package includes provider shared libraries, their CUDA user-space dependency closure,
 and the cuDNN and NVRTC libraries loaded dynamically. Packaging reads ELF dependencies without
 executing the target loader, resolves them against the selected SDK roots, and verifies that every
-library matches the target architecture. Installations outside the system library paths are supported.
+library matches the target architecture. Shared libraries and the linked C API smoke executable
+are checked against the selected variant's glibc baseline. Target SDK inputs participate in the
+artifact identity.
 
 ### Cross-Compile Linux Arm64
 
-For maintainers on Linux amd64, `just build-onnxruntime linux/arm64` builds the arm64 CUDA artifact,
-reusing completed local packages and compiler intermediates. It automatically prepares an arm64
-Debian trixie sysroot and C++ runtime, QEMU, host-native NVCC, and the arm64 CUDA and
-cuDNN SDKs when needed. The source build uses LLVM with an arm64 target and
-sysroot. LLVM LLD must be installed locally as `ld.lld` or a versioned command such as `ld.lld-21`.
-The following environment variables optionally select existing inputs:
+For maintainers on Linux amd64, `just build-onnxruntime linux/arm64` builds the portable arm64
+CUDA artifact inside the pinned amd64 compiler container. Add `--variant docker` to build against
+the application's Debian runtime baseline. The container prepares LLVM LLD, QEMU, host-native
+NVCC, and arm64 CUDA and cuDNN SDKs. The portable variant uses its private manylinux 2.28 SDK;
+the Docker variant uses Debian target packages from the same release and repositories as the
+application image. Clang receives the arm64 target, sysroot, and target C++ runtime flags.
 
-| Environment variable | Value |
-| --- | --- |
-| `ONNXRUNTIME_SYSROOT` | Arm64 Linux root containing target headers and runtime libraries; prepared in the shared cache when system cross packages are unavailable |
-| `ONNXRUNTIME_GCC_TOOLCHAIN` | Root containing arm64 libstdc++ headers and libgcc; selected with the prepared sysroot; Clang remains the compiler |
-| `CUDA_HOME` | CUDA 13 installation with host-native NVCC and the complete arm64 SBSA SDK under `targets/sbsa-linux` |
-| `CUDNN_HOME` | Arm64 cuDNN 9 SDK root containing `include` and `lib` |
-| `CUDAHOSTCXX` | Host-native LLVM compiler supported by the CUDA toolkit; selected automatically when unset; the build adds arm64 target flags |
-| `ONNXRUNTIME_QEMU` | Optional path to `qemu-aarch64` |
-
-The sysroot and C++ runtime must be suitable for the Debian image's runtime. Debian cross packages
-place their target loader and libraries under `usr/aarch64-linux-gnu`; QEMU uses that directory as
-its loader prefix. Other sysroots use their own root. CMake searches the target SDKs for headers
-and libraries and the host for build programs. ONNX Runtime fetches its pinned host-native `protoc`
-for code generation. CUDA compilation explicitly selects the SBSA SDK, and CUDA provider linking
-uses the configured LLVM host compiler and LLD.
+CMake searches the target SDKs for headers and libraries and the compiler container for build
+programs. ONNX Runtime fetches its pinned host-native `protoc` for code generation. CUDA
+compilation explicitly selects the SBSA SDK, and provider linking uses LLVM 21 and LLD.
 
 Before installation, cross-builds link an arm64 C API smoke program and run CPU inference and CUDA
 provider loading under QEMU. The guest loader receives the SBSA SDK's `libcuda` driver stub in a
@@ -214,12 +234,12 @@ verification runs the CPU model.
 
 Development and CI download artifacts over public HTTPS from
 `https://pub-4668ad14d0814ca58c09a124f6bd96f3.r2.dev`. Downloads require no R2 credentials.
-Objects use `onnxruntime/<version>/<platform>/<build-identity>.tar.gz`, for example
-`onnxruntime/1.24.2/linux/arm64/<build-identity>.tar.gz`. Preparation checks the downloaded archive
+Objects use `onnxruntime/<version>/<platform>/<variant>/<build-identity>.tar.gz`, for example
+`onnxruntime/1.28.2/linux/arm64/portable/<build-identity>.tar.gz`. Preparation checks the downloaded archive
 before extracting and installs a verified package atomically. Missing objects, HTTP errors,
 network failures, and checksum failures stop preparation without starting a source build.
 
-`scripts/onnxruntime/checksums.toml` pins each platform's build identity and archive SHA-256.
+`scripts/onnxruntime/checksums.toml` pins each platform and variant's build identity and archive SHA-256.
 Downloaded bytes must match that pin; R2 object metadata does not establish trust. A missing pin
 prevents artifact fetching in both development and CI. Explicit local builds also record their
 checksum in this file for local reuse. The checksum file is excluded from the build identity, so pinning
@@ -252,7 +272,7 @@ speed, and estimated time remaining. Multipart upload workers share the same pro
 | --- | --- |
 | Prepare tools, build, and pin the current host's package for local use | `just build-onnxruntime` |
 | Prepare tools, build, and pin Linux arm64 CUDA from Linux amd64 for local use | `just build-onnxruntime linux/arm64` |
-| Rebuild and repin a completed package using local LLVM | `just build-onnxruntime native --force` |
+| Rebuild and repin a completed package in its pinned environment | `just build-onnxruntime native --force` |
 | Manually build external artifacts for local use | `just build-artifacts` |
 | Upload the completed current host's package | `just publish-onnxruntime` |
 | Upload the completed Linux arm64 package | `just publish-onnxruntime linux/arm64` |
@@ -272,10 +292,10 @@ its existing S3 configuration independently.
 ### Build The Debian Image
 
 ```bash
-just docker-build-debian trixie 23 nervix:debian linux/amd64
+just docker-build-debian nervix:debian linux/amd64
 ```
 
-For arm64, use `just docker-build-debian trixie 23 nervix:debian-arm64 linux/arm64`.
+For arm64, use `just docker-build-debian nervix:debian-arm64 linux/arm64`.
 
 The recipe's dependencies fetch the published CUDA 13 artifact for amd64 or arm64,
 then supply that validated package as a named Docker build context. Product image builds start

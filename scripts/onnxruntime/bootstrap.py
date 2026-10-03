@@ -1,7 +1,7 @@
-"""Prepare missing host build tools and target SDKs in the shared ONNX build cache.
+"""Prepare missing build tools and target SDKs in the shared ONNX build cache.
 
-Downloads are checksum pinned, locked, and installed atomically. LLVM must be installed on the
-host; explicit compiler and SDK configuration is preserved.
+Downloads are checksum pinned, locked, and installed atomically. Linux's pinned container installs
+LLVM with apt; macOS uses local LLVM. Explicit compiler and SDK configuration is preserved.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import subprocess
 import tarfile
 import tempfile
 from typing import Callable, Iterator
@@ -22,8 +23,8 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 import zipfile
 
-from scripts.build_onnxruntime import atomic_text, file_digest, lock
-from scripts.onnxruntime.toolchain import BuildError, Compiler, native_platform, output
+from scripts.build_onnxruntime import atomic_text, file_digest, lock, run
+from scripts.onnxruntime.toolchain import BuildError, Compiler, executable, native_platform, output
 
 
 DOWNLOADS = Path(__file__).with_name("downloads.json")
@@ -50,29 +51,6 @@ def merge_tree(source: Path, destination: Path) -> None:
 
 
 def extract_archive(archive: Path, destination: Path) -> None:
-    with archive.open("rb") as stream:
-        is_deb = stream.read(8) == b"!<arch>\n"
-        if is_deb:
-            while header := stream.read(60):
-                if len(header) != 60 or header[-2:] != b"`\n":
-                    raise BuildError("invalid Debian archive header")
-                size = int(header[48:58].strip())
-                name = header[:16].decode().strip().rstrip("/")
-                if name.startswith("data.tar"):
-                    with tempfile.TemporaryFile(dir=destination.parent) as data:
-                        remaining = size
-                        while remaining:
-                            chunk = stream.read(min(remaining, 1024 * 1024))
-                            if not chunk:
-                                raise BuildError("truncated Debian archive")
-                            data.write(chunk)
-                            remaining -= len(chunk)
-                        data.seek(0)
-                        with tarfile.open(fileobj=data) as contents:
-                            contents.extractall(destination, filter="data")
-                    return
-                stream.seek(size + size % 2, 1)
-            raise BuildError("Debian archive has no data tarball")
     if zipfile.is_zipfile(archive):
         with zipfile.ZipFile(archive) as contents:
             for member in contents.infolist():
@@ -116,6 +94,76 @@ class Installer:
                     staged.replace(destination)
             except (OSError, URLError) as error:
                 raise BuildError(f"build tool download failed: {asset['url']}: {error}") from error
+        return destination
+
+    def install_image(self, name: str, asset: dict, required: list[str]) -> Path:
+        """Extract the target SDK from a digest-pinned image without running its programs."""
+        if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", asset["image"]):
+            raise BuildError("Linux runtime SDK images must be pinned by SHA-256 digest")
+        identity = {"image": asset, "required": required}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        destination = self.root / f"{name}-{digest[:16]}"
+        with lock(self.root / "locks" / f"install-{digest}.lock"):
+            try:
+                receipt = json.loads((destination / "installation.json").read_text())
+                if receipt == identity and all((destination / path).is_file() for path in required):
+                    self.receipts[name] = identity
+                    return destination
+            except (OSError, json.JSONDecodeError):
+                pass
+            docker = executable("docker")
+            # Docker verifies the OCI content digest. A foreign architecture image is only
+            # copied; LLVM and NVCC run in the compiler container's native architecture.
+            run([docker, "pull", "--platform", asset["platform"], asset["image"]])
+            container = output([docker, "create", "--platform", asset["platform"], asset["image"], "/bin/true"])
+            try:
+                with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                    staged = Path(temporary) / "installation"
+                    staged.mkdir()
+                    for relative in asset["paths"]:
+                        target = staged / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        # The image contains read-only RPM directories and absolute links.
+                        # Extract the copy stream ourselves so directories are writable during
+                        # installation and links resolve inside the private SDK.
+                        with tempfile.TemporaryFile(dir=temporary) as copied:
+                            try:
+                                subprocess.run([docker, "cp", f"{container}:/{relative}", "-"],
+                                               check=True, stdout=copied)
+                            except (OSError, subprocess.CalledProcessError) as error:
+                                raise BuildError(f"cannot extract Linux runtime SDK: {relative}: {error}") from error
+                            copied.seek(0)
+                            with tarfile.open(fileobj=copied) as contents:
+                                def private_path(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo:
+                                    suffix = Path(member.name).parts[1:]
+                                    name = str(Path(relative).joinpath(*suffix))
+                                    link = member.linkname
+                                    if member.issym() and link.startswith("/"):
+                                        link = os.path.relpath(staged / link.lstrip("/"), (staged / name).parent)
+                                    if member.islnk():
+                                        link = str(Path(relative).joinpath(*Path(link).parts[1:]))
+                                    return tarfile.data_filter(member.replace(name=name, linkname=link,
+                                                               mode=member.mode | (0o200 if member.isdir() else 0)), destination)
+                                contents.extractall(staged, filter=private_path)
+                    for directory, children, files in os.walk(staged):
+                        Path(directory).chmod(Path(directory).stat().st_mode | 0o200)
+                        for child in [*children, *files]:
+                            path = Path(directory) / child
+                            if path.is_symlink() and (link := os.readlink(path)).startswith("/"):
+                                path.unlink()
+                                path.symlink_to(os.path.relpath(staged / link.lstrip("/"), path.parent))
+                    for name_in_root in ("lib", "lib64"):
+                        (staged / name_in_root).symlink_to(f"usr/{name_in_root}")
+                    missing = [path for path in required if not (staged / path).is_file()]
+                    if missing:
+                        raise BuildError(f"Linux runtime SDK is missing required files: {', '.join(missing)}")
+                    atomic_text(staged / "installation.json", json.dumps(identity, sort_keys=True) + "\n")
+                    if destination.exists():
+                        shutil.rmtree(destination)
+                    staged.rename(destination)
+            finally:
+                run([docker, "rm", container])
+            self.receipts[name] = identity
         return destination
 
     def install(self, name: str, entries: list[dict], required: list[str],
@@ -167,6 +215,18 @@ class Installer:
                 staged.rename(destination)
             self.receipts[name] = identity
         return destination
+
+
+def install_linux_sdk(installer: Installer, catalog: dict, target: str) -> Path:
+    arch = target.split("/")[1]
+    triple = "x86_64-redhat-linux" if arch == "amd64" else "aarch64-redhat-linux"
+    loader = "ld-linux-x86-64.so.2" if arch == "amd64" else "ld-linux-aarch64.so.1"
+    toolset = "opt/rh/gcc-toolset-14/root/usr"
+    return installer.install_image(f"{arch}-sysroot", catalog["linux_sysroot"][target],
+                                   ["usr/include/stdio.h", f"{toolset}/include/c++/14/format",
+                                    f"usr/lib64/{loader}", "usr/lib64/libstdc++.so.6",
+                                    f"{toolset}/lib/gcc/{triple}/14/libstdc++.a",
+                                    f"{toolset}/lib/gcc/{triple}/14/libgcc.a"])
 
 
 class Bootstrap:
@@ -236,29 +296,21 @@ class Bootstrap:
             os.environ["AR"] = available or local_llvm("llvm-ar")
         return cxx
 
-    def cross(self) -> None:
-        if self.target == self.host:
+    def linux_target(self) -> None:
+        if not self.target.startswith("linux/"):
             return
-        if (self.host, self.target) != ("linux/amd64", "linux/arm64"):
-            raise BuildError(f"unsupported ONNX Runtime cross-compilation: {self.host} to {self.target}")
         if not shutil.which("ld.lld"):
             self.alias("ld.lld", local_llvm("ld.lld"))
         if not os.environ.get("ONNXRUNTIME_SYSROOT"):
-            if Path("/usr/aarch64-linux-gnu/include/stdio.h").is_file():
-                os.environ["ONNXRUNTIME_SYSROOT"] = "/"
-            else:
-                root = self.installer.install("arm64-sysroot", self.catalog["arm64_sysroot"],
-                                              ["usr/aarch64-linux-gnu/include/stdio.h",
-                                               "usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1",
-                                               "usr/lib/gcc-cross/aarch64-linux-gnu/14/libgcc.a"])
-                os.environ["ONNXRUNTIME_SYSROOT"] = str(root)
-                if not os.environ.get("ONNXRUNTIME_GCC_TOOLCHAIN"):
-                    os.environ["ONNXRUNTIME_GCC_TOOLCHAIN"] = str(root / "usr")
-        if not os.environ.get("ONNXRUNTIME_QEMU"):
+            toolset = "opt/rh/gcc-toolset-14/root/usr"
+            root = install_linux_sdk(self.installer, self.catalog, self.target)
+            os.environ["ONNXRUNTIME_SYSROOT"] = str(root)
+            if not os.environ.get("ONNXRUNTIME_GCC_TOOLCHAIN"):
+                os.environ["ONNXRUNTIME_GCC_TOOLCHAIN"] = str(root / toolset)
+        if self.target != self.host and not os.environ.get("ONNXRUNTIME_QEMU"):
             available = shutil.which("qemu-aarch64")
             if not available:
-                root = self.installer.install("qemu", [self.catalog["qemu"][self.host]], ["usr/bin/qemu-aarch64"])
-                available = str(root / "usr/bin/qemu-aarch64")
+                raise BuildError("install qemu-user through apt in the Linux compiler container")
             os.environ["ONNXRUNTIME_QEMU"] = available
 
     def cuda_host(self, cxx: Compiler, maximum: int) -> None:
@@ -366,7 +418,7 @@ class Bootstrap:
             self.program("cmake", (3, 29))
             self.program("ninja")
             self.objdump()
-            self.cross()
+            self.linux_target()
             self.cuda(cxx)
             yield
         finally:

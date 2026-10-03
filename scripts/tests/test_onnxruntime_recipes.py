@@ -10,6 +10,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
+from unittest.mock import patch
 
 from scripts.build_onnxruntime import BuildSpec, RuntimeBuild, file_digest, native_platform
 from scripts.tests.test_build_onnxruntime import construct_package, fixture_repository
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 @unittest.skipUnless(shutil.which("just") and shutil.which("uv"), "requires just and uv")
 class ArtifactRecipeTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.enterContext(patch.dict(os.environ, {"CI": ""}))
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -301,8 +303,8 @@ sys.exit(0)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 pins = tomllib.loads(pin_file.read_text())
                 expected = {"fingerprint": build.spec.fingerprint, "sha256": file_digest(build.archive())}
-                self.assertEqual(pins, {**previous, platform: expected})
-                self.assertEqual(tomllib.loads(result.stdout), {platform: expected})
+                self.assertEqual(pins, {**previous, build.spec.artifact_id: expected})
+                self.assertEqual(tomllib.loads(result.stdout), {build.spec.artifact_id: expected})
                 archive = build.archive()
                 written = archive.stat().st_mtime_ns
                 result = subprocess.run(recipe, cwd=self.repo, env=self.environment,
@@ -399,8 +401,8 @@ sys.exit(0)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"published ONNX Runtime to R2: fixture/onnxruntime/{build.spec.object_key}", result.stdout)
         pins = tomllib.loads((self.repo / "scripts/onnxruntime/checksums.toml").read_text())
-        self.assertEqual(pins[build.spec.platform]["fingerprint"], build.spec.fingerprint)
-        self.assertEqual(pins[build.spec.platform]["sha256"], build.spec.artifact_checksum)
+        self.assertEqual(pins[build.spec.artifact_id]["fingerprint"], build.spec.fingerprint)
+        self.assertEqual(pins[build.spec.artifact_id]["sha256"], build.spec.artifact_checksum)
         records = self.log.read_text().splitlines()
         self.assertEqual(json.loads(records[0]), {
             "key": f"onnxruntime/{build.spec.object_key}", "package": str(build.package_dir),

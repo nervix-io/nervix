@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -15,7 +16,8 @@ import zipfile
 
 from scripts.build_onnxruntime import BuildSpec, RuntimeBuild
 from scripts.onnxruntime.artifacts import ManagedRuntimeBuild
-from scripts.onnxruntime.bootstrap import Bootstrap, Installer, extract_archive
+from scripts.onnxruntime.bootstrap import Bootstrap, Installer
+from scripts.onnxruntime.containers import ContainerRuntimeBuild, DockerBuilder
 from scripts.onnxruntime.toolchain import BuildError, Compiler, HostToolchain
 from scripts.tests.test_build_onnxruntime import construct_package, fixture_repository
 
@@ -102,17 +104,6 @@ class InstallerTests(unittest.TestCase):
                 self.installer.install("compiler", [asset], ["bin/compiler"])
         self.assertFalse((self.root / "escaped").exists())
 
-    def test_debian_target_files_are_extracted_without_system_package_installation(self) -> None:
-        payload = tool_archive({"usr/aarch64-linux-gnu/include/stdio.h": b"target header"}, "w:xz")
-        name = "data.tar.xz/".ljust(16)
-        header = f"{name}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(payload):<10}`\n".encode()
-        archive = self.root / "target.deb"
-        archive.write_bytes(b"!<arch>\n" + header + payload)
-        destination = self.root / "sysroot"
-        destination.mkdir()
-        extract_archive(archive, destination)
-        self.assertEqual((destination / "usr/aarch64-linux-gnu/include/stdio.h").read_bytes(), b"target header")
-
     def test_zip_build_tools_are_installed_as_executable_files(self) -> None:
         payload = io.BytesIO()
         with zipfile.ZipFile(payload, "w") as archive:
@@ -124,6 +115,47 @@ class InstallerTests(unittest.TestCase):
             installed = self.installer.install("ninja", [asset], ["ninja"])
         self.assertEqual((installed / "ninja").read_bytes(), b"fixture executable")
         self.assertEqual((installed / "ninja").stat().st_mode & 0o111, 0o111)
+
+    def test_image_sysroot_is_private_atomic_and_reused_without_docker(self) -> None:
+        asset = {"image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:" + "a" * 64,
+                 "platform": "linux/amd64", "paths": ["usr/lib64"]}
+
+        def docker(command: list[str], **kwargs: object) -> None:
+            if "cp" in command:
+                with tarfile.open(fileobj=kwargs["stdout"], mode="w") as archive:
+                    directory = tarfile.TarInfo("lib64")
+                    directory.type = tarfile.DIRTYPE
+                    directory.mode = 0o555
+                    archive.addfile(directory)
+                    library = tarfile.TarInfo("lib64/libc.so.6")
+                    library.size = len(b"target libc")
+                    archive.addfile(library, io.BytesIO(b"target libc"))
+                    loader = tarfile.TarInfo("lib64/ld-linux-x86-64.so.2")
+                    loader.type = tarfile.SYMTYPE
+                    loader.linkname = "/usr/lib64/libc.so.6"
+                    archive.addfile(loader)
+
+        with patch("scripts.onnxruntime.bootstrap.executable", return_value="/host/docker"), \
+                patch("scripts.onnxruntime.bootstrap.output", return_value="container-id"), \
+                patch("scripts.onnxruntime.bootstrap.run") as commands, \
+                patch("scripts.onnxruntime.bootstrap.subprocess.run", side_effect=docker):
+            installed = self.installer.install_image("sysroot", asset, ["lib64/ld-linux-x86-64.so.2"])
+        self.assertEqual((installed / "lib64/ld-linux-x86-64.so.2").read_bytes(), b"target libc")
+        self.assertTrue((installed / "lib64/ld-linux-x86-64.so.2").resolve().is_relative_to(installed))
+        self.assertIn(["/host/docker", "rm", "container-id"], [call.args[0] for call in commands.call_args_list])
+        with patch("scripts.onnxruntime.bootstrap.executable", side_effect=AssertionError("cached SDK needs no Docker")):
+            self.assertEqual(self.installer.install_image("sysroot", asset, ["lib64/ld-linux-x86-64.so.2"]), installed)
+
+    def test_incomplete_image_sysroot_does_not_install_and_removes_its_container(self) -> None:
+        asset = {"image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:" + "b" * 64,
+                 "platform": "linux/amd64", "paths": []}
+        with patch("scripts.onnxruntime.bootstrap.executable", return_value="/host/docker"), \
+                patch("scripts.onnxruntime.bootstrap.output", return_value="container-id"), \
+                patch("scripts.onnxruntime.bootstrap.run") as commands:
+            with self.assertRaisesRegex(BuildError, "missing.*stdio.h"):
+                self.installer.install_image("sysroot", asset, ["usr/include/stdio.h"])
+        self.assertEqual(list(self.installer.root.glob("sysroot-*")), [])
+        self.assertIn(["/host/docker", "rm", "container-id"], [call.args[0] for call in commands.call_args_list])
 
 
 class BootstrapTests(unittest.TestCase):
@@ -265,7 +297,7 @@ class BootstrapTests(unittest.TestCase):
         bootstrap = self.bootstrap()
         wrapper = os.environ.get("RUSTC_WRAPPER")
         with patch.dict(os.environ, configured), patch.object(bootstrap, "program"), \
-                patch.object(bootstrap, "cross"), patch.object(bootstrap, "cuda"), \
+                patch.object(bootstrap, "linux_target"), patch.object(bootstrap, "cuda"), \
                 patch.object(bootstrap.installer, "install", side_effect=AssertionError("unnecessary tools")):
             with bootstrap.environment():
                 self.assertEqual(os.environ["CC"], configured["CC"])
@@ -359,7 +391,7 @@ class BootstrapTests(unittest.TestCase):
     def test_missing_local_archiver_requires_host_installation(self) -> None:
         bootstrap = self.bootstrap()
         compiler = Compiler("/host/clang-23", [], [], "clang version 23.0.0")
-        with patch.dict(os.environ, {"AR": ""}), \
+        with patch.dict(os.environ, {"CC": "/host/clang-23", "CXX": "/host/clang++-23", "AR": ""}), \
                 patch("scripts.onnxruntime.bootstrap.Compiler.discover", return_value=compiler), \
                 patch("scripts.onnxruntime.bootstrap.shutil.which", return_value=None), \
                 patch.object(bootstrap.installer, "install", side_effect=AssertionError("unexpected tool download")):
@@ -375,7 +407,7 @@ class BootstrapTests(unittest.TestCase):
                 patch("scripts.onnxruntime.bootstrap.shutil.which",
                       side_effect=lambda name: str(binary) if name == "ld.lld-21" else None), \
                 patch.object(bootstrap.installer, "install", side_effect=AssertionError("unexpected tool download")):
-            bootstrap.cross()
+            bootstrap.linux_target()
             directory = Path(os.environ["PATH"].split(os.pathsep)[0])
             self.assertEqual((directory / "ld.lld").resolve(), binary)
         self.assertEqual(os.environ["PATH"], original)
@@ -385,7 +417,24 @@ class BootstrapTests(unittest.TestCase):
         with patch("scripts.onnxruntime.bootstrap.shutil.which", return_value=None), \
                 patch.object(bootstrap.installer, "install", side_effect=AssertionError("unexpected tool download")):
             with self.assertRaisesRegex(BuildError, "install.*LLVM.*ld.lld"):
-                bootstrap.cross()
+                bootstrap.linux_target()
+
+    def test_arm64_cross_execution_uses_the_containers_qemu(self) -> None:
+        bootstrap = self.bootstrap("linux/arm64")
+        with patch.dict(os.environ, {"ONNXRUNTIME_SYSROOT": "/sysroot", "ONNXRUNTIME_QEMU": ""}), \
+                patch("scripts.onnxruntime.bootstrap.shutil.which", return_value="/usr/bin/qemu-aarch64"), \
+                patch.object(bootstrap.installer, "install", side_effect=AssertionError("unexpected tool download")):
+            bootstrap.linux_target()
+            self.assertEqual(os.environ["ONNXRUNTIME_QEMU"], "/usr/bin/qemu-aarch64")
+
+    def test_arm64_cross_execution_requires_the_containers_qemu(self) -> None:
+        bootstrap = self.bootstrap("linux/arm64")
+        with patch.dict(os.environ, {"ONNXRUNTIME_SYSROOT": "/sysroot", "ONNXRUNTIME_QEMU": ""}), \
+                patch("scripts.onnxruntime.bootstrap.shutil.which",
+                      side_effect=lambda name: "/usr/bin/ld.lld" if name == "ld.lld" else None), \
+                patch.object(bootstrap.installer, "install", side_effect=AssertionError("unexpected tool download")):
+            with self.assertRaisesRegex(BuildError, "qemu-user.*apt"):
+                bootstrap.linux_target()
 
     def test_bootstrap_restores_environment_after_a_failure(self) -> None:
         bootstrap = self.bootstrap()
@@ -410,7 +459,7 @@ class BootstrapTests(unittest.TestCase):
                       "CMAKE_CUDA_COMPILER_LAUNCHER": "kache"}
         wrapper = os.environ.get("RUSTC_WRAPPER")
         with patch.dict(os.environ, configured), patch.object(bootstrap, "program"), \
-                patch.object(bootstrap, "cross"), patch.object(bootstrap, "objdump"), \
+                patch.object(bootstrap, "linux_target"), patch.object(bootstrap, "objdump"), \
                 patch.object(bootstrap, "cuda", side_effect=lambda cxx: bootstrap.cuda_host(cxx, 21)):
             with bootstrap.environment():
                 self.assertEqual(os.environ["CC"], shutil.which("clang-23"))
@@ -424,8 +473,9 @@ class BootstrapTests(unittest.TestCase):
     def test_real_cmake_cuda_identification_uses_the_direct_host_compiler(self) -> None:
         tools = Path.home() / ".cache/nervix-build/onnxruntime/tools"
         nvcc = next(tools.glob("cuda-linux-amd64-to-linux-amd64-*/bin/nvcc"), None)
-        if nvcc is None or not all(shutil.which(name) for name in ("clang-23", "clang++-23", "clang++-21", "cmake", "ninja")):
-            self.skipTest("requires locally cached native CUDA SDK and installed LLVM 21 and 23")
+        gcc = next(tools.glob("amd64-sysroot-*/opt/rh/gcc-toolset-14/root/usr"), None)
+        if nvcc is None or gcc is None or not all(shutil.which(name) for name in ("clang-23", "clang++-23", "clang++-21", "cmake", "ninja")):
+            self.skipTest("requires cached native CUDA and Linux runtime SDKs and installed LLVM 21 and 23")
         bootstrap = self.bootstrap()
         source = self.root / "cuda-probe"
         source.mkdir()
@@ -434,14 +484,18 @@ class BootstrapTests(unittest.TestCase):
             "file(WRITE ${CMAKE_BINARY_DIR}/selected-host.txt ${CMAKE_CUDA_HOST_COMPILER})\n"
         )
         configured = {"CC": "kache clang-23", "CXX": "kache clang++-23", "CUDAHOSTCXX": "",
-                      "CUDA_HOME": str(nvcc.parent.parent), "CUDNN_HOME": str(self.root / "cudnn")}
+                      "CUDA_HOME": str(nvcc.parent.parent), "CUDNN_HOME": str(self.root / "cudnn"),
+                      "ONNXRUNTIME_SYSROOT": str(gcc.parents[4]), "ONNXRUNTIME_GCC_TOOLCHAIN": str(gcc)}
         build_dir = self.root / "probe-build"
         with patch.dict(os.environ, configured), \
                 patch.object(bootstrap.installer, "install", side_effect=AssertionError("unexpected download")):
             with bootstrap.environment():
                 resolved = HostToolchain.discover("linux/amd64")
+                cuda_flags = " ".join(f"-Xcompiler={argument}" for argument in
+                                      [*resolved.cuda_host.arguments, "-fuse-ld=lld", "-Qunused-arguments"])
                 definitions = [*resolved.cxx.definitions("CXX"), *resolved.cuda.definitions("CUDA"),
                                f"CMAKE_CUDA_HOST_COMPILER={resolved.cuda_host.executable}",
+                               f"CMAKE_CUDA_FLAGS={cuda_flags}",
                                "CMAKE_CUDA_ARCHITECTURES=75", f"CUDAToolkit_ROOT={nvcc.parent.parent}"]
                 result = subprocess.run(["cmake", "-S", str(source), "-B", str(build_dir), "-G", "Ninja",
                                          *["-D" + value for value in definitions]],
@@ -505,31 +559,68 @@ class ManualRebuildTests(unittest.TestCase):
                 self.build.build_source(force=True)
         self.assertEqual(self.build.prepare(), self.build.package_dir / "lib")
 
-    @unittest.skipUnless(shutil.which("cmake") and shutil.which("ninja"), "requires CMake and Ninja")
-    def test_force_compilation_cleans_outputs_but_retains_fetched_dependencies(self) -> None:
-        source = self.root / "cmake-source"
-        source.mkdir()
-        (source / "CMakeLists.txt").write_text(
-            "cmake_minimum_required(VERSION 3.20)\nproject(fixture LANGUAGES NONE)\n"
-            "add_custom_command(OUTPUT compiled.o COMMAND ${CMAKE_COMMAND} -E touch compiled.o)\n"
-            "add_custom_target(fixture ALL DEPENDS compiled.o)\n"
-        )
-        tree = self.root / "compiler-tree"
-        for command in (["cmake", "-S", str(source), "-B", str(tree), "-G", "Ninja"],
-                        ["cmake", "--build", str(tree)]):
-            subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
-        self.assertTrue((tree / "compiled.o").is_file())
-        cached = tree / "_deps/fetched-source/header.h"
-        cached.parent.mkdir(parents=True)
-        cached.write_text("fetched dependency")
-        self.build.build_dir = tree
-        self.build.force_rebuild = True
+    def test_force_compilation_starts_with_an_empty_tree_and_preserves_source_and_sdk_downloads(self) -> None:
+        build = ContainerRuntimeBuild(self.build.spec, 2, force=True)
+        build.stage_root = self.root / "stage"
+        build.build_dir = build.stage_root / "builds/compiler"
+        compiled = build.build_dir / "objects/compiled.o"
+        compiled.parent.mkdir(parents=True)
+        compiled.write_text("previous compiler output")
+        dependency = build.build_dir / "_deps/library/header.h"
+        dependency.parent.mkdir(parents=True)
+        dependency.write_text("configured dependency")
+        source = build.stage_root / "sources/revision/source.cc"
+        sdk = build.stage_root / "tools/cuda/header.h"
+        for path in (source, sdk):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("verified download")
 
         def compile_package(destination: Path) -> None:
-            self.assertFalse((tree / "compiled.o").exists())
-            self.assertEqual(cached.read_text(), "fetched dependency")
-            subprocess.run(["cmake", "--build", str(tree)], check=True, capture_output=True, text=True, timeout=30)
+            self.assertFalse(build.build_dir.exists())
+            for path in (source, sdk):
+                self.assertEqual(path.read_text(), "verified download")
+            compiled.parent.mkdir(parents=True)
+            compiled.write_text("fresh compiler output")
 
         with patch.object(RuntimeBuild, "compile", side_effect=compile_package):
-            self.build.compile(self.root / "destination")
-        self.assertTrue((tree / "compiled.o").is_file())
+            build.compile(self.root / "destination")
+        self.assertEqual(compiled.read_text(), "fresh compiler output")
+
+    def test_linux_builds_use_a_pinned_container_and_isolate_the_callers_toolchain(self) -> None:
+        for variant in ("portable", "docker"):
+            for platform in ("linux/amd64", "linux/arm64"):
+                with self.subTest(platform=platform, variant=variant):
+                    spec = BuildSpec.create(platform, self.repo, variant=variant)
+                    build = ManagedRuntimeBuild(spec, self.root / "stage", jobs=3)
+                    destination = build.stage_root / "packages/temporary/package"
+                    destination.mkdir(parents=True, exist_ok=True)
+                    sdk = build.stage_root / "tools/target-sdk"
+                    commands = []
+
+                    def execute(arguments: list[str]) -> None:
+                        commands.append(arguments)
+                        if arguments[:2] == ["docker", "run"]:
+                            (destination.parent / "provenance.json").write_text(json.dumps({"container": "verified"}))
+
+                    configured = {"CC": "caller-compiler", "CXXFLAGS": "caller-flags",
+                                  "CUDA_HOME": "/caller/cuda", "CMAKE_CUDA_COMPILER_LAUNCHER": "caller-cache"}
+                    with patch.dict(os.environ, configured), \
+                            patch("scripts.onnxruntime.containers.native_platform", return_value="linux/amd64"), \
+                            patch("scripts.onnxruntime.containers.install_linux_sdk", return_value=sdk), \
+                            patch("scripts.onnxruntime.containers.subprocess.check_output", return_value="sha256:" + "a" * 64), \
+                            patch("scripts.onnxruntime.containers.run", side_effect=execute):
+                        DockerBuilder(build).compile(destination, force=True)
+                    image_build, compilation = commands
+                    image_arguments = [image_build[index + 1] for index, value in enumerate(image_build)
+                                       if value == "--build-arg"]
+                    self.assertEqual(image_arguments, [f"DEBIAN_IMAGE={spec.identity['builder']['image']}",
+                                                       f"LLVM_KEY_SHA256={spec.identity['builder']['llvm_key_sha256']}"])
+                    self.assertIn("--force", compilation)
+                    self.assertIn("type=bind,source=" + str(self.repo) + ",target=/workspace,readonly", compilation)
+                    self.assertEqual(compilation[compilation.index("--variant") + 1], variant)
+                    self.assertEqual(compilation[compilation.index("--jobs") + 1], "3")
+                    expected_root = "/cache/tools/target-sdk" if variant == "portable" else "/"
+                    self.assertIn(f"ONNXRUNTIME_SYSROOT={expected_root}", compilation)
+                    for value in configured.values():
+                        self.assertNotIn(value, " ".join(compilation))
+                    self.assertEqual(build.provenance, {"container": "verified"})

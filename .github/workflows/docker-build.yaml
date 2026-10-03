@@ -49,27 +49,13 @@ jobs:
       matrix:
         include:
           - image: debian
-            version: trixie
             platform: linux/amd64
             arch: amd64
-            llvm: "23"
             runner: blacksmith-4vcpu-ubuntu-2404
           - image: debian
-            version: trixie
             platform: linux/arm64
             arch: arm64
-            llvm: "23"
             runner: blacksmith-4vcpu-ubuntu-2404
-          # - image: alpine
-          #   version: "3.23"
-          #   platform: linux/amd64
-          #   arch: amd64
-          #   llvm: "21"
-          # - image: alpine
-          #   version: "3.23"
-          #   platform: linux/arm64
-          #   arch: arm64
-          #   llvm: "21"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -112,21 +98,10 @@ jobs:
             && "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
             push_image="false"
           fi
-          if [[ "${{ matrix.image }}" == "debian" ]]; then
-            just docker-build-debian \
-              "${{ matrix.version }}" \
-              "${{ matrix.llvm }}" \
-              "${tag}" \
-              "${{ matrix.platform }}" \
-              "${push_image}"
-          else
-            just docker-build-alpine \
-              "${{ matrix.version }}" \
-              "${{ matrix.llvm }}" \
-              "${tag}" \
-              "${{ matrix.platform }}" \
-              "${push_image}"
-          fi
+          just docker-build-debian \
+            "${tag}" \
+            "${{ matrix.platform }}" \
+            "${push_image}"
 
   benchmark:
     name: benchmarks

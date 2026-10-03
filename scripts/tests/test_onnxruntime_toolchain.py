@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.build_onnxruntime import BuildSpec, RuntimeBuild
-from scripts.onnxruntime.toolchain import BuildError, Compiler, HostToolchain
+from scripts.onnxruntime.toolchain import BuildError, Compiler, HostToolchain, LinuxTarget
 from scripts.tests.test_build_onnxruntime import construct_cuda_runtime
 
 
@@ -41,11 +41,15 @@ def tool_output(command: list[str], **kwargs: object) -> str:
 
 class NativeToolchainTests(unittest.TestCase):
     def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.sysroot = Path(temporary.name) / "sysroot"
+        (self.sysroot / "usr").mkdir(parents=True)
         for mocked in (
             patch.dict(os.environ, {name: "" for name in (
                 "CI", "CC", "CXX", "AR", "CUDA_HOME", "CUDACXX", "CUDAHOSTCXX", "CUDNN_HOME",
                 "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER", "CMAKE_CUDA_COMPILER_LAUNCHER",
-                "ONNXRUNTIME_SYSROOT", "ONNXRUNTIME_GCC_TOOLCHAIN", "ONNXRUNTIME_QEMU",
+                "ONNXRUNTIME_SYSROOT", "ONNXRUNTIME_GCC_TOOLCHAIN", "ONNXRUNTIME_QEMU", "ONNXRUNTIME_BUILDER_IMAGE",
             )}),
             patch("scripts.onnxruntime.toolchain.shutil.which",
                   side_effect=lambda name: name if name.startswith("/") else f"/host/bin/{name}"),
@@ -55,14 +59,49 @@ class NativeToolchainTests(unittest.TestCase):
         ):
             mocked.start()
             self.addCleanup(mocked.stop)
+        self.enterContext(patch.dict(os.environ, {"ONNXRUNTIME_SYSROOT": str(self.sysroot),
+                                                 "ONNXRUNTIME_GCC_TOOLCHAIN": str(self.sysroot / "usr")}))
+
+    def target_arguments(self) -> list[str]:
+        return ["--target=x86_64-linux-gnu", f"--sysroot={self.sysroot}",
+                f"--gcc-toolchain={self.sysroot / 'usr'}"]
+
+    def test_runtime_loader_uses_the_selected_target_with_cross_packages_installed(self) -> None:
+        cross = self.sysroot / "usr/aarch64-linux-gnu"
+        for directory, name in ((self.sysroot / "lib/x86_64-linux-gnu", "ld-linux-x86-64.so.2"),
+                                (self.sysroot / "lib/aarch64-linux-gnu", "ld-linux-aarch64.so.1"),
+                                (cross / "lib", "ld-linux-aarch64.so.1")):
+            directory.mkdir(parents=True)
+            (directory / name).write_bytes(b"target loader")
+        for platform, emulator, expected in (("linux/amd64", None, self.sysroot),
+                                             ("linux/arm64", None, self.sysroot),
+                                             ("linux/arm64", "qemu-aarch64", cross)):
+            with self.subTest(platform=platform, emulator=emulator):
+                target = LinuxTarget(platform, self.sysroot, self.sysroot / "usr", emulator)
+                self.assertEqual(target.runtime_root, expected)
+                self.assertTrue(target.loader.is_relative_to(expected))
+
+    def test_static_cpp_runtime_is_taken_from_the_target_sdk(self) -> None:
+        tools = HostToolchain.discover("linux/amd64")
+        archives = [self.sysroot / "usr/lib" / name for name in ("libstdc++.a", "libgcc.a", "libgcc_eh.a")]
+        for path in archives:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"!<arch>\n")
+        with patch("scripts.onnxruntime.toolchain.output", side_effect=[str(path) for path in archives]):
+            self.assertEqual(tools.static_runtime(), archives)
+        with patch("scripts.onnxruntime.toolchain.output", return_value="/host/libstdc++.a"):
+            with self.assertRaisesRegex(BuildError, "target SDK"):
+                tools.static_runtime()
 
     def test_host_compiler_commands_preserve_the_kache_launcher(self) -> None:
         with patch.dict(os.environ, {"CC": "kache clang-22", "CXX": "kache clang++-22 -fno-omit-frame-pointer"}):
             tools = HostToolchain.discover("linux/amd64")
-        self.assertEqual(tools.cc.command, ["/host/bin/kache", "/host/bin/clang-22"])
-        self.assertEqual(tools.cxx.command, ["/host/bin/kache", "/host/bin/clang++-22", "-fno-omit-frame-pointer"])
+        self.assertEqual(tools.cc.command, ["/host/bin/kache", "/host/bin/clang-22", *self.target_arguments()])
+        self.assertEqual(tools.cxx.command, ["/host/bin/kache", "/host/bin/clang++-22", "-fno-omit-frame-pointer",
+                                           *self.target_arguments()])
         self.assertIn("CMAKE_CXX_COMPILER_LAUNCHER=/host/bin/kache", tools.cxx.definitions("CXX"))
-        self.assertIn("CMAKE_CXX_COMPILER_ARG1=-fno-omit-frame-pointer", tools.cxx.definitions("CXX"))
+        self.assertIn("CMAKE_CXX_COMPILER_ARG1=" + " ".join(["-fno-omit-frame-pointer", *self.target_arguments()]),
+                      tools.cxx.definitions("CXX"))
         self.assertEqual(tools.aggregate, ["/host/bin/llvm-ar-22", "qcLs"])
 
     def test_cmake_launcher_configuration_is_used_for_an_unwrapped_compiler(self) -> None:
@@ -74,6 +113,36 @@ class NativeToolchainTests(unittest.TestCase):
         with patch.dict(os.environ, {"CC": "gcc"}):
             with self.assertRaisesRegex(BuildError, "CC must select LLVM Clang"):
                 HostToolchain.discover("linux/amd64")
+
+    def test_native_linux_compilers_use_the_target_runtime_sysroot(self) -> None:
+        for machine, target, triple in (("x86_64", "linux/amd64", "x86_64-linux-gnu"),
+                                        ("aarch64", "linux/arm64", "aarch64-linux-gnu")):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sysroot, gcc = root / "sysroot", root / "gcc"
+                sysroot.mkdir()
+                gcc.mkdir()
+                environment = {"ONNXRUNTIME_SYSROOT": str(sysroot), "ONNXRUNTIME_GCC_TOOLCHAIN": str(gcc),
+                               "CC": "clang-23", "CXX": "clang++-23", "CUDAHOSTCXX": "clang++-21"}
+                with patch.dict(os.environ, environment), \
+                        patch("scripts.onnxruntime.toolchain.platform.machine", return_value=machine):
+                    tools = HostToolchain.discover(target)
+                for compiler in (tools.cc, tools.cxx, tools.cuda_host):
+                    self.assertIn(f"--sysroot={sysroot}", compiler.arguments)
+                    self.assertIn(f"--gcc-toolchain={gcc}", compiler.arguments)
+                    self.assertIn(f"--target={triple}", compiler.arguments)
+                build = RuntimeBuild(BuildSpec.create(target, repo=ROOT), root)
+                build.tools = tools
+                with patch("scripts.build_onnxruntime.run", side_effect=BuildError("configuration captured")) as command:
+                    with self.assertRaisesRegex(BuildError, "configuration captured"):
+                        build.compile(root / "package")
+                arguments = command.call_args.args[0]
+                self.assertIn(f"-DCMAKE_SYSROOT={sysroot}", arguments)
+                for kind in ("SHARED", "MODULE"):
+                    self.assertIn(f"-DCMAKE_{kind}_LINKER_FLAGS=-static-libstdc++ -static-libgcc "
+                                  "-Wl,--exclude-libs,ALL", arguments)
+                cuda_flags = next(arg for arg in arguments if arg.startswith("-DCMAKE_CUDA_FLAGS="))
+                self.assertIn(f"-Xcompiler=--sysroot={sysroot}", cuda_flags)
 
     def cross_sdk(self, root: Path) -> dict[str, str]:
         sysroot = root / "sysroot"
@@ -106,7 +175,7 @@ class NativeToolchainTests(unittest.TestCase):
             self.assertIn("--target-directory=sbsa-linux", tools.cuda.arguments)
             self.assertIn("-fno-omit-frame-pointer", tools.cuda_host.arguments)
             self.assertEqual(tools.metadata["platform"], "linux/amd64")
-            self.assertEqual(tools.metadata["cross"]["target"], "linux/arm64")
+            self.assertEqual(tools.metadata["linux_target"]["target"], "linux/arm64")
 
     def test_arm64_cross_compile_configures_cmake_for_target_libraries_and_host_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -298,6 +367,22 @@ class NativeToolchainTests(unittest.TestCase):
         with patch.dict(os.environ, {"CC": "clang-23", "CXX": "clang++-23"}):
             second = BuildSpec.create("linux/amd64", repo=ROOT)
         self.assertEqual(first.object_key, second.object_key)
+
+    def test_changed_container_packages_have_separate_compiler_trees_with_the_same_clang_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directories = []
+            versions = []
+            for image in ("sha256:" + "a" * 64, "sha256:" + "b" * 64):
+                with patch.dict(os.environ, {"ONNXRUNTIME_BUILDER_IMAGE": image}):
+                    tools = HostToolchain.discover("linux/amd64")
+                build = RuntimeBuild(BuildSpec.create("linux/amd64"), Path(temporary))
+                with patch("scripts.build_onnxruntime.HostToolchain.discover", return_value=tools), \
+                        patch.object(build, "_source"), patch.object(build, "compile"):
+                    build._build(Path(temporary) / "package")
+                directories.append(build.build_dir)
+                versions.append(tools.cc.version)
+            self.assertEqual(versions[0], versions[1])
+            self.assertNotEqual(directories[0], directories[1])
 
     @unittest.skipUnless(which("cmake") and which("ninja") and CLANG_CXX,
                          "requires CMake, Ninja, and installed Clang")
@@ -636,7 +721,8 @@ class NativeToolchainTests(unittest.TestCase):
     def test_release_build_reports_warnings_and_rejects_compiler_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build = RuntimeBuild(BuildSpec.create("linux/amd64", repo=ROOT), Path(temporary))
-            tools = HostToolchain.discover("linux/amd64")
+            with patch.dict(os.environ, {"ONNXRUNTIME_SYSROOT": "/", "ONNXRUNTIME_GCC_TOOLCHAIN": "/usr"}):
+                tools = HostToolchain.discover("linux/amd64")
             build.tools = replace(tools, cxx=replace(tools.cxx, executable=CLANG_CXX))
             source = build.source_dir / "cmake"
             source.mkdir(parents=True)
@@ -698,13 +784,15 @@ class NativeToolchainTests(unittest.TestCase):
                     (build.source_dir / name).write_text("fixture notice")
                 destination = Path(temporary) / "package"
                 destination.mkdir()
+                runtime_libraries = ([Path("/fixture/libstdc++.a"), Path("/fixture/libgcc.a"),
+                                      Path("/fixture/libgcc_eh.a")] if system == "Linux" else [])
 
                 def run_command(command: list[str], **kwargs: object) -> None:
                     if command[:2] == ["cmake", "--build"]:
                         (build.build_dir / "nervix-archives.txt").write_text("/fixture/a library.a\n")
                     elif command[0] == "/host/bin/llvm-ar":
                         self.assertEqual(command[1:3], ["qcLs", str(destination / "lib/libonnxruntime.a")])
-                        self.assertEqual(command[3:], ["/fixture/a library.a"])
+                        self.assertEqual(command[3:], ["/fixture/a library.a", *map(str, runtime_libraries)])
                         (destination / "lib/libonnxruntime.a").write_bytes(b"!<arch>\nfixture")
                     elif command[0] == "/Xcode/bin/libtool":
                         self.assertEqual(command[1:4], ["-static", "-o", str(destination / "lib/libonnxruntime.a")])
@@ -712,7 +800,8 @@ class NativeToolchainTests(unittest.TestCase):
 
                 with patch("scripts.onnxruntime.toolchain.platform.system", return_value=system):
                     with patch("scripts.onnxruntime.toolchain.platform.machine", return_value=machine):
-                        with patch.object(build, "_source"), patch.object(build, "_smoke") as smoke:
+                        with patch.object(build, "_source"), patch.object(build, "_smoke") as smoke, \
+                                patch.object(HostToolchain, "static_runtime", return_value=runtime_libraries):
                             with patch.object(build, "_cuda_host_sources"), patch.object(
                                 build, "_cuda_runtime", side_effect=lambda destination, tools: construct_cuda_runtime(destination)
                             ), patch("scripts.build_onnxruntime.run", side_effect=run_command) as command:

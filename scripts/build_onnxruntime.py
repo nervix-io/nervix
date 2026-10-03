@@ -62,12 +62,14 @@ def read_checksums(repo: Path) -> dict:
         return {}
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise BuildError(f"cannot read pinned artifact checksums: {path}") from error
-    for platform, pin in pins.items():
-        if platform not in PLATFORMS or not isinstance(pin, dict) or set(pin) != {"fingerprint", "sha256"}:
-            raise BuildError(f"invalid artifact checksum entry: {platform}")
+    artifacts = {f"{platform}/{variant}" for platform in PLATFORMS
+                 for variant in (("portable", "docker") if platform.startswith("linux/") else ("portable",))}
+    for artifact, pin in pins.items():
+        if artifact not in artifacts or not isinstance(pin, dict) or set(pin) != {"fingerprint", "sha256"}:
+            raise BuildError(f"invalid artifact checksum entry: {artifact}")
         if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
                for value in pin.values()):
-            raise BuildError(f"artifact fingerprint and checksum must be SHA-256 hex digests: {platform}")
+            raise BuildError(f"artifact fingerprint and checksum must be SHA-256 hex digests: {artifact}")
     return pins
 
 
@@ -118,6 +120,18 @@ def shared_dependencies(source: Path, platform: str) -> list[str]:
     return needed
 
 
+def validate_linux_abi(source: Path, glibc: str = "2.28") -> None:
+    """Reject requirements newer than the artifact's deployment baseline."""
+    try:
+        symbols = subprocess.check_output(["objdump", "-T", str(source)], text=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise BuildError(f"cannot inspect Linux runtime ABI: {source}") from error
+    limits = {"GLIBC": tuple(map(int, glibc.split("."))), "GLIBCXX": (3, 4, 25), "CXXABI": (1, 3, 11)}
+    for family, version in re.findall(r"\b(GLIBCXX|GLIBC|CXXABI)_([0-9.]+|PRIVATE)\b", symbols):
+        if version == "PRIVATE" or tuple(map(int, version.split("."))) > limits[family]:
+            raise BuildError(f"ELF object exceeds the Linux ABI baseline (glibc {glibc}): {source}: {family}_{version}")
+
+
 @contextmanager
 def lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,19 +147,23 @@ class BuildSpec:
     configuration: dict
     identity: dict
     fingerprint: str
+    variant: str = "portable"
 
     @classmethod
-    def create(cls, platform: str = "native", repo: Path = ROOT) -> BuildSpec:
+    def create(cls, platform: str = "native", repo: Path = ROOT, *, variant: str = "portable") -> BuildSpec:
         if platform == "native":
             platform = native_platform()
         platform = {value: key for key, value in PLATFORMS.items()}.get(platform, platform)
         platform = {"linux/aarch64": "linux/arm64"}.get(platform, platform)
         if platform not in PLATFORMS:
             raise BuildError(f"unsupported ONNX Runtime platform: {platform}")
+        if variant not in ("portable", "docker") or (variant == "docker" and not platform.startswith("linux/")):
+            raise BuildError(f"unsupported ONNX Runtime artifact variant: {platform}/{variant}")
         configuration = tomllib.loads((repo / "scripts/onnxruntime/manifest.toml").read_text())
         identity = {
             "configuration": configuration,
             "platform": platform,
+            "variant": variant,
             "build_files": {
                 name: file_digest(repo / name)
                 for name in [
@@ -155,8 +173,25 @@ class BuildSpec:
                 ]
             },
         }
+        if platform.startswith("linux/"):
+            catalog = json.loads((repo / "scripts/onnxruntime/downloads.json").read_text())
+            identity["builder"] = catalog["builder"]
+            identity["tool_downloads"] = {
+                "cuda": {name: entries[platform] for name, entries in catalog["cuda"].items()},
+                "cuda_cross_host": {name: catalog["cuda"][name]["linux/amd64"]
+                                    for name in ("cuda_nvcc", "libnvvm")},
+                "cmake": {host: entries for host, entries in catalog["cmake"].items()
+                          if host.startswith("linux/")},
+                "cudnn": catalog["cudnn"][platform],
+            }
+            identity["linux_runtime"] = (catalog["linux_sysroot"][platform] if variant == "portable" else {
+                "image": catalog["builder"]["image"], "platform": platform,
+                "glibc": catalog["builder"]["glibc"],
+            })
+            for name in ("scripts/onnxruntime/Dockerfile", "scripts/onnxruntime/containers.py"):
+                identity["build_files"][name] = file_digest(repo / name)
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-        return cls(repo, platform, configuration, identity, fingerprint)
+        return cls(repo, platform, configuration, identity, fingerprint, variant)
 
     @property
     def cuda_enabled(self) -> bool:
@@ -164,11 +199,15 @@ class BuildSpec:
 
     @property
     def object_key(self) -> str:
-        return f"{self.configuration['version']}/{self.platform}/{self.fingerprint}.tar.gz"
+        return f"{self.configuration['version']}/{self.artifact_id}/{self.fingerprint}.tar.gz"
+
+    @property
+    def artifact_id(self) -> str:
+        return f"{self.platform}/{self.variant}"
 
     @property
     def artifact_checksum(self) -> str | None:
-        pin = read_checksums(self.repo).get(self.platform)
+        pin = read_checksums(self.repo).get(self.artifact_id)
         if pin is None or pin["fingerprint"] != self.fingerprint:
             return None
         return pin["sha256"]
@@ -178,7 +217,7 @@ class BuildSpec:
             raise BuildError("the artifact checksum must be a SHA-256 hex digest")
         with lock(self.repo / ".nervix-deps/onnxruntime-checksums.lock"):
             pins = read_checksums(self.repo)
-            pins[self.platform] = {"fingerprint": self.fingerprint, "sha256": checksum}
+            pins[self.artifact_id] = {"fingerprint": self.fingerprint, "sha256": checksum}
             content = "# SHA-256 pins for manually published ONNX Runtime archives.\n"
             content += "# These pins are excluded from the build identity.\n"
             for platform, pin in sorted(pins.items()):
@@ -212,7 +251,7 @@ class R2Cache:
                 length = getattr(body, "headers", {}).get("Content-Length", "").strip()
                 size = int(length) if length.isdecimal() else None
                 digest = hashlib.sha256()
-                with tqdm(total=size, desc=f"Downloading {spec.platform}",
+                with tqdm(total=size, desc=f"Downloading {spec.artifact_id}",
                           unit="B", unit_scale=True, unit_divisor=1024,
                           file=sys.stderr, dynamic_ncols=True,
                           mininterval=0.2 if sys.stderr.isatty() else 5) as progress:
@@ -351,7 +390,8 @@ class RuntimeBuild:
         return BuildError(f"ONNX Runtime {self.spec.configuration['version']} "
                           f"{self.spec.platform} is unavailable in local storage and R2; {reason}"
                           "normal development requires a published R2 artifact; "
-                          f"ask a maintainer to publish it with just publish-onnxruntime {self.spec.platform}")
+                          f"ask a maintainer to publish it with just publish-onnxruntime {self.spec.platform} "
+                          f"--variant {self.spec.variant}")
 
     def prepare(self, remote: R2Cache | None = None) -> Path:
         """Reuse a checksum-verified package or fetch it from R2; a miss always fails."""
@@ -511,6 +551,7 @@ class RuntimeBuild:
         compiler_identity = hashlib.sha256(json.dumps({
             "revision": self.spec.configuration["revision"],
             "platform": self.spec.platform,
+            "variant": self.spec.variant,
         }, sort_keys=True).encode()).hexdigest()
         # CMake and Ninja track compilation definitions, source dependencies, and commands.
         # Package validation changes can reuse unchanged compiler outputs under their own lock.
@@ -550,14 +591,18 @@ class RuntimeBuild:
             # CMake's generated NVCC rules do not carry COMPILER_ARG1 into compilation.
             cuda_flags = [*tools.cuda.arguments, *shlex.split(os.environ.get("CUDAFLAGS", ""))]
             cuda_flags += [f"-Xcompiler={argument}" for argument in tools.cuda_host.arguments]
-            if tools.cross:
+            if tools.linux_target:
                 # CMake's initial NVCC compiler probe links before target linker selection applies.
                 cuda_flags += ["-Xcompiler=-fuse-ld=lld", "-Xcompiler=-Qunused-arguments"]
             definitions.append(f"CMAKE_CUDA_FLAGS={shlex.join(cuda_flags)}")
-            if tools.cross:
-                definitions += tools.cross.definitions(tools.cuda_home, tools.cudnn_home, tools.cuda_host)
+            if tools.linux_target:
+                definitions += tools.linux_target.definitions(tools.cuda_home, tools.cudnn_home, tools.cuda_host)
                 definitions += tools.cc.definitions("ASM")
                 definitions.append(f"CMAKE_ASM_FLAGS={os.environ.get('ASMFLAGS', '')}")
+                # The CUDA provider is a MODULE target; the shared bridge is a SHARED target.
+                for kind in ("SHARED", "MODULE"):
+                    definitions.append(f"CMAKE_{kind}_LINKER_FLAGS=-static-libstdc++ -static-libgcc "
+                                       "-Wl,--exclude-libs,ALL")
         # Match upstream's release build wrapper: vendor warnings remain visible as warnings.
         run(["cmake", "--compile-no-warning-as-error", "-S", str(self.source_dir / "cmake"), "-B", str(self.build_dir),
              "-G", "Ninja", *[f"-D{definition}" for definition in definitions]])
@@ -568,6 +613,7 @@ class RuntimeBuild:
         (destination / "include").mkdir()
         archive = destination / "lib/libonnxruntime.a"
         libraries = (self.build_dir / "nervix-archives.txt").read_text().splitlines()
+        libraries += [str(library) for library in tools.static_runtime()]
         if self.spec.platform.startswith("darwin/"):
             run([*tools.aggregate, "-o", str(archive), *libraries])
         else:
@@ -641,6 +687,15 @@ class RuntimeBuild:
                     pending.append(target)
         notices = destination / "runtime/licenses"
         notices.mkdir()
+        for library in runtime.iterdir():
+            validate_linux_abi(library, self.spec.identity["linux_runtime"]["glibc"])
+        if tools.linux_target:
+            for relative in ("usr/share/licenses/gcc", "opt/rh/gcc-toolset-14/root/usr/share/licenses",
+                             "usr/share/doc/gcc-14-base", "usr/share/doc/libstdc++-14-dev"):
+                directory = tools.linux_target.sysroot / relative
+                if directory.is_dir():
+                    shutil.copytree(directory, notices / directory.parent.parent.name / directory.name,
+                                    dirs_exist_ok=True)
         for directory in Path("/usr/share/doc").iterdir():
             if directory.name.startswith(("cuda-", "libcudnn", "libcublas", "libcufft", "libcurand",
                                           "libcusolver", "libcusparse", "libnvjitlink")):
@@ -688,29 +743,33 @@ class RuntimeBuild:
                          f"-mmacosx-version-min={self.spec.configuration['macos_deployment_target']}"]
         flags = shlex.split(os.environ.get("CPPFLAGS", "")) + shlex.split(os.environ.get("CXXFLAGS", ""))
         link_flags = shlex.split(os.environ.get("LDFLAGS", ""))
-        if tools.cross:
+        if tools.linux_target:
             link_flags.append("-fuse-ld=lld")
         run([*tools.cxx.command, *flags, "-std=c++17", str(self.spec.repo / "scripts/onnxruntime/smoke.cc"),
              "-I", str(destination / "include"), str(destination / "lib/libonnxruntime.a"),
              *libraries, *link_flags, "-o", str(executable)])
+        if tools.linux_target:
+            validate_linux_abi(executable, self.spec.identity["linux_runtime"]["glibc"])
         smoke = [str(executable), str(fixture / "output.onnx"), self.spec.configuration["version"], mode]
+        driver = None
+        if self.spec.cuda_enabled and not gpu:
+            target = "sbsa" if self.spec.platform == "linux/arm64" else "x86_64"
+            stub = tools.cuda_home / f"targets/{target}-linux/lib/stubs/libcuda.so"
+            if not stub.is_file():
+                stub = tools.cuda_home / "lib64/stubs/libcuda.so"
+            if not stub.is_file():
+                raise BuildError(f"CUDA provider loading requires the target driver stub: {stub}")
+            driver = smoke_dir / "cuda-driver"
+            driver.mkdir(exist_ok=True)
+            link = driver / "libcuda.so.1"
+            link.unlink(missing_ok=True)
+            link.symlink_to(stub)
         if tools.cross:
             # QEMU redirects guest loader paths to the target sysroot. Keep its host process's
             # library environment separate from the target CUDA and C++ runtime libraries.
             sysroot = tools.cross.runtime_root
-            directories = [destination / "runtime/lib", sysroot / "lib", sysroot / "usr/lib",
-                           sysroot / "lib/aarch64-linux-gnu", sysroot / "usr/lib/aarch64-linux-gnu"]
-            if self.spec.cuda_enabled:
-                # Provider loading needs driver symbols, but this check never executes a GPU.
-                # Expose only NVIDIA's target driver stub, outside the packaged runtime.
-                stub = tools.cuda_home / "targets/sbsa-linux/lib/stubs/libcuda.so"
-                if not stub.is_file():
-                    raise BuildError(f"arm64 CUDA provider loading requires the SBSA driver stub: {stub}")
-                driver = smoke_dir / "cuda-driver"
-                driver.mkdir(exist_ok=True)
-                link = driver / "libcuda.so.1"
-                link.unlink(missing_ok=True)
-                link.symlink_to(stub)
+            directories = [destination / "runtime/lib", *tools.cross.library_directories]
+            if driver:
                 directories.insert(1, driver)
             prefix = [tools.cross.emulator, "-L", str(sysroot), "-E",
                       "LD_LIBRARY_PATH=" + os.pathsep.join(str(path) for path in directories)]
@@ -719,10 +778,19 @@ class RuntimeBuild:
                 environment["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
             else:
                 environment.pop("LD_LIBRARY_PATH", None)
+        elif tools.linux_target:
+            # Link and run against the deployment baseline even when the maintainer's host
+            # has newer glibc or libstdc++. Keep these libraries private to this process.
+            directories = [destination / "runtime/lib", *tools.linux_target.library_directories]
+            if driver:
+                directories.insert(1, driver)
+            smoke = [str(tools.linux_target.loader), "--library-path",
+                     os.pathsep.join(str(path) for path in directories), *smoke]
         run(smoke, env=environment)
         if gpu:
-            run([str(executable), str(fixture / "convolution-output.onnx"),
-                 self.spec.configuration["version"], mode], env=environment)
+            convolution = [*smoke]
+            convolution[-3] = str(fixture / "convolution-output.onnx")
+            run(convolution, env=environment)
 
 
 def main() -> int:
@@ -730,6 +798,7 @@ def main() -> int:
     parser.add_argument("operation", choices=["fetch", "build-source", "path", "publish", "verify", "checksum"],
                         help="fetch published artifacts for development; build-source, checksum, and publish are maintainer operations")
     parser.add_argument("--platform", default="native")
+    parser.add_argument("--variant", choices=("portable", "docker"), default="portable")
     parser.add_argument("--stage", type=Path, default=Path(os.environ.get("NERVIX_ONNXRUNTIME_DIR", ROOT / ".nervix-deps/onnxruntime")))
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 4), help="parallel jobs for manual source builds")
     parser.add_argument("--unchecked", action="store_true", help="calculate the library path before preparation")
@@ -737,8 +806,9 @@ def main() -> int:
     if arguments.jobs < 1:
         parser.error("--jobs must be positive")
     try:
-        spec = BuildSpec.create(arguments.platform)
-        build = RuntimeBuild(spec, arguments.stage, arguments.jobs)
+        from scripts.onnxruntime.artifacts import ManagedRuntimeBuild
+        spec = BuildSpec.create(arguments.platform, variant=arguments.variant)
+        build = ManagedRuntimeBuild(spec, arguments.stage, arguments.jobs)
         if arguments.operation == "fetch":
             print(build.prepare())
         elif arguments.operation == "build-source":
@@ -749,9 +819,9 @@ def main() -> int:
             print(build.package_dir / "lib")
         elif arguments.operation == "verify":
             build.verify()
-            print(f"verified ONNX Runtime {spec.configuration['version']} {spec.platform}")
+            print(f"verified ONNX Runtime {spec.configuration['version']} {spec.artifact_id}")
         elif arguments.operation == "checksum":
-            print(f"pinned SHA-256 {build.checksum()} for {spec.platform} in scripts/onnxruntime/checksums.toml")
+            print(f"pinned SHA-256 {build.checksum()} for {spec.artifact_id} in scripts/onnxruntime/checksums.toml")
         else:
             if os.environ.get("CI") == "true":
                 raise BuildError("publishing ONNX Runtime is a manual operation and is disabled in CI")
