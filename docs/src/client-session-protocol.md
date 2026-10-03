@@ -1065,7 +1065,9 @@ server acknowledged and did not end, and fences its restoration by generation: a
 attempt the caller has since cancelled is followed by a deletion before the name can be reused, and
 rows of a generation the client no longer holds are ignored. A restoration the new session refuses
 is reported as a restoration failure and sent again on that session after a growing wait, as
-[Reconnecting A Session](#reconnecting-a-session) describes.
+[Reconnecting A Session](#reconnecting-a-session) describes. Each interruption and refused attempt
+reaches the caller's next read as soon as the client records it, without waiting for another change
+to the subscriptions it holds.
 
 A generation the server ended is never restored, because a new session would not change why it
 ended: its relay was redefined, so the announced schema no longer describes its rows, or the relay

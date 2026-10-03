@@ -44,6 +44,7 @@ checks = [
   "producer::slots::shuttle_tests::shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit",
   "producer::slots::shuttle_tests::shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once",
   "producer::slots::shuttle_tests::shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit",
+  "subscriptions::shuttle_tests::shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change",
 ]
 name = "nervix-client-core"
 
