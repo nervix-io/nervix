@@ -64,6 +64,7 @@ class InventoryTests(unittest.TestCase):
             "simd-checked-lanes",
             "replica-progress",
             "replica-catch-up",
+            "paced-simulation-records",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -77,6 +78,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-lint-report",
             "nervix-server",
             "nervix-checkpoint-replication",
+            "nervix-paced-simulation",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

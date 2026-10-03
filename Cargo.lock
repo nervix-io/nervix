@@ -7398,6 +7398,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-paced-simulation"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-schema",
+ "bolero",
+ "clap",
+ "error-stack",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-models",
+ "nervix-primitives",
+ "nervix-recovery",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "nervix-primitives"
 version = "0.1.0-dev"
 dependencies = [
