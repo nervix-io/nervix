@@ -26,9 +26,7 @@ impl Arbitrary<'_> {
     pub fn create_relay(&mut self) -> CreateRelay {
         let name = self.name();
         let schema = self.name();
-        let capacity = self
-            .entropy
-            .boundary_biased(1..=self.largest_archived_count());
+        let capacity = self.entropy.boundary_biased(1..=u64::MAX);
         let capacity = usize::try_from(capacity).assured("supported targets address 64 bits");
         let branching = if self.entropy.flag() {
             RelayBranching::BranchedBy {

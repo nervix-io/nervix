@@ -606,9 +606,7 @@ impl Arbitrary<'_> {
                     }
                 };
                 let operation = if self.entropy.flag() {
-                    let number = self
-                        .entropy
-                        .boundary_biased(1..=self.largest_archived_count());
+                    let number = self.entropy.boundary_biased(1..=u64::MAX);
                     let number =
                         usize::try_from(number).assured("supported targets address 64 bits");
                     Some(TransactionOperationNumber::new(

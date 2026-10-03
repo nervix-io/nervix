@@ -194,7 +194,9 @@ struct TransactionReportHeader {
     identity: TransactionPreviewIdentity,
     domain: DomainName,
     completeness: ImpactReportCompleteness,
+    #[rkyv(with = nervix_models::CountAsU64)]
     operation_count: usize,
+    #[rkyv(with = nervix_models::CountAsU64)]
     execution_step_count: usize,
 }
 
@@ -353,7 +355,9 @@ impl ImpactTopologyItemKey {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 struct ImpactTopologyHeader {
+    #[rkyv(with = nervix_models::CountAsU64)]
     node_count: usize,
+    #[rkyv(with = nervix_models::CountAsU64)]
     edge_count: usize,
 }
 
@@ -1059,6 +1063,30 @@ pub(crate) fn test_incomplete_report_archive_with_basis(
         test_report_with_completeness(domain, operation_count, planning_basis, completeness),
     )
     .assured("the incomplete test report topology can be archived")
+}
+
+#[cfg(test)]
+pub(crate) fn assert_count_archives(count: usize) {
+    use meticulous::ResultExt as _;
+
+    use crate::archive_count_tests::assert_round_trip;
+
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let mut header = test_report_archive("count-transaction", &domain, 1).header;
+    header.operation_count = count;
+    header.execution_step_count = 0;
+    assert_round_trip(&header);
+    header.operation_count = 0;
+    header.execution_step_count = count;
+    assert_round_trip(&header);
+    assert_round_trip(&ImpactTopologyHeader {
+        node_count: count,
+        edge_count: 0,
+    });
+    assert_round_trip(&ImpactTopologyHeader {
+        node_count: 0,
+        edge_count: count,
+    });
 }
 
 #[cfg(test)]
