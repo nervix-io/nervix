@@ -176,7 +176,10 @@ fn first_in_and_new_scanners_select_the_process_level() {
     assert_eq!(Delimiters::first_in(b""), None);
     let long_token = b"a-hostname-longer-than-one-narrow-register.example";
     assert_eq!(OutsidePrintable::first_in(long_token), None);
-    assert_eq!(Delimiters::first_in(b"name=\"value with a ] inside\""), Some(5));
+    assert_eq!(
+        Delimiters::first_in(b"name=\"value with a ] inside\""),
+        Some(5)
+    );
 
     let structured = b"[id key=\"escaped \\\" quote\" other=\"]\"]";
     let mut scanner = ByteScanner::<Delimiters>::new(structured);
