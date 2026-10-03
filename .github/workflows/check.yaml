@@ -51,10 +51,10 @@ jobs:
         with:
           version: "0.11.31"
 
-      - name: Install just
+      - name: Install artifact recipe tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest
+          tool: just@latest,toml-cli
 
       - name: Fetch and validate the pinned public artifact
         run: just fetch-onnxruntime '${{ matrix.platform }}' --variant '${{ matrix.variant }}'
