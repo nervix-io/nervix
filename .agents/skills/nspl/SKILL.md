@@ -15,6 +15,11 @@ For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.htm
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
 completion status messages.
+The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
+schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
+Roto UDFs, ingestors for all supported source families, junctions, reingestors, and session
+subscriptions; use the same web-console chapter for their typed fields, resource versions, program
+editors, reference lookup, and transaction behavior.
 
 ## Gather the configuration contract
 
@@ -44,6 +49,14 @@ guidance to select the relevant Markdown entries from the public index.
 
 Run the control plane with `nervix-server` and submit configuration through the separate
 `nervix-cli` client. Format saved `.nspl` files with `nervix-nspl-format`.
+For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
+server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
+URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
+its `--dns-resolver-config`, `--dns-hosts-file`, and repeatable `--dns-name-server` options only
+when the session needs an explicitly configured resolver. Browser sessions use browser DNS.
+
+Use the CLI's `subscribe` and `domain-clock` subcommands for shell streams of relay records and
+the selected domain's clock. See the Command Line Client chapter for their line formats.
 
 Build configuration in dependency order:
 
@@ -78,10 +91,10 @@ Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statement
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
 statement must select that same domain. Transactions and commit progress are replicated and
 resumable, but their content is deliberately limited to that domain's model mutations, domain
-configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep `CREATE DOMAIN`,
-`CREATE USER`, other read-only statements, subscriptions, `USE`, resource uploads, and node
-administration outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a
-retained outcome needs
+configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep
+`CREATE DOMAIN`, `CREATE USER`, other read-only statements, subscriptions, `USE`,
+`ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, backups, restores, and node
+administration outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither
@@ -111,7 +124,9 @@ commit identity through redirects or reconnects. Do not manufacture a new identi
 uncertain admitted operation.
 
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
-and recovery` before suggesting a retry.
+and recovery` before suggesting a retry, and
+[Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry
+under the same execution reference recovers the recorded outcome instead of repeating the effect.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
@@ -125,7 +140,9 @@ emitter source-predicate, and relay materialized-state changes gate and drain on
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
 dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`, or
-change only the current source's mode with `SET QUIESCE <body>`.
+change only the current source's mode with `SET QUIESCE <body>`; a client ingestor takes the
+complete `SET FROM CLIENT SCHEMA ...` body, and a change to its endpoint contract ends its attached
+producers.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
@@ -154,7 +171,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   time at delivery, including after quiescing; explicit source times remain unchanged. Check
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
   of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
-  an unreached future center.
+  an unreached future center. Rejected or missing timestamps follow the route's message-error
+  policy per row with code `validation` and operation `admit`.
 - Treat HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` as domain-clock cadence. HTTP and
   generators have an immediate first occurrence; Prometheus first becomes due after one interval.
   Later occurrences stay anchored, coalesce missed periods into one newest-due execution, and
@@ -170,7 +188,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   snapshot. Generator output and tokenless WASM output use it for generated watermarks, while
   source-token WASM output preserves source metadata. Omitted Sentry timestamps use domain time;
   explicit Sentry timestamps are preserved; OTEL `observed_time_unix_nano` and HTTP-date
-  `Retry-After` interpretation use actual UTC.
+  `Retry-After` interpretation use actual UTC, and a retried OTEL Export request keeps the observed
+  time it was prepared with.
 - Treat a session subscription `WHERE` clause as a predicate over the subscribed relay record.
   Bare fields, `message.<field>`, and `input.<field>` are equivalent there. Do not use `output`,
   `branch`, materialized `relay_state`, construction clauses, or side effects; subscription
@@ -195,7 +214,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   context allows, `Function Properties` and `Errors` for optional results, sensitivity, and where a
   failure goes, then the section of each operator and function the expression uses. Check that:
   - literals are `I64` and `F64`, so a narrower operand's literal is cast (`input.count > 5 AS U32`),
-    and there is no exponent, `DATETIME`, or `BYTES` literal;
+    a float is one word (`2.5`, never `2 .5`), and there is no exponent, `DATETIME`, or `BYTES`
+    literal;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
   - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an
@@ -274,6 +294,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
   in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
+  On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
+  creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
   including an outbound WebSocket client, is single-owner and keeps its live assignment across
   ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it
@@ -291,22 +313,61 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- When an application receives constructed graph output, use `TO CLIENT SCHEMA <output_schema>
+  MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
+  Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
+  explicit `FLUSH` policy. The output schema is exact, and every sensitive value copied into a
+  non-sensitive output field needs `leak_sensitive(...)`. Do not create a `CLIENT` model, codec,
+  header operation, or direct `VALUES` body for this sink. An application opens a competing
+  consumer with the Rust client's `subscribe_emitter` or the session protocol, receives native
+  Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
+  until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
+  and delivery identity but use a fresh reference. Consumers are volatile across owner and
+  session loss; the Rust client may restore the same handle with a fresh attachment only when the
+  domain `START` generation and endpoint contract still match. The first read after a session gap
+  or endpoint relocation reports interruption, and an old delivery reference cannot ACK a
+  replacement attempt. Design
+  application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
+  `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
-  must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
+  must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
+  `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
+  the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
+  outage follows the emitter's declared retry policy.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
   `NO_ACK` or `BATCH`; see [Emitters](../../../docs/src/emitters.md#http-request-configuration)
   for client origin and timeout requirements, request-field types and sensitivity, bodyless
-  construction, and ALTER rules.
+  construction, and ALTER rules. Each record is one request: route `WHERE` filters before any
+  request field is evaluated, a failed method, path, header write or body encoding rejects the
+  record through `ON MESSAGE ERROR` before any part of its request is sent, and a retry resends the
+  prepared request unchanged. Declare
+  `Content-Type` and any idempotency key with `write_header`; see
+  [HTTP requests](../../../docs/src/emitters.md#http-requests). Complete valid `2xx` response
+  headers deliver the record without waiting for the response body. `401`, `403`, `407`, `408`,
+  `425`, `429`, and `5xx` retain it for retry; other `3xx`/`4xx` statuses and `101` reject that
+  record through `ON MESSAGE ERROR`. A retained request holds later records behind it, and an
+  `ATTACHED` emitter keeps every unresolved record's upstream acknowledgement open. One valid
+  `Retry-After`, in whole seconds or as an HTTP date, can lengthen the physical wait beyond `MAX`.
+  A lost response can repeat a request the endpoint applied, so give the endpoint a stable key
+  such as `write_header('Idempotency-Key', input.event_id)`; see
+  [HTTP retries](../../../docs/src/emitters.md#http-retries-and-acknowledgements). While a request
+  is pending after a failed attempt, `DESCRIBE EMITTER` shows that failure's status or transport
+  cause as its transient error until the request is delivered. Sent counters count each delivered
+  record once and never a refused one, and a `WITHOUT BODY` emitter sends zero payload bytes; see
+  [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
-  sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
-  MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  sink clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
+  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
-  source relays or concrete branches cannot; see [Emitters](../../../docs/src/emitters.md#batching).
+  source relays or concrete branches cannot. For the database sinks, the clause bounds each insert
+  or bulk write by row count and the exact size of what it carries; for OTEL, it bounds each
+  protobuf export request by successful source-record count and uncompressed encoded size; see
+  [Emitters](../../../docs/src/emitters.md#batching).
   For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
@@ -352,11 +413,24 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
   never accepts `MAX`.
-- End every ingestor source specification with an explicit source-supported `ON QUIESCE` body
-  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
+- When an application publishes typed batches itself, use a client ingestor:
+  `FROM CLIENT SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY
+  BACKOFF <d> MAX <d> ON QUIESCE SUSPEND`, with no client, codec, headers, or `NO_ACK`. Producers are
+  opened through the client library or session protocol, not with a statement. Read `Ingestors` →
+  `Client Ingestors` before explaining outcomes, limits, or what ends a producer, and never promise
+  that a batch whose outcome is unknown or failed had no effect. The Rust client restores a desired
+  producer across a session gap or relocation only while the domain `START` generation and endpoint
+  contract still match; it never resends a batch merely because its outcome is missing.
+- End every transport ingestor source specification with an explicit source-supported `ON QUIESCE`
+  body immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
   explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include `RETRY AFTER` for endpoint
   `REJECT`. Use MQTT `SUSPEND` only with `SESSION PERSISTENT QOS 1`. Do not invent a default or use a
   mode offered by another source type.
+- A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
+  its source stops or is replaced, reconnect to use the new source; after signaling, the next
+  refused payload on the preceding connection closes with 1013. Configured routes without a live
+  intake reject with HTTP 503, while withdrawn routes return 404. Another domain sharing the host
+  and path retains its own intake when a domain is stopped.
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.

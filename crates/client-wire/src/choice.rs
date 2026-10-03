@@ -11,7 +11,10 @@
 
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use nervix_models::{DomainName, NodeRef, PlacementPolicy, ResourceName};
+use nervix_models::{
+    DomainName, FieldName, IngestSourceKind, NodeRef, PlacementPolicy, RequestedResourceVersion,
+    ResourceName,
+};
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
@@ -24,12 +27,144 @@ use crate::{
 pub enum ChoiceTarget {
     DomainPace,
     PlacementPolicy,
+    Schema,
+    Branch,
+    Relay,
+    /// The fields of one relay's records, asked with the domain and then the relay as
+    /// dependencies.
+    RelayField,
+    WireJsonSchema,
+    WireCborSchema,
+    WireAvroSchema,
+    Resource,
+    CompletedResourceVersion,
+    Vhost,
+    SignalingProtocol,
+    Codec,
+    /// Fields of the output schema selected by one configured codec.
+    CodecField,
+    IngestHttpSource,
+    IngestKafkaSource,
+    IngestPulsarSource,
+    IngestMqttSource,
+    IngestNatsSource,
+    IngestRabbitMqSource,
+    IngestRedisPubSubSource,
+    IngestPrometheusSource,
+    IngestZeroMqSource,
+    IngestSqsSource,
+    IngestEndpointSource,
+    IngestWebsocketsSource,
+    IngestSyslogSource,
+    IngestCodec,
+    IngestUnbranchedRelay,
+    IngestBranchedRelay,
+    BranchField,
+    ProcessorCompatibleInputRelay,
+    ProcessorInputBranchRelay,
+    ProcessorMaterializedRelay,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     DomainPace,
     PlacementPolicy,
+    Schema,
+    Branch,
+    Relay,
+    RelayField,
+    WireJsonSchema,
+    WireCborSchema,
+    WireAvroSchema,
+    Resource,
+    CompletedResourceVersion,
+    Vhost,
+    SignalingProtocol,
+    Codec,
+    CodecField,
+    IngestHttpSource,
+    IngestKafkaSource,
+    IngestPulsarSource,
+    IngestMqttSource,
+    IngestNatsSource,
+    IngestRabbitMqSource,
+    IngestRedisPubSubSource,
+    IngestPrometheusSource,
+    IngestZeroMqSource,
+    IngestSqsSource,
+    IngestEndpointSource,
+    IngestWebsocketsSource,
+    IngestSyslogSource,
+    IngestCodec,
+    IngestUnbranchedRelay,
+    IngestBranchedRelay,
+    BranchField,
+    ProcessorCompatibleInputRelay,
+    ProcessorInputBranchRelay,
+    ProcessorMaterializedRelay,
 });
+
+impl ChoiceTarget {
+    /// The choices of what a source names: its client or endpoint, or, for a client source, the
+    /// input schema its producers' batches carry.
+    pub const fn for_ingest_source(kind: IngestSourceKind) -> Self {
+        match kind {
+            IngestSourceKind::Client => Self::Schema,
+            IngestSourceKind::Http => Self::IngestHttpSource,
+            IngestSourceKind::Kafka => Self::IngestKafkaSource,
+            IngestSourceKind::Pulsar => Self::IngestPulsarSource,
+            IngestSourceKind::Mqtt => Self::IngestMqttSource,
+            IngestSourceKind::Nats => Self::IngestNatsSource,
+            IngestSourceKind::RabbitMq => Self::IngestRabbitMqSource,
+            IngestSourceKind::RedisPubSub => Self::IngestRedisPubSubSource,
+            IngestSourceKind::Prometheus => Self::IngestPrometheusSource,
+            IngestSourceKind::ZeroMq => Self::IngestZeroMqSource,
+            IngestSourceKind::Sqs => Self::IngestSqsSource,
+            IngestSourceKind::Endpoint => Self::IngestEndpointSource,
+            IngestSourceKind::Websockets => Self::IngestWebsocketsSource,
+            IngestSourceKind::Syslog => Self::IngestSyslogSource,
+        }
+    }
+
+    pub const fn ingest_source_kind(self) -> Option<IngestSourceKind> {
+        match self {
+            Self::IngestHttpSource => Some(IngestSourceKind::Http),
+            Self::IngestKafkaSource => Some(IngestSourceKind::Kafka),
+            Self::IngestPulsarSource => Some(IngestSourceKind::Pulsar),
+            Self::IngestMqttSource => Some(IngestSourceKind::Mqtt),
+            Self::IngestNatsSource => Some(IngestSourceKind::Nats),
+            Self::IngestRabbitMqSource => Some(IngestSourceKind::RabbitMq),
+            Self::IngestRedisPubSubSource => Some(IngestSourceKind::RedisPubSub),
+            Self::IngestPrometheusSource => Some(IngestSourceKind::Prometheus),
+            Self::IngestZeroMqSource => Some(IngestSourceKind::ZeroMq),
+            Self::IngestSqsSource => Some(IngestSourceKind::Sqs),
+            Self::IngestEndpointSource => Some(IngestSourceKind::Endpoint),
+            Self::IngestWebsocketsSource => Some(IngestSourceKind::Websockets),
+            Self::IngestSyslogSource => Some(IngestSourceKind::Syslog),
+            Self::DomainPace
+            | Self::PlacementPolicy
+            | Self::Schema
+            | Self::Branch
+            | Self::Relay
+            | Self::RelayField
+            | Self::WireJsonSchema
+            | Self::WireCborSchema
+            | Self::WireAvroSchema
+            | Self::Resource
+            | Self::CompletedResourceVersion
+            | Self::Vhost
+            | Self::SignalingProtocol
+            | Self::Codec
+            | Self::CodecField
+            | Self::IngestCodec
+            | Self::IngestUnbranchedRelay
+            | Self::IngestBranchedRelay
+            | Self::BranchField
+            | Self::ProcessorCompatibleInputRelay
+            | Self::ProcessorInputBranchRelay
+            | Self::ProcessorMaterializedRelay => None,
+        }
+    }
+}
 
 /// Whether a domain clock advances with wall time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,7 +192,10 @@ pub enum ChoiceValue {
     PlacementPolicy(PlacementPolicy),
     Domain(DomainName),
     Resource(ResourceName),
+    ResourceVersion(RequestedResourceVersion),
     Model(NodeRef),
+    /// A field of the record the lookup's dependencies select.
+    Field(FieldName),
 }
 
 impl ChoiceValue {
@@ -109,6 +247,20 @@ impl ChoiceValue {
                     ),
                 )
             }
+            Self::ResourceVersion(RequestedResourceVersion::Number(version)) => EncodedUnion::new(
+                wire::ChoiceValue::ResourceVersionNumber,
+                wire::ResourceVersionNumber::create(
+                    encoder.fbb(),
+                    &wire::ResourceVersionNumberArgs { version: *version },
+                ),
+            ),
+            Self::ResourceVersion(RequestedResourceVersion::Latest) => EncodedUnion::new(
+                wire::ChoiceValue::LatestResourceVersion,
+                wire::LatestResourceVersion::create(
+                    encoder.fbb(),
+                    &wire::LatestResourceVersionArgs {},
+                ),
+            ),
             Self::Model(node) => {
                 let node = encode_node_ref(encoder, node)?;
                 EncodedUnion::new(
@@ -116,6 +268,16 @@ impl ChoiceValue {
                     wire::ModelChoiceReference::create(
                         encoder.fbb(),
                         &wire::ModelChoiceReferenceArgs { node: Some(node) },
+                    ),
+                )
+            }
+            Self::Field(field) => {
+                let field = encoder.text("FieldChoiceReference.field", field.as_str())?;
+                EncodedUnion::new(
+                    wire::ChoiceValue::FieldChoiceReference,
+                    wire::FieldChoiceReference::create(
+                        encoder.fbb(),
+                        &wire::FieldChoiceReferenceArgs { field: Some(field) },
                     ),
                 )
             }
@@ -144,8 +306,20 @@ impl ChoiceValue {
             let resource = decoder.name("ResourceChoiceReference.resource", value.resource())?;
             return Ok(Self::Resource(resource));
         }
+        if let Some(value) = selection.value_as_resource_version_number() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Number(
+                value.version(),
+            )));
+        }
+        if selection.value_as_latest_resource_version().is_some() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Latest));
+        }
         if let Some(value) = selection.value_as_model_choice_reference() {
             return Ok(Self::Model(decode_node_ref(decoder, value.node())?));
+        }
+        if let Some(value) = selection.value_as_field_choice_reference() {
+            let field = decoder.name("FieldChoiceReference.field", value.field())?;
+            return Ok(Self::Field(field));
         }
         Err(decoder.unknown_union("ChoiceSelection.value", selection.value_type().0))
     }
@@ -171,8 +345,20 @@ impl ChoiceValue {
             let resource = decoder.name("ResourceChoiceReference.resource", value.resource())?;
             return Ok(Self::Resource(resource));
         }
+        if let Some(value) = choice.value_as_resource_version_number() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Number(
+                value.version(),
+            )));
+        }
+        if choice.value_as_latest_resource_version().is_some() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Latest));
+        }
         if let Some(value) = choice.value_as_model_choice_reference() {
             return Ok(Self::Model(decode_node_ref(decoder, value.node())?));
+        }
+        if let Some(value) = choice.value_as_field_choice_reference() {
+            let field = decoder.name("FieldChoiceReference.field", value.field())?;
+            return Ok(Self::Field(field));
         }
         Err(decoder.unknown_union("Choice.value", choice.value_type().0))
     }

@@ -149,7 +149,7 @@ impl SessionServiceImpl {
 
         let mut received = 0_u64;
         while let Some(frame) = frames.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let frame = frame?;
             let chunk = match UploadMessage::decode(&frame) {
                 Ok(UploadMessage::Chunk(chunk)) => chunk,

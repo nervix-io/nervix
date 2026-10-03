@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use error_stack::{Report, Result, ResultExt as _};
 use nervix_wasm_protocol::{BranchInit, GuestSnapshot, ProcessorSchema, StateResetRequestAnswer};
 
 use crate::{
@@ -46,13 +47,14 @@ impl BranchContext {
         saved: &[u8],
     ) -> Result<P, RejectedSnapshot> {
         let snapshot =
-            GuestSnapshot::decode(saved).map_err(RejectedSnapshot::UndecodableEnvelope)?;
+            GuestSnapshot::decode(saved).change_context(RejectedSnapshot::UndecodableEnvelope)?;
         let saved_init = BranchInit::decode(&snapshot.init_metadata)
-            .map_err(RejectedSnapshot::UndecodableInitMetadata)?;
+            .change_context(RejectedSnapshot::UndecodableInitMetadata)?;
         if saved_init != self.init {
-            return Err(RejectedSnapshot::OtherBranchConfiguration);
+            return Err(Report::new(RejectedSnapshot::OtherBranchConfiguration));
         }
-        P::restore(self, &snapshot.application_state).map_err(RejectedSnapshot::ApplicationState)
+        P::restore(self, &snapshot.application_state)
+            .change_context(RejectedSnapshot::ApplicationState)
     }
 
     pub fn domain_name(&self) -> &str {
@@ -139,10 +141,11 @@ impl GuestContext<'_> {
     /// The timeout belongs to this branch instance. An instance recreated from saved state starts
     /// without it, so request it again from the next callback when the restored state needs it.
     pub fn request_timeout(&self, delay: Duration) -> Result<TimeoutHandle, GuestError> {
-        let delay_nanos = i64::try_from(delay.as_nanos()).map_err(|_| GuestError::InvalidSize)?;
+        let delay_nanos =
+            i64::try_from(delay.as_nanos()).map_err(|_| Report::new(GuestError::InvalidSize))?;
         let handle = abi::host_timeout_after_nanos(delay_nanos);
         if handle < 0 {
-            return Err(GuestError::InvalidSize);
+            return Err(Report::new(GuestError::InvalidSize));
         }
         Ok(TimeoutHandle::new(handle))
     }
@@ -337,8 +340,19 @@ mod tests {
             .restore_snapshot::<Counter>(b"not a guest snapshot")
             .expect_err("bytes that are not a snapshot must not restore");
 
-        assert!(matches!(rejected, RejectedSnapshot::UndecodableEnvelope(_)));
-        assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
+        assert!(matches!(
+            rejected.current_context(),
+            RejectedSnapshot::UndecodableEnvelope
+        ));
+        assert!(
+            rejected
+                .downcast_ref::<nervix_wasm_protocol::ProtocolError>()
+                .is_some()
+        );
+        assert_eq!(
+            rejected.current_context().verdict(),
+            SavedStateRejection::SnapshotEnvelope
+        );
     }
 
     #[test]
@@ -355,10 +369,13 @@ mod tests {
             .expect_err("a snapshot without decodable init metadata must not restore");
 
         assert!(matches!(
-            rejected,
-            RejectedSnapshot::UndecodableInitMetadata(_)
+            rejected.current_context(),
+            RejectedSnapshot::UndecodableInitMetadata
         ));
-        assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
+        assert_eq!(
+            rejected.current_context().verdict(),
+            SavedStateRejection::SnapshotEnvelope
+        );
     }
 
     #[test]
@@ -370,10 +387,13 @@ mod tests {
             .expect_err("a snapshot of another branch must not restore");
 
         assert!(matches!(
-            rejected,
+            rejected.current_context(),
             RejectedSnapshot::OtherBranchConfiguration
         ));
-        assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
+        assert_eq!(
+            rejected.current_context().verdict(),
+            SavedStateRejection::SnapshotEnvelope
+        );
         assert_eq!(
             rejected.to_string(),
             "saved snapshot was taken under a different branch configuration"
@@ -393,8 +413,16 @@ mod tests {
             .restore_snapshot::<Counter>(&saved)
             .expect_err("a truncated count must not restore");
 
-        assert_eq!(rejected.verdict(), SavedStateRejection::ApplicationState);
-        assert_eq!(rejected.to_string(), "saved count must be exactly 8 bytes");
+        assert_eq!(
+            rejected.current_context().verdict(),
+            SavedStateRejection::ApplicationState
+        );
+        assert_eq!(
+            rejected
+                .downcast_ref::<GuestError>()
+                .map(ToString::to_string),
+            Some("saved count must be exactly 8 bytes".to_string())
+        );
     }
 
     #[test]
@@ -410,6 +438,9 @@ mod tests {
             .restore_snapshot::<Stateless>(&saved)
             .expect_err("a stateless processor must not drop saved state silently");
 
-        assert_eq!(rejected.verdict(), SavedStateRejection::ApplicationState);
+        assert_eq!(
+            rejected.current_context().verdict(),
+            SavedStateRejection::ApplicationState
+        );
     }
 }

@@ -3,8 +3,8 @@
 //! Outside the layer order: a test harness. Product code must not name it.
 //!
 //! - **Owns.** Starting a probe of one client runtime against a node, the environment a probe
-//!   reads its target from, collecting the report a probe prints, and holding that report to the
-//!   report a scenario expects.
+//!   reads its target and exercise from, collecting the report a probe prints, and holding that
+//!   report to the report a scenario expects.
 //! - **Depends on.** The probe programs under `tests/client_conformance`, the artifacts
 //!   `just test-client-conformance` builds for them, and the shared Rust binding, which the
 //!   in-process probe drives through its C ABI.
@@ -15,6 +15,7 @@
 //! same data, so one expected report is the oracle for every language: a difference in any line
 //! is a difference in how that runtime read the protocol.
 
+mod c_abi_endpoints;
 mod c_abi_probe;
 
 use std::{
@@ -26,12 +27,10 @@ use std::{
     time::Duration,
 };
 
+use nervix_primitives::{sync::mpsc, task::JoinHandle, time::Instant};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
     process::{Child, Command},
-    sync::mpsc,
-    task::JoinHandle,
-    time::Instant,
 };
 
 /// The checked-in frames the Rust encoder wrote, and the report of them every reader prints.
@@ -46,6 +45,13 @@ pub(crate) fn corpus_report() -> io::Result<String> {
 
 /// The line a probe prints once its subscription is open, before any row reaches it.
 pub(crate) const SUBSCRIBED_LINE: &str = "SUBSCRIBED";
+
+/// The line a probe prints once it follows the domain's clock, before it reads the clock the
+/// attach reported.
+pub(crate) const ATTACHED_LINE: &str = "ATTACHED completed";
+
+/// The line a probe prints once its producer and consumer are open, before it submits a batch.
+pub(crate) const OPENED_LINE: &str = "OPENED";
 
 /// The directory `just test-client-conformance` builds the probe artifacts into.
 const ARTIFACTS_ENV: &str = "NERVIX_CLIENT_CONFORMANCE_DIR";
@@ -174,9 +180,20 @@ impl ProbeRuntime {
             Self::CAbiInProcess | Self::Go | Self::Node | Self::Bun => false,
         }
     }
+
+    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reaches the
+    /// domain clock events and the producer and consumer handles the binding exposes.
+    fn drives_binding(self) -> bool {
+        match self {
+            Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
+                true
+            }
+            Self::Go | Self::Node | Self::Bun => false,
+        }
+    }
 }
 
-/// Where a probe connects and what it subscribes to.
+/// Where a probe connects and what it exercises there.
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeTarget {
     /// The gRPC session URI of the node the probe starts on.
@@ -186,25 +203,75 @@ pub(crate) struct ProbeTarget {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) domain: String,
-    pub(crate) relay: String,
-    pub(crate) subscription: String,
-    /// How many rows the probe reads before it closes its subscription.
-    pub(crate) rows: usize,
+    pub(crate) exercise: ProbeExercise,
+}
+
+/// What a probe does in its session.
+#[derive(Debug, Clone)]
+pub(crate) enum ProbeExercise {
+    /// Runs an operation and a failing command, then reads `rows` rows through a subscription to
+    /// `relay` named `subscription` and closes it.
+    Subscription {
+        relay: String,
+        subscription: String,
+        rows: usize,
+    },
+    /// Attaches to the domain's running clock and reads the clock the attach reported before its
+    /// first tick, then follows the generation the scenario's STOP and START begin and the
+    /// attachment restored after the scenario ends the probe's session, and detaches.
+    DomainClock,
+    /// Opens a producer on client ingestor `ingestor` and a consumer on client emitter `emitter`,
+    /// publishes typed batches and settles their output, holds one delivery while the scenario
+    /// ends the probe's session, and finishes on the restored attachments.
+    Endpoints { ingestor: String, emitter: String },
+}
+
+impl ProbeExercise {
+    /// The argument that selects the exercise in a probe process, when it is not the default.
+    fn argument(&self) -> Option<&'static str> {
+        match self {
+            Self::Subscription { .. } => None,
+            Self::DomainClock => Some("clock"),
+            Self::Endpoints { .. } => Some("io"),
+        }
+    }
+
+    /// Whether the exercise needs the shared Rust binding, which only the binding probes drive.
+    fn needs_binding(&self) -> bool {
+        match self {
+            Self::Subscription { .. } => false,
+            Self::DomainClock | Self::Endpoints { .. } => true,
+        }
+    }
 }
 
 impl ProbeTarget {
     /// The environment every probe reads its target from.
     fn environment(&self) -> BTreeMap<&'static str, String> {
-        BTreeMap::from([
+        let mut environment = BTreeMap::from([
             ("NERVIX_PROBE_GRPC_URI", self.grpc_uri.clone()),
             ("NERVIX_PROBE_WEBSOCKET_URI", self.websocket_uri.clone()),
             ("NERVIX_PROBE_USERNAME", self.username.clone()),
             ("NERVIX_PROBE_PASSWORD", self.password.clone()),
             ("NERVIX_PROBE_DOMAIN", self.domain.clone()),
-            ("NERVIX_PROBE_RELAY", self.relay.clone()),
-            ("NERVIX_PROBE_SUBSCRIPTION", self.subscription.clone()),
-            ("NERVIX_PROBE_ROWS", self.rows.to_string()),
-        ])
+        ]);
+        match &self.exercise {
+            ProbeExercise::Subscription {
+                relay,
+                subscription,
+                rows,
+            } => {
+                environment.insert("NERVIX_PROBE_RELAY", relay.clone());
+                environment.insert("NERVIX_PROBE_SUBSCRIPTION", subscription.clone());
+                environment.insert("NERVIX_PROBE_ROWS", rows.to_string());
+            }
+            ProbeExercise::DomainClock => {}
+            ProbeExercise::Endpoints { ingestor, emitter } => {
+                environment.insert("NERVIX_PROBE_INGESTOR", ingestor.clone());
+                environment.insert("NERVIX_PROBE_EMITTER", emitter.clone());
+            }
+        }
+        environment
     }
 }
 
@@ -253,15 +320,23 @@ impl ClientProbe {
     }
 
     pub(crate) async fn start(runtime: ProbeRuntime, target: ProbeTarget) -> io::Result<Self> {
+        if target.exercise.needs_binding() && !runtime.drives_binding() {
+            return Err(io::Error::other(format!(
+                "the {runtime:?} probe implements the protocol itself and does not drive the \
+                 shared binding the {:?} exercise uses",
+                target.exercise
+            )));
+        }
         let (sender, lines) = mpsc::unbounded_channel();
         let Some(mut command) = runtime.command()? else {
-            let completion = Completion::InProcess(tokio::task::spawn_blocking(move || {
-                c_abi_probe::run(&target, &mut |line| {
-                    sender.send(line.to_string()).map_err(|_| {
-                        io::Error::other("the scenario stopped reading the probe's report")
+            let completion =
+                Completion::InProcess(nervix_primitives::task::spawn_blocking(move || {
+                    c_abi_probe::run(&target, &mut |line| {
+                        sender.send(line.to_string()).map_err(|_| {
+                            io::Error::other("the scenario stopped reading the probe's report")
+                        })
                     })
-                })
-            }));
+                }));
             return Ok(Self {
                 runtime,
                 lines,
@@ -269,6 +344,9 @@ impl ClientProbe {
                 completion,
             });
         };
+        if let Some(argument) = target.exercise.argument() {
+            command.arg(argument);
+        }
         command.envs(target.environment());
         if runtime.loads_binding() {
             command.env(LIBRARY_ENV, ProbeRuntime::library()?);
@@ -296,16 +374,16 @@ impl ClientProbe {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("the probe's stderr was not captured"))?;
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if sender.send(line).is_err() {
                     break;
                 }
             }
         });
-        let stderr = tokio::spawn(async move {
+        let stderr = nervix_primitives::task::spawn(async move {
             let mut captured = String::new();
             stderr.read_to_string(&mut captured).await?;
             Ok(captured)
@@ -326,8 +404,8 @@ impl ClientProbe {
     ) -> io::Result<()> {
         let deadline = Instant::now() + within;
         loop {
-            tokio::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, self.lines.recv()).await {
+            nervix_primitives::task::consume_budget().await;
+            match nervix_primitives::time::timeout_at(deadline, self.lines.recv()).await {
                 Ok(Some(line)) => {
                     let found = line == expected;
                     self.received.push(line);
@@ -360,8 +438,8 @@ impl ClientProbe {
     pub(crate) async fn finish(mut self, within: Duration) -> io::Result<ProbeReport> {
         let deadline = Instant::now() + within;
         loop {
-            tokio::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, self.lines.recv()).await {
+            nervix_primitives::task::consume_budget().await;
+            match nervix_primitives::time::timeout_at(deadline, self.lines.recv()).await {
                 Ok(Some(line)) => self.received.push(line),
                 Ok(None) => break,
                 Err(_) => {
@@ -374,7 +452,7 @@ impl ClientProbe {
                 }
             }
         }
-        let ending = tokio::time::timeout_at(deadline, self.ended()).await;
+        let ending = nervix_primitives::time::timeout_at(deadline, self.ended()).await;
         match ending {
             Ok(Ok(())) => Ok(ProbeReport {
                 lines: self.received,
@@ -393,7 +471,7 @@ impl ClientProbe {
 
     /// Why a probe that stopped reporting ended, for a diagnostic.
     async fn ending(&mut self) -> String {
-        match tokio::time::timeout(Duration::from_secs(30), self.ended()).await {
+        match nervix_primitives::time::timeout(Duration::from_secs(30), self.ended()).await {
             Ok(Ok(())) => "it exited successfully".to_string(),
             Ok(Err(error)) => error.to_string(),
             Err(_) => "it closed its report and kept running".to_string(),

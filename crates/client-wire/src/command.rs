@@ -4,14 +4,17 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    CommandExecutionReference, ResourceDescription, TransactionInspection,
-    TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
+    BackupArchiveSummary, CommandExecutionReference, ResourceDescription, RestoreReport,
+    TransactionInspection, TransactionOperationAdmission, TransactionPreviewIdentity,
+    TransactionStatus,
 };
 
 use crate::{
+    backup::{decode_backup_archive, encode_backup_archive},
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
     resource::{decode_resource_description, encode_resource_description},
+    restore::{decode_restore_report, encode_restore_report},
     transaction::{
         decode_inspection, decode_operation_number, decode_preview_identity,
         decode_transaction_status, encode_inspection, encode_operation_number,
@@ -338,6 +341,12 @@ pub struct CommandOutcome {
     /// The versions, entries and bindings read by a description of every version of a resource,
     /// whichever text its message renders them as.
     pub resource: Option<Box<ResourceDescription>>,
+    /// The archive a completed BACKUP assembled, which a download by this outcome's execution
+    /// reference fetches.
+    pub backup: Option<Box<BackupArchiveSummary>>,
+    /// What a RESTORE that verified its archive applied, the step it failed at if one failed, or
+    /// for a dry run what it would apply.
+    pub restore: Option<Box<RestoreReport>>,
 }
 
 impl CommandOutcome {
@@ -345,6 +354,15 @@ impl CommandOutcome {
         &self,
         encoder: &mut Encoder<'_>,
     ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
+        let outcome = self.encode_table(encoder)?;
+        Ok(EncodedUnion::new(wire::ReplyBody::CommandOutcome, outcome))
+    }
+
+    /// Encodes the outcome's own table, which a session reply and a restore reply each hold.
+    pub(crate) fn encode_table<'fbb>(
+        &self,
+        encoder: &mut Encoder<'fbb>,
+    ) -> Result<WIPOffset<wire::CommandOutcome<'fbb>>, Report<WireEncodeError>> {
         let execution_reference = encoder.text(
             "CommandOutcome.execution_reference",
             self.execution_reference.as_str(),
@@ -392,7 +410,15 @@ impl CommandOutcome {
             Some(description) => Some(encode_resource_description(encoder, description)?),
             None => None,
         };
-        let outcome = wire::CommandOutcome::create(
+        let backup = match &self.backup {
+            Some(archive) => Some(encode_backup_archive(encoder, archive)?),
+            None => None,
+        };
+        let restore = match &self.restore {
+            Some(report) => Some(encode_restore_report(encoder, report)?),
+            None => None,
+        };
+        Ok(wire::CommandOutcome::create(
             encoder.fbb(),
             &wire::CommandOutcomeArgs {
                 execution_reference: Some(execution_reference),
@@ -407,9 +433,10 @@ impl CommandOutcome {
                 inspection,
                 wasm_state,
                 resource,
+                backup,
+                restore,
             },
-        );
-        Ok(EncodedUnion::new(wire::ReplyBody::CommandOutcome, outcome))
+        ))
     }
 
     pub(crate) fn decode(
@@ -475,6 +502,14 @@ impl CommandOutcome {
             Some(description) => Some(Box::new(decode_resource_description(decoder, description)?)),
             None => None,
         };
+        let backup = match outcome.backup() {
+            Some(archive) => Some(Box::new(decode_backup_archive(decoder, archive)?)),
+            None => None,
+        };
+        let restore = match outcome.restore() {
+            Some(report) => Some(Box::new(decode_restore_report(decoder, report)?)),
+            None => None,
+        };
         Ok(Self {
             execution_reference,
             origin,
@@ -487,6 +522,8 @@ impl CommandOutcome {
             inspection,
             wasm_state,
             resource,
+            backup,
+            restore,
         })
     }
 }

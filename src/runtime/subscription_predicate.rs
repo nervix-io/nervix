@@ -62,13 +62,14 @@ pub(crate) fn compile_subscription_predicate(
         expression,
         nervix_vm::SemanticScopePolicy::read_only("input"),
     )
-    .map_err(|reason| {
-        Report::new(RuntimeError::BuildDomainExecution {
+    .map_err(|error| {
+        let reason = format!(
+            "subscription predicate for '{}' is invalid: {error}",
+            subscription.as_str()
+        );
+        error.change_context(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
-            reason: format!(
-                "subscription predicate for '{}' is invalid: {reason}",
-                subscription.as_str()
-            ),
+            reason,
         })
     })?;
     let bindings = [
@@ -84,19 +85,21 @@ pub(crate) fn compile_subscription_predicate(
     }
     let predicate = compile_vm_predicate_with_options_for_bindings(&expression, bindings, options)
         .map_err(|error| {
-            Report::new(RuntimeError::BuildDomainExecution {
+            let reason = format!(
+                "subscription predicate compile failed for '{}': {}",
+                subscription.as_str(),
+                error.current_context().message
+            );
+            error.change_context(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
-                reason: format!(
-                    "subscription predicate compile failed for '{}': {}",
-                    subscription.as_str(),
-                    error.current_context().message
-                ),
+                reason,
             })
         })?;
     Ok(CompiledSubscriptionPredicate { predicate })
 }
 
 pub(crate) async fn execute_subscription_predicate_on_record(
+    executor: &Executor,
     predicate: &CompiledSubscriptionPredicate,
     record: &RuntimeRow,
     execution_now: Timestamp,
@@ -122,17 +125,17 @@ pub(crate) async fn execute_subscription_predicate_on_record(
         None,
     )
     .map_err(|error| {
-        Report::new(SubscriptionPredicateExecutionError::InputProjection {
-            reason: error.to_string(),
-        })
+        let reason = error.current_context().to_string();
+        error.change_context(SubscriptionPredicateExecutionError::InputProjection { reason })
     })?;
     let execution_context = VmExecutionContext::new(execution_now);
-    let result = execute_vm_predicate_in_context(&predicate.predicate, &input, &execution_context)
-        .await
-        .map_err(|error| {
-            let reason = error.current_context().to_string();
-            error.change_context(SubscriptionPredicateExecutionError::VmExecution { reason })
-        })?;
+    let result =
+        execute_vm_predicate_in_context(executor, &predicate.predicate, &input, &execution_context)
+            .await
+            .map_err(|error| {
+                let reason = error.current_context().to_string();
+                error.change_context(SubscriptionPredicateExecutionError::VmExecution { reason })
+            })?;
     if let Some(error) = result.errors().first() {
         return Err(Report::new(
             SubscriptionPredicateExecutionError::Evaluation {
@@ -142,4 +145,70 @@ pub(crate) async fn execute_subscription_predicate_on_record(
         ));
     }
     Ok(result.selected_rows().is_single(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::test_fixtures::{expression, named, test_schema};
+
+    #[test]
+    fn invalid_predicate_keeps_subscription_and_vm_compile_context() {
+        let domain: DomainName = named("test_domain");
+        let subscription: SubscriptionName = named("filtered_view");
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let report = compile_subscription_predicate(
+            &domain,
+            &subscription,
+            &expression("input.missing > 0"),
+            SubscriptionPredicateCompileContext::new(
+                schema.arrow_schema(),
+                VmSchemaSensitivity::default(),
+                None,
+            ),
+        )
+        .expect_err("a predicate cannot read an undeclared input field");
+        assert!(matches!(
+            report.current_context(),
+            RuntimeError::BuildDomainExecution { domain, reason }
+                if domain == "test_domain"
+                    && reason.contains("filtered_view")
+                    && reason.contains("missing")
+        ));
+        assert!(report.contains::<nervix_vm::CompileError>());
+    }
+
+    #[nervix_primitives::test]
+    async fn missing_record_field_keeps_projection_report() {
+        let domain: DomainName = named("test_domain");
+        let subscription: SubscriptionName = named("filtered_view");
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let predicate = compile_subscription_predicate(
+            &domain,
+            &subscription,
+            &expression("input.value > 0"),
+            SubscriptionPredicateCompileContext::new(
+                schema.arrow_schema(),
+                VmSchemaSensitivity::default(),
+                None,
+            ),
+        )
+        .expect("a comparison of a declared I64 field is a valid predicate");
+        let record =
+            crate::runtime_schema::test_runtime_row([("other".to_string(), RuntimeValue::I64(1))]);
+        let report = execute_subscription_predicate_on_record(
+            &Executor::default(),
+            &predicate,
+            &record,
+            Timestamp::from_unix_nanos(7),
+        )
+        .await
+        .expect_err("the record lacks the predicate's required input field");
+        assert!(matches!(
+            report.current_context(),
+            SubscriptionPredicateExecutionError::InputProjection { reason }
+                if reason.contains("value")
+        ));
+        assert!(report.contains::<RuntimeSchemaError>());
+    }
 }

@@ -1,5 +1,5 @@
 Feature: Entity-pause model alterations
-  @entity_pause_junction_swap_sibling_uninterrupted
+  @entity_pause_junction_swap_sibling_uninterrupted @retained_task_handles
   Scenario Outline: A junction swap preserves sibling delivery and concrete branch identity
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -76,6 +76,29 @@ Feature: Entity-pause model alterations
       "tenant":"globex" | "seq":4 | "route":"sibling"
       """
     And the relay subscription does not receive a payload within "500ms"
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER JUNCTION altered_path SET ATTACHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: ENTITY_PAUSE
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-entity-swap.example.com" path "/events"
+      """
+      {"tenant":"acme","seq":5}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-swap.example.com" path "/events"
+      """
+      {"tenant":"globex","seq":6}
+      """
+    Then within "5s" the relay subscription receives payloads containing all fragments
+      """
+      "tenant":"acme" | "seq":5 | "route":"altered"
+      "tenant":"acme" | "seq":5 | "route":"sibling"
+      "tenant":"globex" | "seq":6 | "route":"altered"
+      "tenant":"globex" | "seq":6 | "route":"sibling"
+      """
 
     Examples:
       | cluster_size |

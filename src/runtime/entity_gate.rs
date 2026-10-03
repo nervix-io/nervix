@@ -1,14 +1,13 @@
-// A drain reads one node's quiesce counts one after another while work moves between them, so
-// `QuiesceCount` is Shuttle's atomic under the Shuttle feature: a check needs a scheduling point at
-// every read and every adjustment to explore what a drain observes mid-transfer. The node's other
-// counters stay on the standard library's atomics, because they are shared with maps this module
-// does not own.
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::AtomicUsize as QuiesceCount;
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "entity registration and transaction engagement resolve retained freeze, gate \
+                  and quiesce owners"
+    )
+)]
 
-use parking_lot::Mutex;
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::AtomicUsize as QuiesceCount;
+use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
@@ -116,6 +115,16 @@ impl EntityGateOperationError {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "entity gate coordination identity",
+        bound = "one engagement state and one retained hold per operation; mutex guards never \
+                 cross await",
+        reason = "the transaction retains the exact engagement whose hold it observes or releases"
+    )
+)]
 pub(super) struct EntityGateOperation {
     scope: EntityGateScope,
     state: Mutex<EntityGateOperationState>,
@@ -281,16 +290,23 @@ pub(super) struct QuiescedIngestorHold {
 /// item that is between two counters at the moment they are read, and a drain that misses the last
 /// item reports a node holding no work while it still holds one.
 #[derive(Debug, Default)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained quiesce owner counts each admitted or parked unit of work"
+    )
+)]
 pub(super) struct NodeQuiesceCounters {
     /// Every work item this node holds in memory.
-    outstanding: QuiesceCount,
+    outstanding: AtomicUsize,
     /// Everything in `outstanding` apart from messages parked on `REQUIRED WAIT` and outstanding
     /// force-flush obligations, which a local drain weighs on their own.
-    admitted: QuiesceCount,
+    admitted: AtomicUsize,
     /// Messages parked on `REQUIRED WAIT`, which a drain that ran out of time reports separately.
-    parked: QuiesceCount,
+    parked: AtomicUsize,
     /// Force-flush obligations this node has not completed, reported the same way.
-    force_flushes: QuiesceCount,
+    force_flushes: AtomicUsize,
 }
 
 /// What one publisher of processor depths contributes to its node's quiesce accounting.
@@ -419,7 +435,7 @@ impl NodeQuiesceCounters {
         Self::lower(&self.outstanding, held, holding);
     }
 
-    fn raise(count: &QuiesceCount, previous: usize, next: usize) {
+    fn raise(count: &AtomicUsize, previous: usize, next: usize) {
         if next <= previous {
             return;
         }
@@ -429,7 +445,7 @@ impl NodeQuiesceCounters {
         count.fetch_add(rise, Ordering::AcqRel);
     }
 
-    fn lower(count: &QuiesceCount, previous: usize, next: usize) {
+    fn lower(count: &AtomicUsize, previous: usize, next: usize) {
         if next >= previous {
             return;
         }
@@ -440,6 +456,13 @@ impl NodeQuiesceCounters {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained quiesce owner counts each admitted or parked unit of work"
+    )
+)]
 pub(super) struct NodeQuiesceWorkGuard {
     pub(super) counters: Arc<NodeQuiesceCounters>,
     pub(super) required_materialized_wait: bool,
@@ -595,7 +618,7 @@ impl Drop for BranchQuiesceGauges {
 impl EntityGateHold {
     pub(super) async fn wait_quiescent(&mut self) -> bool {
         for gate in &mut self.gates {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !gate.wait_quiescent().await {
                 return false;
             }
@@ -625,43 +648,102 @@ impl Drop for EntityGateHold {
 /// that lands between a read and a registration wakes nothing: the waiter did not exist yet. A task
 /// that missed one keeps a stale freeze, and a stale freeze disables exactly the arms that would
 /// wake it again, so its force-flush obligation can outlive the handoff that raised it.
+/// Coordination owners mutate only on handoff engagement and release. Tasks retain this slot.
+#[derive(Debug)]
+pub(in crate::runtime) struct OwnershipHandoffFreezeState {
+    published: ArcSwap<BTreeSet<CoordinationIdentity>>,
+    changed: Notify,
+}
+
+impl Default for OwnershipHandoffFreezeState {
+    fn default() -> Self {
+        Self {
+            published: ArcSwap::from_pointee(BTreeSet::new()),
+            changed: Notify::new(),
+        }
+    }
+}
+
+impl OwnershipHandoffFreezeState {
+    pub(in crate::runtime) fn insert(&self, coordination: CoordinationIdentity) {
+        if self.published.load().contains(&coordination) {
+            return;
+        }
+        let preceding = self.published.rcu(|current| {
+            if current.contains(&coordination) {
+                return current.clone();
+            }
+            let mut owners = (**current).clone();
+            owners.insert(coordination.clone());
+            StdArc::new(owners)
+        });
+        if !preceding.contains(&coordination) {
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn remove(&self, coordination: &CoordinationIdentity) {
+        if !self.published.load().contains(coordination) {
+            return;
+        }
+        let preceding = self.published.rcu(|current| {
+            if !current.contains(coordination) {
+                return current.clone();
+            }
+            let mut owners = (**current).clone();
+            owners.remove(coordination);
+            StdArc::new(owners)
+        });
+        if preceding.contains(coordination) {
+            self.changed.notify_waiters();
+        }
+    }
+
+    pub(in crate::runtime) fn is_frozen(&self) -> bool {
+        !self.published.load().is_empty()
+    }
+
+    pub(in crate::runtime) fn contains(&self, coordination: &CoordinationIdentity) -> bool {
+        self.published.load().contains(coordination)
+    }
+}
+
 pub(in crate::runtime) struct OwnershipHandoffFreezeWatch {
-    frozen_entities: Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
-    changed: Arc<Notify>,
-    entity: DomainNodeRef,
+    state: Arc<OwnershipHandoffFreezeState>,
 }
 
 /// One observation of an entity's ownership-handoff freeze, with the wait that outlives it.
 pub(in crate::runtime) struct OwnershipHandoffFreeze<'watch> {
     frozen: bool,
-    changed: tokio::sync::futures::Notified<'watch>,
+    changed: nervix_primitives::sync::futures::Notified<'watch>,
 }
 
 impl OwnershipHandoffFreezeWatch {
-    pub(in crate::runtime) fn new(runtime: &Runtime, entity: DomainNodeRef) -> Self {
-        Self::over(
-            runtime.inner.frozen_ownership_handoff_entities.clone(),
-            runtime.inner.ownership_handoff_freeze_changed.clone(),
-            entity,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "resolve the entity freeze watch before admitted execution"
         )
+    )]
+    pub(in crate::runtime) fn new(runtime: &Runtime, entity: DomainNodeRef) -> Self {
+        let state = runtime
+            .inner
+            .frozen_ownership_handoff_entities
+            .entry(entity)
+            .or_default()
+            .clone();
+        Self::over(state)
     }
 
-    fn over(
-        frozen_entities: Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
-        changed: Arc<Notify>,
-        entity: DomainNodeRef,
-    ) -> Self {
-        Self {
-            frozen_entities,
-            changed,
-            entity,
-        }
+    fn over(state: Arc<OwnershipHandoffFreezeState>) -> Self {
+        Self { state }
     }
 
     /// One observation of the entity's freeze, with its wait registered before the read.
     pub(in crate::runtime) fn observe(&self) -> OwnershipHandoffFreeze<'_> {
-        let changed = self.changed.notified();
-        let frozen = self.frozen_entities.contains_key(&self.entity);
+        let changed = self.state.changed.notified();
+        let frozen = self.state.is_frozen();
         OwnershipHandoffFreeze { frozen, changed }
     }
 }
@@ -672,7 +754,7 @@ impl<'watch> OwnershipHandoffFreeze<'watch> {
     }
 
     /// The wait for the next freeze change, registered before the freeze above was read.
-    pub(in crate::runtime) fn changed(self) -> tokio::sync::futures::Notified<'watch> {
+    pub(in crate::runtime) fn changed(self) -> nervix_primitives::sync::futures::Notified<'watch> {
         self.changed
     }
 }
@@ -732,7 +814,14 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        crate::registry::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
+        let mut relays = affected_entities
+            .iter()
+            .filter_map(|entity| execution.revision.nodes.get(entity))
+            .flat_map(|node| node.gate_relays.iter().cloned())
+            .collect::<Vec<_>>();
+        relays.sort();
+        relays.dedup();
+        relays
     }
 
     pub(in crate::runtime) fn engage_entity_gates(
@@ -772,7 +861,7 @@ impl Runtime {
     ) -> Option<EntityGateHold> {
         let mut branch_gates = Vec::with_capacity(relays.len());
         for relay in relays {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
             let Some(fanout) = self
                 .inner
@@ -805,7 +894,7 @@ impl Runtime {
         let EntityGateLease { deadline, reason } = lease;
         let scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
         let operation = match self.inner.entity_gate_holds.entry(coordination.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Occupied(entry) => {
                 let operation = entry.get().clone();
                 if !operation.scope_matches(&scope) {
                     return Err(Report::new(EntityGateOperationError::ScopeConflict {
@@ -814,14 +903,14 @@ impl Runtime {
                 }
                 operation
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                 let operation = Arc::new(EntityGateOperation::new(scope.clone()));
                 entry.insert(operation.clone());
                 let runtime = self.clone();
                 let coordination = coordination.clone();
                 let reason = reason.to_string();
                 let engagement = operation.clone();
-                drop(tokio::spawn(async move {
+                drop(nervix_primitives::task::spawn(async move {
                     runtime
                         .complete_entity_gate_engagement(
                             coordination,
@@ -899,7 +988,7 @@ impl Runtime {
         };
         let mut quiesced_ingestors = Vec::new();
         for ingestor in &ingestors {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
             if !self.inner.ingestors.contains_key(&key) {
                 continue;
@@ -924,7 +1013,6 @@ impl Runtime {
                     .or_default()
                     .insert(coordination.clone());
             }
-            self.inner.ownership_handoff_freeze_changed.notify_waiters();
         }
         let hold = EntityAlterHold {
             coordination: coordination.clone(),
@@ -941,7 +1029,6 @@ impl Runtime {
                 &self.inner.ingestors,
                 &self.inner.ingestor_quiescence,
                 &self.inner.frozen_ownership_handoff_entities,
-                &self.inner.ownership_handoff_freeze_changed,
                 domain,
                 hold,
             )
@@ -961,10 +1048,9 @@ impl Runtime {
         let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
-        let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
         let expiring_operation = operation.clone();
-        drop(tokio::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
+        drop(nervix_primitives::task::spawn(async move {
+            nervix_primitives::time::sleep_until(deadline).await;
             debug!(
                 domain = expiring_operation.scope().domain.as_str(),
                 %coordination,
@@ -975,7 +1061,6 @@ impl Runtime {
                 &ingestors,
                 &ingestor_quiescence,
                 &frozen_ownership_handoff_entities,
-                &ownership_handoff_freeze_changed,
                 &coordination,
                 &expiring_operation,
             )
@@ -1060,15 +1145,13 @@ impl Runtime {
         let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
-        let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
         let coordination = coordination.clone();
-        let release = tokio::spawn(async move {
+        let release = nervix_primitives::task::spawn(async move {
             Self::release_entity_gate_operation_from_state(
                 &entity_gate_holds,
                 &ingestors,
                 &ingestor_quiescence,
                 &frozen_ownership_handoff_entities,
-                &ownership_handoff_freeze_changed,
                 &coordination,
                 &operation,
             )
@@ -1086,10 +1169,9 @@ impl Runtime {
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeRef,
-            BTreeSet<CoordinationIdentity>,
+            Arc<OwnershipHandoffFreezeState>,
             RandomState,
         >,
-        ownership_handoff_freeze_changed: &Notify,
         coordination: &CoordinationIdentity,
         expected_operation: &Arc<EntityGateOperation>,
     ) {
@@ -1108,7 +1190,6 @@ impl Runtime {
             ingestors,
             ingestor_quiescence,
             frozen_ownership_handoff_entities,
-            ownership_handoff_freeze_changed,
             &operation.scope().domain,
             hold,
         )
@@ -1120,10 +1201,9 @@ impl Runtime {
         ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeRef,
-            BTreeSet<CoordinationIdentity>,
+            Arc<OwnershipHandoffFreezeState>,
             RandomState,
         >,
-        ownership_handoff_freeze_changed: &Notify,
         domain: &DomainName,
         hold: EntityAlterHold,
     ) {
@@ -1133,19 +1213,14 @@ impl Runtime {
             for entity in &hold.affected_entities {
                 let key =
                     DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
-                if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
-                    frozen_ownership_handoff_entities.entry(key)
-                {
-                    entry.get_mut().remove(&hold.coordination);
-                    if entry.get().is_empty() {
-                        entry.remove();
-                    }
+                if let Some(state) = frozen_ownership_handoff_entities.get(&key) {
+                    state.remove(&hold.coordination);
                 }
             }
-            ownership_handoff_freeze_changed.notify_waiters();
+            // Each retained entity slot publishes and wakes its own observers.
         }
         for quiesced in &hold.quiesced_ingestors {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             quiesced.control.release(quiesced.cause);
             info!(
                 domain = domain.as_str(),
@@ -1198,6 +1273,23 @@ impl Runtime {
                     .map(|fanout| fanout.outstanding_work_len())
             })
             .sum();
+        #[cfg(feature = "testing")]
+        let buffered_relay_batches =
+            if self
+                .inner
+                .remote_dispatcher
+                .load()
+                .as_deref()
+                .is_some_and(|dispatcher| {
+                    self.inner
+                        .fault_injection
+                        .report_no_owner_buffered_batches(domain, dispatcher.local_node_id())
+                })
+            {
+                0
+            } else {
+                buffered_relay_batches
+            };
         let node_work_items = affected_entities
             .iter()
             .map(|entity| {
@@ -1276,7 +1368,8 @@ impl Runtime {
                 retry_wait: None,
             });
         }
-        let retry = self.inner.emitter_retry_statuses.get(key)?;
+        let failure = self.inner.emitter_statuses.get(key)?.snapshot()?;
+        let retry = failure.retry.as_ref()?;
         let state = match retry.kind {
             EmitterRetryKind::Infrastructure => EmitterPublishingDrainState::RetryingInfrastructure,
             EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
@@ -1295,6 +1388,14 @@ impl Runtime {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(super) fn node_quiesce_counters(
         &self,
         domain: &DomainName,
@@ -1309,8 +1410,8 @@ impl Runtime {
 
     pub(crate) fn try_begin_domain_alter(&self, domain: &DomainName) -> Option<DomainAlterGuard> {
         match self.inner.active_domain_alters.entry(domain.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(_) => None,
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Occupied(_) => None,
+            nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                 entry.insert(ActiveDomainAlter);
                 Some(DomainAlterGuard {
                     domain: domain.clone(),
@@ -1378,13 +1479,14 @@ impl Runtime {
             })
             .map(|entry| entry.key().clone())
             .collect::<HashSet<_>>();
-        publishing_keys.extend(
-            self.inner
-                .emitter_retry_statuses
-                .iter()
-                .filter(|entry| &entry.key().domain == domain)
-                .map(|entry| entry.key().clone()),
-        );
+        for entry in self.inner.emitter_statuses.iter() {
+            if &entry.key().domain == domain
+                && let Some(failure) = entry.value().snapshot()
+                && failure.retry.is_some()
+            {
+                publishing_keys.insert(entry.key().clone());
+            }
+        }
         let mut emitter_publishing = Vec::new();
         for key in publishing_keys {
             let pending_messages = match self.inner.emitter_buffers.get(&key) {
@@ -1406,7 +1508,13 @@ impl Runtime {
                 });
                 continue;
             }
-            let Some(retry) = self.inner.emitter_retry_statuses.get(&key) else {
+            let Some(status) = self.inner.emitter_statuses.get(&key) else {
+                continue;
+            };
+            let Some(failure) = status.snapshot() else {
+                continue;
+            };
+            let Some(retry) = failure.retry.as_ref() else {
                 continue;
             };
             let state = match retry.kind {
@@ -1441,29 +1549,56 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    use std::time::Duration;
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
         CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
         ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
-        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
+        RetryPolicy,
+    };
+    use nervix_primitives::{
+        sync::{
+            Arc, StdArc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            watch,
+        },
+        time::Instant,
     };
     use nonzero_ext::nonzero;
-    use tokio::{
-        sync::watch,
-        time::{Duration, Instant},
-    };
-    use triomphe::Arc;
 
     use super::*;
+    use crate::emitter_execution_plan::EmitterExecutionPlans;
 
     fn coordination(coordinator: &str, process_epoch: u64, sequence: u64) -> CoordinationIdentity {
         CoordinationIdentity::new(named(coordinator), process_epoch, sequence)
+    }
+
+    #[test]
+    fn bolero_freeze_sequences_publish_exact_coordination_owners() {
+        bolero::check!().with_type::<[u8; 64]>().for_each(|steps| {
+            let state = Arc::new(OwnershipHandoffFreezeState::default());
+            let watch = OwnershipHandoffFreezeWatch::over(state.clone());
+            let mut expected = BTreeSet::new();
+            for step in steps {
+                let owner = coordination("coordinator", 1, u64::from((step / 2) % 8) + 1);
+                if step % 2 == 0 {
+                    state.insert(owner.clone());
+                    expected.insert(owner);
+                } else {
+                    state.remove(&owner);
+                    expected.remove(&owner);
+                }
+                assert_eq!(&**state.published.load(), &expected);
+                assert_eq!(watch.observe().is_frozen(), !expected.is_empty());
+                for sequence in 1..=8 {
+                    let owner = coordination("coordinator", 1, sequence);
+                    assert_eq!(state.contains(&owner), expected.contains(&owner));
+                }
+            }
+        });
     }
 
     #[test]
@@ -1574,7 +1709,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1593,7 +1728,7 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let stopped = StdArc::new(AtomicBool::new(false));
         let task_stopped = stopped.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
             task_stopped.store(true, Ordering::SeqCst);
         });
@@ -1665,7 +1800,7 @@ mod tests {
             .expect("test ingestor should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1694,10 +1829,10 @@ mod tests {
             .expect("entity hold should engage");
         assert!(gate.is_closed());
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        nervix_primitives::time::timeout(Duration::from_secs(1), async {
             while runtime.entity_gate_operation_is_held(&coordination) {
-                tokio::task::consume_budget().await;
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -1705,7 +1840,7 @@ mod tests {
         assert!(!gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn equal_operation_ids_from_different_coordinators_fence_each_requested_relay() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1759,7 +1894,7 @@ mod tests {
         assert!(second_gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn concurrent_coordinators_with_equal_sequences_hold_independent_scopes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1810,7 +1945,7 @@ mod tests {
         assert!(second_gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn receiver_finishes_engagement_after_the_coordinator_request_is_cancelled() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1823,7 +1958,7 @@ mod tests {
             fanout,
         );
         let dispatch = gate.acquire_dispatch().await;
-        let request = tokio::spawn({
+        let request = nervix_primitives::task::spawn({
             let runtime = runtime.clone();
             let domain = domain.clone();
             let relay = relay.clone();
@@ -1845,8 +1980,8 @@ mod tests {
             }
         });
         while !gate.is_closed() {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
 
         request.abort();
@@ -1858,7 +1993,7 @@ mod tests {
         );
         drop(dispatch);
 
-        tokio::time::timeout(
+        nervix_primitives::time::timeout(
             Duration::from_secs(1),
             runtime.engage_entity_gate_operation(
                 &coordination,
@@ -1879,7 +2014,7 @@ mod tests {
         assert!(gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn retries_require_the_same_scope_and_stale_operations_cannot_observe_or_release_it() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1973,7 +2108,7 @@ mod tests {
         assert!(!held_gate.is_closed());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn releasing_one_coordinator_preserves_an_overlapping_ownership_freeze() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2027,7 +2162,7 @@ mod tests {
         assert!(!runtime.ownership_handoff_entity_is_frozen(&entity));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn preceding_lease_expiry_does_not_release_a_reengaged_hold() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2073,8 +2208,8 @@ mod tests {
             .await
             .expect("the replacement hold should engage");
 
-        tokio::time::advance(Duration::from_millis(11)).await;
-        tokio::task::yield_now().await;
+        nervix_primitives::time::advance(Duration::from_millis(11)).await;
+        nervix_primitives::task::yield_now().await;
 
         assert!(runtime.entity_gate_operation_is_held(&coordination));
         assert!(gate.is_closed());
@@ -2084,7 +2219,14 @@ mod tests {
     fn emitter_entity_pause_gates_every_input_relay() {
         let emitter = CreateEmitter {
             name: named("combined_sink"),
-            from: ProcessorInputs::new(vec![named("source_b"), named("source_a")], Vec::new()),
+            from: ProcessorInputs::new(
+                vec![named("source_b"), named("source_a")],
+                vec![ProcessorInputWhere {
+                    relay: named("source_b"),
+                    where_clause: nervix_nspl::parse_expression("input.seq > 0")
+                        .expect("the source predicate is valid"),
+                }],
+            ),
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
@@ -2116,6 +2258,28 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain("testing"),
             vec![
+                scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                    name: named("event"),
+                    fields: vec![nervix_models::SchemaField {
+                        name: named("seq"),
+                        ty: nervix_models::ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Codec(nervix_models::CreateCodec {
+                    name: named("event_codec"),
+                    wire_format: nervix_models::CodecWireFormat::Syslog,
+                    schema: named("event"),
+                    encoding_rules: Vec::new(),
+                })),
+                scheduled_model(nervix_models::Model::ClientZeroMq(
+                    nervix_models::CreateClientZeroMq {
+                        name: named("sink"),
+                        mount: None,
+                        config: Vec::new(),
+                    },
+                )),
                 input_relay("source_a"),
                 input_relay("source_b"),
                 scheduled_model(nervix_models::Model::Emitter(emitter.clone())),
@@ -2138,8 +2302,29 @@ mod tests {
             crate::registry::entity_pause_relays_for_schedule(&schedule, &[entity]),
             vec![named("source_a"), named("source_b")]
         );
-        let remote_consumers = Runtime::remote_runtime_consumers_for_schedule(
-            &schedule,
+        let activation =
+            DomainActivationPlan::from_scheduled_nodes(&domain("testing"), &schedule.nodes)
+                .expect("the test schedule has planned schemas and relays");
+        let emitter_plans =
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation)
+                .expect("the test emitter has a matching client and inputs");
+        let planned = emitter_plans
+            .emitter(&emitter.name)
+            .expect("the scheduled emitter has one plan");
+        assert_eq!(
+            planned
+                .inputs
+                .iter()
+                .map(|input| input.relay.as_str())
+                .collect::<Vec<_>>(),
+            ["source_b", "source_a"]
+        );
+        assert!(planned.inputs[0].from_where.is_some());
+        assert!(planned.inputs[1].from_where.is_none());
+        let revision = ExecutionRevision::from_schedule(&schedule)
+            .assured("the emitter fixture produces a complete revision");
+        let remote_consumers = Runtime::remote_runtime_consumers_for_revision(
+            &revision,
             &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert_eq!(remote_consumers.len(), 2);

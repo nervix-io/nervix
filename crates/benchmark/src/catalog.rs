@@ -45,6 +45,7 @@ struct BenchmarkRenderContext<'a> {
     output_topic: &'a str,
     consumer_group: &'a str,
     lanes: Vec<u32>,
+    lane_count: u32,
     parameters: &'a toml::Table,
     dependencies: &'a BTreeMap<String, String>,
 }
@@ -341,6 +342,7 @@ impl LoadedBenchmark {
             output_topic: inputs.output_topic,
             consumer_group: inputs.consumer_group,
             lanes: (0..inputs.lane_count).collect(),
+            lane_count: inputs.lane_count,
             parameters,
             dependencies: inputs.dependency_endpoints,
         };

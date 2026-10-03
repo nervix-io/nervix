@@ -8,9 +8,10 @@
 //! - **Must not know.** The harness that replaces it in a test build.
 
 #[cfg(not(feature = "testing"))]
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use std::time::Duration;
+
 #[cfg(not(feature = "testing"))]
-use tokio::time::Duration;
+use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
 
 #[cfg(not(feature = "testing"))]
 use crate::ConfiguredFaultInjection;
@@ -52,6 +53,10 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn state_checkpoint_announcements_are_lost(&self) -> bool {
+        false
+    }
+
     pub(in crate::runtime) fn wasm_checkpoint_storage_fails(&self) -> bool {
         false
     }
@@ -82,4 +87,23 @@ impl ConfiguredFaultInjection {
         _branch: Option<&str>,
     ) {
     }
+
+    pub(in crate::runtime) async fn pause_remote_relay_dispatch_if_armed(
+        &self,
+        _domain: &DomainName,
+    ) {
+    }
+
+    pub(in crate::runtime) fn loses_remote_acknowledgement(
+        &self,
+        _resolver: &ClusterNodeName,
+        _registrar: &ClusterNodeName,
+    ) -> bool {
+        false
+    }
+
+    pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
+    }
+
+    pub(in crate::runtime) fn mark_owner_relay_fanout_complete(&self, _domain: &DomainName) {}
 }

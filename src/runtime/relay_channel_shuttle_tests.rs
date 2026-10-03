@@ -3,32 +3,31 @@
 //! Layer: test harness.
 //! - **Owns.** The fencing, waiter-release and admission invariants the production relay dispatch
 //!   gate and relay fan-out are held to.
-//! - **Depends on.** The relay channel types, the server Shuttle runner, and the task labels and
-//!   timeout triggers of Shuttle's Tokio.
+//! - **Depends on.** The relay channel types, the model harness's Shuttle runner, and the task
+//!   labels and timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, or what a dispatch delivers.
 
-// The standard library's atomics are not Shuttle scheduling points, so each gate and wake record
-// below changes in the same scheduling step as the operation it records.
+// Unmodeled atomics are not Shuttle scheduling points, so each gate and wake record below changes
+// in the same scheduling step as the operation it records.
 use std::{
     future::Future,
     num::NonZeroUsize,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
     task::{Context, Wake, Waker},
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::{check_pct, check_random};
+use nervix_primitives::{
+    sync::{Arc, StdArc, oneshot},
+    time::Instant,
+    unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use shuttle::rand::{Rng as _, thread_rng};
-use tokio::{sync::oneshot, time::Instant};
-use triomphe::Arc;
 
 use super::{
     RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease, RelayReceiver, RelayTryRecv,
 };
-use crate::shuttle_test::{check_pct, check_random};
 
 const RANDOM_ITERATIONS: usize = 1_000;
 const PCT_ITERATIONS: usize = 1_000;
@@ -93,10 +92,10 @@ impl GateRecords {
 /// Acquires `dispatches` permits one after another and holds each across a scheduling point.
 async fn dispatch(gate: Arc<RelayDispatchGate>, records: Arc<GateRecords>, dispatches: usize) {
     for _ in 0..dispatches {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let permit = gate.acquire_dispatch().await;
         records.permit_acquired();
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         records.assert_no_permit_overlaps_a_quiescent_lease();
         records.permit_dropping();
         drop(permit);
@@ -147,10 +146,12 @@ fn dispatch_permits_never_overlap_a_quiescent_lease(deadline: Instant) {
         let records = Arc::new(GateRecords::default());
         let (closed, closed_is_reported) = oneshot::channel();
 
-        let first_dispatcher = tokio::spawn(dispatch(gate.clone(), records.clone(), 2));
-        let second_dispatcher = tokio::spawn(dispatch(gate.clone(), records.clone(), 2));
-        let waiter = tokio::spawn(observe_close_then_open(gate.clone(), closed));
-        let fence = tokio::spawn(fence_until_released(
+        let first_dispatcher =
+            nervix_primitives::task::spawn(dispatch(gate.clone(), records.clone(), 2));
+        let second_dispatcher =
+            nervix_primitives::task::spawn(dispatch(gate.clone(), records.clone(), 2));
+        let waiter = nervix_primitives::task::spawn(observe_close_then_open(gate.clone(), closed));
+        let fence = nervix_primitives::task::spawn(fence_until_released(
             gate.clone(),
             records.clone(),
             closed_is_reported,
@@ -225,9 +226,11 @@ fn overlapping_leases_all_release_before_dispatch_resumes(deadline: Instant) {
         let (first_completed, first_is_completed) = oneshot::channel();
         let (second_completed, second_is_completed) = oneshot::channel();
 
-        let first_dispatcher = tokio::spawn(dispatch(gate.clone(), records.clone(), 2));
-        let second_dispatcher = tokio::spawn(dispatch(gate.clone(), records.clone(), 2));
-        let first_fence = tokio::spawn(fence_overlapping_another(
+        let first_dispatcher =
+            nervix_primitives::task::spawn(dispatch(gate.clone(), records.clone(), 2));
+        let second_dispatcher =
+            nervix_primitives::task::spawn(dispatch(gate.clone(), records.clone(), 2));
+        let first_fence = nervix_primitives::task::spawn(fence_overlapping_another(
             gate.clone(),
             records.clone(),
             FenceHandshake {
@@ -236,7 +239,7 @@ fn overlapping_leases_all_release_before_dispatch_resumes(deadline: Instant) {
             },
             deadline,
         ));
-        let second_fence = tokio::spawn(fence_overlapping_another(
+        let second_fence = nervix_primitives::task::spawn(fence_overlapping_another(
             gate.clone(),
             records.clone(),
             FenceHandshake {
@@ -293,7 +296,7 @@ async fn expect_expired_fence(mut lease: RelayDispatchGateLease) {
 fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_deadline: Instant) {
     // Timeout triggers are thread-local rather than per execution, so every execution starts
     // without the trigger an earlier one registered.
-    tokio::time::clear_triggers();
+    nervix_primitives::time::clear_triggers();
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
         let earlier_permit = gate.acquire_dispatch().await;
@@ -302,8 +305,8 @@ fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_dead
         let lease =
             RelayDispatchGateLease::engage(gate.clone(), expired_deadline, "shuttle expired fence");
 
-        let fence = tokio::spawn(expect_expired_fence(lease));
-        let dispatcher = tokio::spawn({
+        let fence = nervix_primitives::task::spawn(expect_expired_fence(lease));
+        let dispatcher = nervix_primitives::task::spawn({
             let gate = gate.clone();
             async move {
                 mark_gate_deadline_may_fire();
@@ -311,7 +314,7 @@ fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_dead
                 drop(permit);
             }
         });
-        let open_waiter = tokio::spawn({
+        let open_waiter = nervix_primitives::task::spawn({
             let gate = gate.clone();
             async move {
                 mark_gate_deadline_may_fire();
@@ -320,15 +323,15 @@ fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_dead
         });
         // Whether the waiters' deadline timeouts fire at all is a recorded choice. When they do
         // not, only an expiry that another gate operation observes can free the waiters.
-        let deadline = tokio::spawn(async {
+        let deadline = nervix_primitives::task::spawn(async {
             if thread_rng().gen_bool(0.5) {
-                tokio::time::trigger_timeouts(|labels| {
+                nervix_primitives::time::trigger_timeouts(|labels| {
                     labels.get::<GateDeadlineMayFire>().is_some()
                 });
             }
         });
 
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         drop(earlier_permit);
 
         fence
@@ -367,14 +370,14 @@ fn shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence() 
 fn canceled_dispatch_releases_its_fence_permit(deadline: Instant) {
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
-        let dispatcher = tokio::spawn({
+        let dispatcher = nervix_primitives::task::spawn({
             let gate = gate.clone();
             async move {
                 let _permit = gate.acquire_dispatch().await;
                 std::future::pending::<()>().await;
             }
         });
-        let fence = tokio::spawn({
+        let fence = nervix_primitives::task::spawn({
             let gate = gate.clone();
             async move {
                 let mut lease = RelayDispatchGateLease::engage(gate, deadline, "shuttle fence");
@@ -385,7 +388,7 @@ fn canceled_dispatch_releases_its_fence_permit(deadline: Instant) {
             }
         });
 
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         dispatcher.abort();
         let Err(cancellation) = dispatcher.await else {
             panic!("a dispatch that holds its permit forever completes only by cancellation");
@@ -481,18 +484,18 @@ fn dispatches_parked_behind_a_lease_wake_only_on_its_release(deadline: Instant) 
 
         let first_wakes = StdArc::new(WakeRecord::default());
         let second_wakes = StdArc::new(WakeRecord::default());
-        let first_dispatcher = tokio::spawn(record_wakes(
+        let first_dispatcher = nervix_primitives::task::spawn(record_wakes(
             dispatch_once(gate.clone()),
             first_wakes.clone(),
         ));
-        let second_dispatcher = tokio::spawn(record_wakes(
+        let second_dispatcher = nervix_primitives::task::spawn(record_wakes(
             dispatch_once(gate.clone()),
             second_wakes.clone(),
         ));
 
         for _ in 0..LEASE_HOLD_YIELDS {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
         drop(lease);
 
@@ -536,7 +539,7 @@ fn capacity(value: usize) -> NonZeroUsize {
 /// Publishes `batches` in order.
 async fn publish(channel: Arc<RelayBroadcast<u32>>, batches: &'static [u32]) {
     for batch in batches {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         channel
             .broadcast(*batch)
             .await
@@ -559,28 +562,30 @@ fn capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain()
         let channel = Arc::new(RelayBroadcast::with_capacity(capacity(BUFFERED.len())));
         let mut receiver = channel.new_receiver();
         for batch in BUFFERED {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             channel
                 .broadcast(batch)
                 .await
                 .assured("the consumer has room for every buffered batch");
         }
 
-        let first_publisher = tokio::spawn(publish(channel.clone(), &FIRST_PUBLISHED));
-        let second_publisher = tokio::spawn(publish(channel.clone(), &SECOND_PUBLISHED));
-        let shrink = tokio::spawn({
+        let first_publisher =
+            nervix_primitives::task::spawn(publish(channel.clone(), &FIRST_PUBLISHED));
+        let second_publisher =
+            nervix_primitives::task::spawn(publish(channel.clone(), &SECOND_PUBLISHED));
+        let shrink = nervix_primitives::task::spawn({
             let channel = channel.clone();
             async move {
                 channel.set_capacity(capacity(1));
             }
         });
-        let drain = tokio::spawn({
+        let drain = nervix_primitives::task::spawn({
             let channel = channel.clone();
             async move {
                 let expected = BUFFERED.len() + FIRST_PUBLISHED.len() + SECOND_PUBLISHED.len();
                 let mut batches = Vec::with_capacity(expected);
                 while batches.len() < expected {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     assert!(
                         channel.len() <= BUFFERED.len(),
                         "admission never passes the largest capacity in force"
@@ -659,9 +664,9 @@ fn capacity_growth_admits_waiting_publishers_without_a_take() {
             .await
             .assured("the consumer has room for one buffered batch");
 
-        let first_publisher = tokio::spawn(publish(channel.clone(), &[1]));
-        let second_publisher = tokio::spawn(publish(channel.clone(), &[2]));
-        let growth = tokio::spawn({
+        let first_publisher = nervix_primitives::task::spawn(publish(channel.clone(), &[1]));
+        let second_publisher = nervix_primitives::task::spawn(publish(channel.clone(), &[2]));
+        let growth = nervix_primitives::task::spawn({
             let channel = channel.clone();
             async move {
                 channel.set_capacity(capacity(3));
@@ -691,7 +696,7 @@ fn capacity_growth_admits_waiting_publishers_without_a_take() {
 
         let mut batches = Vec::with_capacity(3);
         for _ in 0..3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let batch = receiver
                 .recv()
                 .await
@@ -719,7 +724,7 @@ fn shuttle_capacity_growth_admits_waiting_publishers_without_a_take() {
 async fn receive_through(mut receiver: RelayReceiver<u32>, last: u32) -> DrainedReceiver {
     let mut batches = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             receiver.len() <= 1,
             "a consumer at capacity one never holds more than one delivered batch"
@@ -761,15 +766,18 @@ fn publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave() {
             .await
             .assured("every consumer has room for the first batch");
 
-        let publisher = tokio::spawn(publish(channel.clone(), &[1, 2]));
-        let first_consumer = tokio::spawn(receive_through(first, LAST));
-        let second_consumer = tokio::spawn(receive_through(second, LAST));
-        let lagging_leaves = tokio::spawn(async move {
+        let publisher = nervix_primitives::task::spawn(publish(channel.clone(), &[1, 2]));
+        let first_consumer = nervix_primitives::task::spawn(receive_through(first, LAST));
+        let second_consumer = nervix_primitives::task::spawn(receive_through(second, LAST));
+        let lagging_leaves = nervix_primitives::task::spawn(async move {
             drop(lagging);
         });
         let (attached, late_is_attached) = oneshot::channel();
-        let late_consumer =
-            tokio::spawn(attach_and_receive_through(channel.clone(), attached, LAST));
+        let late_consumer = nervix_primitives::task::spawn(attach_and_receive_through(
+            channel.clone(),
+            attached,
+            LAST,
+        ));
 
         // The lagging consumer never takes the first batch, so the publisher finishes only once
         // that consumer leaves and every remaining consumer takes each batch.
@@ -842,17 +850,17 @@ fn losing_every_consumer_delivers_or_returns_the_waiting_batch() {
             .await
             .assured("both consumers have room for one batch");
 
-        let publisher = tokio::spawn({
+        let publisher = nervix_primitives::task::spawn({
             let channel = channel.clone();
             async move { channel.broadcast(1).await }
         });
-        let first_leaves = tokio::spawn(async move {
+        let first_leaves = nervix_primitives::task::spawn(async move {
             drop(first);
         });
-        let second_leaves = tokio::spawn(async move {
+        let second_leaves = nervix_primitives::task::spawn(async move {
             drop(second);
         });
-        let late_attach = tokio::spawn({
+        let late_attach = nervix_primitives::task::spawn({
             let channel = channel.clone();
             async move { channel.new_receiver() }
         });

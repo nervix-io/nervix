@@ -1,8 +1,10 @@
 # HTTP emitter
 
-Status: specified. Not implemented. This is the product contract the HTTP emitter delivery tasks
-implement and qualify. [The acceptance ledger](../../tests/http-emitter-acceptance-ledger.md) maps
-every criterion below to its owning task and its public evidence.
+Status: implemented. This document defines the current contract of the HTTP emitter.
+[The acceptance ledger](../../tests/http-emitter-acceptance-ledger.md) maps every criterion below to
+its owning task and records the public evidence that qualified it.
+[HTTP Emitter Architecture](../src/http-emitter-architecture.md) consolidates the implemented
+path and evidence in the Architecture And Internals section.
 
 ## Required outcome
 
@@ -44,8 +46,8 @@ Method names are string values: `METHOD 'POST'` is a constant expression.
 
 ### Example: a JSON request
 
-The following proposed configuration consumes records supplied to `outgoing` by an application
-graph. `api.example.com` is a deployment placeholder for an already provisioned endpoint.
+The following configuration consumes records supplied to `outgoing` by an application graph.
+`api.example.com` is a deployment placeholder for an already provisioned endpoint.
 
 ```nspl,ignore
 CREATE UNPACED DOMAIN delivery;
@@ -148,9 +150,10 @@ preserves its spelling. Standard methods and extension methods are accepted, exc
 and `TRACE`, which are outside this request-publishing contract. Their ASCII case variants are
 also rejected rather than providing a way around that restriction.
 
-`GET` and `HEAD` require `WITHOUT BODY`. `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, and extension
-methods may use either body selection. The same restrictions apply when the method is computed
-per record. This deliberately avoids relying on undefined GET or HEAD content semantics.
+`GET` and `HEAD` require `WITHOUT BODY`, and so do their ASCII case variants, which likewise
+provide no way around that restriction. `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, and other
+extension methods may use either body selection. The same restrictions apply when the method is
+computed per record. This deliberately avoids relying on undefined GET or HEAD content semantics.
 See [HTTP method semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-9).
 
 ### Path and query

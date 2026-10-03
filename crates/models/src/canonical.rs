@@ -12,13 +12,14 @@ use meticulous::OptionExt as _;
 use thiserror::Error;
 
 use crate::{
-    AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AckWindow, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
-    ClientConfigEntry, ClientResourceMount, CodecEncoding, CodecEncodingRule,
+    AvroType, Backup, BackupResources, BackupScope, BinaryOperator, BranchEviction,
+    BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
+    ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
     CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
@@ -29,23 +30,29 @@ use crate::{
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal, FlushPolicy,
-    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
-    InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
-    MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
-    Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType,
-    PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator,
-    RedisPubSubIngestMode, RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, TransactionInspectionTarget,
-    UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
-    ZeroMqIngestMode,
+    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
+    DomainStartPoint, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
+    EndpointIngestMode, ExistingUserPolicy, Expression, FieldName, FieldScope, Float64Literal,
+    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode,
+    KafkaOffsetMode, Literal, MaterializedStateDependency, MaterializedStatePolicy,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind,
+    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+    RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName, Restore, RestoreMode,
+    RestoreScope, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
+    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
+
+/// The NSPL release canonical rendering writes.
+///
+/// NSPL is versioned with the product, so a text this crate renders is read back by the parser of
+/// the same release. An archive records it beside the NSPL it holds.
+pub const NSPL_LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Width of one canonical indentation level.
 const INDENT: usize = 2;
@@ -677,8 +684,8 @@ impl Statement {
                     DomainPace::Paced { period, skew } => format!(
                         "PACED DOMAIN {} WITH PERIOD {} SKEW {}",
                         create.body.id.as_str(),
-                        period,
-                        skew
+                        clock_duration_literal(period.as_nanos()),
+                        clock_duration_literal(skew.as_nanos())
                     ),
                     DomainPace::Unpaced => {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
@@ -771,6 +778,8 @@ impl Statement {
                 upload.identifier.as_str(),
                 string_literal(&upload.source_path)
             )),
+            Self::Backup(backup) => Ok(backup.to_canonical_nspl()),
+            Self::Restore(restore) => Ok(restore.to_canonical_nspl()),
             Self::StartDomain(start) => Ok(match &start.start {
                 DomainStartPoint::Resume => "START;".to_string(),
                 DomainStartPoint::Now { time_rate } => {
@@ -900,6 +909,7 @@ impl Statement {
                 show.name.as_str()
             )),
             Self::ShowUdfs(_) => Ok("SHOW UDFS;".to_string()),
+            Self::ShowIngestors(_) => Ok("SHOW INGESTORS;".to_string()),
             Self::ShowPlacements(_) => Ok("SHOW PLACEMENTS;".to_string()),
             Self::ShowRelayMaterializedState(show) => Ok(format!(
                 "SHOW RELAY {} MATERIALIZED STATE;",
@@ -909,6 +919,69 @@ impl Statement {
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_nspl()),
         }
+    }
+}
+
+impl Backup {
+    /// Renders the statement with the clauses it needs, omitting the default of including resource
+    /// bytes.
+    pub fn to_canonical_nspl(&self) -> String {
+        let scope = match &self.scope {
+            BackupScope::Cluster => "CLUSTER".to_string(),
+            BackupScope::Domain(Some(domain)) => format!("DOMAIN {}", domain.as_str()),
+            BackupScope::Domain(None) => "DOMAIN".to_string(),
+        };
+        let resources = match self.resources {
+            BackupResources::Included => "",
+            BackupResources::Omitted => " WITHOUT RESOURCES",
+        };
+        format!(
+            "BACKUP {scope} TO {}{resources};",
+            string_literal(&self.destination)
+        )
+    }
+}
+
+impl Restore {
+    /// Renders the statement with the clauses it needs, omitting the default `ON EXISTING USER
+    /// FAIL`.
+    pub fn to_canonical_nspl(&self) -> String {
+        let source = string_literal(&self.source);
+        let mut statement = match &self.scope {
+            RestoreScope::Cluster { existing_users } => {
+                let mut statement = format!("RESTORE CLUSTER FROM {source}");
+                if *existing_users != ExistingUserPolicy::default() {
+                    statement.push_str(&format!(" ON EXISTING USER {}", existing_users.as_ref()));
+                }
+                statement
+            }
+            RestoreScope::Domain { domain, target } => {
+                let mut statement = format!("RESTORE DOMAIN {}", domain.as_str());
+                if let Some(target) = target {
+                    statement.push_str(&format!(" AS {}", target.as_str()));
+                }
+                statement.push_str(&format!(" FROM {source}"));
+                statement
+            }
+        };
+        match self.mode {
+            RestoreMode::Apply => {}
+            RestoreMode::DryRun => statement.push_str(" DRY RUN"),
+        }
+        statement.push(';');
+        statement
+    }
+}
+
+impl DescribeBackup {
+    /// Renders the statement, omitting the default `FORMAT TEXT`.
+    pub fn to_canonical_nspl(&self) -> String {
+        let mut statement = format!("DESCRIBE BACKUP {}", string_literal(&self.source));
+        if self.format != InspectionFormat::default() {
+            statement.push_str(&format!(" FORMAT {}", self.format.as_ref()));
+        }
+        statement.push(';');
+        statement
     }
 }
 
@@ -946,6 +1019,25 @@ fn subscription_literal_to_nspl(literal: &SubscriptionLiteral) -> String {
         SubscriptionLiteral::Number(value) => value.clone(),
         SubscriptionLiteral::Bool(value) => value.to_string().to_ascii_uppercase(),
     }
+}
+
+/// Renders `models` as one canonical NSPL document: each model's `CREATE` statement in the order
+/// given, separated by a blank line and ending with a newline.
+///
+/// A parser reads the document back statement by statement, so the order is the order the models
+/// have to be created in; the caller decides it.
+pub fn canonical_nspl_document<'model, Version: Display + 'model>(
+    models: impl IntoIterator<Item = &'model Model<Version>>,
+) -> error_stack::Result<String, CanonicalNsplError> {
+    let mut document = String::new();
+    for model in models {
+        if !document.is_empty() {
+            document.push('\n');
+        }
+        document.push_str(&model.to_canonical_nspl()?);
+        document.push('\n');
+    }
+    Ok(document)
 }
 
 impl<Version: Display> Model<Version> {
@@ -1281,15 +1373,8 @@ macro_rules! impl_standard_client_canonical_nspl {
         $(
             impl<Version: Display> $Client<Version> {
                 pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-                    let config = self
-                        .config
-                        .iter()
-                        .map(ClientConfigEntry::to_canonical_nspl)
-                        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-                        .join(", ");
-
                     let mut clauses = client_head_clauses!(self, $type_label, $pooling);
-                    clauses.push(Clause::braced("CONFIG", split_config_entries(&config)));
+                    clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
 
                     Ok(clause_statement(
                         format!("CREATE CLIENT {}", self.name.as_str()),
@@ -1326,12 +1411,7 @@ impl_standard_client_canonical_nspl! {
 
 impl<Version: Display> CreateClientS3<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
+        let config = config_entry_items(&self.config)?.join(", ");
 
         Ok(format!(
             "CREATE CLIENT {} TYPE S3{} CONFIG {{{}}};",
@@ -1344,13 +1424,6 @@ impl<Version: Display> CreateClientS3<Version> {
 
 impl<Version: Display> CreateClientWebsockets<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
         Ok(clause_statement(
             format!("CREATE CLIENT {}", self.name.as_str()),
             vec![
@@ -1359,7 +1432,7 @@ impl<Version: Display> CreateClientWebsockets<Version> {
                     signaling_protocol_clause(self.signaling_protocol.as_ref()),
                     client_mount_clause(self.mount.as_ref()),
                 )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
+                Clause::braced("CONFIG", config_entry_items(&self.config)?),
             ],
         ))
     }
@@ -1455,12 +1528,7 @@ impl<Version: Display> SignalingWireFormat<Version> {
         let Self::Protobuf(config) = self else {
             return Ok(self.as_ref().to_string());
         };
-        let protobuf_config = config
-            .config
-            .iter()
-            .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<Result<Vec<_>, _>>()?
-            .join(", ");
+        let protobuf_config = config_entry_items(&config.config)?.join(", ");
         Ok(format!(
             "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} SEND MESSAGE {} WAIT MESSAGE {}",
             config.resource.as_str(),
@@ -1500,56 +1568,65 @@ fn jaq_program_list_to_nspl(programs: &[String]) -> String {
 
 impl<Version: Display> CreateCodec<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let (wire, transformations) = match &self.wire_format {
-            CodecWireFormat::Json { wire_schema } => (
-                format!("WIRE JSON SCHEMA {}", wire_schema.as_str()),
-                String::new(),
-            ),
-            CodecWireFormat::Cbor { wire_schema } => (
-                format!("WIRE CBOR SCHEMA {}", wire_schema.as_str()),
-                String::new(),
-            ),
-            CodecWireFormat::Avro { wire_schema } => (
-                format!("WIRE AVRO SCHEMA {}", wire_schema.as_str()),
-                String::new(),
-            ),
+        let mut clauses = Vec::new();
+        let transformations = match &self.wire_format {
+            CodecWireFormat::Json { wire_schema } => {
+                clauses.push(Clause::line(format!(
+                    "FROM WIRE JSON SCHEMA {}",
+                    wire_schema.as_str()
+                )));
+                String::new()
+            }
+            CodecWireFormat::Cbor { wire_schema } => {
+                clauses.push(Clause::line(format!(
+                    "FROM WIRE CBOR SCHEMA {}",
+                    wire_schema.as_str()
+                )));
+                String::new()
+            }
+            CodecWireFormat::Avro { wire_schema } => {
+                clauses.push(Clause::line(format!(
+                    "FROM WIRE AVRO SCHEMA {}",
+                    wire_schema.as_str()
+                )));
+                String::new()
+            }
             CodecWireFormat::Syslog => {
                 if !self.encoding_rules.is_empty() {
                     return Err(Report::new(CanonicalNsplError::SyslogEncodingRules {
                         codec: self.name.clone(),
                     }));
                 }
-                ("SYSLOG".to_string(), String::new())
+                clauses.push(Clause::line("FROM SYSLOG"));
+                String::new()
             }
             CodecWireFormat::JaqNative {
                 format,
                 transformations,
-            } => (
-                format.as_ref().to_string(),
-                codec_jaq_transformations_to_nspl(&self.name, transformations)?,
-            ),
+            } => {
+                clauses.push(Clause::line(format!("FROM {}", format.as_ref())));
+                codec_jaq_transformations_to_nspl(&self.name, transformations)?
+            }
             CodecWireFormat::Protobuf(config) => {
-                let protobuf_config = config
-                    .config
-                    .iter()
-                    .map(ClientConfigEntry::to_canonical_nspl)
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ");
+                // The configuration map is a block of its own; the messages follow it on one line.
+                clauses.push(Clause::line(format!(
+                    "FROM PROTOBUF USING RESOURCE {} VERSION {}",
+                    config.resource.as_str(),
+                    config.resource_version,
+                )));
+                clauses.push(Clause::braced(
+                    "CONFIG",
+                    config_entry_items(&config.config)?,
+                ));
                 let batch_message = match &config.batch_message {
                     Some(message) => format!(" BATCH MESSAGE {}", string_literal(message)),
                     None => String::new(),
                 };
-                (
-                    format!(
-                        "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} MESSAGE \
-                         {}{batch_message}",
-                        config.resource.as_str(),
-                        config.resource_version,
-                        protobuf_config,
-                        string_literal(&config.message)
-                    ),
-                    codec_jaq_transformations_to_nspl(&self.name, &config.transformations)?,
-                )
+                clauses.push(Clause::line(format!(
+                    "MESSAGE {}{batch_message}",
+                    string_literal(&config.message)
+                )));
+                codec_jaq_transformations_to_nspl(&self.name, &config.transformations)?
             }
         };
         let encoding_rules = if self.encoding_rules.is_empty() {
@@ -1564,22 +1641,6 @@ impl<Version: Display> CreateCodec<Version> {
                     .join(", ")
             )
         };
-        let mut clauses = Vec::new();
-        // The wire description may itself carry a CONFIG map, which becomes a block of its own.
-        match wire.split_once(" CONFIG {") {
-            Some((before, rest)) => {
-                let (entries, after) = rest.rsplit_once('}').verified(
-                    "the split above found an opening CONFIG brace, which this renderer always \
-                     closes",
-                );
-                clauses.push(Clause::line(format!("FROM {before}")));
-                clauses.push(Clause::braced("CONFIG", split_config_entries(entries)));
-                if !after.trim().is_empty() {
-                    clauses.push(Clause::line(after.trim().to_string()));
-                }
-            }
-            None => clauses.push(Clause::line(format!("FROM {wire}"))),
-        }
         clauses.push(Clause::line(format!("TO SCHEMA {}", self.schema.as_str())));
         if !transformations.is_empty() {
             clauses.push(Clause::line(transformations.trim().to_string()));
@@ -1595,38 +1656,14 @@ impl<Version: Display> CreateCodec<Version> {
     }
 }
 
-/// Splits a rendered `CONFIG` map body back into its entries.
-///
-/// Entry values are quoted, so a comma inside one never separates entries; splitting tracks the
-/// quote state rather than scanning for commas blindly.
-fn split_config_entries(entries: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-
-    for ch in entries.chars() {
-        match quote {
-            Some(open) => {
-                if ch == open {
-                    quote = None;
-                }
-                current.push(ch);
-            }
-            None if ch == '\'' || ch == '"' => {
-                quote = Some(ch);
-                current.push(ch);
-            }
-            None if ch == ',' => {
-                items.push(current.trim().to_string());
-                current.clear();
-            }
-            None => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        items.push(current.trim().to_string());
-    }
-    items
+/// Renders configuration entries as the items of a `CONFIG` block, in declaration order.
+fn config_entry_items(
+    entries: &[ClientConfigEntry],
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+    entries
+        .iter()
+        .map(ClientConfigEntry::to_canonical_nspl)
+        .collect()
 }
 
 /// Renders the JAQ programs a codec runs; `codec` names the codec a refusal reports.
@@ -1696,14 +1733,25 @@ impl CreateIngestor {
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
             None => String::new(),
         };
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            ingest_source_to_nspl(&self.source)
-        ))];
-        clauses.push(Clause::line(format!(
-            "DECODE USING {}",
-            self.decode_using_codec.as_str()
-        )));
+        let mut clauses = Vec::new();
+        match &self.input {
+            IngestorInput::Transport(input) => {
+                clauses.push(Clause::line(format!(
+                    "FROM {}",
+                    ingest_source_to_nspl(&input.source)
+                )));
+                clauses.push(Clause::line(format!(
+                    "DECODE USING {}",
+                    input.codec.as_str()
+                )));
+            }
+            IngestorInput::Client(source) => {
+                clauses.push(Clause::line(format!(
+                    "FROM {}",
+                    client_ingest_source_to_nspl(source)
+                )));
+            }
+        }
         if !timestamp.is_empty() {
             clauses.push(Clause::line(timestamp.trim_start().to_string()));
         }
@@ -1727,7 +1775,10 @@ impl CreateGenerator {
                 "USING MATERIALIZED STATE {}",
                 self.materialized_relay.as_str()
             )),
-            Clause::line(format!("EACH {}", self.each)),
+            Clause::line(format!(
+                "EACH {}",
+                clock_duration_literal(self.each.as_nanos())
+            )),
             Clause::line(branch_selection_to_nspl(&self.branched_by)),
         ];
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
@@ -1756,8 +1807,8 @@ impl CreateRelay {
             }
         }
         if let Some(state) = &self.materialized_state {
-            rendered.push(' ');
-            rendered.push_str(materialized_relay_state_to_nspl(state));
+            rendered.push_str(" WITH MATERIALIZED STATE ");
+            rendered.push_str(state.as_ref());
         }
         rendered.push(';');
         Ok(rendered)
@@ -1775,12 +1826,6 @@ impl<Version: Display> CreateLookup<Version> {
             string_literal(&self.path),
             self.decode_using_codec.as_str()
         ))
-    }
-}
-
-fn materialized_relay_state_to_nspl(state: &MaterializedRelayState) -> &'static str {
-    match state {
-        MaterializedRelayState::LastByTimestamp => "WITH MATERIALIZED STATE LAST BY TIMESTAMP",
     }
 }
 
@@ -2053,7 +2098,7 @@ impl CreateEmitter {
                 sink_clauses.push(Clause::line(format!("ENCODE USING {}", codec.as_str())));
             }
             EmitterBody::WithoutBody => sink_clauses.push(Clause::line("WITHOUT BODY".to_string())),
-            EmitterBody::Values => {}
+            EmitterBody::Values | EmitterBody::Client => {}
         }
 
         let mut clauses = vec![Clause::line(format!(
@@ -2456,7 +2501,10 @@ fn alter_generator_operation_to_nspl(
         AlterGeneratorOperation::SetMaterializedState { relay } => {
             Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
         }
-        AlterGeneratorOperation::SetEach { each } => Ok(format!("SET EACH {each}")),
+        AlterGeneratorOperation::SetEach { each } => Ok(format!(
+            "SET EACH {}",
+            clock_duration_literal(each.as_nanos())
+        )),
         AlterGeneratorOperation::SetBranching { branching } => {
             Ok(format!("SET {}", branch_selection_to_nspl(branching)))
         }
@@ -2576,7 +2624,7 @@ fn alter_emitter_operation_to_nspl(
             let body_clause = match body {
                 Some(EmitterBody::Codec { codec }) => format!(" ENCODE USING {}", codec.as_str()),
                 Some(EmitterBody::WithoutBody) => " WITHOUT BODY".to_string(),
-                Some(EmitterBody::Values) | None => String::new(),
+                Some(EmitterBody::Values | EmitterBody::Client) | None => String::new(),
             };
             Ok(format!(
                 "SET TO {}{commit_policy} MODE {}{body_clause}",
@@ -2622,6 +2670,9 @@ fn alter_ingestor_operation_to_nspl(
     match operation {
         AlterIngestorOperation::SetSource { source } => {
             Ok(format!("SET FROM {}", ingest_source_to_nspl(source)))
+        }
+        AlterIngestorOperation::SetClientSource { source } => {
+            Ok(format!("SET FROM {}", client_ingest_source_to_nspl(source)))
         }
         AlterIngestorOperation::SetQuiesce { quiesce } => {
             Ok(format!("SET QUIESCE {}", ingest_quiesce_to_nspl(quiesce)))
@@ -2817,6 +2868,32 @@ pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
     }
 }
 
+/// A client source's clause after `FROM`. Its quiesce mode is always `SUSPEND`, which the grammar
+/// requires it to state.
+fn client_ingest_source_to_nspl(source: &ClientIngestSource) -> String {
+    format!(
+        "CLIENT SCHEMA {} MODE {} ON QUIESCE SUSPEND",
+        source.schema.as_str(),
+        source.mode.to_canonical_nspl()
+    )
+}
+
+impl ClientIngestMode {
+    /// The mode clause of a client source, after its `MODE` keyword.
+    pub fn to_canonical_nspl(&self) -> String {
+        let Self {
+            window,
+            ack_timeout,
+            retry_policy,
+        } = self;
+        format!(
+            "ACK {} ACK TIMEOUT {ack_timeout} RETRY POLICY {}",
+            ack_window_to_nspl(window),
+            retry_policy_to_nspl(retry_policy)
+        )
+    }
+}
+
 fn ingest_source_to_nspl(source: &IngestSource) -> String {
     match source {
         IngestSource::Http {
@@ -2826,7 +2903,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
         } => format!(
             "HTTP {} EVERY {} ON QUIESCE {}",
             client.as_str(),
-            every,
+            clock_duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Kafka {
@@ -2945,7 +3022,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "PROMETHEUS {} QUERY {} EVERY {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
-            every,
+            clock_duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::ZeroMq {
@@ -3084,12 +3161,32 @@ fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
     }
 }
 
+/// Renders an MQTT topic filter bare only when a bare word reads back as the same filter.
+///
+/// A bare word is read as a topic name, which is one identifier and is lower-cased, while MQTT
+/// topics are case-sensitive and routinely hold `/`, `.`, `+` or `#`. Any other filter is written
+/// as a string literal, which keeps its exact spelling.
 fn mqtt_topic_to_nspl(topic: &str) -> String {
-    if TopicName::parse(topic).is_ok() {
+    let reads_back_bare = is_lowercase_identifier(topic)
+        && TopicName::parse(topic).is_ok_and(|name| name.as_str() == topic);
+    if reads_back_bare {
         topic.to_string()
     } else {
         string_literal(topic)
     }
+}
+
+/// Whether `text` is one lower-case identifier the NSPL lexer reads as a single word.
+fn is_lowercase_identifier(text: &str) -> bool {
+    let mut characters = text.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    let starts_well = first.is_ascii_lowercase() || first == '_';
+    starts_well
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
 }
 
 fn nats_mode_to_nspl(mode: &NatsIngestMode) -> String {
@@ -3154,10 +3251,10 @@ fn retry_policy_to_nspl(policy: &RetryPolicy) -> String {
     format!("BACKOFF {} MAX {}", policy.backoff, policy.max_backoff)
 }
 
-fn emitter_ack_window_to_nspl(window: &EmitterAckWindow) -> String {
+fn ack_window_to_nspl(window: &AckWindow) -> String {
     match window {
-        EmitterAckWindow::Sequential => "SEQUENTIAL".to_string(),
-        EmitterAckWindow::Parallel { max } => format!("PARALLEL MAX {max}"),
+        AckWindow::Sequential => "SEQUENTIAL".to_string(),
+        AckWindow::Parallel { max } => format!("PARALLEL MAX {max}"),
     }
 }
 
@@ -3165,14 +3262,19 @@ impl EmitterPublishingMode {
     pub fn to_canonical_nspl(&self) -> String {
         let retry = |policy: &RetryPolicy| format!("RETRY POLICY {}", retry_policy_to_nspl(policy));
         let confirmed =
-            |prefix: &str, window: &EmitterAckWindow, ack_timeout: &str, policy: &RetryPolicy| {
+            |prefix: &str, window: &AckWindow, ack_timeout: &str, policy: &RetryPolicy| {
                 format!(
                     "{prefix} {} ACK TIMEOUT {ack_timeout} {}",
-                    emitter_ack_window_to_nspl(window),
+                    ack_window_to_nspl(window),
                     retry(policy)
                 )
             };
         match self {
+            EmitterPublishingMode::ClientAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            } => confirmed("ACK", window, ack_timeout, retry_policy),
             EmitterPublishingMode::NoAck { retry_policy } => {
                 format!("NO_ACK {}", retry(retry_policy))
             }
@@ -3333,6 +3435,7 @@ fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
 
 fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
     match sink {
+        EmitSink::Client { schema } => Ok(format!("CLIENT SCHEMA {}", schema.as_str())),
         EmitSink::Http {
             client,
             method,
@@ -3377,11 +3480,9 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
             queue,
             fifo_group,
         } => {
-            let queue = if QueueName::parse(queue.as_str()).is_ok() {
-                queue.clone()
-            } else {
-                string_literal(queue)
-            };
+            // A queue is written bare, whatever its length: the grammar reads it as words and
+            // whole numbers joined by hyphens, with an optional `.fifo` suffix, and has no quoted
+            // form a longer or unusual name could fall back to.
             let fifo_group = match fifo_group {
                 Some(SqsFifoGroup::FromBranch) => " FIFO GROUP FROM BRANCH".to_string(),
                 Some(SqsFifoGroup::Expression(expression)) => {
@@ -3666,6 +3767,33 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
     }
 }
 
+/// Renders a domain-clock duration as one whole number of the largest unit that divides it
+/// exactly, the only form an NSPL duration literal reads.
+///
+/// A period's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
+/// hold, so `1500ms` would otherwise render as text that no longer parses. Zero, which only a skew
+/// can be, is written in seconds.
+fn clock_duration_literal(nanos: u64) -> String {
+    const UNITS: [(u64, &str); 6] = [
+        (86_400_000_000_000, "d"),
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "us"),
+    ];
+
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+    for (scale, unit) in UNITS {
+        if nanos.is_multiple_of(scale) {
+            return format!("{}{unit}", nanos / scale);
+        }
+    }
+    format!("{nanos}ns")
+}
+
 /// Renders a stored byte count using the largest binary prefix that divides it exactly.
 ///
 /// Byte sizes elsewhere in NSPL keep the author's spelling, but WASM memory limits are stored as a
@@ -3689,17 +3817,22 @@ fn byte_size_literal(bytes: NonZeroU64) -> String {
     format!("{bytes}B")
 }
 
-/// Wraps `value` in a dollar-quoted delimiter that does not occur inside it.
+/// Wraps `value` in a dollar-quoted delimiter that first occurs where the closing delimiter
+/// starts.
 ///
 /// NSPL dollar-quoting is verbatim: the body needs no escaping, so this represents any string,
-/// including one spanning several lines or mixing quote styles. The tag escalates until it is
-/// absent from the body.
+/// including one spanning several lines or mixing quote styles. A lexer ends the body at the first
+/// delimiter it reads, so the tag escalates until neither the body nor the body running into the
+/// closing delimiter completes one early: a body ending in `$s` would otherwise close on the `$s$`
+/// that its end and the closing `s$` form.
 fn dollar_quote(value: &str, tag: &str) -> String {
     let mut delimiter = format!("${tag}$");
     let mut suffix = 1_u64;
-    while value.contains(&delimiter) {
+    while format!("{value}{delimiter}").find(&delimiter) != Some(value.len()) {
         delimiter = format!("${tag}_{suffix}$");
-        suffix += 1;
+        suffix = suffix
+            .checked_add(1)
+            .assured("a tag escalates at most once per byte of the body it quotes");
     }
 
     format!("{delimiter}{value}{delimiter}")
@@ -3709,8 +3842,9 @@ fn dollar_quote(value: &str, tag: &str) -> String {
 ///
 /// Single quotes are preferred, double quotes carry an embedded apostrophe, and anything the quoted
 /// forms cannot express verbatim -- a newline, or both quote styles at once -- falls back to
-/// dollar-quoting. Every string is therefore representable.
-fn string_literal(value: &str) -> String {
+/// dollar-quoting. Every string is therefore representable, and NSPL reads a string literal
+/// verbatim wherever it appears, so the result reads back as exactly `value`.
+pub fn string_literal(value: &str) -> String {
     let has_single = value.contains('\'');
     let has_double = value.contains('"');
     let has_newline = value.contains('\n') || value.contains('\r');
@@ -5071,15 +5205,17 @@ mod tests {
                 CreateIngestor {
                     name: named("http_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Http {
+                            client: named("http_main"),
+                            every: "30s"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
+                            quiesce: crate::IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Http {
-                        client: named("http_main"),
-                        every: "30s"
-                            .parse()
-                            .assured("the fixture cadence is a positive duration"),
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5094,21 +5230,23 @@ mod tests {
                 CreateIngestor {
                     name: named("kafka_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Kafka {
-                        client: named("kafka_main"),
-                        topic: named("orders_topic"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
-                        instances: nonzero!(3u64),
-                        mode: KafkaIngestMode::AckParallel {
-                            max: nonzero!(8u64),
-                            batch_timeout: "100ms".to_string(),
-                            timeout: "5s".to_string(),
-                            retry_policy: retry.clone(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Kafka {
+                            client: named("kafka_main"),
+                            topic: named("orders_topic"),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
+                            instances: nonzero!(3u64),
+                            mode: KafkaIngestMode::AckParallel {
+                                max: nonzero!(8u64),
+                                batch_timeout: "100ms".to_string(),
+                                timeout: "5s".to_string(),
+                                retry_policy: retry.clone(),
+                            },
+                            quiesce: crate::IngestQuiesceMode::Suspend,
                         },
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5125,18 +5263,20 @@ mod tests {
                 CreateIngestor {
                     name: named("mqtt_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Mqtt {
-                        client: named("mqtt_main"),
-                        topic: "orders_topic".to_string(),
-                        instances: nonzero!(1u64),
-                        mode: MqttIngestMode::NoAckSequential {
-                            session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Mqtt {
+                            client: named("mqtt_main"),
+                            topic: "orders_topic".to_string(),
+                            instances: nonzero!(1u64),
+                            mode: MqttIngestMode::NoAckSequential {
+                                session: MqttSession::Clean,
+                                qos: MqttQos::AtMostOnce,
+                            },
+                            quiesce: crate::IngestQuiesceMode::Drop,
                         },
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5152,16 +5292,18 @@ mod tests {
                 CreateIngestor {
                     name: named("nats_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Nats {
+                            client: named("nats_main"),
+                            subject: named("orders_subject"),
+                            queue_group: named("orders_workers"),
+                            instances: nonzero!(2u64),
+                            mode: NatsIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Drop,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Nats {
-                        client: named("nats_main"),
-                        subject: named("orders_subject"),
-                        queue_group: named("orders_workers"),
-                        instances: nonzero!(2u64),
-                        mode: NatsIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5177,18 +5319,20 @@ mod tests {
                 CreateIngestor {
                     name: named("rabbit_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::RabbitMq {
-                        client: named("rmq_main"),
-                        queue: named("orders_q"),
-                        instances: nonzero!(2u64),
-                        mode: RabbitMqIngestMode::AckSequential {
-                            timeout: "10s".to_string(),
-                            retry_policy: retry.clone(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::RabbitMq {
+                            client: named("rmq_main"),
+                            queue: named("orders_q"),
+                            instances: nonzero!(2u64),
+                            mode: RabbitMqIngestMode::AckSequential {
+                                timeout: "10s".to_string(),
+                                retry_policy: retry.clone(),
+                            },
+                            quiesce: crate::IngestQuiesceMode::Suspend,
                         },
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5205,14 +5349,16 @@ mod tests {
                 CreateIngestor {
                     name: named("redis_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::RedisPubSub {
+                            client: named("redis_main"),
+                            channel: named("orders_channel"),
+                            mode: RedisPubSubIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Drop,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::RedisPubSub {
-                        client: named("redis_main"),
-                        channel: named("orders_channel"),
-                        mode: RedisPubSubIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5228,16 +5374,18 @@ mod tests {
                 CreateIngestor {
                     name: named("prom_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Prometheus {
+                            client: named("prom_main"),
+                            query: "sum(rate(http_requests_total[5m]))".to_string(),
+                            every: "15s"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
+                            quiesce: crate::IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Prometheus {
-                        client: named("prom_main"),
-                        query: "sum(rate(http_requests_total[5m]))".to_string(),
-                        every: "15s"
-                            .parse()
-                            .assured("the fixture cadence is a positive duration"),
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5253,13 +5401,15 @@ mod tests {
                 CreateIngestor {
                     name: named("zmq_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_main"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_main"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5275,18 +5425,20 @@ mod tests {
                 CreateIngestor {
                     name: named("sqs_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Sqs {
-                        client: named("sqs_main"),
-                        queue: named("orders_queue"),
-                        instances: nonzero!(1u64),
-                        mode: SqsIngestMode::AckSequential {
-                            timeout: "20s".to_string(),
-                            retry_policy: retry.clone(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Sqs {
+                            client: named("sqs_main"),
+                            queue: named("orders_queue"),
+                            instances: nonzero!(1u64),
+                            mode: SqsIngestMode::AckSequential {
+                                timeout: "20s".to_string(),
+                                retry_policy: retry.clone(),
+                            },
+                            quiesce: crate::IngestQuiesceMode::Suspend,
                         },
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5302,15 +5454,17 @@ mod tests {
                 CreateIngestor {
                     name: named("endpoint_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Endpoint {
-                        endpoint: named("orders_endpoint"),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Endpoint {
+                            endpoint: named("orders_endpoint"),
+                            mode: EndpointIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5326,13 +5480,15 @@ mod tests {
                 CreateIngestor {
                     name: named("ws_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Websockets {
+                            client: named("ws_main"),
+                            mode: WebsocketsIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Drop,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Websockets {
-                        client: named("ws_main"),
-                        mode: WebsocketsIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5348,15 +5504,17 @@ mod tests {
                 CreateIngestor {
                     name: named("syslog_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("syslog_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Syslog {
-                        client: named("syslog_main"),
-                        quiesce: crate::IngestQuiesceMode::Buffer {
-                            max_size: "1MiB".to_string(),
-                            overflow: crate::IngestQuiesceOverflow::DropOldest,
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Syslog {
+                            client: named("syslog_main"),
+                            quiesce: crate::IngestQuiesceMode::Buffer {
+                                max_size: "1MiB".to_string(),
+                                overflow: crate::IngestQuiesceOverflow::DropOldest,
+                            },
                         },
-                    },
+                        codec: named("syslog_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }
@@ -5457,6 +5615,15 @@ mod tests {
         assert_eq!(
             super::string_literal("holds $s$ and\na newline"),
             "$s_1$holds $s$ and\na newline$s_1$"
+        );
+    }
+
+    #[test]
+    fn dollar_quoted_literals_escalate_past_a_tag_the_body_ends_with() {
+        assert_eq!(super::string_literal("line\n$s"), "$s_1$line\n$s$s_1$");
+        assert_eq!(
+            super::string_literal("both ' and \"$"),
+            "$s$both ' and \"$$s$"
         );
     }
 

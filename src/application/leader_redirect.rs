@@ -11,6 +11,7 @@
 //! A redirect never guesses. While no leader is known it names none, and while discovery has not
 //! established one of the leader's endpoints that endpoint stays absent.
 
+use error_stack::Report;
 use nervix_consensus::ConsensusError;
 use nervix_models::ClusterNodeName;
 
@@ -94,5 +95,16 @@ impl SessionServiceImpl {
             }
             _ => command_error(message),
         }
+    }
+
+    /// Renders a proposal report at the session boundary while classification stays typed.
+    pub(in crate::application) async fn consensus_report_response(
+        &self,
+        report: &Report<ConsensusError>,
+        operation: String,
+    ) -> CommandResult {
+        let message = format!("{operation}: {}", ConsensusError::report_message(report));
+        self.consensus_error_response(report.current_context(), message)
+            .await
     }
 }

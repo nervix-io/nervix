@@ -10,6 +10,7 @@
 //!   and replicas are reached.
 
 use error_stack::ResultExt as _;
+use nervix_wasm::WasmGuestReportExt as _;
 
 use super::*;
 
@@ -94,7 +95,7 @@ impl WasmCallbackReporting<'_> {
         ack_map: &mut WasmAckMap,
         holds: &mut WasmCheckpointHolds,
     ) {
-        let resource_limit_exceeded = failure.current_context().is_resource_limit_exceeded();
+        let resource_limit_exceeded = failure.is_resource_limit_exceeded();
         let module = &instance
             .as_ref()
             .verified("a guest callback only runs on a branch that holds an instance")
@@ -115,6 +116,10 @@ impl WasmCallbackReporting<'_> {
     /// every acknowledgement the callback decided, and every input the instance still buffers, is
     /// negatively acknowledged, and the next work for the branch recreates the guest from the
     /// committed checkpoint.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the bounded guest checkpoint executor owns its generic effects")
+    )]
     pub(super) async fn complete_callback(
         self,
         replicated_state: &ReplicatedWasmProcessorState,
@@ -296,21 +301,21 @@ pub(super) fn wasm_callback_decided_tokens(outputs: &[WasmMaterializedOutput]) -
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::timeout;
+    use nervix_primitives::time::timeout;
 
     use super::*;
     use crate::runtime_ack::AckOutcome;
 
     /// A held input stays unresolved after every other share of it succeeded, and resolves only
     /// when the hold is released.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_held_input_resolves_only_once_its_hold_is_released() {
         let (acks, completion) = AckSet::root();
         let mut holds = WasmCheckpointHolds::default();
         holds.hold(&acks);
         acks.ack_success();
-        let completion = tokio::spawn(completion.wait());
-        tokio::task::yield_now().await;
+        let completion = nervix_primitives::task::spawn(completion.wait());
+        nervix_primitives::task::yield_now().await;
         assert!(
             !completion.is_finished(),
             "an input must not be acknowledged before the checkpoint that covers it completes"
@@ -325,7 +330,7 @@ mod tests {
     }
 
     /// Withholding a hold negatively acknowledges the input even after its deliveries succeeded.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_withheld_input_is_negatively_acknowledged() {
         let (acks, completion) = AckSet::root();
         let mut holds = WasmCheckpointHolds::default();

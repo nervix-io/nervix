@@ -1,7 +1,23 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "resource bindings are resolved and loaded while an execution revision is \
+                  installed"
+    )
+)]
+
+use error_stack::ResultExt as _;
 use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, render_client_config_template};
 use nervix_connector_websockets::{CompiledSignalingProtocol, SignalingProtobufDescriptors};
+use nervix_execution::{CpuClass, MemoryClass};
 
 use super::*;
+
+/// What compiling one resource's protobuf sources is charged. The parser's memory is bounded by the
+/// installed sources, which the resource store's limits bound, so the charge only admits the
+/// compilation onto the bulk workers.
+const PROTOBUF_COMPILE_RESERVATION_BYTES: u64 = 1;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum RuntimeResourceError {
@@ -277,9 +293,9 @@ impl Runtime {
             codec.wire_format.resolved(),
             protobuf_descriptors,
         )
-        .map_err(|err| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: err.to_string(),
+        .map_err(|report| RuntimeError::CodecCompile {
+            domain: domain.clone(),
+            report,
         })
     }
 
@@ -321,7 +337,10 @@ impl Runtime {
             descriptors,
         )
         .map(Arc::new)
-        .map_err(|error| build_error(error.to_string()))
+        .map_err(|report| RuntimeError::SignalingProtocolCompile {
+            domain: domain.clone(),
+            report,
+        })
     }
 
     /// Compiles the descriptors of the one resource version a codec or signaling protocol pins.
@@ -339,20 +358,29 @@ impl Runtime {
             ));
         };
         let compile_config = ProtobufDescriptorCompileConfig::from_entries(config)?;
-        let task_resource = id.identifier.clone();
-        let task_version = id.version;
+        let not_completed = || RuntimeResourceError::ProtobufTask {
+            resource: id.identifier.clone(),
+            version: id.version,
+        };
+        let executor = self.executor();
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, PROTOBUF_COMPILE_RESERVATION_BYTES)
+            .await
+            .change_context_lazy(not_completed)?;
         let descriptor_id = id.clone();
-        let file_descriptor_set = tokio::task::spawn_blocking(move || {
-            compile_config.compile_descriptor_set(&store, &descriptor_id)
-        })
-        .await
-        .map_err(|error| {
-            Report::new(RuntimeResourceError::ProtobufTask {
-                resource: task_resource,
-                version: task_version,
+        let compiled = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(RuntimeResourceError::ProtobufTask {
+                        resource: descriptor_id.identifier.clone(),
+                        version: descriptor_id.version,
+                    })?;
+                compile_config.compile_descriptor_set(&store, &descriptor_id)
             })
-            .attach_printable(error)
-        })??;
+            .await
+            .change_context_lazy(not_completed)?;
+        let file_descriptor_set = compiled?;
 
         ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set).map_err(|error| {
             Report::new(RuntimeResourceError::InvalidProtobufDescriptorSet {
@@ -498,11 +526,11 @@ impl Runtime {
 
     pub(crate) async fn prepare_domain_udfs(
         &self,
-        mut models: Vec<CreateUdf>,
-    ) -> Result<CompiledDomainUdfs, nervix_roto::UdfError> {
-        models.sort_by(|left, right| left.name.cmp(&right.name));
-        let executor = UdfExecutor::compile(models.clone()).await?;
-        Ok(CompiledDomainUdfs { models, executor })
+        mut programs: Vec<UdfProgram>,
+    ) -> error_stack::Result<CompiledDomainUdfs, nervix_roto::UdfError> {
+        programs.sort_by(|left, right| left.name.cmp(&right.name));
+        let executor = UdfExecutor::compile(self.executor(), programs.clone()).await?;
+        Ok(CompiledDomainUdfs { programs, executor })
     }
 
     pub(crate) fn install_prepared_domain_udfs(
@@ -518,16 +546,16 @@ impl Runtime {
     pub(super) async fn compile_domain_udfs(
         &self,
         domain: &DomainName,
-        models: Vec<CreateUdf>,
-    ) -> Result<UdfExecutor, nervix_roto::UdfError> {
-        let mut sorted_models = models;
-        sorted_models.sort_by(|left, right| left.name.cmp(&right.name));
+        programs: Vec<UdfProgram>,
+    ) -> error_stack::Result<UdfExecutor, nervix_roto::UdfError> {
+        let mut sorted_programs = programs;
+        sorted_programs.sort_by(|left, right| left.name.cmp(&right.name));
         if let Some(cached) = self.inner.compiled_domain_udfs.get(domain)
-            && cached.models == sorted_models
+            && cached.programs == sorted_programs
         {
             return Ok(cached.executor.clone());
         }
-        let prepared = self.prepare_domain_udfs(sorted_models).await?;
+        let prepared = self.prepare_domain_udfs(sorted_programs).await?;
         let executor = prepared.executor.clone();
         self.install_prepared_domain_udfs(domain, prepared);
         Ok(executor)
@@ -539,7 +567,8 @@ mod tests {
     use std::path::PathBuf;
 
     use nervix_models::{
-        ClientConfigEntry, ClientResourceMount, ClusterNodeName, DomainName, ResourceId, Timestamp,
+        ClientConfigEntry, ClientResourceMount, ClusterNodeName, DomainName, ResourceId,
+        SignalingProtocolOnConnect, SignalingStep, Timestamp,
     };
     use tempfile::tempdir;
 
@@ -647,7 +676,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn protobuf_descriptor_pool_requires_a_resource_store() {
         let domain = DomainName::parse("tenant").expect("valid domain");
         let resource = named::<ResourceName>("events_proto");
@@ -665,6 +694,42 @@ mod tests {
                 domain: error_domain,
                 resource: error_resource,
             } if error_domain == &domain && error_resource == &resource
+        ));
+    }
+
+    #[nervix_primitives::test]
+    async fn signaling_compile_failure_keeps_the_connector_report_at_runtime_startup() {
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let protocol = PlannedSignalingProtocol {
+            name: named("handshake"),
+            format: SignalingWireFormat::Json,
+            on_connect: SignalingProtocolOnConnect {
+                accept_data: false,
+                steps: vec![SignalingStep::Send(vec![".[".to_string()])],
+                fail_matchers: Vec::new(),
+                timeout: "5s".to_string(),
+            },
+        };
+        let error = Runtime::new()
+            .compile_signaling_protocol(&domain, &protocol)
+            .await
+            .expect_err("a signaling program must compile before installation");
+        let RuntimeError::SignalingProtocolCompile {
+            domain: error_domain,
+            report,
+        } = error
+        else {
+            panic!("the compiler failure must retain its connector report: {error:?}");
+        };
+        assert_eq!(error_domain, domain);
+        assert!(report.contains::<nervix_jaq::JaqProgramError>());
+        assert!(matches!(
+            report.current_context(),
+            nervix_connector_websockets::SignalingProtocolCompileError::InvalidJaqProgram {
+                clause: "SEND JAQ",
+                index: 1,
+                ..
+            }
         ));
     }
 
@@ -705,7 +770,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_resource_mounts_expand_into_runtime_paths() {
         let store_root = tempdir().expect("resource store tempdir");
         let source_root = tempdir().expect("resource source tempdir");

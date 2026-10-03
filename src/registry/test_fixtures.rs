@@ -18,16 +18,22 @@ use nervix_models::{
     CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitSink, EmitterName,
     EmitterPublishingMode, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference,
     FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, Inheritance, JsonType, JunctionName,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, Model, ModelKind,
-    ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-    ProcessorOutputs, ReingestorName, RelayBranching, RelayName, RetryPolicy, ScheduledNode,
-    SchemaField, SchemaName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, TopicName, VhostName, WindowBound, WindowProcessorName, WireSchemaField,
-    WireSchemaName,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, Model, ModelIndex,
+    ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
+    ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, RetryPolicy,
+    ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint, SchemaName,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, TopicName,
+    VhostName, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName,
 };
 use nonzero_ext::nonzero;
 
-use crate::registry::storage::Registry;
+use crate::registry::{
+    DomainActivationPlan, EntrypointPlanError, EntrypointPlans, storage::Registry,
+};
+
+/// Duration text `humantime` panicked on instead of refusing: spans that add up to the last second
+/// a duration holds, and fractions of exactly one more second.
+pub(in crate::registry) const TOO_LONG_DURATION_TEXT: &str = "18446744073709551615s 1000000000ns";
 
 pub(in crate::registry) fn temp_db_path() -> PathBuf {
     tempfile::Builder::new()
@@ -46,6 +52,59 @@ pub(in crate::registry) fn sample_transport_model(name: &str) -> Model {
             value: "localhost:9092".to_string(),
         }],
     })
+}
+
+/// Schedules `models` unplaced, resolving each relay's branch declaration against the branch and
+/// schema Models among them as registry validation would.
+pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNodes {
+    let index = models.iter().cloned().collect::<ModelIndex>();
+    let mut nodes = ScheduledNodes::default();
+    for model in models {
+        let branching = if let Model::Relay(relay) = &model {
+            let resolved = match relay.branching.branch() {
+                None => ResolvedBranching::unbranched(),
+                Some(branch_name) => {
+                    let branch = index
+                        .configured::<CreateBranch>(branch_name)
+                        .expect("the fixture declares every branch its relays use");
+                    let schema = index
+                        .configured::<CreateSchema>(&branch.schema)
+                        .expect("the fixture declares every branch schema");
+                    ResolvedBranching::branched(branch_name.clone(), schema.clone())
+                }
+            };
+            Some(resolved)
+        } else {
+            None
+        };
+        let node = ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32]))
+            .with_resolved_branching(branching);
+        nodes.insert(node.identity(), node);
+    }
+    nodes
+}
+
+/// Plans the ingestors and reingestors of `models` as the installed schedule would.
+pub(in crate::registry) fn planned_entrypoints(
+    models: Vec<Model>,
+) -> error_stack::Result<EntrypointPlans, EntrypointPlanError> {
+    let domain = named::<DomainName>("sales");
+    let nodes = unplaced_schedule(models);
+    let activation = DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)
+        .expect("the fixture surfaces resolve");
+    EntrypointPlans::from_scheduled_nodes(&domain, &nodes, &activation)
+}
+
+/// A predicate whose `to_unix` call names a unit that function does not count in, which lowering
+/// rejects before any schema is consulted.
+pub(in crate::registry) fn unlowerable_predicate() -> Expression {
+    Expression::Call {
+        function: named("to_unix"),
+        arguments: vec![
+            Expression::Literal(nervix_models::Literal::String("year".to_string())),
+            Expression::Field(FieldReference::scoped(FieldScope::Input, named("value"))),
+        ],
+    }
 }
 
 pub(in crate::registry) fn named<N>(raw: &str) -> N
@@ -391,13 +450,7 @@ pub(in crate::registry) fn rfc3339_json_codec_for_field(
 }
 
 pub(in crate::registry) fn ingestor(name: &str, into: &str, codec: &str, client: &str) -> Model {
-    let Model::Ingestor(mut ingestor) = ingestor_with_params(name, into, codec, client, &[]) else {
-        unreachable!("ingestor helper must build an ingestor model")
-    };
-    for output in &mut ingestor.output_routes.routes {
-        output.branch = Some(OutputBranch::Unbranched);
-    }
-    Model::Ingestor(ingestor)
+    Model::Ingestor(ingestor_statement(name, into, codec, client, &[]))
 }
 
 pub(in crate::registry) fn unbranched_ingestor(
@@ -416,12 +469,24 @@ pub(in crate::registry) fn ingestor_with_params(
     client: &str,
     branch_fields: &[&str],
 ) -> Model {
+    Model::Ingestor(ingestor_statement(name, into, codec, client, branch_fields))
+}
+
+/// A Kafka ingestor writing to `into`, whose route constructs a branch key from `branch_fields`
+/// or leaves unbranched when there are none.
+pub(in crate::registry) fn ingestor_statement(
+    name: &str,
+    into: &str,
+    codec: &str,
+    client: &str,
+    branch_fields: &[&str],
+) -> CreateIngestor {
     let branch = if branch_fields.is_empty() {
         OutputBranch::Unbranched
     } else {
         branched_by(into, branch_fields)
     };
-    Model::Ingestor(CreateIngestor {
+    CreateIngestor {
         name: named(name),
         output_routes: with_output_branch(
             with_inherit_all(ProcessorOutputs::single(named(into))).with_flush_policy(
@@ -432,28 +497,30 @@ pub(in crate::registry) fn ingestor_with_params(
             ),
             branch,
         ),
-        decode_using_codec: named(codec),
-        timestamp_source: None,
-        source: IngestSource::Kafka {
-            client: ClientName::parse(client).expect("valid identifier"),
-            topic: TopicName::parse("notifications").expect("valid identifier"),
-            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                ConsumerGroupName::parse("cg").expect("valid consumer group"),
-            ),
-            instances: nonzero!(1u64),
-            mode: KafkaIngestMode::AckSequential {
-                timeout: "30s".to_string(),
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "200ms".to_string(),
-                    max_backoff: "5s".to_string(),
+        input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+            source: IngestSource::Kafka {
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: TopicName::parse("notifications").expect("valid identifier"),
+                offset_mode: KafkaOffsetMode::ConsumerGroup(
+                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                ),
+                instances: nonzero!(1u64),
+                mode: KafkaIngestMode::AckSequential {
+                    timeout: "30s".to_string(),
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: "200ms".to_string(),
+                        max_backoff: "5s".to_string(),
+                    },
                 },
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
             },
-            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        },
+            codec: named(codec),
+        }),
+        timestamp_source: None,
         general_error_policy: GeneralErrorPolicy::Log,
 
         filter_where: None,
-    })
+    }
 }
 
 pub(in crate::registry) fn relay(name: &str, schema: &str) -> Model {
@@ -689,12 +756,23 @@ pub(in crate::registry) fn reingestor(
     into_relay: &str,
     params: &[&str],
 ) -> Model {
+    Model::Reingestor(reingestor_statement(name, from_relay, into_relay, params))
+}
+
+/// A reingestor reading `from_relay` into `into_relay`, whose route constructs a branch key from
+/// `params` or leaves unbranched when there are none.
+pub(in crate::registry) fn reingestor_statement(
+    name: &str,
+    from_relay: &str,
+    into_relay: &str,
+    params: &[&str],
+) -> CreateReingestor {
     let branch = if params.is_empty() {
         OutputBranch::Unbranched
     } else {
         branched_by(into_relay, params)
     };
-    Model::Reingestor(CreateReingestor {
+    CreateReingestor {
         name: ReingestorName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         output_routes: with_output_branch(
@@ -710,7 +788,7 @@ pub(in crate::registry) fn reingestor(
         mode: AckMode::Attached,
         filter_where: None,
         materialized_state: Vec::new(),
-    })
+    }
 }
 
 pub(in crate::registry) fn emitter(

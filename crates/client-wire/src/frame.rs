@@ -19,7 +19,7 @@ const FRAME_HEADER_BYTES: usize = 8;
 
 /// The root table a frame carries, and the identifier that marks it.
 ///
-/// The four roots are the only implementations.
+/// The eight roots are the only implementations.
 pub trait FrameRoot: sealed::Sealed + 'static {
     /// The four-byte file identifier the schema declares for this root.
     const IDENTIFIER: &'static str;
@@ -69,6 +69,23 @@ frame_root!(
 frame_root!(
     /// The frame that answers an upload stream.
     UploadReplyFrame => UploadReply, "NXUR"
+);
+frame_root!(
+    /// The one frame a backup download sends: which retained archive it asks for.
+    BackupDownloadRequestFrame => BackupDownloadRequest, "NXBQ"
+);
+frame_root!(
+    /// A frame of a backup download stream: the archive's start, a chunk of it, its completion,
+    /// or why it cannot be downloaded.
+    BackupDownloadFrame => BackupDownloadMessage, "NXBD"
+);
+frame_root!(
+    /// A frame of a restore stream: the start of the restore or one chunk of its archive.
+    RestoreFrame => RestoreMessage, "NXRM"
+);
+frame_root!(
+    /// The frame that answers a restore stream.
+    RestoreReplyFrame => RestoreReply, "NXRR"
 );
 
 /// Why bytes were refused as a frame.

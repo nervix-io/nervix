@@ -23,19 +23,6 @@
 
 #![recursion_limit = "256"]
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_dashmap as dashmap;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_stream as tokio_stream;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
-#[cfg(feature = "shuttle")]
-extern crate tokio as tokio_real;
-
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
     "the `testing` feature lowers Argon2 password hashing parameters and must not be compiled \
@@ -45,6 +32,8 @@ compile_error!(
 pub mod application;
 pub mod cluster;
 mod domain_clock_authority;
+mod emitter_execution_plan;
+mod emitter_start_plan;
 #[cfg(feature = "testing")]
 mod fault_injection;
 pub mod memory_pressure;
@@ -56,7 +45,7 @@ pub mod runtime;
 pub mod runtime_ack;
 pub mod runtime_schema;
 #[cfg(all(test, feature = "shuttle"))]
-mod shuttle_test;
+mod shuttle_selection_tests;
 #[doc(hidden)]
 pub mod subscription_row;
 pub(crate) mod task_shutdown;
@@ -79,4 +68,14 @@ pub type ConfiguredFaultInjection = fault_injection::FaultInjection;
 #[doc(hidden)]
 pub struct ConfiguredFaultInjection {
     _marker: (),
+}
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredFaultInjection {
+    pub(crate) const fn gossip_send_delay(
+        &self,
+        _destination: &nervix_models::ClusterNodeName,
+    ) -> Option<std::time::Duration> {
+        None
+    }
 }

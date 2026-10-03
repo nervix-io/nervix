@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
@@ -9,6 +9,7 @@ use nervix_models::{
     MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName, RouteConstruction,
     StructuredMessageError, Timestamp,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileOptions as VmCompileOptions,
@@ -20,24 +21,20 @@ use nervix_vm::{
 };
 use nervix_wasm::CompiledWasmProcessor;
 use ordered_float::OrderedFloat;
-use triomphe::Arc;
 
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,
-    CompiledBranchProgram, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
-    DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
-    RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
-    ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance,
-    WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
+    CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
+    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
+    RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
+    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
     inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
     runtime_ack::AckSet,
-    runtime_schema::{
-        CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, arrow_data_type,
-    },
+    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue},
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -106,7 +103,6 @@ pub(super) struct IngestorRouteTemplate {
 
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorRelayTemplate {
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
@@ -437,7 +433,7 @@ impl CompiledInferencerInputProgram {
                 .map(|mapping| {
                     arrow_schema::Field::new(
                         &mapping.tensor,
-                        arrow_data_type(&mapping.schema.message_type()),
+                        mapping.schema.message_type().arrow_data_type(),
                         false,
                     )
                 })
@@ -587,10 +583,6 @@ pub(super) struct RelayProcessorOutputsNode {
 }
 
 impl RelayProcessorOutputsNode {
-    pub(super) fn base_relay(&self) -> Option<RelayName> {
-        self.routes.first().map(|output| output.relay.clone())
-    }
-
     pub(super) fn buffer_deadlines(&self) -> Vec<BranchBufferDeadline> {
         self.routes
             .iter()
@@ -603,13 +595,11 @@ impl RelayProcessorOutputsNode {
 pub(super) struct RelayProcessorOutputNode {
     pub(super) relay: RelayName,
     pub(super) construction: nervix_models::RouteConstruction,
-    pub(super) branch: Option<nervix_models::OutputBranch>,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
     pub(super) pending: Vec<RelayRecordBatch>,
     pub(super) flush_timer: BranchBufferTimer,
     pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
-    pub(super) compiled_branch_program: Option<CompiledBranchProgram>,
 }
 
 impl RelayProcessorOutputNode {

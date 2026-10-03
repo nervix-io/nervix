@@ -4,15 +4,17 @@
 //!
 //! - **Owns.** Composing the RabbitMQ connector plan with the declared acknowledgement policy and
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the RabbitMQ connector, and pre-resolved
-//!   runtime execution handles.
+//! - **Depends on.** The connector source contract, the RabbitMQ connector, the node resolver,
+//!   and pre-resolved runtime execution handles.
 //! - **Must not know.** The AMQP driver, channel lifecycle, NSPL parsing, registry validation, or
 //!   placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_rabbitmq::{RabbitMqSource, RabbitMqSourcePlan};
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -21,7 +23,7 @@ impl RabbitMqIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let RabbitMqIngestorStartPlan {
             client,
             queue,
@@ -30,10 +32,14 @@ impl RabbitMqIngestorStartPlan {
         } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let Some(dns) = runtime.dns() else {
+            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+        };
         BrokerSourceStart {
             connector: RabbitMqSourcePlan::new(
                 resolved.entries,
+                dns.clone(),
                 queue,
                 ingestor.name.as_str().to_string(),
             ),

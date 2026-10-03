@@ -8,8 +8,7 @@
 
 use std::{future::Future, time::Duration};
 
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::{sync::CancellationToken, time::Instant};
 
 use crate::{abi, failure::Failure};
 
@@ -54,11 +53,11 @@ impl Cancel {
     ) -> Result<T, Failure> {
         let expiry = async {
             match self.deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
         };
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             () = self.token.cancelled() => Err(Failure::cancelled()),
             () = expiry => Err(Failure::deadline()),

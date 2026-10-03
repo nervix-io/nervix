@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The stream-slot partition each traffic class runs under, the reserved subquotas
+//! - **Owns.** HTTP/2 builder settings and the stream-slot partition each traffic class runs under,
+//!   the reserved subquotas
 //!   inside the management, replication and bulk partitions, the leases taken from them, and the
 //!   drain that takes every slot back when a connection retires.
 //! - **Depends on.** The traffic classes and the reserved request subquotas they are divided by.
@@ -12,11 +13,7 @@
 //! never be given capacity the connection does not have and the shared remainder is always what
 //! the reservations leave behind.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
 
@@ -27,6 +24,13 @@ use super::*;
 /// quota bundle is no longer borrowed. The surrounding `triomphe::Arc` keeps cloning a complete
 /// quota bundle to one reference-count operation.
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained stream quotas are charged for each admitted request"
+    )
+)]
 pub(super) struct StreamSlotQuotas {
     inner: Arc<StreamSlotQuotasInner>,
 }
@@ -41,6 +45,14 @@ struct StreamSlotQuotasInner {
     partition: StreamSlotPartition,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a retained stream partition admits and drains stream slots for recurring \
+                  requests"
+    )
+)]
 enum StreamSlotPartition {
     Management(ManagementStreamSlotQuotas),
     Replication(ReplicationStreamSlotQuotas),
@@ -297,7 +309,7 @@ impl ManagementStreamSlotQuotas {
         ];
         let mut drained = Vec::with_capacity(quotas.len());
         for (subquota, permits) in quotas {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let permits: u32 = permits
                 .try_into()
                 .assured("management stream subquotas are much smaller than u32::MAX");
@@ -340,7 +352,7 @@ impl ReplicationStreamSlotQuotas {
         ];
         let mut drained = Vec::with_capacity(quotas.len());
         for (subquota, permits) in quotas {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let permits: u32 = permits
                 .try_into()
                 .assured("replication stream subquotas are much smaller than u32::MAX");
@@ -384,7 +396,7 @@ impl BulkStreamSlotQuotas {
         ];
         let mut drained = Vec::with_capacity(quotas.len());
         for (subquota, permits) in quotas {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let permits: u32 = permits
                 .try_into()
                 .assured("bulk stream subquotas are much smaller than u32::MAX");
@@ -411,3 +423,45 @@ fn available_permits<const QUOTAS: usize>(quotas: [&StdArc<Semaphore>; QUOTAS]) 
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_checks;
+
+pub(super) fn configure_client_builder(
+    builder: &mut client::Builder,
+    options: &TransportOptions,
+    class: PoolClass,
+) -> Result<(), Report<TransportError>> {
+    let stream_slots = class.stream_slots_per_connection();
+    let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
+        reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
+    })?;
+    builder
+        .initial_window_size(options.initial_stream_window_bytes)
+        .initial_connection_window_size(options.initial_connection_window_bytes)
+        .max_header_list_size(options.max_header_bytes)
+        .max_concurrent_streams(streams)
+        .initial_max_send_streams(stream_slots)
+        .max_local_error_reset_streams(Some(RESET_LIMIT))
+        .max_pending_accept_reset_streams(RESET_LIMIT)
+        .max_send_buffer_size(BODY_CHUNK_BYTES);
+    Ok(())
+}
+
+pub(super) fn configure_server_builder(
+    builder: &mut server::Builder,
+    options: &TransportOptions,
+) -> Result<(), Report<TransportError>> {
+    let streams =
+        u32::try_from(PoolClass::Management.stream_slots_per_connection()).map_err(|_| {
+            TransportError::InvalidOptions {
+                reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
+            }
+        })?;
+    builder
+        .initial_window_size(options.initial_stream_window_bytes)
+        .initial_connection_window_size(options.initial_connection_window_bytes)
+        .max_header_list_size(options.max_header_bytes)
+        .max_concurrent_streams(streams)
+        .max_local_error_reset_streams(Some(RESET_LIMIT))
+        .max_pending_accept_reset_streams(RESET_LIMIT)
+        .max_send_buffer_size(BODY_CHUNK_BYTES);
+    Ok(())
+}

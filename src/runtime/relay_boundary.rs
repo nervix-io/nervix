@@ -8,7 +8,20 @@
 //!   interconnect dispatcher.
 //! - **Must not know.** NSPL text, transactions, consensus operations, or connector internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "relay membership and channel installation establish retained concrete branch \
+                  and delivery handles"
+    )
+)]
+
 use super::*;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "relay_boundary_shuttle_tests.rs"]
+mod shuttle_tests;
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
@@ -22,65 +35,16 @@ pub(super) fn addressable_count(configured: NonZeroU64) -> NonZeroUsize {
         .assured("a non-zero configured count is still non-zero at this target's pointer width")
 }
 
-#[derive(Debug)]
-pub(super) struct RelayPresence {
-    pub(super) last_seen_at: AtomicTimestamp,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RelayRegistry {
-    pub(super) presences: Arc<DashMap<Option<BranchKey>, Arc<RelayPresence>, RandomState>>,
-}
-
-impl RelayRegistry {
-    pub(super) fn new() -> Self {
-        Self {
-            presences: Arc::new(DashMap::default()),
-        }
-    }
-
-    pub(super) fn touch(&self, key: &Option<BranchKey>, now: Timestamp) {
-        if let Some(existing) = self.presences.get(key) {
-            existing.last_seen_at.store(now);
-            return;
-        }
-        self.presences.insert(
-            key.clone(),
-            Arc::new(RelayPresence {
-                last_seen_at: AtomicTimestamp::new(now),
-            }),
-        );
-    }
-
-    pub(super) fn contains_key(&self, key: &Option<BranchKey>) -> bool {
-        self.presences.contains_key(key)
-    }
-
-    pub(super) fn remove(&self, key: &Option<BranchKey>) {
-        self.presences.remove(key);
-    }
-
-    pub(super) fn clear(&self) {
-        self.presences.clear();
-    }
-
-    pub(super) fn keys(&self) -> Vec<String> {
-        let mut keys = self
-            .presences
-            .iter()
-            .filter_map(|entry| entry.key().as_ref().map(|key| key.as_str().to_string()))
-            .collect::<Vec<_>>();
-        keys.sort();
-        keys
-    }
-}
+/// The concrete branches this node's owner of one relay holds, as `DESCRIBE`, materialized reads
+/// and the console's graph observe them. The relay's owner task alone changes it, and only when a
+/// branch appears, is evicted or expires, or the owner starts or stops.
+pub(super) type RelayBranchPresence = Arc<BranchPresence<BranchKey>>;
 
 pub(super) struct ConcreteRelayRuntime {
     pub(super) key: Option<BranchKey>,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
@@ -89,11 +53,18 @@ pub(super) struct ConcreteRelayRuntimeBuild {
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) struct RelayBoundaryServices {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: AtomicUsize,
@@ -101,6 +72,9 @@ pub(super) struct RelayBoundaryServices {
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     pub(super) remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
     pub(super) owner_node: ArcSwapOption<ClusterNodeName>,
+    /// The concrete branches this node's owner of the relay holds, shared with the relay's state
+    /// placement so materialized reads observe the same membership across execution rebuilds.
+    pub(super) branch_presence: RelayBranchPresence,
     pub(super) ingress_slots: DashMap<Option<BranchKey>, Arc<RelayOutboundSlot>, RandomState>,
     pub(super) outbound_slots: DashMap<RelayOutboundChannel, Arc<RelayOutboundSlot>, RandomState>,
 }
@@ -114,13 +88,29 @@ pub(super) struct RelayOutboundChannel {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) struct RelayOutboundSlot {
     pub(super) gate: Mutex<()>,
-    sequence: parking_lot::Mutex<RelayOutboundSequence>,
+    sequence: nervix_primitives::sync::blocking::Mutex<RelayOutboundSequence>,
     cancellation: CancellationToken,
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 struct RelayOutboundSequence {
     channel_incarnation: [u8; 16],
     next_sequence: u64,
@@ -139,7 +129,7 @@ impl RelayOutboundSlot {
     fn new() -> Self {
         Self {
             gate: Mutex::new(()),
-            sequence: parking_lot::Mutex::new(RelayOutboundSequence {
+            sequence: nervix_primitives::sync::blocking::Mutex::new(RelayOutboundSequence {
                 channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
                 next_sequence: 0,
                 last_delivery_at: None,
@@ -156,6 +146,16 @@ impl RelayOutboundSlot {
         self.cancellation.cancel();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     pub(super) fn reopen_delivery_channel(&self) {
         self.sequence.lock().reopen();
     }
@@ -164,6 +164,16 @@ impl RelayOutboundSlot {
         self.next_delivery_at(Instant::now())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
         let mut channel = self.sequence.lock();
         if let Some(last_delivery_at) = channel.last_delivery_at
@@ -201,7 +211,7 @@ pub(super) struct RelayBoundaryBuilder {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: usize,
     pub(super) detached_runtime_consumer_count: usize,
-    pub(super) registry: RelayRegistry,
+    pub(super) branch_presence: RelayBranchPresence,
     pub(super) remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
 }
 
@@ -340,6 +350,14 @@ pub(super) struct BranchCollapseNode {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) enum RelayBoundaryFanout {
     Direct(Arc<RelayConsumerFanout>),
     BranchCollapse(Arc<BranchCollapseNode>),
@@ -359,6 +377,14 @@ pub(super) struct RoutedDelivery<'a> {
     pub(super) acks: Vec<Option<RemoteAckRegistration>>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "retained relay handles route each admitted record and keep channel ordering and \
+                  fences"
+    )
+)]
 pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
     RelayPayload {
         delivery: delivery.delivery,
@@ -367,12 +393,7 @@ pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
         relay: delivery.consumer.relay.clone(),
         key: BranchKey::to_remote_key(&delivery.batch.key),
         batch_ipc: delivery.batch_ipc,
-        metadata: delivery
-            .batch
-            .metadata
-            .iter()
-            .map(RuntimeRecordMetadata::to_remote)
-            .collect(),
+        metadata: delivery.batch.metadata.to_remote(),
         acks: delivery.acks,
         admission: None,
     }
@@ -385,14 +406,43 @@ pub(super) struct RemoteRuntimeConsumer {
     pub(super) mode: AckMode,
 }
 
+/// How a batch reaches this node's runtime consumers of a relay, which decides what reaching no
+/// attached consumer here means.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RuntimeConsumerDispatch {
+    /// The relay owner fans out a batch of its own relay. Its remote consumers can take what no
+    /// local consumer does, and a relay that no attached consumer reads leaves nothing to wait for.
+    Owner,
+    /// The owner of the relay on another node routed the batch here, because its schedule places an
+    /// attached consumer of the relay on this node.
+    Routed,
+}
+
+impl RuntimeConsumerDispatch {
+    /// Whether a batch that carries record acknowledgements must reach an attached consumer on this
+    /// node.
+    ///
+    /// A routed batch that finds none was routed for a consumer that has since left the node, as
+    /// when a forced recovery moves it off a node the scheduler judged unavailable while the batch
+    /// was in flight. Nothing here can complete the work its acknowledgements stand for, so
+    /// completing them would report records no consumer processed.
+    fn requires_local_attached_consumer(self) -> bool {
+        match self {
+            Self::Owner => false,
+            Self::Routed => true,
+        }
+    }
+}
+
 pub(super) struct RelayOwnerTask {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) task: JoinHandle<()>,
 }
 
 pub(super) struct RelayOwnerBranchState {
-    pub(super) registry: RelayRegistry,
-    pub(super) instances: BranchInstanceRegistry<Option<BranchKey>, RelayMetricRecorders>,
+    /// The concrete branches this owner holds, each with its metric series, and the presence it
+    /// publishes for them. Dropping it releases the presence.
+    pub(super) instances: OwnedBranches<BranchKey, RelayMetricRecorders>,
     pub(super) global_metrics: RelayMetricsHandle,
     pub(super) physical_node_id: Option<ClusterNodeName>,
     pub(super) capacity: Option<NonZeroUsize>,
@@ -405,7 +455,7 @@ pub(super) struct RelayOwnerBranchState {
 }
 
 impl RelayOwnerBranchState {
-    /// The domain time this owner stamps branch presence and expiry with.
+    /// The domain time this owner admits branches at and expires them by.
     fn expiration_time(
         &mut self,
         runtime: &Runtime,
@@ -452,7 +502,7 @@ impl RelayStateTask {
         grace: Duration,
     ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
-        match tokio::time::timeout(grace, &mut self.task).await {
+        match nervix_primitives::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
                 task: RelayTaskKind::State,
@@ -475,7 +525,7 @@ impl RelayOwnerTask {
         grace: Duration,
     ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
-        match tokio::time::timeout(grace, &mut self.task).await {
+        match nervix_primitives::time::timeout(grace, &mut self.task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
                 task: RelayTaskKind::Owner,
@@ -589,7 +639,7 @@ impl RelayConsumerFanout {
         let gates = self.branch_dispatch_gates.entries.load_full();
         let mut permits = Vec::new();
         for scoped in gates.iter() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if scoped.scope.contains(fingerprint.as_ref()) {
                 permits.push(RelayDispatchGate::acquire_owned(&scoped.gate).await);
             }
@@ -597,6 +647,7 @@ impl RelayConsumerFanout {
         permits
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     async fn engage_branch_dispatch_gate(
         &self,
         scope: WasmStateResetScope,
@@ -614,6 +665,7 @@ impl RelayConsumerFanout {
         if !publication_fence.wait_quiescent().await {
             return None;
         }
+        #[allow(deprecated)] // until try_update is stabilized
         let id = self
             .branch_dispatch_gates
             .next_id
@@ -689,6 +741,7 @@ impl RelayConsumerFanout {
 
     pub(super) async fn dispatch_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
@@ -701,6 +754,19 @@ impl RelayConsumerFanout {
         {
             for ack in batch.acks.iter() {
                 ack.no_ack("runtime consumer unavailable for attached delivery");
+            }
+            return Err(Box::new(batch.clone()));
+        }
+        // A consumer that leaves after this count was read keeps the share the broadcast below
+        // reserves for it unresolved, which fails the batch as well.
+        if attached_receiver_count == 0
+            && dispatch.requires_local_attached_consumer()
+            && batch.carries_record_acknowledgements()
+        {
+            for ack in batch.acks.iter() {
+                ack.no_ack(
+                    "no attached consumer of the relay runs on the node the batch was routed to",
+                );
             }
             return Err(Box::new(batch.clone()));
         }
@@ -774,12 +840,14 @@ impl BranchCollapseNode {
 
     pub(super) async fn dispatch_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout
             .dispatch_runtime_consumers(
+                dispatch,
                 attached_runtime_consumer_count,
                 detached_runtime_consumer_count,
                 batch,
@@ -958,6 +1026,7 @@ impl RelayBoundaryFanout {
 
     pub(super) async fn dispatch_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
@@ -966,6 +1035,7 @@ impl RelayBoundaryFanout {
             Self::Direct(fanout) => {
                 fanout
                     .dispatch_runtime_consumers(
+                        dispatch,
                         attached_runtime_consumer_count,
                         detached_runtime_consumer_count,
                         batch,
@@ -975,6 +1045,7 @@ impl RelayBoundaryFanout {
             Self::BranchCollapse(branch_collapse) => {
                 branch_collapse
                     .dispatch_runtime_consumers(
+                        dispatch,
                         attached_runtime_consumer_count,
                         detached_runtime_consumer_count,
                         batch,
@@ -991,7 +1062,7 @@ impl RelayRuntimeFanIn {
     }
 
     pub(super) async fn recv(&mut self) -> Option<RelayRecordBatch> {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         self.receiver.recv().await
     }
 
@@ -1038,11 +1109,6 @@ impl RelayRuntimeFanIn {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct ExpiringRelayState {
-    pub(super) registry: RelayRegistry,
-}
-
 /// A relay owner consumes the retention decision made with the rest of its domain plan.
 pub(super) use crate::registry::PlannedRelayRetention as RelayRetention;
 
@@ -1055,14 +1121,6 @@ pub(super) struct RelayStateTaskSpec {
     pub(super) receiver: RelayRuntimeFanIn,
 }
 
-impl ExpiringRelayState {
-    pub(super) fn new() -> Self {
-        Self {
-            registry: RelayRegistry::new(),
-        }
-    }
-}
-
 impl RelayBoundaryServices {
     pub(super) fn new(
         fanout: RelayBoundaryFanout,
@@ -1070,6 +1128,7 @@ impl RelayBoundaryServices {
         detached_runtime_consumer_count: usize,
         remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
         remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
+        branch_presence: RelayBranchPresence,
     ) -> Self {
         Self {
             fanout,
@@ -1078,6 +1137,7 @@ impl RelayBoundaryServices {
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
             owner_node: ArcSwapOption::empty(),
+            branch_presence,
             ingress_slots: DashMap::default(),
             outbound_slots: DashMap::default(),
         }
@@ -1111,20 +1171,45 @@ impl RelayBoundaryServices {
         self.fanout.deactivate_owner_buffer();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> Arc<RelayOutboundSlot> {
         // A branch's slot is created once and then read on every batch it carries, so the steady
         // state resolves it with a borrowed key and clones nothing. Creation still goes through
         // `entry`, because two first batches for one branch must agree on a single slot: the slot
         // is what orders deliveries, and a racing pair of them would interleave the channel.
-        if let Some(existing) = self.ingress_slots.get(branch) {
+        if let Some(existing) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.ingress_slots.get(branch)
+        ) {
             return existing.clone();
         }
-        self.ingress_slots
-            .entry(branch.clone())
-            .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
-            .clone()
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.ingress_slots.entry(branch.clone())
+        )
+        .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
+        .clone()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn outbound_slot(
         &self,
         node_id: &ClusterNodeName,
@@ -1142,27 +1227,54 @@ impl RelayBoundaryServices {
             kind,
             branch: branch.clone(),
         };
-        if let Some(existing) = self.outbound_slots.get(&channel) {
+        if let Some(existing) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.outbound_slots.get(&channel)
+        ) {
             return existing.clone();
         }
-        self.outbound_slots
-            .entry(channel)
-            .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
-            .clone()
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.outbound_slots.entry(channel)
+        )
+        .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
+        .clone()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn remove_branch_slots(&self, branch: &Option<BranchKey>) {
-        if let Some((_, slot)) = self.ingress_slots.remove(branch) {
+        if let Some((_, slot)) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.ingress_slots.remove(branch)
+        ) {
             slot.cancel();
         }
-        self.outbound_slots.retain(|channel, slot| {
-            if &channel.branch == branch {
-                slot.cancel();
-                false
-            } else {
-                true
-            }
-        });
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
+             and avoid recurring shared registry operations",
+            self.outbound_slots.retain(|channel, slot| {
+                if &channel.branch == branch {
+                    slot.cancel();
+                    false
+                } else {
+                    true
+                }
+            })
+        );
     }
 
     pub(super) async fn enqueue_owner_batch(
@@ -1194,6 +1306,16 @@ impl RelayBoundaryServices {
         self.fanout.begin_owner_batch_completion()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     pub(super) async fn dispatch_to_owner(
         &self,
         domain: &DomainName,
@@ -1215,7 +1337,6 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let local_node_id = dispatcher.local_node_id();
         let ingress_slot = self.ingress_slot(&batch.key);
         let _slot = ingress_slot.gate.lock().await;
         let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1228,23 +1349,16 @@ impl RelayBoundaryServices {
             }
         };
         let delivery = ingress_slot.next_delivery();
-        let mut registered_ack_ids = Vec::new();
-        let remote_acks = batch
-            .acks
-            .iter()
-            .map(|ack| {
-                if ack.is_empty() {
-                    return None;
-                }
-                let ack_id = dispatcher.next_ack_id();
-                dispatcher.register_pending_ack(ack_id, RemoteDispatcher::forwarded_ack(ack));
-                registered_ack_ids.push(ack_id);
-                Some(RemoteAckRegistration {
-                    ack_id,
-                    reply_node_id: local_node_id.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut remote_acks = Vec::with_capacity(batch.acks.len());
+        for ack in &batch.acks {
+            if ack.is_empty() {
+                remote_acks.push(None);
+                continue;
+            }
+            let registration =
+                dispatcher.register_pending_ack(&owner_node, RemoteDispatcher::forwarded_ack(ack));
+            remote_acks.push(Some(registration));
+        }
         let admission_result = dispatcher
             .dispatch_admitted_relay_payload(
                 &owner_node,
@@ -1255,12 +1369,8 @@ impl RelayBoundaryServices {
                     relay: relay.clone(),
                     key: BranchKey::to_remote_key(&batch.key),
                     batch_ipc,
-                    metadata: batch
-                        .metadata
-                        .iter()
-                        .map(RuntimeRecordMetadata::to_remote)
-                        .collect(),
-                    acks: remote_acks,
+                    metadata: batch.metadata.to_remote(),
+                    acks: remote_acks.clone(),
                     admission: None,
                 },
                 &ingress_slot,
@@ -1268,14 +1378,15 @@ impl RelayBoundaryServices {
             .await;
         if let Err(error) = admission_result {
             let reason = error.to_string();
-            for ack_id in registered_ack_ids {
-                dispatcher.clear_pending_ack(ack_id);
+            for registration in remote_acks.iter().flatten() {
+                dispatcher.clear_pending_ack(registration);
             }
             for ack in batch.acks.iter() {
                 ack.no_ack(reason.clone());
             }
             return Err(Box::new(batch.clone()));
         }
+        dispatcher.admit_pending_acks(&remote_acks);
         Ok(())
     }
 
@@ -1311,10 +1422,12 @@ impl RelayBoundaryServices {
 
     pub(super) async fn dispatch_local_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout
             .dispatch_runtime_consumers(
+                dispatch,
                 self.attached_runtime_consumer_count.load(Ordering::Acquire),
                 self.detached_runtime_consumer_count.load(Ordering::Acquire),
                 batch,
@@ -1322,6 +1435,16 @@ impl RelayBoundaryServices {
             .await
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained channel serializes sequence and publication changes",
+            key = "delivery channel incarnation and sequence",
+            bound = "one admitted delivery is serialized against channel replacement and its \
+                     dispatch gate"
+        )
+    )]
     pub(super) async fn dispatch_remote_runtime_consumers(
         &self,
         domain: &DomainName,
@@ -1353,7 +1476,7 @@ impl RelayBoundaryServices {
         // and reach the slot ahead of an earlier one, delivering the relay out of order.
         let mut encoded_body: Option<ChargedBytes> = None;
         for consumer in remote_runtime_consumers.iter() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outbound_slot = self.outbound_slot(
                 &consumer.node_id,
                 &consumer.relay,
@@ -1391,17 +1514,11 @@ impl RelayBoundaryServices {
                 AckMode::Detached => batch.detached(),
             };
             let remote_acks = if consumer.mode == AckMode::Attached {
-                let local_node_id = dispatcher.local_node_id();
                 remote_batch
                     .acks
                     .iter()
                     .map(|ack| {
-                        let ack_id = dispatcher.next_ack_id();
-                        dispatcher.register_pending_ack(ack_id, ack.clone());
-                        Some(RemoteAckRegistration {
-                            ack_id,
-                            reply_node_id: local_node_id.clone(),
-                        })
+                        Some(dispatcher.register_pending_ack(&consumer.node_id, ack.clone()))
                     })
                     .collect::<Vec<_>>()
             } else {
@@ -1424,12 +1541,14 @@ impl RelayBoundaryServices {
                 .await;
 
             match (consumer.mode, result) {
-                (AckMode::Attached, Ok(())) => {}
+                (AckMode::Attached, Ok(())) => {
+                    dispatcher.admit_pending_acks(&remote_acks);
+                }
                 (AckMode::Attached, Err(error)) => {
                     let reason = error.to_string();
                     for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {
                         if let Some(remote_ack) = remote_ack {
-                            dispatcher.clear_pending_ack(remote_ack.ack_id);
+                            dispatcher.clear_pending_ack(remote_ack);
                         }
                         ack_set.no_ack(reason.clone());
                     }
@@ -1481,19 +1600,44 @@ impl RelayBoundaryServices {
         domain: &DomainName,
         relay: &RelayName,
         batch: &RelayRecordBatch,
+        fault_injection: &ConfiguredFaultInjection,
     ) -> RelayDispatchResult {
+        fault_injection
+            .pause_owner_relay_fanout_if_armed(domain)
+            .await;
+        let gate = self.fanout.dispatch_gate();
+        let Some(_dispatch_permit) = gate.try_acquire_dispatch() else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("relay routing changed before owner fan-out");
+            }
+            batch.ack_success();
+            return Err(Box::new(batch.clone()));
+        };
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.dispatch_local_runtime_consumers(batch).await?;
-        self.dispatch_remote_runtime_consumers(domain, batch).await
+        if let Err(failed) = self
+            .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
+            .await
+        {
+            batch.ack_success();
+            return Err(failed);
+        }
+        let result = self.dispatch_remote_runtime_consumers(domain, batch).await;
+        batch.ack_success();
+        result
     }
 
+    /// Hands a batch another node's relay owner routed here to the runtime consumers this node runs
+    /// for the relay. A batch that carries record acknowledgements fails them when no attached
+    /// consumer of the relay runs here any more, so its source delivers it again along the owner's
+    /// current routes rather than committing a record no consumer processed.
     pub(super) async fn inject_remote_message(
         &self,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
-        self.dispatch_local_runtime_consumers(batch).await
+        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, batch)
+            .await
     }
 }
 
@@ -1504,14 +1648,12 @@ impl ConcreteRelayRuntime {
             runtime,
             domain,
             relay,
-            registry,
             services,
         } = build;
         Self {
             runtime,
             domain,
             relay,
-            registry,
             services,
             key,
         }
@@ -1523,13 +1665,7 @@ impl ConcreteRelayRuntime {
     ) -> RelayDispatchResult {
         debug_assert_eq!(&self.key, &batch.key);
         self.runtime
-            .ingest_stream_boundary_message(
-                &self.domain,
-                &self.relay,
-                &self.registry,
-                &self.services,
-                batch,
-            )
+            .ingest_stream_boundary_message(&self.domain, &self.relay, &self.services, batch)
             .await
     }
 }
@@ -1555,28 +1691,15 @@ impl RelayBoundaryBuilder {
     }
 }
 
-pub(crate) fn scheduled_relay_owner_nodes(
-    schedule: &DomainSchedule,
-    relay: &RelayName,
-) -> Vec<ClusterNodeName> {
-    let owner = schedule
-        .nodes
-        .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
-        .and_then(ScheduledNode::execution_node);
-    match owner {
-        Some(owner) => vec![owner.clone()],
-        None => Vec::new(),
-    }
-}
-
 impl Runtime {
-    pub(in crate::runtime) fn current_stream_expiration_time(
-        &self,
-        domain: &DomainName,
-    ) -> DomainClockAccessResult<Timestamp> {
-        Ok(self.domain_execution_snapshot(domain)?.now())
-    }
-
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "retained relay handles route each admitted record and keep channel ordering \
+                      and fences"
+        )
+    )]
     pub(in crate::runtime) fn invalidate_branch_relay_generation(
         &self,
         domain: &DomainName,
@@ -1593,6 +1716,14 @@ impl Runtime {
 
     /// Whether this node owns the relay `services` serve. A relay whose schedule names no owner is
     /// owned wherever it runs.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "retained relay handles route each admitted record and keep channel ordering \
+                      and fences"
+        )
+    )]
     pub(in crate::runtime) fn owns_relay(&self, services: &RelayBoundaryServices) -> bool {
         let dispatcher = self.inner.remote_dispatcher.load();
         services.is_owned_by(dispatcher.as_deref().map(RemoteDispatcher::local_node_id))
@@ -1621,32 +1752,32 @@ impl Runtime {
                 return Err(Box::new(batch.clone()));
             }
         };
-        branches.registry.touch(&batch.key, now);
-        let metrics = match batch.key.as_ref() {
-            Some(branch_key) => {
-                let branch_instance = branches
-                    .instances
-                    .get_or_try_create_with(batch.key.clone(), now, |_, _| {
-                        Ok::<RelayMetricRecorders, std::convert::Infallible>(
-                            self.inner.metrics.resolve_relay_metric_recorders(
-                                domain,
-                                relay,
-                                branches.physical_node_id.as_ref(),
-                                RELAY_BUFFER_DIRECTION_CONCRETE,
-                                Some(branch_key.as_str()),
-                            ),
-                        )
-                    })
-                    .assured("the metrics resolver's error type is Infallible");
-                RelayMetricsHandle::from_recorders(branch_instance.state)
-            }
+        let physical_node_id = branches.physical_node_id.as_ref();
+        let admission = branches
+            .instances
+            .admit(
+                batch.key.as_ref(),
+                now,
+                branches.capacity,
+                |branch_key, _| {
+                    Ok::<RelayMetricRecorders, std::convert::Infallible>(
+                        self.inner.metrics.resolve_relay_metric_recorders(
+                            domain,
+                            relay,
+                            physical_node_id,
+                            RELAY_BUFFER_DIRECTION_CONCRETE,
+                            Some(branch_key.as_str()),
+                        ),
+                    )
+                },
+            )
+            .assured("the metrics resolver's error type is Infallible");
+        let metrics = match admission.branch {
+            Some(recorders) => RelayMetricsHandle::from_recorders(recorders),
             None => branches.global_metrics.clone(),
         };
-        if let Some(capacity) = branches.capacity {
-            for (evicted_key, _) in branches.instances.evict_lru_to_capacity(capacity) {
-                branches.registry.remove(&evicted_key);
-                self.invalidate_branch_relay_generation(domain, &evicted_key);
-            }
+        for (evicted_key, _) in admission.evicted {
+            self.invalidate_branch_relay_generation(domain, &Some(evicted_key));
         }
         metrics.observe_batch(
             batch.message_count(),
@@ -1654,18 +1785,23 @@ impl Runtime {
             batch.domain_timestamp(),
         );
         services.observe_owner_buffer_length(&metrics);
-        let result = services.fanout_owner_batch(domain, relay, batch).await;
-        batch.ack_success();
+        let result = services
+            .fanout_owner_batch(domain, relay, batch, &self.inner.fault_injection)
+            .await;
+        self.inner
+            .fault_injection
+            .mark_owner_relay_fanout_complete(domain);
         result
     }
 
-    /// The branch expiration state of `relay`, kept for the relay-wide materialized state in the
-    /// lifetime the committed schedule publishes for it.
-    pub(in crate::runtime) fn expiring_stream_state(
+    /// The branch presence of `relay`, kept with the relay-wide materialized state in the lifetime
+    /// the committed schedule publishes for it, so materialized reads observe the membership of
+    /// whichever owner the relay has on this node.
+    pub(in crate::runtime) fn relay_branch_presence(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> error_stack::Result<Arc<ExpiringRelayState>, StateIdentityError> {
+    ) -> error_stack::Result<RelayBranchPresence, StateIdentityError> {
         let placement = self.state_placement(
             domain,
             RuntimeStateKind::MaterializedRelay,
@@ -1673,26 +1809,26 @@ impl Runtime {
             relay,
             None,
         )?;
-        if let Some(existing) = self.inner.expiring_stream_states.get(&placement) {
+        if let Some(existing) = self.inner.relay_branch_presences.get(&placement) {
             return Ok(existing.clone());
         }
-        let state = Arc::new(ExpiringRelayState::new());
+        let presence = Arc::new(BranchPresence::new());
         self.inner
-            .expiring_stream_states
-            .insert(placement, state.clone());
-        Ok(state)
+            .relay_branch_presences
+            .insert(placement, presence.clone());
+        Ok(presence)
     }
 
-    pub(in crate::runtime) fn clear_expiring_stream_states_for_domain(&self, domain: &DomainName) {
+    pub(in crate::runtime) fn clear_relay_branch_presences_for_domain(&self, domain: &DomainName) {
         let relays = self
             .inner
-            .expiring_stream_states
+            .relay_branch_presences
             .iter()
             .map(|entry| entry.key().clone())
             .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
         for placement in relays {
-            self.inner.expiring_stream_states.remove(&placement);
+            self.inner.relay_branch_presences.remove(&placement);
         }
     }
 
@@ -1712,12 +1848,6 @@ impl Runtime {
             });
         };
         let routing = routing.load();
-        if !routing.relay_registries.contains_key(relay) {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
-        }
         let Some(services) = routing.relay_services.get(relay) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
@@ -1741,7 +1871,6 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        registry: RelayRegistry,
         services: Arc<RelayBoundaryServices>,
         retention: RelayRetention,
     ) -> RelayOwnerTask {
@@ -1767,10 +1896,12 @@ impl Runtime {
             branch_capacity,
         } = retention;
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
-        let task = tokio::spawn(async move {
+        // Claiming before the task starts makes this owner the presence's only publisher from here
+        // on: a predecessor that is still ending can no longer change what observers read.
+        let instances = OwnedBranches::claim(services.branch_presence.clone());
+        let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
-                registry,
-                instances: BranchInstanceRegistry::new(),
+                instances,
                 global_metrics,
                 physical_node_id,
                 capacity: branch_capacity,
@@ -1778,8 +1909,8 @@ impl Runtime {
             };
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     biased;
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -1827,8 +1958,7 @@ impl Runtime {
                             now,
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
-                            branches.registry.remove(&expired_key);
-                            runtime.invalidate_branch_relay_generation(&domain, &expired_key);
+                            runtime.invalidate_branch_relay_generation(&domain, &Some(expired_key));
                         }
                         next_expiration_scan = Instant::now() + expiration_scan_interval;
                     }
@@ -1836,7 +1966,7 @@ impl Runtime {
             }
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let batch = match receiver.try_recv() {
                     RelayTryRecv::Batch(batch) => batch,
                     RelayTryRecv::Empty | RelayTryRecv::Closed => {
@@ -1854,7 +1984,9 @@ impl Runtime {
             }
             services.observe_owner_buffer_length(&branches.global_metrics);
             services.deactivate_owner_buffer();
-            branches.registry.clear();
+            // Releasing the owner's branches publishes an empty presence before the relay's metrics
+            // are removed, unless a successor already claimed the presence.
+            drop(branches);
             runtime.inner.metrics.remove_relay(&domain, &relay);
         });
         RelayOwnerTask { shutdown, task }
@@ -1882,7 +2014,7 @@ impl Runtime {
         let quiesce_counters =
             self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
         let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let interaction_input = RelayInteractionInput::immediate(relay.clone(), receiver);
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
@@ -1898,6 +2030,18 @@ impl Runtime {
             let relay_model_name = ModelName::from(&relay);
             let ownership_entity =
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
+            let freeze_watch = OwnershipHandoffFreezeWatch::new(&runtime, ownership_entity);
+            let clock = match runtime.bind_domain_clock(&domain) {
+                Ok(clock) => clock,
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "materialized relay '{}' in domain '{}' could not bind its clock: {error}",
+                        relay.as_str(),
+                        domain.as_str()
+                    ));
+                    return;
+                }
+            };
             let mut restored_branches = state.read().restored_branch_watermarks();
             restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
             for (key, last_ingestion) in restored_branches {
@@ -1905,12 +2049,12 @@ impl Runtime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
-                tokio::task::consume_budget().await;
-                if !runtime.ownership_handoff_entity_is_frozen(&ownership_entity)
+                nervix_primitives::task::consume_budget().await;
+                if !freeze_watch.observe().is_frozen()
                     && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
                 {
-                    let now = match runtime.current_stream_expiration_time(&domain) {
+                    let now = match clock.snapshot().map(|snapshot| snapshot.now()) {
                         Ok(now) => now,
                         Err(error) => {
                             runtime.events().report_error(format!(
@@ -1922,7 +2066,7 @@ impl Runtime {
                         }
                     };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &key);
                         if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
                             warn!(
@@ -1937,16 +2081,15 @@ impl Runtime {
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
                     continue;
                 }
-                let expiration_sleep =
-                    if runtime.ownership_handoff_entity_is_frozen(&ownership_entity) {
-                        Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
-                    } else {
-                        branch_ttl.map(|_| {
-                            next_expiration_scan
-                                .checked_duration_since(Instant::now())
-                                .unwrap_or(Duration::ZERO)
-                        })
-                    };
+                let expiration_sleep = if freeze_watch.observe().is_frozen() {
+                    Some(OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL)
+                } else {
+                    branch_ttl.map(|_| {
+                        next_expiration_scan
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO)
+                    })
+                };
                 let mut wake = RuntimeWake::never();
                 if let Some(sleep) = expiration_sleep {
                     match RuntimeWake::after(sleep) {
@@ -2006,7 +2149,7 @@ impl Runtime {
                     }
                 };
                 let branch_key = batch.key.clone();
-                let now = match runtime.current_stream_expiration_time(&domain) {
+                let now = match clock.snapshot().map(|snapshot| snapshot.now()) {
                     Ok(now) => now,
                     Err(error) => {
                         let reason = format!(
@@ -2029,7 +2172,7 @@ impl Runtime {
                 if let Some(branch_capacity) = branch_capacity {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
                             runtime.delete_materialized_stream_key(&state, &evicted_key)
@@ -2080,3 +2223,7 @@ impl Runtime {
 #[cfg(test)]
 #[path = "relay_boundary_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "relay_branch_presence_shuttle_tests.rs"]
+mod branch_presence_shuttle_tests;

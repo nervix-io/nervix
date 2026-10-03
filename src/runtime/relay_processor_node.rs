@@ -327,12 +327,15 @@ impl RelayProcessorNode {
             return None;
         };
         let plan = match plan_filter_map_messages(
+            ProgramRun {
+                executor: branch.runtime.executor(),
+                now: execution_now,
+            },
             self.kind.as_str(),
             &self.processor,
             kind.error_operation(),
             &program,
             batch,
-            execution_now,
             materialized_state,
         )
         .await
@@ -353,6 +356,7 @@ impl RelayProcessorNode {
         branch
             .runtime
             .handle_planned_message_errors(
+                branch.routing_snapshot.as_deref(),
                 &branch.domain,
                 self.kind,
                 &self.processor,
@@ -385,8 +389,7 @@ impl RelayProcessorNode {
                 }
             };
             self.refresh(routing);
-            let execution_snapshot = match branch.runtime.domain_execution_snapshot(&branch.domain)
-            {
+            let execution_snapshot = match branch.domain_clock.snapshot() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
@@ -500,6 +503,7 @@ impl RelayProcessorNode {
                         }
                     };
                     let key_result = execute_program_with_selection_in_context(
+                        branch.runtime.executor(),
                         &key_program.program,
                         &vm_batch,
                         &VmExecutionContext {
@@ -646,6 +650,7 @@ impl RelayProcessorNode {
                     };
                     // Every route's aggregate arguments are evaluated over the whole batch once.
                     let evaluated = evaluate_window_arguments(
+                        branch.runtime.executor(),
                         plan,
                         compiled_aggregates,
                         first_message.record.batch(),
@@ -657,11 +662,12 @@ impl RelayProcessorNode {
                         Err(failure) => {
                             // A failure of the whole batch fails every one of its messages.
                             for message in messages {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 branch
                                     .runtime
                                     .handle_message_error(
                                         MessageErrorSourceContext {
+                                            routing: branch.routing_snapshot.as_deref(),
                                             domain: &branch.domain,
                                             node_kind: self.kind,
                                             node: &self.processor,
@@ -685,7 +691,7 @@ impl RelayProcessorNode {
                     };
                     let mut pending = VecDeque::with_capacity(messages.len());
                     for (row, message) in messages.into_iter().enumerate() {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let Some(refusal) = evaluated.take_refusal(row) else {
                             pending.push_back(WindowAdmission { message, row });
                             continue;
@@ -694,6 +700,7 @@ impl RelayProcessorNode {
                             .runtime
                             .handle_message_error(
                                 MessageErrorSourceContext {
+                                    routing: branch.routing_snapshot.as_deref(),
                                     domain: &branch.domain,
                                     node_kind: self.kind,
                                     node: &self.processor,
@@ -715,7 +722,7 @@ impl RelayProcessorNode {
                     // emission covers exactly the rows admitted before it.
                     let mut budget_limited = false;
                     while !pending.is_empty() {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let run_len = if budget_limited {
                             1
                         } else {
@@ -735,11 +742,12 @@ impl RelayProcessorNode {
                                 continue;
                             }
                             for admission in run {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 branch
                                     .runtime
                                     .handle_message_error(
                                         MessageErrorSourceContext {
+                                            routing: branch.routing_snapshot.as_deref(),
                                             domain: &branch.domain,
                                             node_kind: self.kind,
                                             node: &self.processor,
@@ -846,6 +854,7 @@ impl RelayProcessorNode {
                         }
                     };
                     let key_result = execute_program_with_selection_in_context(
+                        branch.runtime.executor(),
                         &program.program,
                         &vm_batch,
                         &VmExecutionContext {
@@ -1057,20 +1066,23 @@ impl RelayProcessorNode {
                         Vec::<(CorrelatorPendingMessage, CorrelatorPendingMessage)>::new();
                     let materialized_state = Arc::new(materialized_values);
                     for message in messages {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let incoming = CorrelatorPendingMessage {
                             received_at: execution_now,
                             message,
                             materialized_state: materialized_state.clone(),
                         };
                         match correlate_incoming_message(
+                            ProgramRun {
+                                executor: branch.runtime.executor(),
+                                now: execution_now,
+                            },
                             &self.processor,
                             where_program,
                             side,
                             *match_policy,
                             state,
                             incoming,
-                            execution_now,
                         )
                         .await
                         {
@@ -1164,13 +1176,14 @@ impl RelayProcessorNode {
                         })
                         .collect::<Vec<_>>();
                     for (output_index, output_program) in output_programs.into_iter().enumerate() {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let route_acks = if output_index + 1 == output_count {
                             std::mem::take(&mut pair_acks)
                         } else {
                             pair_acks.iter().map(AckSet::attached).collect()
                         };
                         let outcomes = match evaluate_correlator_output_batch(
+                            branch.runtime.executor(),
                             &self.processor,
                             output_program,
                             &matched,
@@ -1202,7 +1215,7 @@ impl RelayProcessorNode {
                         let output_relay = output_routes.routes[output_index].relay.clone();
                         let mut messages = Vec::new();
                         for outcome in outcomes {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             match outcome {
                                 Ok(Some(message)) => messages.push(message),
                                 Ok(None) => {}
@@ -1210,6 +1223,7 @@ impl RelayProcessorNode {
                                     branch
                                         .runtime
                                         .handle_structured_message_error(MessageErrorHandling {
+                                            routing: branch.routing_snapshot.as_deref(),
                                             domain: &branch.domain,
                                             node_kind: self.kind,
                                             node: &self.processor,
@@ -1701,7 +1715,7 @@ impl RelayProcessorNode {
                     // callback that ends the instance never takes the decisions of an earlier one,
                     // which no checkpoint has covered yet, down with it.
                     for timeout in due_timeouts {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let Some(live) = instance.as_mut() else {
                             // A callback before this one ended the instance, and the timeouts it
                             // had requested ended with it.

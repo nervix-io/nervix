@@ -333,6 +333,12 @@ Published branch snapshots share the retained Arrow input and argument columns, 
 sections, and rebuild the same sketches from those columns when ownership moves or a node recovers.
 Histogram delayed removals travel in bounded typed sections beside the columns.
 
+Admission reads each consecutive run of retained rows as typed Arrow value slices with their
+validity bits. Counts and integer sums are exact across run boundaries. Floating-point sums and
+statistics merge each run's compensated or centered result into the branch-local window, so their
+last rounded digits can depend on the run and lane grouping. Stepping refolds surviving runs;
+restoring a snapshot re-admits its retained rows.
+
 In a window route, `COUNT`, `SUM`, `FIRST`, `LAST`, `MIN`, and `MAX` always name window aggregates.
 The [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same
 names apply to one `ARRAY` or `VEC` value everywhere else.
@@ -511,10 +517,11 @@ CREATE REINGESTOR repartition_events
 ```
 
 When the outgoing branch name equals the incoming branch, no branch `SET` is allowed and the key is
-preserved. State lookup always uses the incoming branch, never a partially constructed outgoing
-key. The reingestor resolves the outgoing branch before buffering the route, so each concrete
-outgoing branch has an independent flush interval and size boundary. Downstream branch execution
-receives the completed Arrow batch and does not apply a second flush policy.
+preserved. A message passes its input's `FROM ... WHERE` and then the reingestor's `FILTER WHERE`
+before any route constructs it. State lookup always uses the incoming branch, never a partially
+constructed outgoing key. The reingestor resolves the outgoing branch before buffering the route,
+so each concrete outgoing branch has an independent flush interval and size boundary. Downstream
+branch execution receives the completed Arrow batch and does not apply a second flush policy.
 
 ### Altering Reingestors
 

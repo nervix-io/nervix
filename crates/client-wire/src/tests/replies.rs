@@ -4,9 +4,10 @@ use flatbuffers::FlatBufferBuilder;
 use meticulous::ResultExt as _;
 use nervix_models::{
     DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, ModelKind, ModelName, NodeRef,
-    PlacementPolicy, TransactionInspection, TransactionInspectionRejection, TransactionLifecycle,
-    TransactionPosition, TransactionStatus, TransactionStatusError, WasmCheckpointCounts,
-    WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration, WasmStateInspection,
+    PlacementPolicy, RequestedResourceVersion, TransactionInspection,
+    TransactionInspectionRejection, TransactionLifecycle, TransactionPosition, TransactionStatus,
+    TransactionStatusError, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
+    WasmStateGeneration, WasmStateInspection,
 };
 
 use super::{
@@ -362,11 +363,35 @@ fn typed_choices_and_lookup_states_round_trip() {
             },
         },
         Choice {
+            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest),
+            presentation: ChoicePresentation {
+                label: "LATEST".to_string(),
+                detail: Some("Highest completed version".to_string()),
+                group: Some("Resource version".to_string()),
+            },
+        },
+        Choice {
+            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(3)),
+            presentation: ChoicePresentation {
+                label: "3".to_string(),
+                detail: Some("Completed version".to_string()),
+                group: Some("Resource version".to_string()),
+            },
+        },
+        Choice {
             value: ChoiceValue::Model(NodeRef::new(ModelKind::Relay, name::<ModelName>("orders"))),
             presentation: ChoicePresentation {
                 label: "orders".to_string(),
                 detail: Some("Relay".to_string()),
                 group: Some("Models".to_string()),
+            },
+        },
+        Choice {
+            value: ChoiceValue::Field(name("amount")),
+            presentation: ChoicePresentation {
+                label: "amount".to_string(),
+                detail: Some("I64".to_string()),
+                group: None,
             },
         },
     ];

@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 use error_stack::Report;
 
 use crate::{
+    backup::{ALL_BACKUP_DOWNLOAD_FAILURES, ALL_BACKUP_RESOURCES},
     choice::{
         ALL_CHOICE_PLACEMENT_POLICIES, ALL_CHOICE_STATUSES, ALL_CHOICE_TARGETS,
         ALL_DOMAIN_PACE_CHOICES,
@@ -12,16 +13,28 @@ use crate::{
     codec::UndeclaredEnumValue,
     command::{ALL_EXECUTION_REFERENCE_CONFLICTS, ALL_UNKNOWN_OUTCOME_CAUSES},
     common::{ALL_MODEL_KINDS, ALL_OUTCOME_ORIGINS},
+    consumer::{
+        ALL_EMITTER_CLOSE_DISPOSITIONS, ALL_EMITTER_OPEN_REFUSALS, ALL_EMITTER_SETTLEMENTS,
+    },
     domain::ALL_DOMAIN_STATUSES,
+    domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
     event::ALL_NOTICE_LEVELS,
     impact::{
         ALL_ACTIVATION_ACTIONS, ALL_DOMAIN_LIFECYCLE_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS,
         ALL_IMPACT_EDGE_KINDS, ALL_MODEL_CHANGE_ASPECTS, ALL_REBUILD_REASONS,
         ALL_RESOURCE_CATALOG_ACTIONS, ALL_STATE_PURGES,
     },
+    producer::{
+        ALL_OUTCOME_UNCERTAINTIES, ALL_PROCESSING_FAILURES, ALL_PRODUCER_ADMISSIONS,
+        ALL_PRODUCER_END_REASONS, ALL_PRODUCER_REFUSALS,
+    },
     reply::{
         ALL_CANCEL_STATES, ALL_CANCELLATION_STAGES, ALL_INSPECTION_REJECTIONS,
         ALL_REQUEST_REJECTIONS, ALL_SUGGESTION_KINDS,
+    },
+    restore::{
+        ALL_RESTORE_MODES, ALL_RESTORE_STEP_KINDS, ALL_RESTORE_STEP_OUTCOMES,
+        ALL_RESTORE_UPLOAD_FAILURES,
     },
     row::ALL_SCALAR_TYPES,
     subscription::{ALL_ROWS_SKIPPED_CAUSES, ALL_SUBSCRIPTION_END_REASONS, ALL_SUBSCRIPTION_TYPES},
@@ -139,6 +152,54 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
         wire::SubscriptionEndReason::ENUM_VALUES,
     );
     assert_exact_mapping(ALL_UPLOAD_FAILURES, wire::UploadFailure::ENUM_VALUES);
+    assert_exact_mapping(ALL_BACKUP_RESOURCES, wire::BackupResources::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_BACKUP_DOWNLOAD_FAILURES,
+        wire::BackupDownloadFailure::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
+        wire::DomainClockAttachmentEndReason::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_PRODUCER_ADMISSIONS,
+        wire::ProducerAdmission::ENUM_VALUES,
+    );
+    assert_exact_mapping(ALL_PRODUCER_REFUSALS, wire::ProducerRefusal::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_EMITTER_OPEN_REFUSALS,
+        wire::EmitterOpenRefusal::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_EMITTER_SETTLEMENTS,
+        wire::EmitterSettlement::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_EMITTER_CLOSE_DISPOSITIONS,
+        wire::EmitterCloseDisposition::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_PROCESSING_FAILURES,
+        wire::ProcessingFailure::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_OUTCOME_UNCERTAINTIES,
+        wire::OutcomeUncertainty::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_PRODUCER_END_REASONS,
+        wire::ProducerEndReason::ENUM_VALUES,
+    );
+    assert_exact_mapping(ALL_RESTORE_MODES, wire::RestoreMode::ENUM_VALUES);
+    assert_exact_mapping(ALL_RESTORE_STEP_KINDS, wire::RestoreStepKind::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_RESTORE_STEP_OUTCOMES,
+        wire::RestoreStepOutcome::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_RESTORE_UPLOAD_FAILURES,
+        wire::RestoreUploadFailure::ENUM_VALUES,
+    );
 }
 
 #[test]
@@ -215,6 +276,30 @@ fn every_undeclared_enum_byte_is_refused() {
         wire::ModelChangeAspect::ENUM_MAX,
         wire::ModelChangeAspect,
     );
+    assert_undeclared_refused::<nervix_models::BackupResources, _>(
+        wire::BackupResources::ENUM_MAX,
+        wire::BackupResources,
+    );
+    assert_undeclared_refused::<crate::BackupDownloadFailure, _>(
+        wire::BackupDownloadFailure::ENUM_MAX,
+        wire::BackupDownloadFailure,
+    );
+    assert_undeclared_refused::<nervix_models::RestoreMode, _>(
+        wire::RestoreMode::ENUM_MAX,
+        wire::RestoreMode,
+    );
+    assert_undeclared_refused::<crate::restore::RestoreStepKind, _>(
+        wire::RestoreStepKind::ENUM_MAX,
+        wire::RestoreStepKind,
+    );
+    assert_undeclared_refused::<nervix_models::RestoreStepOutcome, _>(
+        wire::RestoreStepOutcome::ENUM_MAX,
+        wire::RestoreStepOutcome,
+    );
+    assert_undeclared_refused::<crate::RestoreUploadFailure, _>(
+        wire::RestoreUploadFailure::ENUM_MAX,
+        wire::RestoreUploadFailure,
+    );
     assert_undeclared_refused::<crate::SuggestionKind, _>(
         wire::SuggestionKind::ENUM_MAX,
         wire::SuggestionKind,
@@ -254,5 +339,29 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<crate::UploadFailure, _>(
         wire::UploadFailure::ENUM_MAX,
         wire::UploadFailure,
+    );
+    assert_undeclared_refused::<crate::DomainClockAttachmentEndReason, _>(
+        wire::DomainClockAttachmentEndReason::ENUM_MAX,
+        wire::DomainClockAttachmentEndReason,
+    );
+    assert_undeclared_refused::<nervix_models::ClientProducerAdmission, _>(
+        wire::ProducerAdmission::ENUM_MAX,
+        wire::ProducerAdmission,
+    );
+    assert_undeclared_refused::<nervix_models::ClientProducerRefusal, _>(
+        wire::ProducerRefusal::ENUM_MAX,
+        wire::ProducerRefusal,
+    );
+    assert_undeclared_refused::<nervix_models::ClientProcessingFailure, _>(
+        wire::ProcessingFailure::ENUM_MAX,
+        wire::ProcessingFailure,
+    );
+    assert_undeclared_refused::<nervix_models::ClientOutcomeUncertainty, _>(
+        wire::OutcomeUncertainty::ENUM_MAX,
+        wire::OutcomeUncertainty,
+    );
+    assert_undeclared_refused::<nervix_models::ClientProducerEndReason, _>(
+        wire::ProducerEndReason::ENUM_MAX,
+        wire::ProducerEndReason,
     );
 }

@@ -437,8 +437,8 @@ the VM batch-size sweep (`crates/nervix-vm/benches/vm.rs`, criterion, one develo
 September 2026) relative to the 1,024-row value for each program shape: at 64 rows it is 12–60%
 of that value and climbs steeply; above 1,024 rows most shapes are flat within measurement noise,
 float arithmetic dips, and only the cheapest shape, nullable casts, keeps gaining, because batches
-above 1,024 rows execute on the blocking worker pool and its per-batch hand-off is no longer
-amortized by more work. Absolute rates are machine-specific; the shape is not.
+above 1,024 rows execute on the node's data workers and their per-batch admission and hand-off
+is no longer amortized by more work. Absolute rates are machine-specific; the shape is not.
 
 | program shape | 64 | 256 | 1,024 | 4,096 | 16,384 | 65,536 |
 |:--|--:|--:|--:|--:|--:|--:|
@@ -724,6 +724,11 @@ Current built-in client transport kinds include:
 - `S3`
 - `GCS`
 - `AZURE_BLOB`
+- `CLICKHOUSE`
+- `POSTGRES`
+- `MYSQL`
+- `MONGODB`
+- `ICEBERG_REST`
 
 Resource management commands:
 
@@ -754,6 +759,22 @@ to one completed version. The resource itself is unchanged. Every selected repla
 before any model is written; a no-op selection succeeds without a write. Resource descriptions
 list all bound usages, while a version-qualified description lists only usages pinned there.
 
+Backup and restore commands, which read and write archive files on the client's machine:
+
+```nspl,ignore
+BACKUP CLUSTER TO '<file>' [WITHOUT RESOURCES];
+BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES];
+DESCRIBE BACKUP '<file>' [FORMAT TEXT | JSON];
+RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN];
+RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN];
+```
+
+`BACKUP` is admitted and run by the leader like other persistent commands, and the client
+downloads the archive it assembles. `DESCRIBE BACKUP` runs in `nervix-cli` without a server.
+`RESTORE` streams the archive to the leader, which verifies and plans the whole restore before it
+changes anything, and then recreates the users, the domains stopped, their resource versions under
+their archived numbers, and their models. See [Backup And Restore](backup-and-restore.md).
+
 Session-only commands:
 
 ```nspl,ignore
@@ -778,6 +799,7 @@ Show commands:
 
 ```nspl,ignore
 SHOW CREATE <kind> <name>;
+SHOW CREATE BRANCH by_tenant;
 SHOW PLACEMENTS;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW CLUSTER STATUS;

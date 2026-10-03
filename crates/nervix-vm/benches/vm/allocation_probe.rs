@@ -3,12 +3,10 @@
 //! This module is built only by `just bench-vm-alloc`. Its global allocator counts requested
 //! bytes while one fixture executes. Criterion timing uses the ordinary allocator build.
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::alloc::{GlobalAlloc, Layout, System};
 
 use meticulous::OptionExt as _;
+use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 
@@ -63,7 +61,7 @@ unsafe impl GlobalAlloc for MeteredAllocator {
 }
 
 pub(super) fn measure(
-    runtime: &tokio::runtime::Runtime,
+    runtime: &BenchmarkRuntime,
     name: &str,
     shape: &str,
     program: &Arc<CompiledProgram>,
@@ -73,7 +71,7 @@ pub(super) fn measure(
     BYTES.store(0, Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
     let output = runtime
-        .block_on(execute_benchmark_program(program, batch))
+        .execute(program, batch)
         .assured("the validated benchmark fixture executes successfully");
     ACTIVE.store(false, Ordering::Release);
 

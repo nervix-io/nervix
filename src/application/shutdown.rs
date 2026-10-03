@@ -9,14 +9,14 @@
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
 
+use std::time::Duration;
+
 use meticulous::{OptionExt as _, ResultExt as _};
-use tokio::{
-    sync::watch,
-    time::{Duration, Instant},
+use nervix_primitives::{
+    sync::{Arc, CancellationToken, watch},
+    time::Instant,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::info;
-use triomphe::Arc;
 
 pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a shutdown may take from its first stop request until the process exits. It covers
@@ -55,7 +55,7 @@ impl ShutdownDeadline {
     where
         F: Future,
     {
-        let bounded = tokio::time::timeout(self.remaining(), work).await;
+        let bounded = nervix_primitives::time::timeout(self.remaining(), work).await;
         match bounded {
             Ok(output) => BeforeDeadline::Finished(output),
             Err(_) => BeforeDeadline::Expired,
@@ -307,7 +307,7 @@ impl ShutdownCoordinator {
     pub async fn completion(&self) -> ShutdownOutcome {
         let mut state = self.inner.state.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = state.borrow().outcome();
             if let Some(outcome) = outcome {
                 return outcome;
@@ -429,21 +429,21 @@ mod tests {
             .deadline()
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn repeated_stop_requests_keep_the_first_deadline() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(30));
         let ShutdownRequestOutcome::Accepted(first) = coordinator.request_stop() else {
             panic!("the first stop request must start shutdown");
         };
 
-        tokio::time::advance(Duration::from_secs(10)).await;
+        nervix_primitives::time::advance(Duration::from_secs(10)).await;
         let repeated = coordinator.request_stop();
 
         assert_eq!(repeated, ShutdownRequestOutcome::AlreadyRequested(first));
         assert_eq!(first.deadline().remaining(), Duration::from_secs(20));
         assert!(!first.deadline().has_passed());
 
-        tokio::time::advance(Duration::from_secs(20)).await;
+        nervix_primitives::time::advance(Duration::from_secs(20)).await;
         let after_the_deadline = coordinator.request_stop();
 
         assert_eq!(
@@ -454,7 +454,7 @@ mod tests {
         assert!(first.deadline().has_passed());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn work_still_running_at_the_deadline_is_cut_off_there() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
         coordinator.request_stop();
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(5));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn work_that_finishes_before_the_deadline_reports_its_output() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
         coordinator.request_stop();
@@ -475,7 +475,7 @@ mod tests {
 
         let finished = deadline
             .bound(async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                nervix_primitives::time::sleep(Duration::from_secs(1)).await;
                 7
             })
             .await;
@@ -504,7 +504,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_phase_that_finishes_after_the_deadline_is_forced() {
         let coordinator = ShutdownCoordinator::new(Duration::from_secs(5));
         coordinator.request_stop();
@@ -514,7 +514,7 @@ mod tests {
             ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline),
             ShutdownPhaseOutcome::Completed
         );
-        tokio::time::advance(Duration::from_secs(5)).await;
+        nervix_primitives::time::advance(Duration::from_secs(5)).await;
         assert_eq!(
             ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline),
             ShutdownPhaseOutcome::Forced
@@ -527,7 +527,7 @@ mod tests {
         assert!(outcome.deadline_expired());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn drain_support_stays_live_until_terminal_teardown() {
         let coordinator = ShutdownCoordinator::default();
         let admission = coordinator.admission_token();
@@ -561,12 +561,13 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
-    use shuttle::{future::block_on, thread};
+    use nervix_model_harness::shuttle::{check_pct, check_random};
+    use nervix_primitives::thread;
+    use shuttle::future::block_on;
 
     use super::*;
-    use crate::{
-        application::test_fixtures::{FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order},
-        shuttle_test::{check_pct, check_random},
+    use crate::application::test_fixtures::{
+        FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order,
     };
 
     const MODEL_THREAD_JOINS: &str =

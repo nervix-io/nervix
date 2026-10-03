@@ -1,10 +1,9 @@
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use clap::Parser;
 use error_stack::{Report, ResultExt as _};
+use nervix_primitives::runtime::Builder;
 use nervix_server::application::{AppError, Args, TerminationSignals, init_tracing, run_cli};
-use tokio::runtime::Builder;
+
+nervix_primitives::product_binary!("nervix-server");
 
 fn main() -> Result<(), Report<AppError>> {
     let args = Args::parse();
@@ -17,6 +16,9 @@ fn main() -> Result<(), Report<AppError>> {
         .build()
         .change_context(AppError::BuildRuntime)?;
 
-    let _tracing_guard = init_tracing(&args)?;
-    runtime.block_on(run_cli(args, termination_signals))
+    let tracing_guard = {
+        let _entered = runtime.enter();
+        init_tracing(&args)?
+    };
+    runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
 }

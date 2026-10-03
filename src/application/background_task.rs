@@ -8,9 +8,10 @@
 //!   shutdown deadline that bounds every wait.
 //! - **Must not know.** What any supervised task does.
 
+use std::time::Duration;
+
 use error_stack::Report;
-use tokio::{task::JoinHandle, time::Duration};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::{sync::CancellationToken, task::JoinHandle};
 use tracing::warn;
 
 use super::{
@@ -105,7 +106,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
     deadline: ShutdownDeadline,
 ) -> ShutdownPhaseOutcome {
     let grace_period = BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD.min(deadline.remaining());
-    let joined = tokio::time::timeout(grace_period, &mut task).await;
+    let joined = nervix_primitives::time::timeout(grace_period, &mut task).await;
     match joined {
         Ok(Ok(())) => ShutdownPhaseOutcome::Completed,
         Ok(Err(error)) => {
@@ -135,7 +136,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::Instant;
+    use nervix_primitives::time::Instant;
 
     use super::*;
 
@@ -148,20 +149,20 @@ mod tests {
             .deadline()
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_background_task_that_stops_within_its_grace_period_completes() {
         let deadline = deadline_after(Duration::from_secs(30));
-        let task = tokio::spawn(async {});
+        let task = nervix_primitives::task::spawn(async {});
 
         let outcome = await_background_task_shutdown(task, "test task", deadline).await;
 
         assert_eq!(outcome, ShutdownPhaseOutcome::Completed);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_background_task_that_ignores_its_stop_is_aborted_after_its_grace_period() {
         let deadline = deadline_after(Duration::from_secs(30));
-        let task = tokio::spawn(std::future::pending::<()>());
+        let task = nervix_primitives::task::spawn(std::future::pending::<()>());
         let started = Instant::now();
 
         let outcome = await_background_task_shutdown(task, "test task", deadline).await;
@@ -170,10 +171,10 @@ mod tests {
         assert_eq!(started.elapsed(), BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn the_shutdown_deadline_cuts_a_background_task_grace_period_short() {
         let deadline = deadline_after(Duration::from_millis(500));
-        let task = tokio::spawn(std::future::pending::<()>());
+        let task = nervix_primitives::task::spawn(std::future::pending::<()>());
         let started = Instant::now();
 
         let outcome = await_background_task_shutdown(task, "test task", deadline).await;
@@ -182,10 +183,11 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_millis(500));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn public_listeners_that_outlive_the_deadline_are_aborted_and_joined() {
         let deadline = deadline_after(Duration::from_secs(5));
-        let listeners = tokio::spawn(std::future::pending::<Result<(), Report<AppError>>>());
+        let listeners =
+            nervix_primitives::task::spawn(std::future::pending::<Result<(), Report<AppError>>>());
         let started = Instant::now();
 
         let joined = join_public_listeners(listeners, deadline).await;

@@ -107,6 +107,11 @@ mapping, and advances the authority fence to an unassigned state in the same tra
 runtime clears accepted progress for the generation and wakes bound waiters, which observe a typed
 stopped or stale-generation error. A later `START` creates another generation.
 
+A producer of a [client ingestor](./ingestors.md#client-ingestors) is bound to the generation it
+attached under, which its open reply reports. `STOP` ends it, and so does an execution installed
+under a later generation, both as `domain stopped`; a producer never carries batches from one
+generation into the next.
+
 The internal pause used while altering a running model does not establish a generation. It keeps
 the mapping and authority active while ingestion and generators are withheld, so logical time and
 already-armed deadlines continue through the quiesce cycle.
@@ -114,9 +119,12 @@ already-armed deadlines continue through the quiesce cycle.
 ## Authority Selection And Reconciliation
 
 The current consensus leader reconciles authority ownership whenever domain state, Raft topology,
-or effective node availability changes. Candidate identities are the intersection of live gossip
-incarnations and current Raft voters. Duplicate observations for one node name collapse to the
-newest incarnation.
+or effective node availability changes. Candidate identities are the intersection of effectively
+available node incarnations and current Raft voters. Effective availability retains an established
+incarnation through a gossip loss while its latest application-health observation remains within
+the node-unavailability interval and has not marked it unavailable. If that observation becomes
+stale, the node follows gossip's liveness verdict. Duplicate observations for one node name
+collapse to the newest incarnation.
 
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and
@@ -132,6 +140,10 @@ Leadership transfer alone does not alter the mapping or authority. Losing the au
 node incarnation causes the leader to select and commit another eligible incarnation. If none is
 eligible, the authority becomes unassigned and the paced clock is unavailable for execution until
 an owner is committed again; the mapping itself remains replicated.
+
+Application-health probes finish their bounded attempts despite concurrent gossip updates. This
+allows continuous failures to exclude a stopped authority even after its advertised endpoint has
+changed; a stale healthy observation must not leave it indefinitely eligible for clock production.
 
 On each node, a producer task exists only when all of these values agree with committed runtime
 state:
@@ -159,6 +171,9 @@ tick by direct arithmetic. If scheduling delay spans several periods, it emits o
 due boundary and continues with the first future boundary. It never loops through or queues every
 missed tick. A newly assigned authority can consequently reconstruct the current frontier without
 persisting the previous producer's counter.
+After an actual emission, the authority waits at least one period divided by the rate in physical
+time before emitting another tick. This keeps consecutive observations spaced correctly when tick
+1 was delayed after `START`; a late next boundary is coalesced to the newest due id as usual.
 
 Each progress report carries the lifecycle generation, authority revision, full authority
 identity, tick id, logical boundary, authority UTC observation, and period. The authority applies
@@ -189,8 +204,12 @@ nonzero tick id. A report is newer only when its tick id advances and its author
 does not precede the retained one. Duplicate, reordered, delayed, and superseded reports are
 ignored.
 
-The receiver retains only the newest accepted tick observation. It does not use the report's
-logical timestamp, UTC timestamp, or period to replace the installed mapping. The unit response
+The receiver publishes the newest accepted tick id, logical boundary, and authority UTC observation
+through a per-domain watch. The compare and replacement are serialized by the watch so concurrent
+deliveries cannot replace newer progress with an older report. Generation changes and stops clear
+it with `send_replace`; a late observer subscribes before reading and sees the current value at
+once. Progress does not use the report's logical timestamp, UTC timestamp, or period to replace the
+installed mapping. The unit response
 therefore means that the receiver evaluated the report against its current fence; it does not mean
 that the report established time. Progress can never create a missing domain.
 
@@ -200,7 +219,18 @@ Each runtime node keeps one shared lifecycle allocation per domain, and graph ta
 handles bound to its domain and lifecycle generation. Control-plane synchronization publishes each
 installation change into that allocation by atomically replacing the complete installation, then
 notifies logical waiters. This makes a lifecycle change visible to every existing handle and gives
-logical waiters one notification source to observe.
+logical waiters one notification source to observe. The same immutable publication contains its
+pause state, lifecycle generation and last start point. Ingest groups read pause/admission and time
+from one publication. Kafka domain-offset polls and filtered subscriptions retain the lifecycle
+allocation; a subscription reads its current installed generation even when it opened before
+START. Generators, processors and materialized relay tasks retain their generation-bound clock. These
+reads do not resolve the runtime's domain or execution registry again. A paused paced domain keeps
+its installed mapping while publishing pause, and a later generation still invalidates a clock
+bound to its predecessor.
+
+A pause-only publication does not notify installation observers when it keeps the installed
+mapping unchanged; intake sees pause through the lifecycle publication while execution keeps its
+existing logical waiters and mapping.
 
 The local installation states have explicit meanings:
 
@@ -237,6 +267,69 @@ watermark when its mapping and authority are installed again.
 Applying a cluster revision synchronizes all domain lifecycles before applying its schedule. A
 joining node therefore cannot instantiate work and then discover that its clock mapping is absent.
 Removing a domain marks the shared lifecycle missing before node-local state is discarded.
+
+## Session Observation
+
+A session attached with `ATTACH DOMAIN CLOCK` observes the installation and accepted tick progress
+its serving node publishes. Its observer takes a clock snapshot for the serving node's logical
+reading when building a tick frame. Attachment adds no interconnect traffic: every node serves it
+from its own installation and accepted progress.
+
+The runtime exposes an observer of one domain's lifecycle and progress watch. It subscribes to
+both notifications before its first read, so a later installation or tick wakes it. It maps each
+installation to the public observed clock, a vocabulary model shared by the server and Rust client:
+
+| Installation | Observed clock |
+| --- | --- |
+| Missing | None: the attachment ends |
+| Stopped | Stopped, with its generation |
+| Uninstalled | Uninstalled, with its generation and no mapping |
+| Installed unpaced | Unpaced, with its generation |
+| Installed paced | Paced, with its generation, period, skew, and committed mapping |
+
+The observer retains the progress watch sender while the attachment lives. Removing the domain
+therefore closes neither wait before the lifecycle publishes missing and wakes delivery to send the
+attachment-end frame.
+
+The session edge runs one delivery task per attached domain against its observer. The attach reply
+carries the observation read when the observer was created, and the task starts only once that
+reply is queued, remembering the observation the reply carried. It first sends any accepted tick
+of that generation, if one exists. On each wake it reads the newest installation and queues a
+state frame on the session's control lane only when the observation differs from the one the client
+last received. Replacing an installation with an equal one publishes
+nothing. An authority move within a generation or the alteration pause leaves the installation
+unchanged, though newly accepted progress still wakes delivery. A state frame waits for room on the
+control lane; changes published meanwhile collapse into the newest installation read after it is
+queued. Before each tick delivery, the task re-reads the installation and sends a changed state
+frame first. A tick's control-lane slot can be replaced until transport takes it,
+including while the lane is full. Each attached domain therefore has at most one pending tick and
+slow clients see the newest accepted id instead of a backlog.
+
+Attach and detach run on the session's ordered lane, in order with its commands. An attach first
+waits until the node has installed the committed domains since it started, or until the session
+ends. Before that installation every domain is missing from the node's runtime, so the node cannot
+tell a domain the cluster lacks from one it has not installed yet; waiting keeps a node that is
+still starting, as after a restart, from refusing a committed domain as not found. The runtime
+counts its installations through a watch and advances the count only after an installation has put
+every domain in place, so the lookup that follows the wait finds each domain that installation
+holds. Detach stops the delivery task and waits for it to end before queueing its reply, so no frame
+about the domain follows that reply. When the observer reports the domain missing, the task marks
+the attachment ending, queues the end frame with reason `DomainRemoved`, and ends. Because the mark
+precedes the frame, a request the client sends after reading the frame finds the attachment ending:
+an attach replaces it and a detach reports it not attached. The end of the session stops every
+delivery task without a frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment)
+for the public contract and
+[Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
+attachment travels in the protocol.
+
+The Rust client keeps the attach reply's state as its latest followed clock. The shared C binding
+gives hosts a separate retained `nx_clock_event` handle for later state changes, ticks,
+interruptions, refused restorations, and ends through `nx_session_next_clock_event`. Its typed
+accessors expose the domain, generation, state and paced mapping, tick, or end reason. Through
+`nx_session_domain_clock` a host reads that latest followed clock itself as a retained
+`nx_domain_clock`, so a host attaching to an already paced clock reads the generation and mapping
+the attach reply carried before it uses the first tick, and projects logical time, waits and
+admission with the Rust client's arithmetic instead of reimplementing it.
 
 ## Execution-Time Snapshots
 
@@ -275,6 +368,17 @@ batches and their retries retain the snapshot from acceptance, while external ob
 whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
 connector boundary.
 
+An HTTP emitter's prepared method, target, headers, and optional body retain the execution
+snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter
+does not re-evaluate an admitted request under the replacement. Attempt timeouts, retry backoff,
+an HTTP-date `Retry-After`, and shutdown or drain deadlines remain physical waits; a domain's
+`TIME RATE` does not shorten them.
+
+A native client emitter similarly freezes the Arrow IPC bytes, source members, delivery identity
+and execution snapshot when the batch is prepared. Consumer retry or ACK timeout gives that same
+batch a new attempt reference without re-running expressions at a later domain time. Its ACK
+deadline, retry backoff, interconnect heartbeat and peer-silence deadline are physical waits.
+
 ## Admission Windows
 
 Paced ingestion obtains its execution time and admission window from one clock read. Given the
@@ -296,8 +400,24 @@ the latest center cannot make a future center eligible. `TIMESTAMP NOW` uses the
 created the window. `TIMESTAMP AT <field>` preserves the decoded event timestamp before testing it
 against that window.
 
+An ingest group resolves its event timestamp column once. Admission compares signed nanosecond
+values against the first and last reached centers in lanes, then tests the exact period remainder
+for values between them. The period reduction is prepared once for that window. A bitmap selects
+accepted Arrow rows and their timestamp and ACK sidecars together. Rejected rows retain their own
+ACKs and follow each output route's message-error policy with code `validation` and operation
+`admit`; a rejected timestamp cannot discard another row of the group. A missing declared timestamp
+is also rejected for that row. The single-timestamp admission check has the same inclusive bounds.
+
 Unpaced ingestion has no admission window. Its clock snapshot still supplies delivery time, while
 an explicit event timestamp or connector-owned source timestamp remains preserved source time.
+
+A client ingestor takes one ingestion snapshot for each batch its admission worker dispatches, after
+the batch is validated and its acknowledgement root is tracked. `TIMESTAMP NOW` gives every row of
+the batch that snapshot, and `TIMESTAMP AT <field>` preserves each row's own field; paced admission
+then tests each row against the window exactly as for any other ingestor. A client batch carries no
+connector-owned source timestamp, so a paced domain requires its client ingestors to declare a
+timestamp. The batch's `ACK TIMEOUT` and its producer's retry backoff are physical monotonic bounds;
+neither waits on nor stretches domain logical time.
 
 ## Logical And Physical Deadlines
 
@@ -340,7 +460,7 @@ The architecture keeps four time classes distinct:
 | Domain logical time | Expressions, explicit domain cadence, collection and flush cadence, TTL, retention, window completion, and guest-requested timeouts |
 | Preserved source time | External event timestamps, broker metadata, and window membership inputs |
 | Physical monotonic time | Network deadlines, retry and backoff, acknowledgements, cancellation, shutdown, drain, state checkpoint deadlines, safety timeouts, and physical batching minima |
-| Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, and explicitly external observation fields |
+| Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, explicitly external observation fields, and the comparison of a server-supplied HTTP date, such as `Retry-After`, with the present |
 
 Logical deadlines and physical deadlines are different types and cannot be interchanged. Actual
 UTC enters the data plane through a dedicated boundary, and expression engines cannot read it
@@ -348,6 +468,22 @@ directly. That boundary and the capability that arms physical deadlines belong t
 contract, which the runtime and every connector crate share, so a connector stamps arrival time
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
+
+Physical monotonic time is measured with the timers and instants of the primitive boundary,
+`nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
+permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
+deadline armed on its timer stays logical, as described above. Its timers follow the clock of the
+runtime that polls them, so an ordinary test on a paused runtime checks a physical deadline's
+elapsed behavior exactly, and a simulated interconnect host waits in simulated time. Shuttle does
+not model time: under Shuttle a timeout never measures its deadline, and a check decides whether it
+wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush cadence keeps the
+domain clock, and no check establishes progress by waiting.
+
+The web console's clock display is an external observer: its clock-display module reads browser UTC
+to project an attached paced mapping for the screen. That projection does not enter a node's read
+watermark, alter tick progress, or supply domain time to execution. The repository clock-boundary
+check declares this module as the browser observation owner; other console modules receive its UTC
+sample instead of reading the wall clock themselves.
 
 ## Recovery And Distributed Guarantees
 
@@ -363,6 +499,7 @@ This produces the following failure behavior:
 | Leader transfer | The committed mapping and authority remain unchanged unless the effective candidate set also requires reconciliation |
 | Authority loss or restart | Consensus advances the authority revision and assigns another live voter incarnation; the mapping and lifecycle generation stay fixed |
 | Node join or reconnect | The node installs the committed generation before execution and receives the newest retained progress after readiness |
+| Session attach before a restarted node installs | The attach waits for the node's first installation of the committed domains, so it never reports a committed domain as missing |
 | Delayed old progress | Generation, revision, identity, and authenticated-peer checks discard it |
 | `STOP` followed by `START` | Stop revokes the authority; start increments the generation and commits a new mapping and fence |
 | Mapping or tick arithmetic overflow | Projection, deadline conversion, boundary, and tick-id operations report typed clock errors instead of wrapping or changing anchors |

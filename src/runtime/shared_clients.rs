@@ -13,6 +13,14 @@
 //! ingestor of that client borrows from the same instance, which is what makes the declared bounds
 //! a property of the transport rather than of whoever happened to open a connection first.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "named client pools are registered, replaced and retired when their users attach"
+    )
+)]
+
 use error_stack::Report;
 use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, SinkStartError};
 use nervix_connector_mongodb::MongoDbClient;
@@ -61,6 +69,10 @@ impl OpenClientError {
             RedisClientError::Connect { reason } => Self::Connect {
                 transport: "Redis",
                 reason: reason.clone(),
+            },
+            RedisClientError::Resolve { .. } => Self::Connect {
+                transport: "Redis",
+                reason: error.current_context().to_string(),
             },
         };
         error.change_context(context)
@@ -218,7 +230,7 @@ impl SharedClient {
 pub(in crate::runtime) struct SharedClientSlot {
     /// Built once however many users race to be first, so a burst of emitters starting together
     /// opens one pool rather than one pool each.
-    instance: StdArc<tokio::sync::OnceCell<StdArc<SharedClient>>>,
+    instance: StdArc<nervix_primitives::sync::OnceCell<StdArc<SharedClient>>>,
     users: usize,
 }
 
@@ -267,18 +279,70 @@ impl PoolWait {
     }
 }
 
-/// Marks its graph node as waiting for a connection until it is dropped.
-///
-/// Acquisition can end in a connection, a timeout, or task cancellation, and the wait has to clear
-/// in all three. Tying it to a guard is what makes that true without every call site remembering.
+/// Publication retained by one pooled sink. Its connector serializes connection borrows.
+pub(in crate::runtime) struct PoolWaitSlot {
+    client: ClientName,
+    active: ArcSwapOption<PoolWait>,
+}
+
+impl PoolWaitSlot {
+    fn new(client: ClientName) -> Self {
+        Self {
+            client,
+            active: ArcSwapOption::empty(),
+        }
+    }
+
+    pub(in crate::runtime) fn begin(slot: &Arc<Self>) -> PoolWaitGuard {
+        slot.active.store(Some(StdArc::new(PoolWait {
+            client: slot.client.clone(),
+            since: Instant::now(),
+        })));
+        PoolWaitGuard { slot: slot.clone() }
+    }
+
+    /// A ready borrow performs no publication or registry operation. Cancellation drops its guard.
+    pub(in crate::runtime) async fn borrow<F: std::future::Future>(
+        slot: &Arc<Self>,
+        future: F,
+    ) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut waiting = None;
+        std::future::poll_fn(|context| {
+            let result = future.as_mut().poll(context);
+            if result.is_pending() && waiting.is_none() {
+                waiting = Some(Self::begin(slot));
+            }
+            result
+        })
+        .await
+    }
+}
+
+/// Clears a pending connection borrow on success, failure or cancellation.
 pub(in crate::runtime) struct PoolWaitGuard {
-    runtime: Runtime,
-    key: DomainNodeRef,
+    slot: Arc<PoolWaitSlot>,
 }
 
 impl Drop for PoolWaitGuard {
     fn drop(&mut self) {
-        self.runtime.inner.pool_waits.remove(&self.key);
+        self.slot.active.store(None);
+    }
+}
+
+/// Registry interest follows the sink lifetime, independently of individual connection borrows.
+pub(in crate::runtime) struct PoolWaitRegistration {
+    pub(in crate::runtime) slot: Arc<PoolWaitSlot>,
+    runtime: Runtime,
+    key: DomainNodeRef,
+}
+
+impl Drop for PoolWaitRegistration {
+    fn drop(&mut self) {
+        self.runtime
+            .inner
+            .pool_waits
+            .remove_if(&self.key, |_, current| Arc::ptr_eq(current, &self.slot));
     }
 }
 
@@ -288,6 +352,13 @@ impl Runtime {
     /// The instance is built from the first user's resolved configuration. Every pool-capable
     /// client renders the same configuration for all of its users, so the instance a later user
     /// joins is the one its own configuration describes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "sink installation retains one shared-client lease for its configuration"
+        )
+    )]
     pub(in crate::runtime) async fn lease_shared_client(
         &self,
         domain: &DomainName,
@@ -302,7 +373,7 @@ impl Runtime {
                 .shared_clients
                 .entry(key.clone())
                 .or_insert_with(|| SharedClientSlot {
-                    instance: StdArc::new(tokio::sync::OnceCell::new()),
+                    instance: StdArc::new(nervix_primitives::sync::OnceCell::new()),
                     users: 0,
                 });
             slot.users = slot
@@ -313,7 +384,7 @@ impl Runtime {
         };
 
         let opened = cell
-            .get_or_try_init(|| Self::open_shared_client(name, pool, &client.config))
+            .get_or_try_init(|| self.open_shared_client(name, pool, &client.config))
             .await;
 
         match opened {
@@ -333,6 +404,7 @@ impl Runtime {
 
     /// Build the driver instance behind one pool-capable client.
     async fn open_shared_client(
+        &self,
         name: &ClientName,
         pool: PooledClientPlan,
         resolved: &ResolvedClientConfig,
@@ -377,12 +449,23 @@ impl Runtime {
                     .await
                     .map_err(started)?,
             ),
-            PooledTransport::Redis => SharedClientInstance::Redis(
-                open_redis_command_pool(config, pool.bounds)
-                    .await
-                    .map_err(OpenClientError::from_redis)
-                    .map_err(opened)?,
-            ),
+            PooledTransport::Redis => {
+                let Some(dns) = self.dns() else {
+                    return Err(Report::new(OpenClientError::InvalidConfig {
+                        transport: "Redis",
+                        reason: "the node DNS resolver is not installed".to_string(),
+                    })
+                    .change_context(SharedClientError::Open {
+                        client: name.as_str().to_string(),
+                    }));
+                };
+                SharedClientInstance::Redis(
+                    open_redis_command_pool(config, pool.bounds, dns.clone())
+                        .await
+                        .map_err(OpenClientError::from_redis)
+                        .map_err(opened)?,
+                )
+            }
         };
         Ok(StdArc::new(SharedClient {
             instance,
@@ -391,6 +474,13 @@ impl Runtime {
     }
 
     /// Give back one user's interest, closing the instance once the last one leaves.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "sink teardown releases its exact shared-client lease"
+        )
+    )]
     fn release_shared_client(&self, key: &DomainNodeRef) {
         let closed = {
             let Some(mut slot) = self.inner.shared_clients.get_mut(key) else {
@@ -407,30 +497,151 @@ impl Runtime {
         }
     }
 
-    /// Mark `waiter` as waiting for a connection from `client` until the returned guard is dropped.
-    pub(in crate::runtime) fn pool_wait_guard(
+    /// Register one pooled sink's stable wait publication for observers.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "sink installation retains one pool-wait publication slot"
+        )
+    )]
+    pub(in crate::runtime) fn register_pool_wait(
         &self,
-        waiter: &DomainNodeRef,
-        client: &ClientName,
-    ) -> PoolWaitGuard {
-        self.inner.pool_waits.insert(
-            waiter.clone(),
-            PoolWait {
-                client: client.clone(),
-                since: Instant::now(),
-            },
-        );
-        PoolWaitGuard {
+        waiter: DomainNodeRef,
+        client: ClientName,
+    ) -> PoolWaitRegistration {
+        let slot = Arc::new(PoolWaitSlot::new(client));
+        self.inner.pool_waits.insert(waiter.clone(), slot.clone());
+        PoolWaitRegistration {
+            slot,
             runtime: self.clone(),
-            key: waiter.clone(),
+            key: waiter,
         }
     }
 
-    /// What `waiter` is waiting for, when it has asked for a connection and not yet been given one.
     pub(in crate::runtime) fn pool_wait(&self, waiter: &DomainNodeRef) -> Option<PoolWait> {
-        self.inner
-            .pool_waits
-            .get(waiter)
-            .map(|wait| wait.value().clone())
+        let slot = self.inner.pool_waits.get(waiter)?;
+        let wait = slot.active.load_full()?;
+        Some((*wait).clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_dns::DnsLookupFailure;
+    use nervix_models::ClientPoolBounds;
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn retained_pool_wait_reports_only_pending_borrows_and_clears_on_cancel() {
+        let runtime = Runtime::new();
+        let key = DomainNodeRef::node_in(
+            domain("pool_wait"),
+            ModelKind::Emitter,
+            named::<EmitterName>("sink"),
+        );
+        let registration = runtime.register_pool_wait(key.clone(), named("database"));
+        let slot = registration.slot.clone();
+        for _ in 0..100 {
+            assert_eq!(PoolWaitSlot::borrow(&slot, std::future::ready(7)).await, 7);
+        }
+        assert!(slot.active.load().is_none());
+        let (sender, receiver) = oneshot::channel::<u8>();
+        let mut borrow = Box::pin(PoolWaitSlot::borrow(&slot, receiver));
+        std::future::poll_fn(|context| {
+            assert!(borrow.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let waiting = runtime
+            .pool_wait(&key)
+            .assured("the pending borrow is visible to DESCRIBE");
+        assert_eq!(waiting.client, named::<ClientName>("database"));
+        sender.send(9).assured("the borrow retains its receiver");
+        assert_eq!(borrow.await.assured("the connection borrow succeeds"), 9);
+        assert!(slot.active.load().is_none());
+        let mut borrow = Box::pin(PoolWaitSlot::borrow(&slot, std::future::pending::<()>()));
+        std::future::poll_fn(|context| {
+            assert!(borrow.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(slot.active.load().is_some());
+        drop(borrow);
+        assert!(slot.active.load().is_none());
+        drop(registration);
+        assert!(runtime.pool_wait(&key).is_none());
+    }
+
+    #[test]
+    fn pool_registration_teardown_preserves_a_replacement_sink() {
+        let runtime = Runtime::new();
+        let key = DomainNodeRef::node_in(
+            domain("pool_wait"),
+            ModelKind::Emitter,
+            named::<EmitterName>("sink"),
+        );
+        let first = runtime.register_pool_wait(key.clone(), named("database"));
+        let replacement = runtime.register_pool_wait(key.clone(), named("database"));
+        drop(first);
+        let waiting = PoolWaitSlot::begin(&replacement.slot);
+        assert!(runtime.pool_wait(&key).is_some());
+        drop(waiting);
+        drop(replacement);
+        assert!(!runtime.inner.pool_waits.contains_key(&key));
+    }
+
+    #[test]
+    fn redis_lookup_failure_keeps_its_cause_when_a_shared_client_reports_it() {
+        let error = OpenClientError::from_redis(Report::new(RedisClientError::Resolve {
+            host: "missing.nervix.test".to_string(),
+            failure: DnsLookupFailure::NameNotFound,
+        }));
+        assert!(matches!(
+            error.current_context(),
+            OpenClientError::Connect {
+                transport: "Redis",
+                reason,
+            } if reason.contains("missing.nervix.test") && reason.contains("the name does not exist")
+        ));
+        assert!(
+            error
+                .frames()
+                .any(|frame| frame.downcast_ref::<RedisClientError>().is_some())
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn redis_pool_reports_a_missing_node_resolver_before_opening() {
+        let client = ClientName::try_from("cache".to_string()).assured("the fixture name is valid");
+        let error = Runtime::default()
+            .open_shared_client(
+                &client,
+                PooledClientPlan {
+                    transport: PooledTransport::Redis,
+                    bounds: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
+                        .assured("zero is below one"),
+                },
+                &ResolvedClientConfig::default(),
+            )
+            .await
+            .err()
+            .assured("a Redis pool requires the node resolver");
+        assert!(matches!(
+            error.current_context(),
+            SharedClientError::Open { client } if client == "cache"
+        ));
+        let cause = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<OpenClientError>())
+            .assured("the shared-client error retains the Redis configuration failure");
+        assert!(matches!(
+            cause,
+            OpenClientError::InvalidConfig {
+                transport: "Redis",
+                reason,
+            } if reason == "the node DNS resolver is not installed"
+        ));
     }
 }

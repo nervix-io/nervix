@@ -8,26 +8,32 @@
 
 use std::{
     convert::Infallible,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainPace, DomainStatus, FieldName, ParseAsType,
     PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
-use tokio::{
+use nervix_primitives::{
     net::TcpListener,
-    sync::{Mutex, mpsc},
+    stream::wrappers::{ReceiverStream, TcpListenerStream},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     task::JoinHandle,
 };
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use nervix_recovery::Discarded as _;
+use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -35,14 +41,14 @@ use tonic::{
     server::{ClientStreamingService, Grpc, NamedService, StreamingService},
     transport::Server,
 };
-use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]
 use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
-    Client, ClientError, CommandDisposition, ConnectOptions, DomainName, Leadership, OutcomeOrigin,
-    ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent, SubscriptionRequest,
+    Client, ClientError, CommandDisposition, ConnectDns, ConnectOptions, DomainName, Leadership,
+    OutcomeOrigin, ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent,
+    SubscriptionLifecycle, SubscriptionRequest,
     wire::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
@@ -52,7 +58,7 @@ use crate::{
         SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
         SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
         SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -114,6 +120,8 @@ fn command_outcome(
         inspection: None,
         wasm_state: None,
         resource: None,
+        backup: None,
+        restore: None,
     }))
 }
 
@@ -124,7 +132,7 @@ fn completed() -> CommandDisposition {
 }
 
 async fn within_deadline<F: Future>(future: F) -> F::Output {
-    tokio::time::timeout(DEADLINE, future)
+    nervix_primitives::time::timeout(DEADLINE, future)
         .await
         .assured("the awaited step completes within the generous test deadline")
 }
@@ -161,7 +169,7 @@ impl ServerExchange {
             ReplyDelivery::Frame(frame) => self.send(frame).await,
             ReplyDelivery::Transfer(parts) => {
                 for part in parts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     self.send(part).await;
                 }
             }
@@ -284,7 +292,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             };
             let mut archive = Vec::new();
             while let Some(frame) = inbound.message().await? {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let decoded = UploadMessage::decode(&frame)
                     .map_err(|error| Status::invalid_argument(error.to_string()))?;
                 let UploadMessage::Chunk(chunk) = decoded else {
@@ -353,6 +361,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             if reject {
                 return Err(Status::permission_denied("the upload is not authorized"));
             }
+            #[allow(deprecated)] // until try_update is stabilized
             if fail_upload_replies
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
@@ -383,7 +392,12 @@ impl Drop for TestServer {
 
 impl TestServer {
     async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        Self::start_at(SocketAddr::from(([127, 0, 0, 1], 0))).await
+    }
+
+    /// Starts a server listening on `address`, a loopback address with a free port or port 0.
+    async fn start_at(address: SocketAddr) -> Self {
+        let listener = TcpListener::bind(address)
             .await
             .assured("the loopback interface accepts a listener");
         let address = listener
@@ -399,7 +413,7 @@ impl TestServer {
             fail_upload_replies: fail_upload_replies.clone(),
             upload_reply_mode: upload_reply_mode.clone(),
         };
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             Server::builder()
                 .add_service(service)
                 .serve_with_incoming(TcpListenerStream::new(listener))
@@ -431,9 +445,156 @@ impl TestServer {
             .await
             .assured("the server keeps handing exchanges to the test")
     }
+
+    /// Stops serving and waits until the listener is closed, so a client connecting afterwards is
+    /// refused.
+    async fn stop(mut self) {
+        self.task.abort();
+        (&mut self.task)
+            .await
+            .discarded("the server task only ever ends by being aborted");
+    }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
+async fn native_session_uses_ordered_fixture_addresses_and_original_host() {
+    let mut server = TestServer::start().await;
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("the fixture can bind a local DNS port");
+    let name = "session.nervix.test";
+    authority.set(
+        name,
+        DnsAnswer::Addresses {
+            addresses: vec![
+                IpAddr::V4(Ipv4Addr::new(127, 0, 5, 3)),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ],
+            ttl: Duration::from_secs(1),
+        },
+    );
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:1 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let options = ConnectOptions {
+        dns: ConnectDns::Resolver(dns),
+        connect_timeout: Duration::from_secs(10),
+        ..ConnectOptions::default()
+    };
+    let endpoint = format!("http://{name}:{}", server.address.port());
+    let _client = within_deadline(Client::connect_with_options(endpoint, None, options))
+        .await
+        .assured("the second DNS answer reaches the session server");
+    let _exchange = server.next_exchange().await;
+    assert!(authority.questions_for(name) > 0);
+}
+
+#[nervix_primitives::test]
+async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("the fixture can bind a local DNS port");
+    let name = "silent-session.nervix.test";
+    authority.set(name, DnsAnswer::Silent);
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:20 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let options = ConnectOptions {
+        dns: ConnectDns::Resolver(dns),
+        connect_timeout: Duration::from_millis(200),
+        retry_timeout: Duration::from_secs(1),
+        ..ConnectOptions::default()
+    };
+    let result = nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        Client::connect_with_options(format!("http://{name}:4317"), None, options),
+    )
+    .await
+    .assured(
+        "the client's connection deadline cancels DNS before the authority's 20-second silence",
+    );
+    assert!(matches!(result, Err(ClientError::ConnectServer(_))));
+    assert!(authority.questions_for(name) > 0);
+}
+
+#[nervix_primitives::test]
+async fn native_session_connection_error_preserves_the_typed_dns_failure() {
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("the fixture can bind a local DNS port");
+    let name = "missing-session.nervix.test";
+    authority.set(
+        name,
+        DnsAnswer::NameNotFound {
+            negative_ttl: Duration::from_secs(1),
+        },
+    );
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:1 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let Err(error) = Client::connect_with_options(
+        format!("http://{name}:4317"),
+        None,
+        ConnectOptions {
+            dns: ConnectDns::Resolver(dns),
+            connect_timeout: Duration::from_secs(2),
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    else {
+        panic!("the missing name cannot open a native session");
+    };
+    let ClientError::ConnectServer(connect_error) = error else {
+        panic!("DNS resolution should be classified as a connection failure");
+    };
+    let lookup = DnsLookupError::find_in(&connect_error)
+        .assured("the Tonic connection error retains the resolver's typed cause");
+    assert_eq!(lookup.name(), name);
+    assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+    assert!(authority.questions_for(name) > 0);
+}
+
+#[nervix_primitives::test]
 async fn configured_seed_connects_when_the_primary_is_unavailable() {
     let mut seed = TestServer::start().await;
     let unused = TcpListener::bind("127.0.0.1:0")
@@ -459,7 +620,8 @@ async fn configured_seed_connects_when_the_primary_is_unavailable() {
     .assured("the configured seed accepts the session");
     let mut exchange = seed.next_exchange().await;
     let listing_client = client.clone();
-    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
     let request = exchange.next_request().await;
     assert!(matches!(request.request, ClientRequest::ListDomains));
     exchange
@@ -480,7 +642,7 @@ async fn configured_seed_connects_when_the_primary_is_unavailable() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_closed_session_recovers_through_a_configured_seed() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -499,14 +661,14 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     .await
     .assured("the primary accepts the session");
     let exchange = primary.next_exchange().await;
+    let reading = client.clone();
+    let notice = nervix_primitives::task::spawn(async move { reading.next_server_event().await });
     drop(exchange);
-    assert!(matches!(
-        within_deadline(client.next_server_event()).await,
-        Err(ClientError::SessionClosed)
-    ));
 
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let mut recovered = seed.next_exchange().await;
     let request = recovered.next_request().await;
     let ClientRequest::Command(sent) = request.request else {
@@ -525,6 +687,22 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .assured("the command task completes")
         .assured("the seed answers the command");
     assert!(outcome.succeeded());
+    recovered
+        .send(
+            ServerNotice {
+                level: NoticeLevel::Warning,
+                message: "relay 'orders' is behind".to_string(),
+            }
+            .encode(&limits())
+            .assured("a notice fits a frame"),
+        )
+        .await;
+    let notice = within_deadline(notice)
+        .await
+        .assured("the notice task completes")
+        .assured("the notice stream continues on the recovered session");
+    assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.message, "relay 'orders' is behind");
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
         client
@@ -539,7 +717,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -562,7 +740,10 @@ async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
         transaction_id: "tx-1".to_string(),
     };
     let inspector = client.clone();
-    let inspection = tokio::spawn(async move { inspector.inspect_transaction(target, None).await });
+    let inspection =
+        nervix_primitives::task::spawn(
+            async move { inspector.inspect_transaction(target, None).await },
+        );
     let first = first_exchange.next_request().await;
     assert!(matches!(
         first.request,
@@ -601,7 +782,7 @@ async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn typed_inspection_refreshes_the_attached_preview() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -610,7 +791,7 @@ async fn typed_inspection_refreshes_the_attached_preview() {
         .await;
     let mut exchange = server.next_exchange().await;
     let inspecting = client.clone();
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         inspecting
             .inspect_transaction(
                 TransactionInspectionTarget::Transaction {
@@ -650,13 +831,14 @@ async fn typed_inspection_refreshes_the_attached_preview() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn attaching_a_transaction_adopts_its_domain_and_status() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
     let attaching = client.clone();
-    let task = tokio::spawn(async move { attaching.attach_transaction("tx-1").await });
+    let task =
+        nervix_primitives::task::spawn(async move { attaching.attach_transaction("tx-1").await });
     let request = exchange.next_request().await;
     let ClientRequest::AttachTransaction(sent) = request.request else {
         panic!("an attach request is sent");
@@ -692,14 +874,14 @@ async fn attaching_a_transaction_adopts_its_domain_and_status() {
     assert_eq!(client.transaction_status().await, Some(status));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
     for query in [
         "BEGIN TRANSACTION;",
         "CREATE SCHEMA recovered_record (id I64);",
         "COMMIT;",
     ] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut primary = TestServer::start().await;
         let mut seed = TestServer::start().await;
         let seed_url = Url::parse(&format!("http://{}", seed.address))
@@ -719,7 +901,9 @@ async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
         let mut first_exchange = primary.next_exchange().await;
         let execution = client.prepare_execution(query).await;
         let command_client = client.clone();
-        let task = tokio::spawn(async move { command_client.execute_prepared(&execution).await });
+        let task = nervix_primitives::task::spawn(async move {
+            command_client.execute_prepared(&execution).await
+        });
         let first = first_exchange.next_request().await;
         let ClientRequest::Command(first_command) = first.request else {
             panic!("the client submitted a command");
@@ -765,7 +949,7 @@ async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     let mut server = TestServer::start().await;
     let options = ConnectOptions {
@@ -784,7 +968,10 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
     let expected = execution.reference().clone();
     let command_client = client.clone();
-    let task = tokio::spawn(async move { command_client.execute_prepared(&execution).await });
+    let task =
+        nervix_primitives::task::spawn(
+            async move { command_client.execute_prepared(&execution).await },
+        );
     let request = exchange.next_request().await;
     let ClientRequest::Command(sent) = request.request else {
         panic!("the command was sent");
@@ -800,7 +987,7 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     assert_eq!(reference, expected);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -825,9 +1012,12 @@ async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
         .await;
 
     let listing_client = client.clone();
-    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let first = exchange.next_request().await;
     let second = exchange.next_request().await;
     assert_ne!(first.request_id, second.request_id);
@@ -876,7 +1066,7 @@ async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
     assert_eq!(observed, tenant_domains());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_domain_list_recovers_after_its_session_closes() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -895,7 +1085,8 @@ async fn a_domain_list_recovers_after_its_session_closes() {
     .assured("the primary accepts the session");
     let mut first_exchange = primary.next_exchange().await;
     let listing_client = client.clone();
-    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
     let first = first_exchange.next_request().await;
     assert!(matches!(first.request, ClientRequest::ListDomains));
     drop(first_exchange);
@@ -921,7 +1112,7 @@ async fn a_domain_list_recovers_after_its_session_closes() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -936,7 +1127,8 @@ async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values()
     .with_page(2, None)
     .assured("two choices fit the bounded page size");
     let choice_client = client.clone();
-    let choices = tokio::spawn(async move { choice_client.lookup_choices(lookup).await });
+    let choices =
+        nervix_primitives::task::spawn(async move { choice_client.lookup_choices(lookup).await });
 
     let request = exchange.next_request().await;
     let ClientRequest::Choice(lookup) = request.request else {
@@ -982,7 +1174,7 @@ async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values()
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_suggestion_recovers_after_its_session_closes() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -1001,8 +1193,9 @@ async fn a_suggestion_recovers_after_its_session_closes() {
     .assured("the primary accepts the session");
     let mut first_exchange = primary.next_exchange().await;
     let suggestion_client = client.clone();
-    let suggestion =
-        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+    let suggestion = nervix_primitives::task::spawn(async move {
+        suggestion_client.suggest("CREATE ", 7, 64, None).await
+    });
     let first = first_exchange.next_request().await;
     assert!(matches!(first.request, ClientRequest::Suggest(_)));
     drop(first_exchange);
@@ -1038,7 +1231,7 @@ async fn a_suggestion_recovers_after_its_session_closes() {
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1046,20 +1239,23 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
 
     for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
         let suggestion_client = client.clone();
-        let suggestion =
-            tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+        let suggestion = nervix_primitives::task::spawn(async move {
+            suggestion_client.suggest("CREATE ", 7, 64, None).await
+        });
         let listing_client = client.clone();
-        let listing = tokio::spawn(async move { listing_client.list_domains().await });
+        let listing =
+            nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
         let command_client = client.clone();
-        let command =
-            tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+        let command = nervix_primitives::task::spawn(async move {
+            command_client.execute("SHOW CLUSTER STATUS;").await
+        });
         let mut requests = Vec::new();
         for _ in 0..3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             requests.push(exchange.next_request().await);
         }
         for index in order {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = &requests[index];
             let body = match &request.request {
                 ClientRequest::Suggest(suggest) => {
@@ -1115,14 +1311,16 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn suggestion_finishes_while_a_command_reply_is_pending() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let command_request = exchange.next_request().await;
     let ClientRequest::Command(command_body) = &command_request.request else {
         panic!("the first request is the pending command");
@@ -1130,8 +1328,9 @@ async fn suggestion_finishes_while_a_command_reply_is_pending() {
     let execution_reference = command_body.execution_reference.clone();
 
     let suggestion_client = client.clone();
-    let suggestion =
-        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+    let suggestion = nervix_primitives::task::spawn(async move {
+        suggestion_client.suggest("CREATE ", 7, 64, None).await
+    });
     let suggestion_request = exchange.next_request().await;
     assert!(matches!(
         suggestion_request.request,
@@ -1176,14 +1375,17 @@ async fn suggestion_finishes_while_a_command_reply_is_pending() {
         .assured("the command succeeds");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reply_larger_than_a_frame_arrives_in_parts() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let command_client = client.clone();
-    let command = tokio::spawn(async move { command_client.execute("SHOW DOMAINS;").await });
+    let command =
+        nervix_primitives::task::spawn(
+            async move { command_client.execute("SHOW DOMAINS;").await },
+        );
     let request = exchange.next_request().await;
     let ClientRequest::Command(command_request) = request.request else {
         panic!("the statement is sent as a command");
@@ -1200,7 +1402,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
     };
     assert!(parts.len() > 2);
     for (index, part) in parts.enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         exchange.send(part).await;
         if index == 0 {
             // An unsolicited message may arrive between the parts of a reply.
@@ -1267,14 +1469,62 @@ fn rows_frame(handle: SubscriptionHandle, rows: &[(u64, &str)]) -> EncodedFrame<
     batch.finish().assured("a test batch finishes")
 }
 
-#[tokio::test]
+/// The text of each row of a batch that fills its frame.
+const WIDE_ROW_BYTES: usize = 32 * 1024;
+
+/// A batch of wide rows that the server fills until its next row no longer fits the frame limit,
+/// together with the number of rows it holds.
+fn full_rows_frame(handle: SubscriptionHandle) -> (EncodedFrame<ServerFrame>, usize) {
+    let wide = "w".repeat(WIDE_ROW_BYTES);
+    let mut batch = SubscriptionRowsEncoder::unbranched(handle, &limits())
+        .assured("an unbranched batch starts within the limits");
+    loop {
+        let id = u64::try_from(batch.rows()).assured("a frame holds far fewer than u64::MAX rows");
+        let pushed = batch.push_row(|cells| {
+            cells.push_string(&wide)?;
+            cells.push_u64(id)
+        });
+        if let Err(refused) = pushed {
+            assert!(
+                matches!(
+                    refused.current_context(),
+                    WireEncodeError::FrameTooLarge { .. }
+                ),
+                "only the frame limit ends a batch of wide rows: {refused:?}"
+            );
+            break;
+        }
+    }
+    let rows = batch.rows();
+    let frame = batch
+        .finish()
+        .assured("the rows accepted before the refused one finish their frame");
+    (frame, rows)
+}
+
+/// The reply that opens `handle` over the `orders` relay.
+fn opened_reply(handle: SubscriptionHandle) -> ReplyBody {
+    ReplyBody::Subscribe(SubscribeOutcome {
+        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+            subscription: handle,
+            domain: domain("tenant"),
+            relay: RelayName::parse("orders").assured("the test relay name is valid"),
+            subscription_type: SubscriptionType::Row,
+            schema: orders_schema(),
+        })),
+        message: "subscription 'live' opened".to_string(),
+        diagnostics: Vec::new(),
+    })
+}
+
+#[nervix_primitives::test]
 async fn subscription_rows_render_against_the_schema_the_subscription_opened_with() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let subscribe_client = client.clone();
-    let subscribe = tokio::spawn(async move {
+    let subscribe = nervix_primitives::task::spawn(async move {
         subscribe_client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -1289,19 +1539,8 @@ async fn subscription_rows_render_against_the_schema_the_subscription_opened_wit
         "CREATE SUBSCRIPTION live TO orders;"
     );
     assert_eq!(subscribe_request.subscription_type, SubscriptionType::Row);
-    let opened = SubscribeOutcome {
-        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
-            subscription: subscription(1),
-            domain: domain("tenant"),
-            relay: RelayName::parse("orders").assured("the test relay name is valid"),
-            subscription_type: SubscriptionType::Row,
-            schema: orders_schema(),
-        })),
-        message: "subscription 'live' opened".to_string(),
-        diagnostics: Vec::new(),
-    };
     exchange
-        .reply(request.request_id, ReplyBody::Subscribe(opened), &limits())
+        .reply(request.request_id, opened_reply(subscription(1)), &limits())
         .await;
     // Rows of a generation the client does not hold are dropped.
     exchange
@@ -1358,15 +1597,61 @@ async fn subscription_rows_render_against_the_schema_the_subscription_opened_wit
     assert_eq!(ended.subscription, subscription(1));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
+async fn a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let subscribe_client = client.clone();
+    let subscribe = nervix_primitives::task::spawn(async move {
+        subscribe_client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(request.request_id, opened_reply(subscription(1)), &limits())
+        .await;
+    let (frame, rows) = full_rows_frame(subscription(1));
+    assert!(
+        frame.len() > limits().frame_bytes() - 2 * WIDE_ROW_BYTES,
+        "the batch fills its frame to within two rows of the frame limit: {} bytes",
+        frame.len()
+    );
+    exchange.send(frame).await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription is answered");
+    assert!(outcome.succeeded());
+
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the rows of the opened subscription are delivered");
+    let SubscriptionEvent::Rows(delivered) = event else {
+        panic!("a frame of the frame limit reaches its subscription as rows: {event:?}");
+    };
+    assert_eq!(delivered.rows.subscription(), &subscription(1));
+    assert_eq!(delivered.rows.batch().len(), rows);
+    let lifecycle = client.subscription_lifecycle(&subscription(1).name);
+    assert_eq!(
+        lifecycle,
+        Some(SubscriptionLifecycle::Active(subscription(1))),
+        "retaining the frame leaves its subscription active"
+    );
+}
+
+#[nervix_primitives::test]
 async fn a_command_waits_for_an_election_and_is_sent_again_with_its_reference() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
     let mut exchange = server.next_exchange().await;
 
     let command_client = client.clone();
-    let command =
-        tokio::spawn(async move { command_client.execute("CREATE DOMAIN orders;").await });
+    let command = nervix_primitives::task::spawn(async move {
+        command_client.execute("CREATE DOMAIN orders;").await
+    });
     let first = exchange.next_request().await;
     let ClientRequest::Command(first_command) = first.request else {
         panic!("the statement is sent as a command");
@@ -1419,14 +1704,23 @@ async fn a_command_waits_for_an_election_and_is_sent_again_with_its_reference() 
     );
 }
 
-#[tokio::test]
-async fn a_command_redirect_keeps_its_execution_reference() {
+#[nervix_primitives::test]
+async fn a_command_redirect_from_a_preopened_channel_keeps_its_execution_reference() {
     let mut primary = TestServer::start().await;
     let mut leader = TestServer::start().await;
-    let client = primary.connect().await;
+    let channel = within_deadline(
+        tonic::transport::Endpoint::from_shared(format!("http://{}", primary.address))
+            .assured("the primary server has an HTTP origin")
+            .connect(),
+    )
+    .await
+    .assured("the primary server accepts a preopened channel");
+    let client = within_deadline(Client::from_channel(channel, Some(domain("tenant"))))
+        .await
+        .assured("the preopened channel starts a session");
     let mut first_exchange = primary.next_exchange().await;
     let command_client = client.clone();
-    let command = tokio::spawn(async move {
+    let command = nervix_primitives::task::spawn(async move {
         command_client
             .execute("CREATE SCHEMA redirected (id I64);")
             .await
@@ -1487,7 +1781,7 @@ fn write_file(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).assured("the test directory accepts files");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1543,7 +1837,7 @@ async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
     let mut primary = TestServer::start().await;
     let mut seed = TestServer::start().await;
@@ -1592,7 +1886,7 @@ async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
     assert!(outcome.succeeded());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_upload_redirect_keeps_its_identity_and_archive() {
     let mut primary = TestServer::start().await;
     let mut leader = TestServer::start().await;
@@ -1628,7 +1922,7 @@ async fn an_upload_redirect_keeps_its_identity_and_archive() {
     assert!(outcome.succeeded());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_prepared_upload_uses_its_captured_domain() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -1653,13 +1947,13 @@ async fn a_prepared_upload_uses_its_captured_domain() {
     assert_eq!(received.start.upload_identity, *prepared.upload_identity());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn malformed_upload_replies_are_rejected_by_their_correlations() {
     for mode in [
         UploadReplyMode::WrongIdentity,
         UploadReplyMode::WrongRequestId,
     ] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut server = TestServer::start().await;
         *server.upload_reply_mode.lock().await = Some(mode);
         let client = server.connect().await;
@@ -1684,7 +1978,7 @@ async fn malformed_upload_replies_are_rejected_by_their_correlations() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn upload_permission_denial_is_reported_without_retry() {
     let mut server = TestServer::start().await;
     *server.upload_reply_mode.lock().await = Some(UploadReplyMode::Reject);
@@ -1708,4 +2002,980 @@ async fn upload_permission_denial_is_reported_without_retry() {
         panic!("permission denial has a typed upload status");
     };
     assert_eq!(status.code(), tonic::Code::PermissionDenied);
+}
+
+fn attach_reply(clock: crate::DomainClockObservation, message: &str) -> ReplyBody {
+    ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
+        disposition: crate::DomainClockAttachDisposition::Attached {
+            domain: domain("tenant"),
+            clock,
+        },
+        message: message.to_string(),
+    })
+}
+
+fn clock_in(
+    generation: u64,
+    state: crate::DomainClockObservedState,
+) -> crate::DomainClockObservation {
+    crate::DomainClockObservation { generation, state }
+}
+
+#[nervix_primitives::test]
+async fn domain_clock_statements_are_sent_as_typed_requests_for_the_active_domain() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let attaching = client.clone();
+    let attach =
+        nervix_primitives::task::spawn(
+            async move { attaching.execute("ATTACH DOMAIN CLOCK;").await },
+        );
+    let request = exchange.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("ATTACH DOMAIN CLOCK is sent as an attach request");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let unpaced = clock_in(1, crate::DomainClockObservedState::Unpaced);
+    let message = "attached to the clock of domain 'tenant': generation 1, unpaced";
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(unpaced.clone(), message),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+    assert!(outcome.succeeded());
+    assert_eq!(outcome.message, message);
+    assert_eq!(outcome.execution_reference, None);
+    let attached = client
+        .domain_clock(&domain("tenant"))
+        .assured("the client follows the attached clock");
+    assert_eq!(attached.clock(), &unpaced);
+
+    let stopped = clock_in(1, crate::DomainClockObservedState::Stopped);
+    let frame = crate::DomainClockObserved {
+        domain: domain("tenant"),
+        clock: stopped.clone(),
+    }
+    .encode(&limits())
+    .assured("a clock frame fits the default limits");
+    exchange.send(frame).await;
+    let event = within_deadline(client.next_domain_clock_event())
+        .await
+        .assured("the clock frame reaches the event stream");
+    assert_eq!(
+        event,
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped.clone(),
+        })
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the client still follows the clock")
+            .clock(),
+        &stopped
+    );
+
+    let detaching = client.clone();
+    let detach =
+        nervix_primitives::task::spawn(
+            async move { detaching.execute("detach domain clock").await },
+        );
+    let request = exchange.next_request().await;
+    let ClientRequest::DetachDomainClock(sent) = request.request else {
+        panic!("DETACH DOMAIN CLOCK is sent as a detach request");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockDetach(crate::DomainClockDetachOutcome {
+                disposition: crate::DomainClockDetachDisposition::Detached(domain("tenant")),
+                message: "detached from the clock of domain 'tenant'".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(detach)
+        .await
+        .assured("the detach task completes")
+        .assured("the detach succeeds");
+    assert!(outcome.succeeded());
+    assert_eq!(client.domain_clock(&domain("tenant")), None);
+
+    let refusing = client.clone();
+    let refused =
+        nervix_primitives::task::spawn(
+            async move { refusing.execute("DETACH DOMAIN CLOCK;").await },
+        );
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockDetach(crate::DomainClockDetachOutcome {
+                disposition: crate::DomainClockDetachDisposition::NotAttached(domain("tenant")),
+                message: "this session does not follow the clock of domain 'tenant'".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(refused)
+        .await
+        .assured("the detach task completes")
+        .assured("the refusal is an outcome");
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.message,
+        "this session does not follow the clock of domain 'tenant'"
+    );
+}
+
+#[nervix_primitives::test]
+async fn domain_clock_statements_need_an_active_domain_and_no_transaction() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+
+    client.set_domain(None).await;
+    for statement in ["ATTACH DOMAIN CLOCK;", "DETACH DOMAIN CLOCK;"] {
+        assert!(matches!(
+            within_deadline(client.execute(statement)).await,
+            Err(ClientError::NoActiveDomain)
+        ));
+    }
+
+    client
+        .adopt_transaction_status(
+            nervix_models::TransactionStatus::new(
+                "tx".to_string(),
+                domain("tenant"),
+                nervix_models::TransactionLifecycle::Open,
+                nervix_models::TransactionPosition::new(0),
+                0,
+            )
+            .assured("an empty open transaction is consistent"),
+        )
+        .await;
+    let outcome = within_deadline(client.execute("ATTACH DOMAIN CLOCK;"))
+        .await
+        .assured("a refused local statement is an outcome");
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.message,
+        "client-local commands are not allowed while a transaction is active"
+    );
+    let outcome = within_deadline(client.execute("ATTACH DOMAIN CLOCK; SHOW CLUSTER STATUS;"))
+        .await
+        .assured("a refused batch is an outcome");
+    assert_eq!(
+        outcome.message,
+        "client-local commands must be executed separately"
+    );
+}
+
+#[nervix_primitives::test]
+async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let attaching = client.clone();
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("missing")).await
+    });
+    let request = exchange.next_request().await;
+    let not_found = crate::DomainClockAttachOutcome {
+        disposition: crate::DomainClockAttachDisposition::DomainNotFound(domain("missing")),
+        message: "domain 'missing' does not exist".to_string(),
+    };
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockAttach(not_found.clone()),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(attach)
+            .await
+            .assured("the attach task completes")
+            .assured("a refusal is an outcome"),
+        not_found
+    );
+    assert_eq!(client.domain_clock(&domain("missing")), None);
+
+    let detaching = client.clone();
+    let detach = nervix_primitives::task::spawn(async move {
+        detaching.detach_domain_clock(domain("tenant")).await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Rejected(crate::wire::RequestRejected {
+                rejection: crate::wire::RequestRejection::UnsupportedRequest,
+                field: None,
+                message: "not served".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let error = within_deadline(detach)
+        .await
+        .assured("the detach task completes")
+        .expect_err("a rejected request is an error");
+    assert!(matches!(
+        error.current_context(),
+        ClientError::RequestRejected {
+            request: crate::RequestKind::DetachDomainClock,
+            ..
+        }
+    ));
+
+    let attaching = client.clone();
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockDetach(crate::DomainClockDetachOutcome {
+                disposition: crate::DomainClockDetachDisposition::Failed,
+                message: String::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    let error = within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .expect_err("a reply of another kind is an error");
+    assert!(matches!(
+        error.current_context(),
+        ClientError::UnexpectedReply {
+            request: crate::RequestKind::AttachDomainClock,
+        }
+    ));
+}
+
+#[nervix_primitives::test]
+async fn an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+
+    let reading = client.clone();
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = server.next_exchange().await;
+    let request = restored.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("the first request on the new session attaches the followed clock again");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped.clone(),
+        })
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the restored clock is followed")
+            .clock(),
+        &stopped
+    );
+}
+
+/// The reply that opens `live` at `generation` on `orders`.
+fn opened(generation: u64) -> ReplyBody {
+    ReplyBody::Subscribe(SubscribeOutcome {
+        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+            subscription: subscription(generation),
+            domain: domain("tenant"),
+            relay: RelayName::parse("orders").assured("the test relay name is valid"),
+            subscription_type: SubscriptionType::Row,
+            schema: orders_schema(),
+        })),
+        message: "subscription 'live' opened".to_string(),
+        diagnostics: Vec::new(),
+    })
+}
+
+/// Waits until the client observes that its session ended: the exchange's reader closed the
+/// registry of the requests waiting on it.
+async fn session_closed(client: &Client) {
+    within_deadline(async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let requests = client.inner.exchange.lock().await.requests();
+            if !requests.pending.lock().is_open() {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_requested_on_a_closed_session_opens_on_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let exchange = server.next_exchange().await;
+    drop(exchange);
+    session_closed(&client).await;
+
+    let subscribing = client.clone();
+    let mut subscribe = nervix_primitives::task::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let mut reopened = nervix_primitives::select! {
+        exchange = server.next_exchange() => exchange,
+        finished = &mut subscribe => {
+            panic!("the subscription ended without opening a new session: {finished:?}")
+        }
+    };
+    let request = reopened.next_request().await;
+    let ClientRequest::Subscribe(sent) = request.request else {
+        panic!("the subscription is requested on the new session");
+    };
+    assert_eq!(sent.statement, "CREATE SUBSCRIPTION live TO orders;");
+    reopened
+        .reply(request.request_id, opened(1), &limits())
+        .await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription opens on the new session");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(
+        client.subscription_lifecycle(
+            &SubscriptionName::parse("live").assured("the test name is valid")
+        ),
+        Some(crate::SubscriptionLifecycle::Active(subscription(1)))
+    );
+}
+
+#[nervix_primitives::test]
+async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let exchange = server.next_exchange().await;
+    drop(exchange);
+    session_closed(&client).await;
+
+    let deleting = client.clone();
+    let mut unsubscribe =
+        nervix_primitives::task::spawn(async move { deleting.unsubscribe("ghost").await });
+    let mut reopened = nervix_primitives::select! {
+        exchange = server.next_exchange() => exchange,
+        finished = &mut unsubscribe => {
+            panic!("the deletion ended without opening a new session: {finished:?}")
+        }
+    };
+    let request = reopened.next_request().await;
+    let ClientRequest::Unsubscribe(sent) = request.request else {
+        panic!("the deletion is requested on the new session");
+    };
+    assert_eq!(sent.subscription.as_str(), "ghost");
+    reopened
+        .reply(
+            request.request_id,
+            ReplyBody::Unsubscribe(crate::wire::UnsubscribeOutcome {
+                disposition: crate::wire::UnsubscribeDisposition::Failed,
+                message: "session subscription 'ghost' does not exist".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(unsubscribe)
+        .await
+        .assured("the unsubscribe task completes")
+        .assured("the refusal is an outcome");
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.message,
+        "session subscription 'ghost' does not exist"
+    );
+
+    let subscribing = client.clone();
+    let subscribe = nervix_primitives::task::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("ghost", "orders"))
+            .await
+    });
+    let request = reopened.next_request().await;
+    assert!(
+        matches!(request.request, ClientRequest::Subscribe(_)),
+        "a refused deletion of a name the client never held leaves the name free"
+    );
+    reopened
+        .reply(
+            request.request_id,
+            ReplyBody::Subscribe(SubscribeOutcome {
+                disposition: SubscribeDisposition::Failed,
+                message: "relay 'orders' does not exist".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the refusal is an outcome");
+}
+
+#[nervix_primitives::test]
+async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let subscribing = client.clone();
+    let subscribe = nervix_primitives::task::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(request.request_id, opened(1), &limits())
+        .await;
+    within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription opens");
+    let transaction = nervix_models::TransactionStatus::new(
+        "tx".to_string(),
+        domain("tenant"),
+        nervix_models::TransactionLifecycle::Open,
+        nervix_models::TransactionPosition::new(0),
+        0,
+    )
+    .assured("an empty open transaction is consistent");
+    client.adopt_transaction_status(transaction.clone()).await;
+
+    drop(exchange);
+    let interrupted = within_deadline(client.next_subscription())
+        .await
+        .assured("the lost session reports the subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+
+    let recovering = client.clone();
+    let recovery = nervix_primitives::task::spawn(async move {
+        recovering
+            .recover_session(crate::client::RecoveryMode::IfClosed)
+            .await
+            .map(|_| ())
+    });
+    let mut restored = server.next_exchange().await;
+    let first = restored.next_request().await;
+    assert!(
+        matches!(first.request, ClientRequest::Subscribe(_)),
+        "a session that holds a transaction refuses subscriptions, so restoration comes first: \
+         {:?}",
+        first.request
+    );
+    restored.reply(first.request_id, opened(2), &limits()).await;
+    let second = restored.next_request().await;
+    let ClientRequest::AttachTransaction(attach) = second.request else {
+        panic!("the transaction is attached again after the subscription");
+    };
+    assert_eq!(attach.transaction_id, "tx");
+    restored
+        .reply(
+            second.request_id,
+            ReplyBody::Attach(crate::wire::AttachOutcome {
+                disposition: crate::wire::AttachDisposition::Attached(transaction),
+                message: "attached".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(recovery)
+        .await
+        .assured("the recovery task completes")
+        .assured("the session recovers");
+}
+
+/// The frame that ends `handle` because its relay was redefined.
+fn relay_changed(handle: SubscriptionHandle) -> EncodedFrame<ServerFrame> {
+    SubscriptionEnded {
+        subscription: handle,
+        reason: SubscriptionEndReason::RelayChanged,
+        message: "session subscription 'live' ended because relay 'orders' was redefined"
+            .to_string(),
+    }
+    .encode(&limits())
+    .assured("a subscription end fits a frame")
+}
+
+/// Subscribes `live` to `orders` on `exchange`, which opens it as `generation`.
+async fn subscribe_live(client: &Client, exchange: &mut ServerExchange, generation: u64) {
+    let subscribing = client.clone();
+    let subscribe = nervix_primitives::task::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    let ClientRequest::Subscribe(sent) = request.request else {
+        panic!("a subscription is requested with a subscribe request");
+    };
+    assert_eq!(sent.statement, "CREATE SUBSCRIPTION live TO orders;");
+    exchange
+        .reply(request.request_id, opened(generation), &limits())
+        .await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription is answered");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_the_server_ended_is_not_opened_again_on_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    subscribe_live(&client, &mut exchange, 1).await;
+    exchange.send(relay_changed(subscription(1))).await;
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the end of the subscription is delivered");
+    let SubscriptionEvent::Ended(ended) = event else {
+        panic!("the server's end is the subscription's next event, not {event:?}");
+    };
+    assert_eq!(ended.subscription, subscription(1));
+    let live = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1)))
+    );
+
+    drop(exchange);
+    session_closed(&client).await;
+    let listing_client = client.clone();
+    let listing =
+        nervix_primitives::task::spawn(async move { listing_client.list_domains().await });
+    let mut reopened = server.next_exchange().await;
+    let first = reopened.next_request().await;
+    assert!(
+        matches!(first.request, ClientRequest::ListDomains),
+        "nothing is restored on the new session, so its first request is the caller's: {:?}",
+        first.request
+    );
+    reopened
+        .reply(
+            first.request_id,
+            ReplyBody::DomainList(DomainList {
+                domains: tenant_domains(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(listing)
+        .await
+        .assured("the listing task finishes")
+        .assured("the listing succeeds on the new session");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1))),
+        "a new session leaves an ended subscription ended"
+    );
+
+    subscribe_live(&client, &mut reopened, 2).await;
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Active(subscription(2))),
+        "subscribing under the ended name opens a new generation"
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_end_its_session_lost_before_it_was_read_is_still_reported() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    subscribe_live(&client, &mut exchange, 1).await;
+    exchange
+        .send(rows_frame(subscription(1), &[(1, "before the end")]))
+        .await;
+    exchange.send(relay_changed(subscription(1))).await;
+    drop(exchange);
+    within_deadline(async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if client.inner.events.sinks.subscriptions.is_closed() {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the end is reported after its session ended");
+    let SubscriptionEvent::Ended(ended) = event else {
+        panic!(
+            "the rows ended with their session, and the subscription's end is reported, not \
+             {event:?}"
+        );
+    };
+    assert_eq!(ended.subscription, subscription(1));
+    assert_eq!(ended.reason, SubscriptionEndReason::RelayChanged);
+    let live = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&live),
+        Some(SubscriptionLifecycle::Ended(subscription(1)))
+    );
+
+    let outcome = within_deadline(client.unsubscribe("live"))
+        .await
+        .assured("deleting an ended subscription needs no session");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(
+        outcome.message,
+        "subscription 'live' deleted; the server had already ended it"
+    );
+    assert_eq!(client.subscription_lifecycle(&live), None);
+}
+
+#[nervix_primitives::test]
+async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let reading = client.clone();
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = server.next_exchange().await;
+    let request = restored.next_request().await;
+    assert!(matches!(
+        request.request,
+        ClientRequest::AttachDomainClock(_)
+    ));
+    restored
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
+                disposition: crate::DomainClockAttachDisposition::Failed,
+                message: "the session holds a transaction".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the refusal is reported"),
+        crate::DomainClockEvent::RestorationFailed(crate::DomainClockRestorationFailure {
+            domain: domain("tenant"),
+            message: "the session holds a transaction".to_string(),
+            retry_after: Duration::from_secs(1),
+        })
+    );
+    let request = restored.next_request().await;
+    assert!(
+        matches!(request.request, ClientRequest::AttachDomainClock(_)),
+        "a refused restoration is sent again on the same session"
+    );
+    restored
+        .reply(
+            request.request_id,
+            ReplyBody::Rejected(crate::wire::RequestRejected {
+                rejection: crate::wire::RequestRejection::TooManyRequestsInFlight,
+                field: None,
+                message: "the session already has 64 requests in flight".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let rejected = within_deadline(client.next_domain_clock_event())
+        .await
+        .assured("the rejection is reported");
+    let crate::DomainClockEvent::RestorationFailed(rejected) = rejected else {
+        panic!("a rejected restoration is reported as a failed restoration: {rejected:?}");
+    };
+    assert_eq!(rejected.retry_after, Duration::from_secs(2));
+    assert!(
+        rejected.message.contains("TooManyRequestsInFlight"),
+        "{}",
+        rejected.message
+    );
+    let request = restored.next_request().await;
+    assert!(
+        matches!(request.request, ClientRequest::AttachDomainClock(_)),
+        "a rejected restoration is sent again on the same session"
+    );
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped.clone(),
+        })
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the restored clock is followed")
+            .clock(),
+        &stopped
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_clock_restoration_answered_already_attached_follows_the_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let reading = client.clone();
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = server.next_exchange().await;
+    let request = restored.next_request().await;
+    restored
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
+                disposition: crate::DomainClockAttachDisposition::AlreadyAttached(domain("tenant")),
+                message: "this session already follows the clock of domain 'tenant'".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let stopped = clock_in(1, crate::DomainClockObservedState::Stopped);
+    let frame = crate::DomainClockObserved {
+        domain: domain("tenant"),
+        clock: stopped.clone(),
+    }
+    .encode(&limits())
+    .assured("a clock frame fits the default limits");
+    restored.send(frame).await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the clock frame is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped,
+        })
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read() {
+    let mut primary = TestServer::start().await;
+    let unused = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("loopback accepts a test listener");
+    let seed_address = unused
+        .local_addr()
+        .assured("a bound listener has an address");
+    drop(unused);
+    let seed_url =
+        Url::parse(&format!("http://{seed_address}")).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        connect_timeout: Duration::from_millis(250),
+        retry_timeout: Duration::from_secs(1),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the primary accepts the session");
+    let mut exchange = primary.next_exchange().await;
+    let attaching = client.clone();
+    let attach = nervix_primitives::task::spawn(async move {
+        attaching.attach_domain_clock(domain("tenant")).await
+    });
+    let request = exchange.next_request().await;
+    let unpaced = clock_in(1, crate::DomainClockObservedState::Unpaced);
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(unpaced.clone(), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    primary.stop().await;
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let failure = within_deadline(client.next_domain_clock_event())
+        .await
+        .expect_err("no server accepts a session within the retry deadline");
+    assert!(
+        matches!(failure.current_context(), ClientError::ConnectServer(_)),
+        "the reopening fails to connect: {failure:?}"
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the clock is still followed")
+            .clock(),
+        &unpaced
+    );
+
+    let mut seed = TestServer::start_at(seed_address).await;
+    let reading = client.clone();
+    let next =
+        nervix_primitives::task::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = seed.next_exchange().await;
+    let request = restored.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("the first request on the reopened session attaches the followed clock again");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped,
+        })
+    );
 }

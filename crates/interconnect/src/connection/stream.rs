@@ -17,7 +17,7 @@ use http::{Response, StatusCode, Version};
 use meticulous::OptionExt as _;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_models::ClusterNodeName;
-use tokio::time::{Instant, timeout};
+use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, read_body,
@@ -32,6 +32,14 @@ use crate::{
 
 /// A bounded, flow-controlled response body. Dropping it cancels the HTTP/2 stream and releases
 /// its bulk slot; each returned chunk holds its own memory charge until the caller drops it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained response stream consumes each admitted chunk under its progress \
+                  deadline"
+    )
+)]
 pub struct IncomingByteStream {
     body: RecvStream,
     lease: StreamLease,
@@ -90,11 +98,7 @@ impl IncomingByteStream {
         };
         let chunk = next.map_err(|error| {
             self.finished = true;
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: self.request,
-                reason: error.to_string(),
-            })
+            RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
         })?;
         if chunk.is_empty() {
             self.finished = true;
@@ -116,11 +120,7 @@ impl IncomingByteStream {
             return Ok(None);
         }
         let chunk_bytes = u64::try_from(chunk.len()).map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: self.request,
-                reason: error.to_string(),
-            })
+            RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
         })?;
         let received = self.received.checked_add(chunk_bytes).ok_or_else(|| {
             Report::new(RequestError::Stream {
@@ -149,18 +149,18 @@ impl IncomingByteStream {
                     .flow_control()
                     .release_capacity(chunk.len())
                     .map_err(|release_error| {
-                        Report::new(RequestError::Stream {
-                            node: self.node.clone(),
-                            request: self.request,
-                            reason: release_error.to_string(),
-                        })
+                        RequestError::stream_with_cause(
+                            Report::new(release_error),
+                            self.node.clone(),
+                            self.request,
+                        )
                     })?;
                 self.finished = true;
-                return Err(Report::new(RequestError::Stream {
-                    node: self.node.clone(),
-                    request: self.request,
-                    reason: error.to_string(),
-                }));
+                return Err(RequestError::stream_with_cause(
+                    error,
+                    self.node.clone(),
+                    self.request,
+                ));
             }
         };
         let bytes = chunk.to_vec();
@@ -168,11 +168,7 @@ impl IncomingByteStream {
             .flow_control()
             .release_capacity(chunk.len())
             .map_err(|error| {
-                Report::new(RequestError::Stream {
-                    node: self.node.clone(),
-                    request: self.request,
-                    reason: error.to_string(),
-                })
+                RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
             })?;
         self.received = received;
         self.lease.state.observations.bulk_transferred(
@@ -220,7 +216,7 @@ impl TransportState {
             .await?;
             return Ok(());
         }
-        let handled = tokio::select! {
+        let handled = nervix_primitives::select! {
             handled = self.requests.handle_stream(
                 &self.executor,
                 peer_node_id,
@@ -306,7 +302,7 @@ async fn send_stream_chunk(
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
     while offset < body.len() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = body
             .len()
             .checked_sub(offset)
@@ -355,13 +351,15 @@ impl TransportState {
             .version(Version::HTTP_2)
             .header(http::header::CONTENT_LENGTH, response.content_length)
             .body(())
-            .map_err(|error| TransportError::Http(error.to_string()))?;
+            .map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Http)
+            })?;
         let mut stream = respond
             .send_response(headers, false)
             .map_err(TransportError::from)?;
         let mut sent = 0_u64;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let next = match timeout(progress_timeout, response.chunks.next()).await {
                 Ok(next) => next,
                 Err(_) => {
@@ -378,7 +376,7 @@ impl TransportState {
                 Ok(chunk) => chunk,
                 Err(error) => {
                     stream.send_reset(Reason::INTERNAL_ERROR);
-                    return Err(Report::new(TransportError::Decode(error.to_string())));
+                    return Err(TransportError::with_cause(error, TransportError::Decode));
                 }
             };
             if chunk.is_empty() {
@@ -387,8 +385,9 @@ impl TransportState {
                     "stream producer yielded an empty chunk".to_string(),
                 )));
             }
-            let chunk_bytes = u64::try_from(chunk.len())
-                .map_err(|error| TransportError::Decode(error.to_string()))?;
+            let chunk_bytes = u64::try_from(chunk.len()).map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Decode)
+            })?;
             sent = sent.checked_add(chunk_bytes).ok_or_else(|| {
                 TransportError::Decode("streamed response byte count overflowed".to_string())
             })?;

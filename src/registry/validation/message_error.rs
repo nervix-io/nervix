@@ -32,7 +32,7 @@ use crate::registry::{
             schema_sensitivity_for_internal_schema, structured_message_error_arrow_schema,
         },
         vm::udf_compile_options,
-        wire::{schema_for_ack_model, schema_for_codec_model},
+        wire::{ingestor_input_schema, schema_for_ack_model, schema_for_codec_model},
     },
 };
 
@@ -103,13 +103,12 @@ pub(in crate::registry) fn validate_model_message_error_policies(
 
     match model {
         Model::Ingestor(node) => {
-            let input =
-                schema_for_codec_model(domain, identifier, models, &node.decode_using_codec)?;
+            let input = ingestor_input_schema(domain, identifier, models, &node.input)?;
             validate_outputs(
                 &node.output_routes,
                 MessageErrorSchemas {
                     input: Some(input),
-                    allow_header_reads: node.source.reads_headers(),
+                    allow_header_reads: node.input.reads_headers(),
                     ..MessageErrorSchemas::default()
                 },
                 None,
@@ -403,10 +402,11 @@ fn validate_message_error_policy(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("message-error SET compile failed: {}", error.message),
+            reason: format!("message-error SET compile failed: {}", message),
         })
     })?;
     Ok(())

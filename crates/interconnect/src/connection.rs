@@ -7,42 +7,51 @@
 //! - **Depends on.** Certificate identity, bounded rkyv codecs, and execution admission.
 //! - **Must not know.** Runtime graphs, scheduling decisions, or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "connection and peer registration install or retire concrete transport \
+                  lifetimes; recurring transport operations override this default"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::poll_fn,
     hash::RandomState,
-    io::Write as _,
     net::SocketAddr,
     ops::Deref,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
     time::Duration,
 };
 
 use bytes::Bytes;
-use dashmap::mapref::entry::Entry;
 use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
-use h2::{Reason, RecvStream, SendStream, client, server};
-use http::{Method, Request, Response, StatusCode, Version};
+use h2::{Ping, PingPong, Reason, RecvStream, client, server};
+use http::{Method, Request, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_dns::ConnectionBudget;
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
-    sync::{ArcSwap, CancellationToken, DashMap},
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
 };
-use strum::EnumCount as _;
-use tokio::{
-    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
+use nervix_primitives::{
+    collections::{DashMap, dash_map::Entry},
+    net::{TcpListener, TcpStream},
+    publication::ArcSwap,
+    sync::{
+        Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc,
+    },
+    task::TaskTracker,
     time::{Instant, sleep, sleep_until, timeout},
 };
-use tokio_util::task::TaskTracker;
+use strum::EnumCount as _;
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
@@ -56,28 +65,30 @@ use crate::{
         ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, StreamResetReason,
         TransportObservations, TransportSnapshot,
     },
+    peer_resolver::PeerResolver,
     request::RequestAdmission,
-    socket::{PeerResolver, TcpListener, TcpStream},
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
     },
 };
 
+mod body;
 mod dial;
 mod duplex;
 mod relay;
 mod stream;
 pub(crate) mod stream_slots;
 
-use dial::{DialedStream, OutboundDial, SetupBudget};
+use body::{read_body, read_body_into, send_body, send_response, send_static_error};
+use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
     ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
 };
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
-use stream_slots::StreamSlotQuotas;
+use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
 
 const CONNECT_PATH: &str = "/v1/connect";
 const CONTROL_PATH: &str = "/v1/control";
@@ -96,6 +107,10 @@ const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
 const RESET_LIMIT: usize = 128;
+/// A blackholed established TCP session otherwise stays in the pool until the kernel abandons its
+/// retransmissions, which can outlast the cluster's partition-heal convergence deadline.
+const HTTP2_PING_INTERVAL: Duration = Duration::from_secs(15);
+const HTTP2_PING_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ConnectionSlotKey {
@@ -124,6 +139,13 @@ struct SlotControl {
     cancel: CancellationToken,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct CancelOnDrop {
     token: CancellationToken,
     armed: bool,
@@ -153,6 +175,13 @@ impl Drop for CancelOnDrop {
 /// and connections by reference instead of assembling a key for every operation. The keys name the
 /// endpoint, not an address, so a new DNS answer for the same endpoint changes only where the next
 /// connection is dialled and never retires a connection that is already established.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
@@ -269,6 +298,13 @@ fn increment(total: usize, addition: usize) -> usize {
         .assured("configured connection, stream and slot limits are far inside usize")
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 pub(crate) struct StreamLease {
     connection: Arc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
@@ -339,7 +375,9 @@ struct RelayGrant {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RelayAdmissionKey {
     peer_node_id: ClusterNodeName,
-    ack_id: u64,
+    /// The whole registration, whose registrar run keeps an admission that an earlier run of the
+    /// same node numbered alike from naming this one.
+    registration: RemoteAckRegistration,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -353,6 +391,13 @@ struct OutboundRelayKey {
 /// The attempt holds its channel's key, so the channel bookkeeping an attempt touches never
 /// rebuilds that key.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayAttemptKey {
     channel: RelayChannelKey,
     sequence: u64,
@@ -376,6 +421,13 @@ struct RelayChannelKey {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
@@ -419,6 +471,13 @@ impl RelayChannelWatermark {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 enum RelayAttemptEntry {
     Active(StdArc<RelayAdmissionRecord>),
     CancellationFence,
@@ -461,12 +520,21 @@ enum RelayAdmissionState {
     Cancelled,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one inbound admission record",
+        bound = "one terminal transition per reserved grant and retained admission permit",
+        reason = "admission records own the exact grant and its terminal resolution"
+    )
+)]
 struct RelayAdmissionRecord {
     attempt: RelayAttemptKey,
     admission_key: RelayAdmissionKey,
     body_bytes: u64,
     metadata: wire::RelayMetadata,
-    state: parking_lot::Mutex<RelayAdmissionState>,
+    state: nervix_primitives::sync::blocking::Mutex<RelayAdmissionState>,
     cancellation: CancellationToken,
     /// When the receiver accepted this attempt's reservation. Progress and admission latency are
     /// both measured from here, because that is when the sender's wait begins.
@@ -478,6 +546,13 @@ struct RelayAdmissionRecord {
     _terminal: OwnedSemaphorePermit,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "this retained transport value services relay frames and their terminal outcomes"
+    )
+)]
 struct RelayBodyCompletionGuard {
     admission: StdArc<RelayAdmissionRecord>,
     complete: bool,
@@ -506,10 +581,28 @@ impl Drop for RelayBodyCompletionGuard {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "the intake retains its exact grant record through the terminal transition",
+        key = "one admitted relay grant",
+        bound = "one synchronous status transition under its retained record; no guard crosses \
+                 await"
+    )
+)]
 pub struct RelayAdmission {
     record: StdArc<RelayAdmissionRecord>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport services each admitted body and resolves its exact cancellation \
+                  guard"
+    )
+)]
 pub struct RelayCancellationGuard {
     state: TransportState,
     peer_node_id: ClusterNodeName,
@@ -736,7 +829,7 @@ impl TransportState {
         options: TransportOptions,
         executor: Executor,
         resolver: PeerResolver,
-    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
+    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), Report<TransportError>> {
         let TransportIdentity {
             cluster_id,
             node_id,
@@ -745,13 +838,15 @@ impl TransportState {
         options.validate()?;
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         tls.clock
             .ensure_current(&tls.certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
 
-        let listener = TcpListener::bind(listen_addr).await?;
-        let local_addr = listener.local_addr()?;
+        let listener = TcpListener::bind(listen_addr)
+            .await
+            .map_err(TransportError::from)?;
+        let local_addr = listener.local_addr().map_err(TransportError::from)?;
         let (incoming_tx, incoming_rx) = mpsc::channel(options.incoming_queue_capacity);
         let process_epoch = options.entropy.next_u64();
         let management_connection_reserve = options
@@ -853,9 +948,11 @@ impl TransportState {
         &self.node_id
     }
 
+    #[allow(deprecated)] // until try_update is stabilized
     pub(crate) fn next_coordination_identity(
         &self,
     ) -> Result<CoordinationIdentity, Report<CoordinationIdentityAllocationError>> {
+        #[allow(deprecated)] // until try_update is stabilized
         let sequence = self
             .next_coordination_sequence
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -985,9 +1082,9 @@ impl TransportState {
         &self,
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         if !self.has_room_for(&node_id) {
-            return Err(TransportError::PoolExhausted);
+            return Err(Report::new(TransportError::PoolExhausted));
         }
         let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised);
         self.ensure_preconnected_slots(&outbound);
@@ -1053,9 +1150,9 @@ impl TransportState {
     pub(crate) async fn bootstrap_target(
         &self,
         target: PeerTarget,
-    ) -> Result<ClusterNodeName, TransportError> {
+    ) -> Result<ClusterNodeName, Report<TransportError>> {
         if self.admission_closed.is_cancelled() {
-            return Err(TransportError::ShuttingDown);
+            return Err(Report::new(TransportError::ShuttingDown));
         }
         let peer_addr = target.addr;
         let setup = async {
@@ -1064,41 +1161,43 @@ impl TransportState {
                 .acquire_connection_permits(PoolClass::Management, &cancel)
                 .await
                 .ok_or(TransportError::ShuttingDown)?;
-            let _handshake_permit = tokio::select! {
+            let _handshake_permit = nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => {
-                    return Err(TransportError::ShuttingDown);
+                    return Err(Report::new(TransportError::ShuttingDown));
                 }
                 permit = StdArc::clone(&self.handshake_permits).acquire_owned() => {
                     permit.map_err(|_| TransportError::ShuttingDown)?
                 }
             };
-            let tcp = TcpStream::connect(target.addr).await?;
-            tcp.set_nodelay(true)?;
+            let tcp = TcpStream::connect(target.addr)
+                .await
+                .map_err(TransportError::from)?;
+            tcp.set_nodelay(true).map_err(TransportError::from)?;
             let tls = self.tls.current().bundle;
             let session = tls
                 .connect(tcp, &target.server_name, &self.cluster_id, None)
                 .await?;
             let identity = session.peer;
             if !identity.matches_endpoint(&target.server_name) {
-                return Err(TransportError::InvalidHandshake(format!(
+                return Err(Report::new(TransportError::InvalidHandshake(format!(
                     "peer certificate does not identify bootstrap endpoint '{}'",
                     target.server_name
-                )));
+                ))));
             }
             let node_id = identity.node_id;
             if !self.has_room_for(&node_id) {
-                return Err(TransportError::PoolExhausted);
+                return Err(Report::new(TransportError::PoolExhausted));
             }
             let outbound = self.install_authenticated_target(node_id.clone(), target);
             self.ensure_preconnected_slots(&outbound);
-            Ok(node_id)
+            Ok::<_, Report<TransportError>>(node_id)
         };
         match timeout(self.options.connection_setup_timeout, setup).await {
             Ok(result) => result,
-            Err(_) => Err(TransportError::ConnectionSetupTimeout {
+            Err(_) => Err(Report::new(TransportError::ConnectionSetupTimeout {
                 peer: NodeEndpoint::from(peer_addr),
                 timeout: self.options.connection_setup_timeout,
-            }),
+            })),
         }
     }
 
@@ -1115,6 +1214,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn ensure_class_slots(&self, target: &OutboundTarget, class: PoolClass) {
         for key in target.slot_keys(class) {
             self.ensure_slot(key);
@@ -1127,6 +1234,14 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn ensure_slot(&self, key: &ConnectionSlotKey) {
         if self.admission_closed.is_cancelled() {
             return;
@@ -1134,10 +1249,20 @@ impl TransportState {
         // Every lease passes through here, and in the steady state its slot is already running. A
         // shared lookup confirms that, so only a missing slot takes the exclusive entry and builds
         // an owned key.
-        if self.slots.contains_key(key) {
+        if nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.slots.contains_key(key)
+        ) {
             return;
         }
-        match self.slots.entry(key.clone()) {
+        match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.slots.entry(key.clone())
+        ) {
             Entry::Occupied(_) => {}
             Entry::Vacant(entry) => {
                 let cancel = CancellationToken::new();
@@ -1147,7 +1272,13 @@ impl TransportState {
                 let state = self.clone();
                 let key = key.clone();
                 self.tasks.spawn(async move {
-                    state.run_slot(key, cancel).await;
+                    nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "Typed Ratchet 03 (86bc9eqjv): a missing retained transport slot installs \
+                         its one supervised connection task",
+                        state.run_slot(key, cancel)
+                    )
+                    .await;
                 });
             }
         }
@@ -1183,10 +1314,18 @@ impl TransportState {
         self.connection_changed.notify_waiters();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
         let mut backoff = self.options.reconnect_backoff;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if slot_cancel.is_cancelled() || self.admission_closed.is_cancelled() {
                 break;
             }
@@ -1197,7 +1336,7 @@ impl TransportState {
                 Some(permits) => permits,
                 None => break,
             };
-            let connected = tokio::select! {
+            let connected = nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
                 connected = self.connect(&key, &slot_cancel) => connected,
@@ -1208,7 +1347,7 @@ impl TransportState {
                     match self.register_connection(connection.clone()) {
                         Ok(()) => {
                             self.observations.connection_established(key.class);
-                            tokio::select! {
+                            nervix_primitives::select! {
                                 _ = slot_cancel.cancelled() => {}
                                 _ = self.admission_closed.cancelled() => {}
                                 _ = connection.closed.cancelled() => {}
@@ -1248,7 +1387,7 @@ impl TransportState {
                 }
             }
             drop(permits);
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
                 _ = sleep(backoff) => {}
@@ -1261,6 +1400,26 @@ impl TransportState {
         self.unregister_slot(&key, &slot_cancel);
     }
 
+    /// End a blackholed HTTP/2 connection without waiting for the kernel's TCP retransmission
+    /// timeout. Both ends monitor it, so a stale inbound class slot also releases its capacity.
+    async fn monitor_http2_connection(mut ping_pong: PingPong) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            sleep(HTTP2_PING_INTERVAL).await;
+            match timeout(HTTP2_PING_TIMEOUT, ping_pong.ping(Ping::opaque())).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    debug!(?error, "interconnect HTTP/2 ping failed");
+                    break;
+                }
+                Err(_) => {
+                    debug!("interconnect HTTP/2 ping timed out");
+                    break;
+                }
+            }
+        }
+    }
+
     async fn acquire_connection_permits(
         &self,
         class: PoolClass,
@@ -1269,7 +1428,7 @@ impl TransportState {
         let non_management = if class == PoolClass::Management {
             None
         } else {
-            let acquired = tokio::select! {
+            let acquired = nervix_primitives::select! {
                 _ = cancel.cancelled() => return None,
                 _ = self.admission_closed.cancelled() => return None,
                 acquired = StdArc::clone(&self.non_management_connection_permits).acquire_owned() => acquired,
@@ -1282,7 +1441,7 @@ impl TransportState {
         let non_preconnected = if class.is_preconnected() {
             None
         } else {
-            let acquired = tokio::select! {
+            let acquired = nervix_primitives::select! {
                 _ = cancel.cancelled() => return None,
                 _ = self.admission_closed.cancelled() => return None,
                 acquired = StdArc::clone(&self.non_preconnected_connection_permits).acquire_owned() => acquired,
@@ -1292,7 +1451,7 @@ impl TransportState {
                 Err(_) => return None,
             }
         };
-        let acquired = tokio::select! {
+        let acquired = nervix_primitives::select! {
             _ = cancel.cancelled() => return None,
             _ = self.admission_closed.cancelled() => return None,
             acquired = StdArc::clone(&self.connection_permits).acquire_owned() => acquired,
@@ -1318,10 +1477,13 @@ impl TransportState {
         }
     }
 
-    fn register_connection(&self, connection: Arc<ClientConnection>) -> Result<(), TransportError> {
+    fn register_connection(
+        &self,
+        connection: Arc<ClientConnection>,
+    ) -> Result<(), Report<TransportError>> {
         let key = connection.key.clone();
         let Entry::Vacant(entry) = self.connections.entry(key.clone()) else {
-            return Err(TransportError::PoolExhausted);
+            return Err(Report::new(TransportError::PoolExhausted));
         };
         self.increment_peer(&key.node_id)?;
         entry.insert(connection);
@@ -1347,7 +1509,7 @@ impl TransportState {
             return;
         }
         let drained = connection.stream_slots.drain();
-        tokio::select! {
+        nervix_primitives::select! {
             _ = self.force_close.cancelled() => {}
             _ = sleep(self.options.shutdown_drain_timeout) => {}
             _ = drained => {}
@@ -1359,7 +1521,7 @@ impl TransportState {
         key: &ConnectionSlotKey,
         slot_cancel: &CancellationToken,
     ) -> Result<Arc<ClientConnection>, Report<TransportError>> {
-        let budget = SetupBudget::start(self.options.connection_setup_timeout);
+        let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
         let setup = async {
             let DialedStream {
                 stream: tcp,
@@ -1383,22 +1545,26 @@ impl TransportState {
 
             let mut builder = client::Builder::new();
             configure_client_builder(&mut builder, &self.options, key.class)?;
-            let (sender, connection) = builder
+            let (sender, mut connection) = builder
                 .handshake(stream)
                 .await
                 .map_err(TransportError::from)?;
+            let ping_pong = connection
+                .ping_pong()
+                .assured("a newly handshaken HTTP/2 connection has not lent out its ping handle");
             let cancel = CancellationToken::new();
             let closed = CancellationToken::new();
             let driver_cancel = cancel.clone();
             let driver_closed = closed.clone();
             let force_close = self.force_close.clone();
             self.tasks.spawn(async move {
-                tokio::select! {
+                nervix_primitives::select! {
                     result = connection => {
                         if let Err(error) = result {
                             debug!(?error, "outbound HTTP/2 connection closed");
                         }
                     }
+                    () = Self::monitor_http2_connection(ping_pong) => {}
                     _ = driver_cancel.cancelled() => {}
                     _ = force_close.cancelled() => {}
                     _ = sleep_until(certificate_expires_at) => {}
@@ -1487,17 +1653,25 @@ impl TransportState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     pub(crate) async fn lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
         deadline: Instant,
-    ) -> Result<StreamLease, TransportError> {
+    ) -> Result<StreamLease, Report<TransportError>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.admission_closed.is_cancelled() {
-                return Err(TransportError::ShuttingDown);
+                return Err(Report::new(TransportError::ShuttingDown));
             }
             if let Some(lease) = self.try_lease(node_id, class, subquota) {
                 return Ok(lease);
@@ -1511,15 +1685,15 @@ impl TransportState {
                 return Ok(lease);
             }
 
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => {
-                    return Err(TransportError::ShuttingDown);
+                    return Err(Report::new(TransportError::ShuttingDown));
                 }
                 _ = sleep_until(deadline) => {
-                    return Err(TransportError::RequestTimeout {
+                    return Err(Report::new(TransportError::RequestTimeout {
                         peer: node_id.clone(),
                         timeout: self.options.request_timeout,
-                    });
+                    }));
                 }
                 _ = &mut notified => {}
             }
@@ -1529,19 +1703,37 @@ impl TransportState {
     /// Lease a free stream on an established connection of `class` to `node_id`, starting any of
     /// the peer's slots in that class that are not running. On an established pool every step reads
     /// shared state, so the lease takes no exclusive lock.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
+    #[allow(deprecated)] // until try_update is stabilized
     fn try_lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
     ) -> Option<StreamLease> {
-        let target = self
-            .targets
-            .get(node_id)
-            .map(|target| Arc::clone(target.value()))?;
-        self.ensure_class_slots(&target, class);
+        let target = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
+             slot instead of reaching the shared registry per request",
+            self.targets.get(node_id)
+        )
+        .map(|target| Arc::clone(target.value()))?;
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
+             recurring lease attempts",
+            self.ensure_class_slots(&target, class)
+        );
 
         let slot_keys = target.slot_keys(class);
+        #[allow(deprecated)] // until try_update is stabilized
         let start = self
             .next_connection
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1551,7 +1743,13 @@ impl TransportState {
             % slot_keys.len();
         let (before_start, from_start) = slot_keys.split_at(start);
         for key in from_start.iter().chain(before_start) {
-            let Some(connection) = self.connections.get(key).map(|item| item.clone()) else {
+            let Some(connection) = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected \
+                 connection slot instead of reaching the shared registry per request",
+                self.connections.get(key)
+            )
+            .map(|item| item.clone()) else {
                 continue;
             };
             let Some(permit) = connection.stream_slots.try_lease(subquota) else {
@@ -1569,11 +1767,19 @@ impl TransportState {
         None
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) async fn send(
         &self,
         node_id: &ClusterNodeName,
         envelope: Envelope,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         if let Envelope::RelayPayload(payload) = envelope {
             return self.send_relay(node_id, payload).await;
         }
@@ -1585,12 +1791,15 @@ impl TransportState {
             } else {
                 let key = RelayAdmissionKey {
                     peer_node_id: node_id.clone(),
-                    ack_id: ack.ack_id,
+                    registration: ack.registration.clone(),
                 };
-                let record = self
-                    .relay_admissions
-                    .get(&key)
-                    .map(|record| StdArc::clone(record.value()));
+                let record = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain pending request \
+                     ownership through the terminal response",
+                    self.relay_admissions.get(&key)
+                )
+                .map(|record| StdArc::clone(record.value()));
                 if let Some(record) = &record {
                     if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
                         record.reject(reason.clone());
@@ -1649,10 +1858,10 @@ impl TransportState {
                 }
                 Envelope::Control(control) => {
                     if let ControlEnvelope::Request(_) | ControlEnvelope::Response(_) = &control {
-                        return Err(TransportError::Decode(
+                        return Err(Report::new(TransportError::Decode(
                             "typed request envelopes cannot be sent as one-way controls"
                                 .to_string(),
-                        ));
+                        )));
                     }
                     let bytes = wire::encode_rkyv(
                         &self.executor,
@@ -1677,9 +1886,9 @@ impl TransportState {
                         .await?;
                 }
                 Envelope::RelayPayload(_) => {
-                    return Err(TransportError::RelayGrant(
+                    return Err(Report::new(TransportError::RelayGrant(
                         "relay payload escaped relay admission".to_string(),
-                    ));
+                    )));
                 }
             }
             Ok(())
@@ -1699,7 +1908,7 @@ impl TransportState {
         control: ControlEnvelope,
         subquota: RequestSubquota,
         timeout_duration: Duration,
-    ) -> Result<wire::Decoded<ControlEnvelope>, TransportError> {
+    ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
         let class = control.pool_class();
         let deadline = Instant::now()
             .checked_add(timeout_duration)
@@ -1743,7 +1952,7 @@ impl TransportState {
         peer_node_id: ClusterNodeName,
         envelope: Envelope,
         decoded: Option<Reservation>,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         self.incoming_tx
             .try_send(ReceivedEnvelope::new(
                 peer_addr,
@@ -1751,29 +1960,37 @@ impl TransportState {
                 envelope,
                 decoded,
             ))
-            .map_err(|_| TransportError::IncomingQueueFull)
+            .map_err(|_| Report::new(TransportError::IncomingQueueFull))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn deliver_terminal_incoming(
         &self,
         peer_addr: SocketAddr,
         peer_node_id: ClusterNodeName,
         envelope: Envelope,
         decoded: Option<Reservation>,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         let received = ReceivedEnvelope::new(peer_addr, peer_node_id, envelope, decoded);
-        tokio::select! {
-            _ = self.admission_closed.cancelled() => Err(TransportError::ShuttingDown),
+        nervix_primitives::select! {
+            _ = self.admission_closed.cancelled() => Err(Report::new(TransportError::ShuttingDown)),
             result = self.incoming_tx.send(received) => {
-                result.map_err(|_| TransportError::ShuttingDown)
+                result.map_err(|_| Report::new(TransportError::ShuttingDown))
             }
         }
     }
 
     async fn accept_loop(self, listener: TcpListener) {
         loop {
-            tokio::task::consume_budget().await;
-            let accepted = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let accepted = nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => break,
                 accepted = listener.accept() => accepted,
             };
@@ -1802,7 +2019,7 @@ impl TransportState {
                 };
             let state = self.clone();
             self.tasks.spawn(async move {
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = state.admission_closed.cancelled() => {}
                     _ = state.force_close.cancelled() => {}
                     result = state.clone().accept_connection(
@@ -1993,7 +2210,7 @@ impl TransportState {
         let connection_closed = poll_fn(|context| connection.poll_closed(context));
         tokio::pin!(binding);
         tokio::pin!(connection_closed);
-        tokio::select! {
+        nervix_primitives::select! {
             result = &mut binding => result,
             result = &mut connection_closed => {
                 result.map_err(TransportError::from)?;
@@ -2010,22 +2227,28 @@ impl TransportState {
         peer: InboundPeer,
         generation: u64,
         certificate_expires_at: Instant,
-    ) -> Result<(), TransportError>
+    ) -> Result<(), Report<TransportError>>
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let stream_slots = StdArc::new(Semaphore::new(peer.class.stream_slots_per_connection()));
+        let ping_pong = connection
+            .ping_pong()
+            .assured("a newly bound HTTP/2 connection has not lent out its ping handle");
+        let health_probe = Self::monitor_http2_connection(ping_pong);
+        tokio::pin!(health_probe);
         let connection_force_close = CancellationToken::new();
         let _connection_force_close_guard = CancelOnDrop::new(connection_force_close.clone());
         let mut draining = false;
         let mut drain_deadline = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let accepted = if draining {
                 let deadline = drain_deadline
                     .verified("entering drain always records its force-close deadline");
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = self.force_close.cancelled() => break,
+                    () = &mut health_probe => break,
                     _ = sleep_until(deadline) => break,
                     accepted = connection.accept() => accepted,
                 }
@@ -2045,7 +2268,7 @@ impl TransportState {
                     );
                     continue;
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = self.admission_closed.cancelled() => {
                         connection.graceful_shutdown();
                         draining = true;
@@ -2057,6 +2280,7 @@ impl TransportState {
                         continue;
                     }
                     _ = self.force_close.cancelled() => break,
+                    () = &mut health_probe => break,
                     _ = sleep_until(certificate_expires_at) => {
                         connection.graceful_shutdown();
                         draining = true;
@@ -2085,7 +2309,7 @@ impl TransportState {
             let Some(accepted) = accepted else {
                 break;
             };
-            let (request, mut response) = accepted?;
+            let (request, mut response) = accepted.map_err(TransportError::from)?;
             let stream_slot = match StdArc::clone(&stream_slots).try_acquire_owned() {
                 Ok(stream_slot) => stream_slot,
                 Err(_) => {
@@ -2100,7 +2324,7 @@ impl TransportState {
             self.tasks.spawn(async move {
                 let _stream_slot = stream_slot;
                 let handled = state.clone().handle_stream(peer.clone(), request, response);
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = stream_force_close.cancelled() => {}
                     _ = transport_force_close.cancelled() => {}
                     result = handled => {
@@ -2192,7 +2416,7 @@ impl TransportState {
             } else {
                 Some(RelayAdmissionKey {
                     peer_node_id: peer.node_id.clone(),
-                    ack_id: ack.ack_id,
+                    registration: ack.registration.clone(),
                 })
             };
             if ack.outcome == RemoteAckOutcome::Alive {
@@ -2299,7 +2523,7 @@ impl TransportState {
         peer: InboundPeer,
         body: RecvStream,
         mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         let bytes = read_body(
             &self.executor,
             peer.class.memory_class(),
@@ -2328,7 +2552,7 @@ impl TransportState {
         }
 
         if let ControlEnvelope::Request(request) = control {
-            let response = tokio::select! {
+            let response = nervix_primitives::select! {
                 response = self.requests.handle(
                     &self.executor,
                     peer.node_id,
@@ -2337,7 +2561,7 @@ impl TransportState {
                     request,
                 ) => response,
                 reset = poll_fn(|context| respond.poll_reset(context)) => {
-                    reset?;
+                    reset.map_err(TransportError::from)?;
                     return Ok(());
                 }
             };
@@ -2386,7 +2610,7 @@ impl TransportState {
         .await
     }
 
-    fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), TransportError> {
+    fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), Report<TransportError>> {
         match self.peer_connections.entry(node_id.clone()) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().count = entry
@@ -2413,12 +2637,12 @@ impl TransportState {
         &self,
         node_id: ClusterNodeName,
         class: PoolClass,
-    ) -> Result<InboundConnectionRegistration, TransportError> {
+    ) -> Result<InboundConnectionRegistration, Report<TransportError>> {
         let key = InboundPoolKey { node_id, class };
         match self.inbound_pool_connections.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
                 if *entry.get() >= class.connections_per_peer() {
-                    return Err(TransportError::PoolExhausted);
+                    return Err(Report::new(TransportError::PoolExhausted));
                 }
                 *entry.get_mut() = entry
                     .get()
@@ -2467,13 +2691,16 @@ impl TransportState {
         self.connection_changed.notify_waiters();
     }
 
-    pub(crate) async fn replace_tls(&self, tls: TlsConfigBundle) -> Result<(), TransportError> {
+    pub(crate) async fn replace_tls(
+        &self,
+        tls: TlsConfigBundle,
+    ) -> Result<(), Report<TransportError>> {
         tls.certificate
             .validate_local(&self.cluster_id, &self.node_id, &self.advertised_host)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         tls.clock
             .ensure_current(&tls.certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         let next_generation =
             self.tls
                 .generation()
@@ -2548,12 +2775,21 @@ impl ClientConnection {
             headers,
         } = request;
         let operation = async {
-            let sender = self.sender.clone().ready().await?;
+            let sender = self
+                .sender
+                .clone()
+                .ready()
+                .await
+                .map_err(TransportError::from)?;
             let mut request_url = url::Url::parse("https://localhost/")
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
                 .set_host(Some(&self.request_host))
-                .map_err(|_| TransportError::InvalidServerName(self.request_host.clone()))?;
+                .map_err(|error| {
+                    Report::new(error).change_context(TransportError::InvalidServerName(
+                        self.request_host.clone(),
+                    ))
+                })?;
             request_url.set_path(path);
             let mut builder = Request::builder()
                 .method(Method::POST)
@@ -2562,20 +2798,22 @@ impl ClientConnection {
             for (name, value) in headers {
                 builder = builder.header(*name, *value);
             }
-            let request = builder
-                .body(())
-                .map_err(|error| TransportError::Http(error.to_string()))?;
+            let request = builder.body(()).map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Http)
+            })?;
             let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
             let (response, mut send_stream) = {
                 let mut sender = sender;
-                sender.send_request(request, end_stream)?
+                sender
+                    .send_request(request, end_stream)
+                    .map_err(TransportError::from)?
             };
             if let Some(body) = body
                 && !body.is_empty()
             {
                 send_body(&mut send_stream, body).await?;
             }
-            let response = response.await?;
+            let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
             if !status.is_success() {
                 let message = read_body(
@@ -2586,10 +2824,10 @@ impl ClientConnection {
                     response.into_body(),
                 )
                 .await?;
-                return Err(TransportError::RemoteRejected {
+                return Err(Report::new(TransportError::RemoteRejected {
                     status: status.as_u16(),
                     message: String::from_utf8_lossy(message.as_ref()).into_owned(),
-                });
+                }));
             }
             let content_length = response
                 .headers()
@@ -2600,18 +2838,23 @@ impl ClientConnection {
                     )
                 })?
                 .to_str()
-                .map_err(|error| TransportError::Decode(error.to_string()))?
+                .map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Decode)
+                })?
                 .parse::<u64>()
-                .map_err(|error| TransportError::Decode(error.to_string()))?;
+                .map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Decode)
+                })?;
             Ok((response.into_body(), content_length))
         };
         match timeout(timeout_duration, operation).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(error)) => {
-                state
-                    .observations
-                    .stream_reset(self.key.class, StreamResetReason::of(&error));
-                Err(Report::new(error))
+                state.observations.stream_reset(
+                    self.key.class,
+                    StreamResetReason::of(error.current_context()),
+                );
+                Err(error)
             }
             Err(_) => {
                 state
@@ -2625,13 +2868,23 @@ impl ClientConnection {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn request_raw(
         &self,
         state: &TransportState,
         request: RawRequest<'_>,
-    ) -> Result<ChargedBytes, TransportError> {
+    ) -> Result<ChargedBytes, Report<TransportError>> {
         if self.closed.is_cancelled() {
-            return Err(TransportError::Closed(self.key.endpoint.clone()));
+            return Err(Report::new(TransportError::Closed(
+                self.key.endpoint.clone(),
+            )));
         }
         let RawRequest {
             path,
@@ -2642,12 +2895,21 @@ impl ClientConnection {
             headers,
         } = request;
         let operation = async {
-            let sender = self.sender.clone().ready().await?;
+            let sender = self
+                .sender
+                .clone()
+                .ready()
+                .await
+                .map_err(TransportError::from)?;
             let mut request_url = url::Url::parse("https://localhost/")
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
                 .set_host(Some(&self.request_host))
-                .map_err(|_| TransportError::InvalidServerName(self.request_host.clone()))?;
+                .map_err(|error| {
+                    Report::new(error).change_context(TransportError::InvalidServerName(
+                        self.request_host.clone(),
+                    ))
+                })?;
             request_url.set_path(path);
             let mut builder = Request::builder()
                 .method(Method::POST)
@@ -2656,20 +2918,22 @@ impl ClientConnection {
             for (name, value) in headers {
                 builder = builder.header(*name, *value);
             }
-            let request = builder
-                .body(())
-                .map_err(|error| TransportError::Http(error.to_string()))?;
+            let request = builder.body(()).map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Http)
+            })?;
             let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
             let (response, mut stream) = {
                 let mut sender = sender;
-                sender.send_request(request, end_stream)?
+                sender
+                    .send_request(request, end_stream)
+                    .map_err(TransportError::from)?
             };
             if let Some(body) = body
                 && !body.is_empty()
             {
                 send_body(&mut stream, body).await?;
             }
-            let response = response.await?;
+            let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
             let response = read_body(
                 &state.executor,
@@ -2680,256 +2944,49 @@ impl ClientConnection {
             )
             .await?;
             if !status.is_success() {
-                return Err(TransportError::RemoteRejected {
+                return Err(Report::new(TransportError::RemoteRejected {
                     status: status.as_u16(),
                     message: String::from_utf8_lossy(response.as_ref()).into_owned(),
-                });
+                }));
             }
             Ok(response)
         };
         match timeout(timeout_duration, operation).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(error)) => {
-                state
-                    .observations
-                    .stream_reset(self.key.class, StreamResetReason::of(&error));
+                state.observations.stream_reset(
+                    self.key.class,
+                    StreamResetReason::of(error.current_context()),
+                );
                 Err(error)
             }
             Err(_) => {
                 state
                     .observations
                     .stream_reset(self.key.class, StreamResetReason::Deadline);
-                Err(TransportError::RequestTimeout {
+                Err(Report::new(TransportError::RequestTimeout {
                     peer: self.key.node_id.clone(),
                     timeout: timeout_duration,
-                })
+                }))
             }
         }
     }
 }
 
 impl StreamLease {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
     async fn request_raw(
         &self,
         state: &TransportState,
         request: RawRequest<'_>,
-    ) -> Result<ChargedBytes, TransportError> {
+    ) -> Result<ChargedBytes, Report<TransportError>> {
         self.connection.request_raw(state, request).await
     }
-}
-
-fn configure_client_builder(
-    builder: &mut client::Builder,
-    options: &TransportOptions,
-    class: PoolClass,
-) -> Result<(), TransportError> {
-    let stream_slots = class.stream_slots_per_connection();
-    let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
-        reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
-    })?;
-    builder
-        .initial_window_size(options.initial_stream_window_bytes)
-        .initial_connection_window_size(options.initial_connection_window_bytes)
-        .max_header_list_size(options.max_header_bytes)
-        .max_concurrent_streams(streams)
-        .initial_max_send_streams(stream_slots)
-        .max_local_error_reset_streams(Some(RESET_LIMIT))
-        .max_pending_accept_reset_streams(RESET_LIMIT)
-        .max_send_buffer_size(BODY_CHUNK_BYTES);
-    Ok(())
-}
-
-fn configure_server_builder(
-    builder: &mut server::Builder,
-    options: &TransportOptions,
-) -> Result<(), TransportError> {
-    let streams =
-        u32::try_from(PoolClass::Management.stream_slots_per_connection()).map_err(|_| {
-            TransportError::InvalidOptions {
-                reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
-            }
-        })?;
-    builder
-        .initial_window_size(options.initial_stream_window_bytes)
-        .initial_connection_window_size(options.initial_connection_window_bytes)
-        .max_header_list_size(options.max_header_bytes)
-        .max_concurrent_streams(streams)
-        .max_local_error_reset_streams(Some(RESET_LIMIT))
-        .max_pending_accept_reset_streams(RESET_LIMIT)
-        .max_send_buffer_size(BODY_CHUNK_BYTES);
-    Ok(())
-}
-
-async fn send_body(
-    stream: &mut SendStream<Bytes>,
-    body: ChargedBytes,
-) -> Result<(), TransportError> {
-    let mut offset = 0;
-    while offset < body.len() {
-        tokio::task::consume_budget().await;
-        let remaining = body
-            .len()
-            .checked_sub(offset)
-            .verified("the send offset never advances beyond the body");
-        let wanted = remaining.min(BODY_CHUNK_BYTES);
-        stream.reserve_capacity(wanted);
-        let assigned = poll_fn(|context| stream.poll_capacity(context))
-            .await
-            .ok_or_else(|| {
-                TransportError::Decode(
-                    "HTTP/2 stream closed while assigning send capacity".to_string(),
-                )
-            })??;
-        let ready = assigned.min(wanted);
-        if ready == 0 {
-            continue;
-        }
-        let end = offset
-            .checked_add(ready)
-            .verified("assigned capacity is bounded by the remaining body");
-        let chunk = body
-            .slice(offset, end)
-            .verified("the chunk bounds were checked against the body");
-        offset = end;
-        let end_stream = offset == body.len();
-        stream.send_data(Bytes::from_owner(chunk), end_stream)?;
-        if end_stream {
-            break;
-        }
-    }
-    stream.reserve_capacity(0);
-    Ok(())
-}
-
-async fn send_response(
-    mut respond: server::SendResponse<Bytes>,
-    status: StatusCode,
-    body: Option<ChargedBytes>,
-    progress_timeout: Duration,
-) -> Result<(), TransportError> {
-    let response = Response::builder()
-        .status(status)
-        .version(Version::HTTP_2)
-        .body(())
-        .map_err(|error| TransportError::Http(error.to_string()))?;
-    let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
-    let mut stream = respond.send_response(response, end_stream)?;
-    if let Some(body) = body
-        && !body.is_empty()
-    {
-        timeout(progress_timeout, send_body(&mut stream, body))
-            .await
-            .map_err(|_| TransportError::ProgressTimeout {
-                timeout: progress_timeout,
-            })??;
-    }
-    Ok(())
-}
-
-async fn send_static_error(
-    respond: &mut server::SendResponse<Bytes>,
-    status: StatusCode,
-    message: &str,
-    progress_timeout: Duration,
-) -> Result<(), TransportError> {
-    let response = Response::builder()
-        .status(status)
-        .version(Version::HTTP_2)
-        .body(())
-        .map_err(|error| TransportError::Http(error.to_string()))?;
-    let mut stream = respond.send_response(response, false)?;
-    timeout(progress_timeout, async {
-        let body = Bytes::copy_from_slice(message.as_bytes());
-        let mut offset = 0;
-        while offset < body.len() {
-            tokio::task::consume_budget().await;
-            let remaining = body
-                .len()
-                .checked_sub(offset)
-                .verified("the send offset never advances beyond the static error body");
-            let wanted = remaining.min(BODY_CHUNK_BYTES);
-            stream.reserve_capacity(wanted);
-            let assigned = poll_fn(|context| stream.poll_capacity(context))
-                .await
-                .ok_or_else(|| {
-                    TransportError::Decode(
-                        "HTTP/2 stream closed while assigning send capacity".to_string(),
-                    )
-                })??;
-            let ready = assigned.min(wanted);
-            if ready == 0 {
-                continue;
-            }
-            let end = offset
-                .checked_add(ready)
-                .verified("assigned capacity is bounded by the remaining static error body");
-            let chunk = body.slice(offset..end);
-            offset = end;
-            let end_stream = offset == body.len();
-            stream.send_data(chunk, end_stream)?;
-            if end_stream {
-                break;
-            }
-        }
-        stream.reserve_capacity(0);
-        Ok::<(), TransportError>(())
-    })
-    .await
-    .map_err(|_| TransportError::ProgressTimeout {
-        timeout: progress_timeout,
-    })?
-}
-
-async fn read_body(
-    executor: &Executor,
-    class: MemoryClass,
-    limit: u64,
-    progress_timeout: Duration,
-    body: RecvStream,
-) -> Result<ChargedBytes, TransportError> {
-    let initial = limit.min(4 * 1024);
-    let reservation = executor
-        .reserve(class, initial)
-        .await
-        .map_err(|error| TransportError::Decode(error.to_string()))?;
-    let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
-    read_body_into(&mut buffer, progress_timeout, body).await?;
-    Ok(ChargedBytes::from_buffer(buffer))
-}
-
-async fn read_body_into(
-    buffer: &mut BudgetedBuffer,
-    progress_timeout: Duration,
-    mut body: RecvStream,
-) -> Result<(), TransportError> {
-    loop {
-        tokio::task::consume_budget().await;
-        let chunk = timeout(progress_timeout, body.data()).await.map_err(|_| {
-            TransportError::ProgressTimeout {
-                timeout: progress_timeout,
-            }
-        })?;
-        let Some(chunk) = chunk else {
-            break;
-        };
-        let chunk = chunk?;
-        buffer
-            .write_all(&chunk)
-            .map_err(|error| TransportError::Decode(error.to_string()))?;
-        body.flow_control().release_capacity(chunk.len())?;
-    }
-    Ok(())
-}
-
-fn header_u64(request: &Request<RecvStream>, name: &'static str) -> Result<u64, TransportError> {
-    let value = request
-        .headers()
-        .get(name)
-        .ok_or_else(|| TransportError::RelayGrant(format!("missing {name} header")))?;
-    let value = value
-        .to_str()
-        .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
-    value
-        .parse()
-        .map_err(|error| TransportError::RelayGrant(format!("invalid {name} header: {error}")))
 }

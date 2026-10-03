@@ -11,22 +11,29 @@
 use std::{
     any::Any,
     cell::RefCell,
-    fmt::{self, Write as _},
+    fmt,
+    fmt::Write as _,
     future::Future,
     io,
     num::NonZeroUsize,
-    panic::{self, AssertUnwindSafe, PanicHookInfo},
-    sync::{
-        Arc as StdArc, Once,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
-    },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    panic,
+    panic::{AssertUnwindSafe, PanicHookInfo},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::{
+    sync::{
+        StdArc,
+        atomic::{AtomicU64, Ordering},
+        blocking::{
+            Mutex, Once, mpsc,
+            mpsc::{Receiver, RecvTimeoutError, SyncSender},
+        },
+    },
+    unmodeled::time::Instant,
+};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
 use rustls::{pki_types::UnixTime, time_provider::TimeProvider};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -123,7 +130,7 @@ impl fmt::Display for SchedulerProgress {
     }
 }
 
-thread_local! {
+nervix_primitives::thread_local! {
     /// The first panic this thread raised since the report was last taken.
     static FIRST_PANIC: RefCell<Option<PanicReport>> = const { RefCell::new(None) };
 }
@@ -330,7 +337,7 @@ impl SimulationConfig {
         let channels = SchedulerChannels { finished, cleaned };
         let progress = StdArc::new(ProgressCell::default());
         let scheduler_progress = StdArc::clone(&progress);
-        let scheduler = std::thread::Builder::new()
+        let scheduler = nervix_primitives::thread::Builder::new()
             .name(format!("turmoil scheduler: {scenario} seed {}", self.seed))
             .spawn(move || self.schedule(scenario, setup, control, &scheduler_progress, channels))
             .map_err(|source| SimulationError::SchedulerUnavailable {
@@ -602,7 +609,7 @@ impl HostSupervisor {
         F: Future<Output = Result<(), E>> + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let outcome = tokio::spawn(future).await?;
+        let outcome = nervix_primitives::task::spawn(future).await?;
         outcome?;
         Ok(())
     }

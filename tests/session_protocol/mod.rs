@@ -17,7 +17,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     CommandExecutionReference, ResourceUploadIdentity, SubscriptionName,
-    TransactionInspectionRejection, TransactionInspectionTarget,
+    TransactionInspectionRejection, TransactionInspectionTarget, parse_duration_text,
 };
 
 use super::*;
@@ -159,7 +159,7 @@ async fn when_active_session_collects_completion_pages(
     let mut values = Vec::new();
     let mut page_count = 0_usize;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let request = SuggestRequest::new(input.clone(), cursor, domain.clone())
             .assured("scenario cursor is a character boundary")
             .with_page(page_size, continuation.take())
@@ -450,7 +450,7 @@ async fn then_background_command_request_reports_unknown_outcome(world: &mut Sce
         .background_command_result
         .take()
         .expect("a background command request must be active");
-    let result = tokio::time::timeout(Duration::from_secs(60), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
@@ -475,8 +475,7 @@ async fn then_node_redirects_without_an_endpoint(
     node_id: String,
     leader: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let leader = expand_placeholders(world, &leader);
     let server = world
@@ -486,7 +485,7 @@ async fn then_node_redirects_without_an_endpoint(
     let deadline = Instant::now() + duration;
     let mut last = None;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "node '{node_id}' never redirected to '{leader}' without an endpoint within \
@@ -497,7 +496,7 @@ async fn then_node_redirects_without_an_endpoint(
             Ok(session) => session,
             Err(error) => {
                 last = Some(format!("session failed: {error}"));
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
         };
@@ -518,7 +517,7 @@ async fn then_node_redirects_without_an_endpoint(
             }
             Err(error) => last = Some(format!("request failed: {error}")),
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -558,9 +557,9 @@ async fn then_console_websocket_closes_with_code(
         .unwrap_or_else(|error| panic!("the console WebSocket refused the message: {error}"));
     let deadline = Instant::now() + SESSION_END_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let received = tokio::time::timeout(remaining, socket.next())
+        let received = nervix_primitives::time::timeout(remaining, socket.next())
             .await
             .unwrap_or_else(|_| panic!("the console WebSocket was not closed in time"));
         match received {
@@ -615,7 +614,7 @@ async fn then_background_command_request_ends_without_an_answer(world: &mut Scen
         .background_command_result
         .take()
         .expect("a background command request must be active");
-    let result = tokio::time::timeout(Duration::from_secs(60), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"));
@@ -670,8 +669,7 @@ async fn then_active_session_subscription_ends(
     subscription: String,
     cause: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let subscription = expand_placeholders(world, &subscription);
     let expected = match cause.as_str() {
         "removed" => SubscriptionEndReason::RelayRemoved,
@@ -708,8 +706,7 @@ async fn then_no_received_row_contains(world: &mut ScenarioWorld, fragment: Stri
 
 #[when(expr = "the active session reads its frames for {string}")]
 async fn when_active_session_reads_frames(world: &mut ScenarioWorld, duration: String) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     active_session(world)
         .read_for(duration)
         .await

@@ -7,9 +7,12 @@
 //! - **Depends on.** The registry's active graph, the resource store and the VM's type inference.
 //! - **Must not know.** How a validated model is scheduled or executed.
 
+use std::time::Duration;
+
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerName,
     InferencerTensorDimension, InferencerTensorSchema, IngestorName, LookupName, Model, ModelKind,
@@ -19,12 +22,18 @@ use ort::{
     session::Session,
     value::{TensorElementType, ValueType},
 };
-use tokio::time::Duration;
 
 use super::{
     session_service::SessionServiceImpl,
     tls::{ensure_file_exists, load_vhost_tls_materials},
 };
+
+/// How long opening one ONNX model to read its tensor metadata may take before validation gives up.
+const MODEL_INSPECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What inspecting one model is charged. ONNX Runtime allocates what it reads itself, so the charge
+/// only admits the inspection onto the bulk workers.
+const MODEL_INSPECTION_RESERVATION_BYTES: u64 = 1;
 
 struct OnnxModelMetadata {
     inputs: HashMap<String, OnnxTensorMetadata>,
@@ -112,7 +121,8 @@ enum InferencerBindingValidationError {
     #[error("timed out inspecting ONNX model '{file}' for inferencer '{node}'")]
     InspectionTimeout { node: InferencerName, file: String },
     #[error(
-        "failed to inspect ONNX model '{file}' for inferencer '{node}': inspection task failed"
+        "failed to inspect ONNX model '{file}' for inferencer '{node}': the node's bounded \
+         execution did not take the inspection"
     )]
     InspectionTask { node: InferencerName, file: String },
     #[error("failed to inspect ONNX model '{file}' for inferencer '{node}': inspection panicked")]
@@ -342,7 +352,7 @@ impl SessionServiceImpl {
         planned: &crate::registry::PlannedMutations,
     ) -> error_stack::Result<(), ModelBindingValidationError> {
         for model in planned.changed_models() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match model {
                 Model::Ingestor(ingestor) => {
                     if pace.is_paced() && ingestor.timestamp_source.is_none() {
@@ -389,7 +399,9 @@ impl SessionServiceImpl {
                     // previous binding and its saved state are still the current ones.
                     self.inner
                         .runtime
-                        .prepare_candidate_wasm_module(domain, processor)
+                        .prepare_wasm_module(&crate::registry::WasmModulePlan::from_model(
+                            domain, processor,
+                        ))
                         .await
                         .change_context(ModelBindingValidationError::WasmProcessor {
                             domain: domain.clone(),
@@ -425,7 +437,7 @@ impl SessionServiceImpl {
             .candidate_models_of_kind(ModelKind::Udf)
             .into_iter()
             .filter_map(|model| match model {
-                Model::Udf(udf) => Some(udf.clone()),
+                Model::Udf(udf) => Some(crate::registry::udf_program(udf)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -526,19 +538,25 @@ impl SessionServiceImpl {
         let path = path.to_path_buf();
         let processor_name = processor.name.clone();
         let processor_file = processor.file.clone();
-        let model_metadata = tokio::time::timeout(
-            Duration::from_secs(30),
-            tokio::task::spawn_blocking(move || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let executor = self.inner.runtime.executor();
+        // Opening a model reads and optimizes the whole file, so it runs on the bulk workers. ONNX
+        // Runtime allocates what it reads itself, so the charge only admits the inspection.
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+            .await
+            .change_context_lazy(|| InferencerBindingValidationError::InspectionTask {
+                node: processor.name.clone(),
+                file: processor.file.clone(),
+            })?;
+        let inspected = nervix_primitives::time::timeout(
+            MODEL_INSPECTION_TIMEOUT,
+            executor.run_cpu(
+                CpuClass::Bulk,
+                reservation,
+                move |_charge, _cancellation| {
                     Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
-                }))
-                .map_err(|_| {
-                    Report::new(InferencerBindingValidationError::InspectionPanic {
-                        node: processor_name.clone(),
-                        file: processor_file.clone(),
-                    })
-                })?
-            }),
+                },
+            ),
         )
         .await
         .map_err(|_| {
@@ -546,11 +564,27 @@ impl SessionServiceImpl {
                 node: processor.name.clone(),
                 file: processor.file.clone(),
             })
-        })?
-        .change_context(InferencerBindingValidationError::InspectionTask {
-            node: processor.name.clone(),
-            file: processor.file.clone(),
-        })??;
+        })?;
+        let model_metadata = match inspected {
+            Ok(model_metadata) => model_metadata?,
+            Err(error) => {
+                let failure = match error.current_context() {
+                    ExecutionError::JobPanicked { .. } => {
+                        InferencerBindingValidationError::InspectionPanic {
+                            node: processor.name.clone(),
+                            file: processor.file.clone(),
+                        }
+                    }
+                    ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
+                        InferencerBindingValidationError::InspectionTask {
+                            node: processor.name.clone(),
+                            file: processor.file.clone(),
+                        }
+                    }
+                };
+                return Err(error.change_context(failure));
+            }
+        };
 
         model_metadata.validate_binding_names(processor)?;
 
@@ -742,5 +776,84 @@ mod tests {
         assert!(
             matches!(error.current_context(), InferencerBindingValidationError::SessionModel { node, file, .. } if node == &processor.name && file == "model.onnx")
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_model_is_inspected_on_the_bulk_workers() {
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service(false).await;
+        let executor = service.inner.runtime.executor().clone();
+        let matrix = InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions: vec![
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
+            ],
+        };
+        let processor = CreateInferencer {
+            inputs: vec![nervix_models::InferencerTensorMapping {
+                tensor: "matrix".to_string(),
+                schema: matrix.clone(),
+                expression: nervix_models::Expression::Literal(nervix_models::Literal::Null),
+            }],
+            output_schema: vec![nervix_models::InferencerTensorDeclaration {
+                tensor: "transformed".to_string(),
+                schema: matrix,
+            }],
+            ..inferencer()
+        };
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+        let before = executor.snapshot().bulk_cpu;
+
+        service
+            .validate_inferencer_model_metadata(&processor, &model)
+            .await
+            .expect("the identity model's tensors match the declared binding");
+
+        let after = executor.snapshot().bulk_cpu;
+        assert_eq!(after.admitted - before.admitted, 1);
+        assert_eq!(after.completed - before.completed, 1);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_model_the_bulk_workers_cannot_take_now_is_refused_as_an_inspection_task() {
+        let executor = crate::runtime::single_worker_executor();
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service_with_executor(
+            false,
+            executor.clone(),
+        )
+        .await;
+        let processor = inferencer();
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+        let filled = crate::runtime::FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
+
+        let refused = service
+            .validate_inferencer_model_metadata(&processor, &model)
+            .await
+            .expect_err("a full bulk class refuses the inspection");
+
+        assert!(
+            matches!(
+                refused.current_context(),
+                InferencerBindingValidationError::InspectionTask { node, .. }
+                    if node == &processor.name
+            ),
+            "{refused:?}"
+        );
+        assert!(refused.contains::<ExecutionError>(), "{refused:?}");
+        filled.release().await;
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

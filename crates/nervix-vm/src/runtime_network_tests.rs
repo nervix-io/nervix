@@ -10,10 +10,9 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How the kernels parse text or walk columns.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{Array, BinaryArray, BooleanArray, Int64Array, ListArray, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::execute_program_sync;
 use crate::{
@@ -35,7 +34,7 @@ fn compile_with(
     source: &str,
     input_schema: &StdArc<Schema>,
     outputs: Vec<Field>,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let output_schema = schema(
         input_schema
             .fields()
@@ -194,8 +193,12 @@ fn a_constant_that_is_no_network_rejects_the_program() {
             vec![Field::new("inside", DataType::Boolean, true)],
         )
         .expect_err("an invalid constant network rejects the program");
-        assert_eq!(error.code, "invalid_ip_network", "{network}");
-        assert_eq!(error.message, message);
+        assert_eq!(
+            error.current_context().code(),
+            "invalid_ip_network",
+            "{network}"
+        );
+        assert_eq!(error.current_context().message, message);
     }
 }
 
@@ -245,8 +248,12 @@ fn arguments_keep_their_exact_types() {
             vec![Field::new("out", output_type, true)],
         )
         .expect_err("a mistyped argument rejects the program");
-        assert_eq!(error.code, "unsupported_function", "{source}");
-        assert_eq!(error.message, message, "{source}");
+        assert_eq!(
+            error.current_context().code(),
+            "unsupported_function",
+            "{source}"
+        );
+        assert_eq!(error.current_context().message, message, "{source}");
     }
 
     let error = compile_with(
@@ -255,7 +262,7 @@ fn arguments_keep_their_exact_types() {
         vec![Field::new("out", DataType::Utf8, true)],
     )
     .expect_err("url_query_values returns a VEC<STRING>");
-    assert_eq!(error.code, "type_mismatch");
+    assert_eq!(error.current_context().code(), "type_mismatch");
 }
 
 #[test]
@@ -273,7 +280,11 @@ fn components_a_url_can_lack_are_optional_and_the_others_follow_their_input() {
             vec![Field::new("out", DataType::Utf8, false)],
         )
         .expect_err("a component a URL can lack is optional");
-        assert_eq!(error.code, "null_for_required_field", "{source}");
+        assert_eq!(
+            error.current_context().code(),
+            "null_for_required_field",
+            "{source}"
+        );
     }
     let error = compile_with(
         "SET out = url_port(input.url)",
@@ -281,7 +292,7 @@ fn components_a_url_can_lack_are_optional_and_the_others_follow_their_input() {
         vec![Field::new("out", DataType::Int64, false)],
     )
     .expect_err("a URL can lack a port");
-    assert_eq!(error.code, "null_for_required_field");
+    assert_eq!(error.current_context().code(), "null_for_required_field");
 
     for source in [
         "SET out = url_scheme(input.url)",
@@ -732,7 +743,7 @@ fn every_result_keeps_the_sensitivity_of_its_arguments() {
     ] {
         let error = compile_sensitive(source, data_type.clone())
             .expect_err("a result read from a sensitive value stays sensitive");
-        assert_eq!(error.code, "sensitive_leak", "{source}");
+        assert_eq!(error.current_context().code(), "sensitive_leak", "{source}");
     }
     compile_sensitive(
         "SET out = leak_sensitive(url_host(input.secret))",

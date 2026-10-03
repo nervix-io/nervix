@@ -34,8 +34,12 @@ use nervix_models::{
     TransactionInspection, TransactionInspectionTarget, TransactionLifecycle, TransactionPosition,
     TransactionStatus,
 };
-use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use nervix_primitives::{
+    net::TcpListener,
+    stream::wrappers::{ReceiverStream, TcpListenerStream},
+    sync::mpsc,
+    task::JoinHandle,
+};
 use tonic::{
     Code, Request, Response, Status, Streaming,
     body::Body,
@@ -118,7 +122,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
         Box::pin(async move {
             let mut inbound = request.into_inner();
             let (outbound, receiver) = mpsc::channel(64);
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 let notice = ServerNotice {
                     level: NoticeLevel::Info,
                     message: "connected to leader 'node-1'".to_string(),
@@ -129,7 +133,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
                     return;
                 }
                 while let Some(frame) = inbound.next().await {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let frame = match frame {
                         Ok(frame) => frame,
                         Err(status) => {
@@ -153,7 +157,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
                         }
                         ReplyDelivery::Transfer(parts) => {
                             for part in parts {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 if outbound.send(Ok(part)).await.is_err() {
                                     return;
                                 }
@@ -196,6 +200,8 @@ fn answer(frame: &VerifiedFrame<ClientFrame>) -> Option<Reply> {
             inspection: None,
             wasm_state: None,
             resource: None,
+            backup: None,
+            restore: None,
         })),
         ClientRequest::InspectTransaction(_) => ReplyBody::Inspection(inspection()),
         _ => ReplyBody::Rejected(RequestRejected {
@@ -282,7 +288,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
             };
             let mut received = Vec::new();
             while let Some(frame) = inbound.message().await? {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let UploadMessage::Chunk(chunk) = UploadMessage::decode(&frame)
                     .map_err(|error| Status::invalid_argument(error.to_string()))?
                 else {
@@ -338,7 +344,7 @@ async fn serve(limits: SessionLimits) -> TestServer {
         .local_addr()
         .assured("a bound listener has an address");
     let service = SessionService { limits };
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         Server::builder()
             .add_service(service)
             .serve_with_incoming(TcpListenerStream::new(listener))
@@ -385,7 +391,7 @@ where
 }
 
 async fn next_message(replies: &mut Streaming<VerifiedFrame<ServerFrame>>) -> ServerMessage {
-    let frame = tokio::time::timeout(DEADLINE, replies.message())
+    let frame = nervix_primitives::time::timeout(DEADLINE, replies.message())
         .await
         .assured("the server answers within the deadline")
         .assured("the exchange stays open")
@@ -407,7 +413,7 @@ fn command(id: u64, query: &str) -> ClientMessage {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
     let limits = limits();
     let server = serve(limits).await;
@@ -429,7 +435,7 @@ async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
         command(u64::MAX, "SHOW CLUSTER;"),
     ];
     for request in &requests {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let frame = request
             .encode(&limits)
             .assured("a request fits the test limits");
@@ -450,7 +456,7 @@ async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
     let mut transfers = std::collections::BTreeMap::new();
     let mut replies = std::collections::BTreeMap::new();
     while replies.len() < requests.len() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match next_message(&mut session.replies).await {
             ServerMessage::Reply(reply) => {
                 replies.insert(reply.request_id, reply.body);
@@ -526,8 +532,8 @@ impl Codec for RawCodec {
 
 async fn status_after(session: &mut Session<RawCodec>) -> Status {
     loop {
-        tokio::task::consume_budget().await;
-        let message = tokio::time::timeout(DEADLINE, session.replies.message())
+        nervix_primitives::task::consume_budget().await;
+        let message = nervix_primitives::time::timeout(DEADLINE, session.replies.message())
             .await
             .assured("the server answers within the deadline");
         match message {
@@ -538,7 +544,7 @@ async fn status_after(session: &mut Session<RawCodec>) -> Status {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_malformed_frame_ends_the_call_with_an_internal_error() {
     let limits = limits();
     let server = serve(limits).await;
@@ -553,7 +559,7 @@ async fn a_malformed_frame_ends_the_call_with_an_internal_error() {
     assert!(status.message().contains("ClientMessage"), "{status:?}");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_frame_above_the_servers_limit_ends_the_call_with_resource_exhausted() {
     let limits = limits();
     let server = serve(limits).await;
@@ -570,7 +576,7 @@ async fn a_frame_above_the_servers_limit_ends_the_call_with_resource_exhausted()
     assert_eq!(status.code(), Code::ResourceExhausted);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_undecodable_request_is_rejected_and_the_session_continues() {
     let limits = limits();
     let server = serve(limits).await;
@@ -656,7 +662,7 @@ mod raw_frames {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_upload_stream_is_answered_by_one_reply() {
     let limits = limits();
     let server = serve(limits).await;
@@ -678,7 +684,7 @@ async fn an_upload_stream_is_answered_by_one_reply() {
     }
     let response = client
         .client_streaming(
-            Request::new(tokio_stream::iter(frames)),
+            Request::new(nervix_primitives::stream::iter(frames)),
             http::uri::PathAndQuery::from_static(UPLOAD_RESOURCE_PATH),
             ClientUploadCodec::new(limits),
         )
@@ -697,7 +703,7 @@ async fn an_upload_stream_is_answered_by_one_reply() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_unknown_method_is_unimplemented() {
     let limits = limits();
     let server = serve(limits).await;

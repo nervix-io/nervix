@@ -57,6 +57,21 @@ A storage failure marks that node's consensus store failed. Later writes return
 after the device completed the write, so a failed or disconnected request is an uncertain outcome,
 not proof that the command was absent. Recovery reads the durable state to decide.
 
+Consensus startup, proposal, and membership operations carry contextual error reports locally.
+Database open failures retain their I/O cause; Raft configuration, startup, and handler
+registration failures retain the failure beneath the startup context. A rejected proposal keeps
+its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
+storage, and other Raft write failures separately. A state-machine refusal remains a typed
+conflict, distinct from a storage or leadership failure. These classifications determine whether
+the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
+message to decide.
+
+Transaction mutation checks also create local reports. Raft's applied response retains its
+existing serialized `TransactionMutationError` outcome, so report frames are local to the state
+machine evaluation. The proposer creates a new report from the exact typed outcome received over
+Raft and adds transaction context when the control plane takes ownership. The response encoding,
+client acknowledgement boundary, and recovery rules in this chapter are unchanged.
+
 ### Applied Ranges And Client Replies
 
 Committed entries are applied in order. Entries already available together share an atomic write
@@ -179,9 +194,16 @@ learner caught up; the membership change has its own ten-second bound. A timeout
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
 
+When discovery reports a different interconnect endpoint for an existing member, reconciliation
+replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
+re-added as a learner. Once the committed membership contains the advertised address, subsequent
+reconciliation passes propose no further address change. The stored address supplies recovery
+contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
+
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft promote voters`, and `raft membership updated` transitions. `SHOW CLUSTER STATUS` reports the
-local `raft.last_log_index`, `raft.last_applied`, and each member's learner or voter role.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
+learner or voter role and recorded address.
 
 ## Bounded Log Reading
 
@@ -264,6 +286,13 @@ sends it in 64 KiB chunks through the Bulk pool. The receiver holds at most one 
 validates its declared size and offsets, and synchronizes each completed section into a newly claimed
 generation. A restarted transfer abandons the earlier staged generation.
 
+The receiver stages at most one transfer from each sending node, and a new transfer from that node
+supersedes it. Every transfer carries an identity its sender allocates, and the receiver refuses a
+chunk or a finish whose identity is not that of the transfer it is staging, so a late chunk of a
+superseded transfer never lands in its successor. Because the receiver only compares identities
+from one sender, an identity is unique among the transfers one node sends: every Raft connection of
+the node draws from the node's own sequence, which starts again when the node starts.
+
 After every declared section arrives, Raft revalidates the vote and whether the snapshot still
 applies. Installation then synchronizes the new manifest together with an installation marker. That
 write is the recovery boundary: before it, the old snapshot and state machine remain authoritative;
@@ -286,12 +315,17 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-This layout has one current shape. A node database containing the earlier shared `raft_*` keyspaces
-fails startup with `consensus storage shares the node database; recreate the node's stored state for
-the dedicated consensus database layout`. A consensus database containing an unknown keyspace, a
-malformed current archive, or incomplete current state fails with `invalid consensus record
-storage; recreate the node's stored state`. Nervix does not migrate, reinterpret, or default those
-records; recreate the node's stored state and let it rejoin from the cluster.
+The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
+`raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
+before reading any records. Its state metadata requires the current `WideCounts` encoding. Native
+counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
+and snapshot installation therefore retain their complete magnitudes. See
+[Archived Counts](./typed-states.md#archived-counts).
+
+This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
+current archive, or incomplete current state fails with `invalid consensus record storage; recreate
+the node's stored state`. Recreate the node's stored state and let it rejoin from the cluster.
 
 ## Shutdown And Forced Endings
 
@@ -306,6 +340,12 @@ the last complete atomic storage boundaries: an append batch is present or absen
 contains its records and final metadata together or not at all; and a marked snapshot installation
 is redone in full. See [Shutdown And Recovery](./shutdown.md#terminal-teardown) for the exact
 SIGTERM, SIGKILL, stream-teardown, and restart behavior.
+
+The recovered applied state includes the last stored membership and its peer endpoints. Startup
+discovery reads that membership before Raft has published its live topology metrics, so a former
+bootstrap leader can use surviving peers as authenticated gossip seeds. The stored endpoints are
+contact hints; current peer identity, incarnation, and endpoint still come from discovery. See
+[Cluster Interconnect](./interconnect.md#listener-and-peer-topology).
 
 ## Observability
 

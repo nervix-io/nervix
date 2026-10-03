@@ -17,21 +17,8 @@ use nervix_models::{
     InferencerTensorMapping, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
     ProcessorOutputs as ModelProcessorOutputs, RelayName, ResolvedBranching, ResourceName,
-    ScheduledNodes, SchemaFingerprint, WindowBound,
+    ScheduledNodes, SchemaFingerprint, WasmStateGenerations, WindowBound,
 };
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct BranchedIngestorSpec {
-    pub(crate) kind: ModelKind,
-    pub(crate) identifier: ModelName,
-    pub(crate) root_relay: RelayName,
-    pub(crate) branch: Option<BranchName>,
-    pub(crate) branch_ttl: Option<String>,
-    pub(crate) branch_max_instances: Option<NonZeroU64>,
-    pub(crate) output_ack_boundary: BranchInstanceAckBoundary,
-    pub(crate) output_flush_policy: FlushPolicy,
-    pub(crate) error_policies: ErrorPolicies,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedProcessorNodeSpec {
@@ -49,6 +36,7 @@ pub(crate) struct BranchedProcessorNodeSpec {
 pub(crate) struct ProcessorPlanBinding {
     schema_fingerprint: Option<SchemaFingerprint>,
     resolved_branching: Option<ResolvedBranching>,
+    wasm_state_generations: Option<WasmStateGenerations>,
 }
 
 impl BranchedProcessorNodeSpec {
@@ -63,7 +51,6 @@ impl BranchedProcessorNodeSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedNodeSpecs {
-    pub(crate) entrypoints: Vec<BranchedIngestorSpec>,
     pub(crate) processors: Vec<BranchedProcessorNodeSpec>,
 }
 
@@ -77,12 +64,6 @@ impl BranchedNodeSpecs {
             .iter()
             .find(|node| node.spec.kind == kind && &node.spec.processor == identifier)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BranchInstanceAckBoundary {
-    Preserve,
-    Reingestor(AckMode),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,14 +183,17 @@ impl BranchedProcessorSpec {
     }
 }
 
-fn output_error_policies(
-    policy: &MessageErrorPolicy,
-    general: GeneralErrorPolicy,
-) -> ErrorPolicies {
-    ErrorPolicies {
-        message: policy.clone(),
-        general,
+/// Every branch one set of validated Models declares, keyed by its name.
+fn branch_declarations<'a>(
+    models: impl Iterator<Item = &'a Model>,
+) -> HashMap<BranchName, CreateBranch> {
+    let mut branches = HashMap::default();
+    for model in models {
+        if let Model::Branch(branch) = model {
+            branches.insert(branch.name.clone(), branch.clone());
+        }
     }
+    branches
 }
 
 fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolicies {
@@ -345,6 +329,7 @@ pub(crate) fn branched_node_specs_from_scheduled_nodes(
         processor.binding = ProcessorPlanBinding {
             schema_fingerprint: Some(scheduled.schema_fingerprint),
             resolved_branching: scheduled.resolved_branching.clone(),
+            wasm_state_generations: scheduled.wasm_state_generations().cloned(),
         };
         processor.wasm_state_reset = resets.get(&processor.spec.processor).cloned();
     }
@@ -355,18 +340,8 @@ pub(crate) fn branched_node_specs_from_models(
     nodes: impl Iterator<Item = PlannedModel>,
 ) -> BranchedNodeSpecs {
     let nodes = nodes.collect::<Vec<_>>();
-    let branches = nodes
-        .iter()
-        .filter_map(|planned| {
-            if let Model::Branch(branch) = &planned.model {
-                Some((branch.name.clone(), branch.clone()))
-            } else {
-                None
-            }
-        })
-        .collect::<HashMap<_, _>>();
+    let branches = branch_declarations(nodes.iter().map(|planned| &planned.model));
     let mut processors = Vec::new();
-    let mut entrypoints = Vec::new();
 
     for PlannedModel {
         kind,
@@ -564,68 +539,13 @@ pub(crate) fn branched_node_specs_from_models(
                 };
                 processors.push(processor_node_spec(spec, &processor.branched_by, &branches));
             }
-            Model::Ingestor(ingestor) => {
-                for output in ingestor.output_routes.outputs() {
-                    let branch_action = output.branch.as_ref().verified(
-                        "the registry requires every route of these nodes to declare its branch \
-                         behavior",
-                    );
-                    let policy = branch_policy(branch_action.branch(), &branches);
-                    entrypoints.push(BranchedIngestorSpec {
-                        kind,
-                        identifier: identifier.clone(),
-                        root_relay: output.relay.clone(),
-                        branch: policy.branch,
-                        branch_ttl: policy.ttl,
-                        branch_max_instances: policy.max_instances,
-                        output_ack_boundary: BranchInstanceAckBoundary::Preserve,
-                        output_flush_policy: output.flush_policy.clone().verified(
-                            "the registry requires a flush policy on every flush-based output \
-                             route",
-                        ),
-                        error_policies: output_error_policies(
-                            &output.message_error_policy,
-                            ingestor.general_error_policy.clone(),
-                        ),
-                    });
-                }
-            }
-            Model::Reingestor(reingestor) => {
-                for output in reingestor.output_routes.outputs() {
-                    let branch_action = output.branch.as_ref().verified(
-                        "the registry requires every route of these nodes to declare its branch \
-                         behavior",
-                    );
-                    let policy = branch_policy(branch_action.branch(), &branches);
-                    entrypoints.push(BranchedIngestorSpec {
-                        kind,
-                        identifier: identifier.clone(),
-                        root_relay: output.relay.clone(),
-                        branch: policy.branch,
-                        branch_ttl: policy.ttl,
-                        branch_max_instances: policy.max_instances,
-                        output_ack_boundary: BranchInstanceAckBoundary::Reingestor(reingestor.mode),
-                        output_flush_policy: output.flush_policy.clone().verified(
-                            "the registry requires a flush policy on every flush-based output \
-                             route",
-                        ),
-                        error_policies: output_error_policies(
-                            &output.message_error_policy,
-                            GeneralErrorPolicy::Log,
-                        ),
-                    });
-                }
-            }
             _ => {}
         }
     }
 
     processors.sort_by(|left, right| left.spec.processor.cmp(&right.spec.processor));
 
-    BranchedNodeSpecs {
-        entrypoints,
-        processors,
-    }
+    BranchedNodeSpecs { processors }
 }
 
 #[cfg(test)]
@@ -766,5 +686,33 @@ mod tests {
             );
         }
         assert!(!current.reuses_prepared_revision(None));
+    }
+
+    #[test]
+    fn wasm_guest_state_generation_changes_the_prepared_revision() {
+        let nodes = crate::registry::test_fixtures::unplaced_schedule(vec![
+            crate::registry::test_fixtures::wasm_processor("filter", "incoming", "outgoing"),
+        ]);
+        let mut changed = nodes.clone();
+        changed
+            .values_mut()
+            .find(|node| node.kind() == ModelKind::WasmProcessor)
+            .assured("the fixture contains a WASM processor")
+            .begin_wasm_state_generation();
+
+        let current = branched_node_specs_from_scheduled_nodes(&nodes);
+        let current = current
+            .processor(ModelKind::WasmProcessor, &named("filter"))
+            .assured("the scheduled WASM processor has a plan");
+        let changed = branched_node_specs_from_scheduled_nodes(&changed);
+        let changed = changed
+            .processor(ModelKind::WasmProcessor, &named("filter"))
+            .assured("the changed WASM processor has a plan");
+
+        assert_ne!(
+            current.binding.wasm_state_generations,
+            changed.binding.wasm_state_generations
+        );
+        assert!(!changed.reuses_prepared_revision(Some(current)));
     }
 }

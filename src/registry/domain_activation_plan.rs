@@ -9,17 +9,17 @@
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName, CodecProtobufConfig,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DomainName, EndpointName,
     EndpointType, Model, RelayName, ResolvedBranching, ResolvedCodecWireFormat, ResourceId,
     ScheduledNodes, SchemaName, SignalingProtocolName, SignalingProtocolOnConnect,
-    SignalingWireFormat, VhostName, WireSchemaLookup, WireSchemaName,
+    SignalingWireFormat, VhostName, WireSchemaLookup, WireSchemaName, parse_duration_text,
 };
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::runtime_schema::{CompiledSchema, compile_schema};
 
@@ -246,12 +246,11 @@ impl DomainActivationPlan {
                                 })
                             })?;
                             let branch_ttl =
-                                humantime::parse_duration(&branch.ttl).map_err(|error| {
-                                    Report::new(DomainActivationPlanError::InvalidRelayBranchTtl {
+                                parse_duration_text(&branch.ttl).change_context_lazy(|| {
+                                    DomainActivationPlanError::InvalidRelayBranchTtl {
                                         relay: relay.name.clone(),
                                         branch: branch_name.clone(),
-                                    })
-                                    .attach_printable(error)
+                                    }
                                 })?;
                             let branch_capacity = branch.eviction.as_ref().map(|eviction| {
                                 NonZeroUsize::new(eviction.max_instances().get().arch_into())
@@ -398,7 +397,9 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::registry::test_fixtures::{named, relay, schema, signaling_protocol, wire_schema};
+    use crate::registry::test_fixtures::{
+        TOO_LONG_DURATION_TEXT, named, relay, schema, signaling_protocol, wire_schema,
+    };
 
     fn nodes(models: Vec<Model>) -> ScheduledNodes {
         models
@@ -648,18 +649,32 @@ mod tests {
             DomainActivationPlanError::MissingRelayBranch { .. }
         ));
 
-        branched_relay.extend(nodes(vec![Model::Branch(CreateBranch {
-            name: branch_name,
-            schema: branch_schema.name,
-            ttl: "invalid".to_string(),
-            eviction: None,
-        })]));
-        let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)
-            .expect_err("the branch TTL must be a duration");
-        assert!(matches!(
-            error.current_context(),
-            DomainActivationPlanError::InvalidRelayBranchTtl { .. }
-        ));
+        for (ttl, why) in [
+            ("invalid", "expected number at 0"),
+            (
+                TOO_LONG_DURATION_TEXT,
+                "it is longer than a duration can be",
+            ),
+        ] {
+            branched_relay.extend(nodes(vec![Model::Branch(CreateBranch {
+                name: branch_name.clone(),
+                schema: branch_schema.name.clone(),
+                ttl: ttl.to_string(),
+                eviction: None,
+            })]));
+            let error = DomainActivationPlan::from_scheduled_nodes(&domain, &branched_relay)
+                .expect_err("the branch TTL must be a duration");
+            assert!(matches!(
+                error.current_context(),
+                DomainActivationPlanError::InvalidRelayBranchTtl { .. }
+            ));
+            assert_eq!(
+                error
+                    .downcast_ref::<nervix_models::DurationTextError>()
+                    .map(ToString::to_string),
+                Some(why.to_string())
+            );
+        }
 
         let codec_nodes = nodes(vec![codec("decode", CodecWireFormat::Syslog)]);
         let error = DomainActivationPlan::from_scheduled_nodes(&domain, &codec_nodes)

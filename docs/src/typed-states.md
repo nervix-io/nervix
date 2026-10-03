@@ -13,6 +13,9 @@ delivery, and transport failures. [Domain Clock](./domain-clock.md) owns clock i
 authority, and time bounds. [Shutdown And Recovery](./shutdown.md) owns drain, handoff, and restart
 semantics. The state rules here apply to those systems without replacing their detailed contracts.
 
+[Execution Plans](./execution-plans.md) follows the validated values into a complete installed
+revision.
+
 ## A State Has One Owner
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
@@ -38,6 +41,13 @@ the *state* is absent or different, not merely because a literal looks special.
 
 ## Absence And Distinct States
 
+**Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
+publication together. The publication carries `Option<DnsResolver>`: absence means startup has not
+installed the node resolver, and presence carries that same resolver's shared handle. A closed
+publication before installation is a distinct connection failure, not a choice of another resolver.
+The lazy connector waits through the publication primitive; its export connection timeout starts
+only after installation, preserving early startup spans.
+
 **Branching.** A validated branch declaration is either unbranched or carries its named branch
 and resolved schema together. The schema supplies the branch fields and their sensitivity, so a
 runtime plan cannot pair a present branch schema with an independently missing sensitivity set.
@@ -51,9 +61,26 @@ An emitter's buffered Arrow carrier keeps its typed source relay and optional co
 The relay's declared branch name is fixed, so the pair identifies the exact source branch even if
 another relay uses the same key fields and values. Payload assembly compares the pair before
 combining carriers, and unbranched absence remains `None` throughout buffering and packing. Each
-buffered row is one of three states: pending, carried by a batch payload the emitter retains, or
-resolved. A retained payload's members are therefore neither packed again nor mistaken for resolved
-rows, which a delivered flag could not express.
+buffered row is one of three states: pending, carried by a batch payload or prepared request the
+emitter retains, or resolved. A retained payload's members are therefore neither packed or prepared
+again nor mistaken for resolved rows, which a delivered flag could not express.
+
+A client emitter's consumer, delivery identity and ACK attempt are separate typed identities.
+The optional concrete branch remains an internal `BranchKey`; the client sees only its opaque
+fingerprint, never its key values. An attempt is pending or assigned to one consumer with one
+reference and deadline. Retry, timeout or detach makes that reference stale before another
+attempt becomes live. Confirmed ACK, retry and rejection results have bounded retention for
+idempotence and expire independently of the delivery identity. An absent consumer is not encoded
+as an empty consumer id, and an unbranched batch has no synthetic branch fingerprint.
+
+The Rust client's desired producer and consumer handles have distinct active, interrupted,
+restoring, reopen-required and closed states. An attachment belongs to one session exchange; a
+replacement receives a fresh request-derived identity. The producer's unresolved sent batch has
+an unknown outcome, rather than a missing outcome defaulted to not admitted. A consumer reports
+the interruption before delivery from a replacement attachment. Its prior delivery reference is
+expired, while a settlement sent before losing its answer is separately uncertain. The domain
+`START` generation and endpoint contract fingerprint are required values on every successful
+consumer open, so absence cannot be mistaken for a matching contract.
 
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
@@ -71,6 +98,16 @@ snapshot retention likewise distinguishes no request from a request made while t
 completed snapshot, and from one made at completed index zero. The trigger holds the optional
 completed index that existed when the request was made; it suppresses duplicate requests for that
 same completed snapshot without confusing its absence with index zero.
+
+**Client ingestors.** An ingestor's input is either a transport, which carries its source and the
+codec that decodes it, or a client source, which carries the schema its batches hold and its
+producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim
+both or neither. A producer's admission is `Open` or `Suspended`; a batch's outcome is one of four
+variants, each carrying its own typed cause, so a completed batch has no cause and a refused one no
+failure; and a producer's end is one typed reason. A producer's identity is the request identity
+that opened it, and a forwarded producer's link key is never reused within its process, so neither
+has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
+zero counts, never markers.
 
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission
@@ -101,6 +138,23 @@ updated together. A previously stored shape that cannot supply required identity
 clearly and must be recreated; it is not defaulted into the current state. Tests construct the
 current shape and assert its behavior.
 
+## Archived Counts
+
+Native `usize` and `NonZeroUsize` counts use the vocabulary's `CountAsU64` archive adapter. Every
+count-bearing archived field selects it explicitly, so its stored width is 64 bits independently
+of the archive's pointer width. Zero remains valid for an ordinary count; a nonzero count uses the
+archive's validated `NonZeroU64` representation. Encoding preserves every bit of a supported
+native count. Decoding converts once with `usize::try_from` and returns `ArchivedCountError` if the
+receiving target cannot represent the value. No narrowing cast, clamp, or default supplies a count.
+
+This contract covers relay capacity, transaction positions and operation numbers, queue limits,
+application progress and outcomes, plan and report counts, topology counts, WASM inspection totals
+and omitted-entry counts, and histogram delayed-removal bucket indices. The owning stored
+namespaces and frame signatures identify the current count-bearing shape before decoding, and the
+interconnect's wire fingerprint fences it between nodes. Unrecognized stored state fails clearly
+and must be recreated. Complete equality properties exercise the production representations at
+their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
+
 ## Atomic States On The Data Plane
 
 An ACK root's ownership handoff can be tracking a bounded number of active shares or be complete.
@@ -128,6 +182,11 @@ raw on the wire, while callers see the state the format describes. Arrow batches
 data-plane payload throughout this conversion; codecs use typed builders and column values, and a
 single addressed message is a view into a batch.
 
+A relay batch carries its rows' ingestion watermarks the same way, in two Arrow buffers of
+Unix-nanosecond timestamps beside the payload. A kernel reads them as `i64` lanes; a row addressed
+on its own, the interconnect wire, and a materialized-state snapshot receive typed timestamps,
+converted once where the row leaves the batch.
+
 A conversion failure never becomes another valid payload value. The MongoDB sink returns a typed
 per-record failure if a value cannot be represented in BSON, including an unsigned value above
 BSON's signed range. It does not publish that record with a replacement BSON null or a changed
@@ -142,11 +201,33 @@ as a row error rather than substituting the epoch. Exact schema types and Arrow 
 govern the rest of the expression. The public function results are documented in
 [Expression Functions](./filter-map-functions.md).
 
+A submitted client batch is validated as a whole before any row is admitted: a stream that is not
+exactly one uncompressed record batch of the ingestor's canonical Arrow schema, with valid columns
+and within the row and byte limits, is refused with its typed defect. No value is cast, widened,
+coerced, or defaulted to make a batch fit, and no subset of a malformed batch is admitted.
+
 Session replies carry typed command purpose and outcomes. An upload failure can carry an optional
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can
 be absent, while a present span beginning at offset zero is still present. The web console uses
 the typed outcome for domain-selection dispatch instead of matching reply message text. The
-FlatBuffers encoding preserves these optional fields and typed variants across the session edge.
+FlatBuffers encoding preserves these optional fields and typed variants across the session edge;
+[Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
+receiver keeps an absent optional value distinct from a present zero.
+
+The shared C binding gives clock observations their own `nx_clock_event_kind` and installations
+their own `nx_clock_state`. Only `NX_CLOCK_PACED` has a mapping for `nx_clock_event_paced`; tick and
+end-reason accessors likewise require their corresponding event kinds. An interruption or a refused
+restoration carries a domain but no invented generation or end reason. A mismatched accessor returns
+`NX_ERROR_TYPE` without changing its outputs, so absence cannot look like a zero generation or
+timestamp. The paced and tick accessors allow omitted output pointers for fields a host does not
+need.
+
+The clock of a followed domain, `nx_domain_clock`, always has a generation and a state, so those
+accessors cannot fail. A domain the session does not follow reads as a NULL clock rather than a
+stopped one, a clock without an accepted tick answers `false` from `nx_domain_clock_tick` rather
+than a zero tick, and an unpaced clock reports no admission window rather than an unbounded one.
+Only a paced clock has a mapping for `nx_domain_clock_paced`, and a stopped or uninstalled clock has
+no logical time, so its projections return `NX_ERROR_TYPE` instead of a fabricated instant.
 
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one
@@ -159,11 +240,33 @@ candidate set, so a changed context cannot silently reuse a page.
 
 Structured-control lookups use a separate typed choice boundary. A request names its semantic
 target and carries each dependency as a `ChoiceValue`; a placement choice therefore depends on a
-domain-pace variant rather than on the text `PACED`. Results keep the same typed union for enum
-variants and domain, resource, or model references, with label, detail, and group held separately
-as presentation. The FlatBuffers discriminant selects behavior. A missing typed dependency is
-`MissingContext`, and a page cursor binds the dependencies, revision, candidate values, and
-presentation so changed form state is `StaleContext` rather than a silently retargeted page.
+domain-pace variant rather than on the text `PACED`. An internal-schema, branch, or relay choice
+depends on a typed domain reference and returns a kind-qualified Model reference, and a relay-field
+choice depends on the domain and relay references and returns a typed field reference. Results keep
+the same typed union for enum variants and domain, resource, model, or field references, with
+label, detail, and group held separately as presentation. The FlatBuffers discriminant selects
+behavior. A missing typed dependency is `MissingContext`, and a page cursor binds the dependencies,
+revision, candidate values, and presentation so changed form state is `StaleContext` rather than a
+silently retargeted page. The browser keeps missing prerequisites, stale context, empty results,
+loading, and failures as separate choice states. A missing prerequisite carries a hint; stale
+context offers a fresh lookup; only lookup and transport failures are alerts.
+
+Incomplete schema, branch, relay, and subscription form values stay in browser drafts. The
+completed conversion creates the current schema, branch, or relay Model, with field order,
+optionality, sensitivity, wire format and mode intact, or the current subscription client
+statement. A relay draft's branching starts unselected, a state distinct from unbranched execution,
+so a completed relay is never unbranched by omission; its materialized state is absent until
+`LAST BY TIMESTAMP` is chosen, because a relay without one is itself valid. A schema, branch, or
+relay selection retained after its captured domain changes is explicitly invalid until reselected;
+no empty name or fabricated Model stands for a missing selection.
+
+Junction and reingestor drafts use the same boundary. A junction's branch is unselected until the
+operator chooses unbranched execution or a named branch; a reingestor route separately chooses
+preserve, unbranched, or a named outgoing branch. A materialized dependency remains incomplete
+until its relay and absence policy are selected. Ordered input, dependency, assignment, and route
+drafts become the existing semantic Model only when every required choice and expression builds.
+Changing the captured domain or a dependent reference invalidates selected references while
+keeping the operator's draft text visible for correction.
 
 ## Validation And Failure Boundaries
 
@@ -174,6 +277,35 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+Generated compiler findings carry a required execution-context field. An explicit null means that
+analysis has not established a source contract; it is an unknown effect, not a cold classification.
+The report decoder requires that field even though its value is optional. Complete compiler,
+configuration and worktree identities are also required before generated evidence is reusable.
+
+A vocabulary type that validates its value when it is parsed or constructed validates it again when
+it is decoded, from JSON and from the archive alike. Every name type, a command execution reference,
+a resource upload identity, a JSON path, connection-pool bounds, and an emitter's message and size
+limits decode through the rule that constructs them, and accept only a value that rule produces
+unchanged. Stored or received data therefore cannot hold a name with an upper-case letter, a path
+past its step limit, a minimum above its maximum, or a size that is not a whole number of its unit;
+such data fails to decode with a typed error and is never normalized into a valid value. A timestamp
+is its signed Unix nanoseconds, and every conversion into one goes through them, so two spellings of
+one instant, such as an offset and its UTC equivalent, or a leap second and the second after it, are
+one timestamp. Every duration Nervix reads from text, whether an NSPL literal, a domain-clock period
+or skew, a Model's timeout, interval, retention or TTL, a window aggregate's delay, or a node's
+command-line option, is read by one guarded parser in the vocabulary. It refuses text whose spans
+could add up to the most seconds a duration holds with a typed error; the grammar library it wraps
+would panic on such text instead of failing, and Clippy rejects every other way of reaching that
+library's parser.
+
+Constant integer division prepares a `SignedDivisor` or `UnsignedDivisor` at the kernel boundary.
+Its unsigned magnitude is `NonZeroU64`, and its private reciprocal state distinguishes a power-of-two
+shift from a multiply-high reciprocal. A zero input produces no prepared divisor; the numeric
+kernel reports failed lanes with the existing failure mask. Datetime callers already hold validated
+positive strides, so they can assert that preparation succeeds. These per-call values are execution
+artifacts and are never persisted; [VM Functions](./vm-functions.md#checked-buffer-kernels) owns their
+arithmetic and failure contracts.
+
 One in-memory domain activation plan resolves each relay's compiled schema, branch retention and
 materialized-state presence; each codec's schema and wire definition; and each endpoint's VHOST and
 signaling reference. A missing reference is a typed planning failure before installation. The
@@ -181,12 +313,38 @@ same plan shape feeds running and passive builds. Passive builds retain the plan
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
 
+Server endpoint configuration and source availability are distinct states. The immutable route
+table contains configured definitions; a bound source lifetime contains an optional prepared intake.
+Source ending publishes absence through that lifetime before removing its route binding. A retained
+request or WebSocket cannot interpret absence as a replacement source with the same node identity.
+A lease loaded before ending may complete; later admission sees absence. Domain replacement and
+teardown end the domain's lifetimes and replace all of its route definitions together, preserving
+other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
+its replacement.
+
+A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
+client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
+route's records get their branch key as one of three states: unbranched, keeping the incoming key,
+or constructing a new key with a lowered program. The two branched states carry the branch and the
+retention of the relay the route writes, so the branch a route declares and the branch its
+entrypoint retains are one value, and a route whose declaration disagrees with its relay fails
+planning. An ingestor's transport class is read from the one source it declares rather than stored
+beside it. A Kafka ingestor's offsets are either a consumer group or domain offsets together with
+their placement. The planner lowers every filter, route and branch construction before a node binds
+them, so a bound route always carries its compiled program and a running task has no
+missing-program or undeclared-branch state to check.
+
 The owner reports a semantic typed error; contextual propagation uses `error-stack`. A
 per-record conversion error is reported at the record boundary without formatting a fresh
 message on every hot-path operation. Diagnostics contain the relevant identity, operation, and
 field names, while sensitive payload values stay out of errors and logs. A truly optional value
 continues as `Option` until its consumer decides whether absence is valid. A label or rendered
 string is only a presentation of the state and never an input to execution.
+
+Replicated command admission distinguishes a reference that has expired from one bound to a
+different owner, domain, transaction position, or content in its typed conflict result. The
+session carries that distinction into the public command disposition; rendering its message does
+not choose the disposition.
 
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
@@ -211,3 +369,13 @@ qualification passed `just validate` and `just ratchet`.
 These results establish the listed semantic paths and their tested failure boundaries. The
 ledger distinguishes source-audited findings from demonstrated runtime behavior and records
 which values remain legitimate zeros, empty content, Arrow masked lanes, and private encodings.
+
+## Recurring Task Observations
+
+Healthy connector status is absence of a failure; a failure contains its safe error and an optional
+retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
+point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
+a present assignment contains its state identity and checkpoint owners together. Force-flush
+readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
+decodes that byte; the coordinator remains the authority for generation and claim state. The hint
+has no cross-location data-publication contract.

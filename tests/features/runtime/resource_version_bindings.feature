@@ -350,6 +350,7 @@ Feature: Resource version bindings
       | 1            | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 1> |
       | 3            | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 1> |
 
+  @execution_resource_plan
   Scenario Outline: Protobuf and WASM bindings stay pinned through uploads and a cluster restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured

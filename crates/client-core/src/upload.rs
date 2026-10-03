@@ -20,13 +20,12 @@ use nervix_client_wire::{
     grpc::{ClientUploadCodec, UPLOAD_RESOURCE_PATH},
 };
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use tempfile::TempPath;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::mpsc,
 };
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
@@ -89,99 +88,100 @@ impl Client {
                 source: report.current_context().clone(),
             })?;
         let archive = UploadArchive::build(directory.as_ref()).await?;
-        let result = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
-                let start = UploadStart {
-                    request_id: UPLOAD_REQUEST_ID,
-                    domain: domain.clone(),
-                    resource: resource.clone(),
-                    upload_identity: upload_identity.clone(),
-                    total_bytes: archive.total_bytes,
-                }
-                .encode(&SESSION_LIMITS)
-                .map_err(|report| ClientError::EncodeRequest {
-                    request: RequestKind::UploadResource,
-                    source: report.current_context().clone(),
-                })?;
-                let reader = File::open(&archive.path)
-                    .await
-                    .map_err(|_| ClientError::BuildUploadArchive)?;
-                let stream = UploadAttempt {
-                    channel: self.current_channel().await,
-                    start,
-                    archive: reader,
-                };
-                let sent = tokio::time::timeout(
-                    self.inner.connector.request_timeout(),
-                    stream.send(&self.inner.connector, on_progress.clone()),
-                )
-                .await;
-                let response = match sent.unwrap_or_else(|_| {
-                    Err(Box::new(Status::deadline_exceeded(
-                        "upload request deadline exceeded",
-                    )))
-                }) {
-                    Ok(response) => response,
-                    Err(status)
-                        if upload_status_is_retryable(&status)
-                            && Self::await_retry(attempt).await =>
-                    {
-                        match self.recover_session(RecoveryMode::Replace).await? {
-                            SessionRecovery::Ready => continue,
-                            SessionRecovery::Unavailable => {
-                                return Err(ClientError::UploadResource(status));
+        let result =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    let start = UploadStart {
+                        request_id: UPLOAD_REQUEST_ID,
+                        domain: domain.clone(),
+                        resource: resource.clone(),
+                        upload_identity: upload_identity.clone(),
+                        total_bytes: archive.total_bytes,
+                    }
+                    .encode(&SESSION_LIMITS)
+                    .map_err(|report| ClientError::EncodeRequest {
+                        request: RequestKind::UploadResource,
+                        source: report.current_context().clone(),
+                    })?;
+                    let reader = File::open(&archive.path)
+                        .await
+                        .map_err(|_| ClientError::BuildUploadArchive)?;
+                    let stream = UploadAttempt {
+                        channel: self.current_channel().await,
+                        start,
+                        archive: reader,
+                    };
+                    let sent = nervix_primitives::time::timeout(
+                        self.inner.connector.request_timeout(),
+                        stream.send(&self.inner.connector, on_progress.clone()),
+                    )
+                    .await;
+                    let response = match sent.unwrap_or_else(|_| {
+                        Err(Box::new(Status::deadline_exceeded(
+                            "upload request deadline exceeded",
+                        )))
+                    }) {
+                        Ok(response) => response,
+                        Err(status)
+                            if upload_status_is_retryable(&status)
+                                && Self::await_retry(attempt).await =>
+                        {
+                            match self.recover_session(RecoveryMode::Replace).await? {
+                                SessionRecovery::Ready => continue,
+                                SessionRecovery::Unavailable => {
+                                    return Err(ClientError::UploadResource(status));
+                                }
                             }
                         }
+                        Err(status) => return Err(ClientError::UploadResource(status)),
+                    };
+                    let reply = UploadReply::decode(response.get_ref()).map_err(|report| {
+                        ClientError::InvalidUploadReply(report.current_context().clone())
+                    })?;
+                    if let Some(request_id) = reply.request_id
+                        && request_id != UPLOAD_REQUEST_ID
+                    {
+                        return Err(ClientError::UnexpectedReply {
+                            request: RequestKind::UploadResource,
+                        });
                     }
-                    Err(status) => return Err(ClientError::UploadResource(status)),
-                };
-                let reply = UploadReply::decode(response.get_ref()).map_err(|report| {
-                    ClientError::InvalidUploadReply(report.current_context().clone())
-                })?;
-                if let Some(request_id) = reply.request_id
-                    && request_id != UPLOAD_REQUEST_ID
-                {
-                    return Err(ClientError::UnexpectedReply {
-                        request: RequestKind::UploadResource,
-                    });
+                    let received = match &reply.disposition {
+                        UploadDisposition::Installed {
+                            upload_identity, ..
+                        } => Some(upload_identity),
+                        UploadDisposition::Failed {
+                            upload_identity, ..
+                        } => upload_identity.as_ref(),
+                        UploadDisposition::NotLeader(_) => None,
+                    };
+                    if let Some(received) = received
+                        && received != &upload_identity
+                    {
+                        return Err(ClientError::UploadIdentityMismatch {
+                            expected: upload_identity.clone(),
+                            received: received.clone(),
+                        });
+                    }
+                    let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
+                    match outcome.routing() {
+                        Routing::Redirect(leader) => self.follow_leader(leader).await?,
+                        Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                        _ => return Ok(outcome),
+                    }
                 }
-                let received = match &reply.disposition {
-                    UploadDisposition::Installed {
-                        upload_identity, ..
-                    } => Some(upload_identity),
-                    UploadDisposition::Failed {
-                        upload_identity, ..
-                    } => upload_identity.as_ref(),
-                    UploadDisposition::NotLeader(_) => None,
-                };
-                if let Some(received) = received
-                    && received != &upload_identity
-                {
-                    return Err(ClientError::UploadIdentityMismatch {
-                        expected: upload_identity.clone(),
-                        received: received.clone(),
-                    });
-                }
-                let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
-                match outcome.routing() {
-                    Routing::Redirect(leader) => self.follow_leader(leader).await?,
-                    Routing::AwaitElection if Self::await_retry(attempt).await => {}
-                    _ => return Ok(outcome),
-                }
-            }
 
-            let mut exhausted =
-                CommandOutcome::failed_locally("upload redirect loop exceeded".to_string());
-            exhausted.resource_upload = Some(ResourceUploadOutcome {
-                identity: upload_identity.clone(),
-                version: None,
-                origin: None,
-                failure: None,
-            });
-            Ok(exhausted)
-        })
-        .await;
+                let mut exhausted =
+                    CommandOutcome::failed_locally("upload redirect loop exceeded".to_string());
+                exhausted.resource_upload = Some(ResourceUploadOutcome {
+                    identity: upload_identity.clone(),
+                    version: None,
+                    origin: None,
+                    failure: None,
+                });
+                Ok(exhausted)
+            })
+            .await;
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(error)) if error.can_hide_installed_upload() => {
@@ -243,7 +243,7 @@ impl UploadArchive {
         let mut result = Ok(());
 
         for entry in entries {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut header = Header::new_ustar();
             header.set_mtime(0);
             header.set_uid(0);
@@ -351,14 +351,14 @@ impl UploadAttempt {
             mut archive,
         } = self;
         let (frames, outbound) = mpsc::channel(UPLOAD_FRAME_CAPACITY);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             if frames.send(start).await.is_err() {
                 // The call ended before it took the start frame, and its status says why.
                 return;
             }
             let mut buffer = vec![0_u8; UPLOAD_CHUNK_BYTES];
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let read = match archive.read(&mut buffer).await {
                     Ok(read) => read,
                     // Ending the stream early leaves the archive short of its declared size,

@@ -36,14 +36,13 @@
 //! schedules: a runner that stops running the harness's own tasks for longer than an attempt
 //! delays the check that ends it, and the measured startups include such a runner.
 
-use std::{fmt, io};
+use std::{fmt, io, time::Duration};
 
 use error_stack::Report;
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::Arc;
 use nervix_server::application::AppError;
 use thiserror::Error;
-use tokio::time::Duration;
-use triomphe::Arc;
 
 use super::{
     node_liveness::{
@@ -391,7 +390,7 @@ impl<'node> NodeStartup<'node> {
         target: &mut impl StartableNode,
     ) -> Result<(), Report<NodeStartupExhausted>> {
         for attempt in 1..=NODE_START_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.budget.has_passed() {
                 return Err(self.exhausted(StartupEnd::BudgetSpent));
             }

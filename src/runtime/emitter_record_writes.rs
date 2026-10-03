@@ -1,21 +1,25 @@
 //! The records one write hands a sink, and what the sink's answers for them resolve.
 //!
 //! Layer: data plane.
-//! - **Owns.** The identity a record sink answers for each record of a write under and the source
-//!   rows each record carries: one row, or every member of a batch payload the emitter retains
-//!   verbatim — bytes, envelope and members — until the sink answers for it. Checking a sink's
+//! - **Owns.** The identity a sink answers for each record of a write under and the source rows
+//!   each record carries: one row, every member of a batch payload, the one row of a prepared HTTP
+//!   request, or the rows of a request a row request sink prepared, which the emitter retains
+//!   verbatim — bytes, envelope or request fields, and members — until the sink answers for it.
+//!   Checking a row request sink's preparation against the rows it was handed, checking a sink's
 //!   answers against the write they answer, and applying them: a delivered record delivers every
 //!   row it carries, a rejected one rejects each of them with the one error the sink gave it, and a
 //!   payload the sink left unanswered stays retained for the next attempt.
-//! - **Depends on.** The emitter's buffered batches and the state of their rows, the connector
-//!   contract's record identity and outcome, and the node's message-error delivery.
-//! - **Must not know.** How rows are encoded or packed into payloads, which connector writes them,
-//!   or when the emitter retries.
+//! - **Depends on.** The emitter's buffered batches and the state of their rows, the request fields
+//!   an HTTP emitter admitted a row with, the connector contract's record identity, prepared
+//!   requests, written values and outcome, and the node's message-error delivery.
+//! - **Must not know.** How rows are encoded or packed into payloads, how request fields were
+//!   evaluated, which connector writes them, or when the emitter retries.
 
 use std::collections::BTreeMap;
 
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkRecord, SinkRecordId, SinkRecordPosition,
+    PerRecordOutcome, PreparedRowRequest, RejectedSinkRecord, RowRequestPreparation,
+    SinkHttpRequest, SinkRecord, SinkRecordId, SinkRecordPosition, SinkRowRequest,
 };
 
 use super::{emitter_batch_packing::BatchEnvelope, *};
@@ -210,39 +214,51 @@ impl RowRecords {
     }
 }
 
-/// A batch payload prepared for a record sink, retained with everything it is written with until
-/// the sink answers for it.
+/// What a prepared payload hands its sink on every attempt, prepared once and written unchanged.
+pub(super) trait PreparedContent {
+    /// The value one write hands the sink for the payload.
+    type Written;
+
+    /// The value the write hands the sink for this payload under `record`. The sink takes its own
+    /// copy, so the payload stays retained until an answer resolves it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> Self::Written;
+}
+
+/// A batch payload for a record sink: the envelope every member shares and exactly the bytes the
+/// codec produced.
 #[derive(Debug)]
-pub(super) struct PreparedPayload {
-    /// The source rows the payload carries, in packing order. A payload always carries one.
-    pub(super) members: Vec<SinkRecordPosition>,
+pub(super) struct EncodedPayload {
     /// The key, headers and ordering group every member shares.
     pub(super) envelope: BatchEnvelope,
-    /// The execution time of the batch the first member came from, which the sink reports the
-    /// payload's rejection with. Each member's own replaces it when the rejection is routed.
-    pub(super) occurred_at: Timestamp,
     /// Exactly the bytes the codec produced. Every attempt writes these bytes, so a duplicate a
     /// retry produces is the payload the destination may already hold.
     pub(super) payload: Vec<u8>,
 }
 
-impl PreparedPayload {
-    fn first_member(&self) -> SinkRecordPosition {
-        *self
-            .members
-            .first()
-            .assured("packing builds a payload only from a candidate with at least one member")
-    }
+impl PreparedContent for EncodedPayload {
+    type Written = SinkRecord;
 
-    /// The record one write hands the sink for this payload. The sink takes its own copy of the
-    /// bytes, so the payload stays retained until an answer resolves it.
-    fn sink_record(&self, record: SinkRecordId) -> SinkRecord {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkRecord {
         let sink_record = SinkRecord::new(
             record,
             self.envelope.key.clone(),
             self.payload.clone(),
             self.envelope.headers.clone(),
-            self.occurred_at,
+            occurred_at,
         );
         match &self.envelope.message_group {
             Some(message_group) => sink_record.with_message_group(message_group.clone()),
@@ -251,20 +267,263 @@ impl PreparedPayload {
     }
 }
 
-/// The batch payloads prepared for a record sink and not yet answered for, in packing order.
+/// An HTTP request for an HTTP sink: the request fields its one record was admitted with, and its
+/// body.
+#[derive(Debug)]
+pub(super) struct PreparedHttpRequest {
+    pub(super) fields: HttpRequestFields,
+    /// Exactly the bytes the codec produced, or nothing for an emitter declared `WITHOUT BODY`.
+    /// Every attempt sends these bytes, so the codec never runs again for a retry.
+    pub(super) body: Option<Vec<u8>>,
+}
+
+impl PreparedContent for PreparedHttpRequest {
+    type Written = SinkHttpRequest;
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkHttpRequest {
+        SinkHttpRequest {
+            id: record,
+            method: self.fields.method.clone(),
+            target: self.fields.target.clone(),
+            headers: self.fields.headers.clone(),
+            body: self.body.clone(),
+            occurred_at,
+        }
+    }
+}
+
+/// A request a row request sink prepared from mapped rows: exactly the bytes it prepared.
+#[derive(Debug)]
+pub(super) struct RowRequestBody {
+    /// Exactly the bytes the sink prepared. Every attempt sends these bytes, so the rows the request
+    /// carries are never mapped or prepared again for a retry.
+    pub(super) body: Vec<u8>,
+}
+
+impl PreparedContent for RowRequestBody {
+    type Written = SinkRowRequest;
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkRowRequest {
+        SinkRowRequest {
+            id: record,
+            body: self.body.clone(),
+            occurred_at,
+        }
+    }
+}
+
+/// How a row request sink's preparation of one projected batch broke the contract it is checked
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(in crate::runtime) enum RowPreparationViolation {
+    #[error("it answered for row {row} of batch {batch}, which the write did not hand over")]
+    Unselected { batch: usize, row: usize },
+    #[error("it answered twice for row {row}")]
+    AnsweredTwice { row: usize },
+    #[error("it prepared row {row} after a row that follows it")]
+    OutOfOrder { row: usize },
+    #[error("it prepared a request that carries no row")]
+    EmptyRequest,
+    #[error("it left {unanswered} of the {rows} rows it was handed unanswered")]
+    Unanswered { unanswered: usize, rows: usize },
+}
+
+/// The rows of one write a row request sink's preparation has answered for so far.
+struct PreparedRowAnswers<'a> {
+    batch_index: usize,
+    /// The rows the write handed over. A projection selects them in ascending row order, so each is
+    /// found by a binary search.
+    selected_rows: &'a [usize],
+    answered: Vec<bool>,
+}
+
+impl PreparedRowAnswers<'_> {
+    /// Records the one answer the preparation may give for the row at `position`.
+    fn answer(&mut self, position: SinkRecordPosition) -> EmitterRuntimeResult<()> {
+        let unselected = RowPreparationViolation::Unselected {
+            batch: position.batch_index,
+            row: position.row_index,
+        };
+        if position.batch_index != self.batch_index {
+            return Err(self.violation(unselected));
+        }
+        let Ok(slot) = self.selected_rows.binary_search(&position.row_index) else {
+            return Err(self.violation(unselected));
+        };
+        let answered = self
+            .answered
+            .get_mut(slot)
+            .verified("a binary search returns an index into the rows it searched");
+        if *answered {
+            return Err(self.violation(RowPreparationViolation::AnsweredTwice {
+                row: position.row_index,
+            }));
+        }
+        *answered = true;
+        Ok(())
+    }
+
+    /// Fails unless the preparation answered for every row the write handed over.
+    fn finish(&self) -> EmitterRuntimeResult<()> {
+        let unanswered = self.answered.iter().filter(|answered| !**answered).count();
+        if unanswered > 0 {
+            return Err(self.violation(RowPreparationViolation::Unanswered {
+                unanswered,
+                rows: self.answered.len(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn violation(&self, violation: RowPreparationViolation) -> Report<EmitterRuntimeError> {
+        Report::new(EmitterRuntimeError::RowPreparation {
+            batch_index: self.batch_index,
+            violation,
+        })
+    }
+}
+
+/// A row request sink's preparation of one projected batch, checked against the rows the write
+/// handed it.
+#[derive(Debug)]
+pub(super) struct CheckedPreparation {
+    /// The prepared requests with the rows each carries, in the order the sink sends them.
+    pub(super) requests: Vec<PreparedPayload<RowRequestBody>>,
+    /// The rows the sink refused, each with the message error the sink gave it.
+    pub(super) rejected: Vec<RejectedEmitterRecord>,
+}
+
+impl CheckedPreparation {
+    /// Checks `preparation` of the rows `selected_rows` of batch `batch_index`, whose mapping was
+    /// evaluated at `occurred_at`.
+    ///
+    /// Every handed-over row must be a member of exactly one request or refused, every request must
+    /// carry at least one row, and every member must follow the members before it in source order,
+    /// so the requests retained by their first member are sent in the order the sink prepared them.
+    /// A preparation that breaks any of these fails the attempt without a retry and resolves
+    /// nothing, because the same sink would prepare the same rows the same way again.
+    pub(super) fn check(
+        preparation: RowRequestPreparation,
+        batch_index: usize,
+        selected_rows: &[usize],
+        occurred_at: Timestamp,
+    ) -> EmitterRuntimeResult<Self> {
+        let RowRequestPreparation { requests, rejected } = preparation;
+        let mut answers = PreparedRowAnswers {
+            batch_index,
+            selected_rows,
+            answered: vec![false; selected_rows.len()],
+        };
+        let mut previous_member = None;
+        let mut checked_requests = Vec::with_capacity(requests.len());
+        for PreparedRowRequest { members, body } in requests {
+            if members.is_empty() {
+                return Err(answers.violation(RowPreparationViolation::EmptyRequest));
+            }
+            for member in &members {
+                answers.answer(*member)?;
+                if let Some(previous) = previous_member
+                    && *member < previous
+                {
+                    return Err(answers.violation(RowPreparationViolation::OutOfOrder {
+                        row: member.row_index,
+                    }));
+                }
+                previous_member = Some(*member);
+            }
+            checked_requests.push(PreparedPayload {
+                members,
+                occurred_at,
+                content: RowRequestBody { body },
+            });
+        }
+        let mut checked_rejections = Vec::with_capacity(rejected.len());
+        for RejectedSinkRecord { id, error } in rejected {
+            answers.answer(id)?;
+            checked_rejections.push(RejectedEmitterRecord {
+                position: id,
+                reason: String::new(),
+                structured_error: Some(error),
+            });
+        }
+        answers.finish()?;
+        Ok(Self {
+            requests: checked_requests,
+            rejected: checked_rejections,
+        })
+    }
+}
+
+/// A payload prepared for a sink, retained with everything it is written with until the sink
+/// answers for it.
+#[derive(Debug)]
+pub(super) struct PreparedPayload<Content> {
+    /// The source rows the payload carries, in packing order. A payload always carries one.
+    pub(super) members: Vec<SinkRecordPosition>,
+    /// The execution time of the batch the first member came from, which the sink reports the
+    /// payload's rejection with. Each member's own replaces it when the rejection is routed.
+    pub(super) occurred_at: Timestamp,
+    /// What every attempt hands the sink for the payload.
+    pub(super) content: Content,
+}
+
+impl<Content: PreparedContent> PreparedPayload<Content> {
+    fn first_member(&self) -> SinkRecordPosition {
+        *self
+            .members
+            .first()
+            .assured("a payload is prepared only from a candidate with at least one member")
+    }
+
+    /// The value one write hands the sink for this payload.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
+    fn written(&self, record: SinkRecordId) -> Content::Written {
+        self.content.written(record, self.occurred_at)
+    }
+}
+
+/// The payloads prepared for a sink and not yet answered for, in packing order.
 ///
 /// Payloads are keyed by their first member. No two payloads share a member, and every member of a
 /// payload follows the members of the payloads packed before it, so their first members order them
 /// the way they were packed. A retry therefore writes the retained payloads in their own order and
 /// before any payload packed after them.
-#[derive(Debug, Default)]
-pub(super) struct PreparedPayloads {
-    retained: BTreeMap<SinkRecordPosition, PreparedPayload>,
+#[derive(Debug)]
+pub(super) struct PreparedPayloads<Content> {
+    retained: BTreeMap<SinkRecordPosition, PreparedPayload<Content>>,
 }
 
-/// The records one write hands a sink for the retained payloads, and which payload each carries.
-pub(super) struct PreparedWrite {
-    pub(super) records: Vec<SinkRecord>,
+impl<Content> Default for PreparedPayloads<Content> {
+    fn default() -> Self {
+        Self {
+            retained: BTreeMap::new(),
+        }
+    }
+}
+
+/// The values one write hands a sink for the retained payloads, and which payload each carries.
+pub(super) struct PreparedWrite<Written> {
+    pub(super) records: Vec<Written>,
     pub(super) payloads: WrittenPayloads,
 }
 
@@ -273,7 +532,7 @@ pub(super) struct WrittenPayloads {
     first_members: Vec<SinkRecordPosition>,
 }
 
-impl PreparedPayloads {
+impl<Content: PreparedContent> PreparedPayloads<Content> {
     pub(super) fn is_empty(&self) -> bool {
         self.retained.is_empty()
     }
@@ -286,7 +545,7 @@ impl PreparedPayloads {
     /// member again while the payload waits for its answer.
     pub(super) fn retain(
         &mut self,
-        payload: PreparedPayload,
+        payload: PreparedPayload<Content>,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
         for member in &payload.members {
@@ -302,13 +561,13 @@ impl PreparedPayloads {
         Ok(())
     }
 
-    /// One record for every retained payload, in packing order, each carrying the bytes its
-    /// payload was prepared with.
-    pub(super) fn next_write(&self) -> PreparedWrite {
+    /// One record for every retained payload, in packing order, each carrying what its payload
+    /// was prepared with.
+    pub(super) fn next_write(&self) -> PreparedWrite<Content::Written> {
         let mut records = Vec::with_capacity(self.retained.len());
         let mut first_members = Vec::with_capacity(self.retained.len());
         for (first_member, payload) in &self.retained {
-            records.push(payload.sink_record(SinkRecordId::new(records.len())));
+            records.push(payload.written(SinkRecordId::new(records.len())));
             first_members.push(*first_member);
         }
         PreparedWrite {
@@ -374,7 +633,11 @@ impl PreparedPayloads {
 
     /// Takes the payload `record` carried out of the retained ones, now that the sink answered for
     /// it.
-    fn take(&mut self, payloads: &WrittenPayloads, record: SinkRecordId) -> PreparedPayload {
+    fn take(
+        &mut self,
+        payloads: &WrittenPayloads,
+        record: SinkRecordId,
+    ) -> PreparedPayload<Content> {
         let first_member = payloads
             .first_members
             .get(record.index())
@@ -426,20 +689,29 @@ mod tests {
         }
     }
 
-    fn payload(members: &[SinkRecordPosition], bytes: &str) -> PreparedPayload {
+    fn payload(members: &[SinkRecordPosition], bytes: &str) -> PreparedPayload<EncodedPayload> {
         PreparedPayload {
             members: members.to_vec(),
-            envelope: BatchEnvelope {
-                key: Some("key".to_string()),
-                headers: vec![("source".to_string(), "a".to_string())],
-                message_group: Some("group".to_string()),
-            },
             occurred_at: Timestamp::from_unix_nanos(1),
-            payload: bytes.as_bytes().to_vec(),
+            content: EncodedPayload {
+                envelope: BatchEnvelope {
+                    key: Some("key".to_string()),
+                    headers: vec![("source".to_string(), "a".to_string())],
+                    message_group: Some("group".to_string()),
+                },
+                payload: bytes.as_bytes().to_vec(),
+            },
         }
     }
 
-    fn written(write: &PreparedWrite) -> Vec<(usize, Vec<u8>)> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external write outcome converts into the connector-owned prepared \
+                      payload representation"
+        )
+    )]
+    fn written(write: &PreparedWrite<SinkRecord>) -> Vec<(usize, Vec<u8>)> {
         write
             .records
             .iter()
@@ -447,7 +719,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_confirmed_payload_delivers_every_member_and_an_unanswered_one_is_written_unchanged()
     {
         let (first, first_completions) = batch(&[1, 2, 3], 10);
@@ -528,7 +800,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_rejected_payload_rejects_every_member_with_one_reference_and_its_own_time() {
         let (first, first_completions) = batch(&[1], 10);
         let (second, second_completions) = batch(&[2], 20);
@@ -754,5 +1026,170 @@ mod tests {
             vec![position(0, 3)]
         );
         assert!(answers.unresolved.is_none());
+    }
+
+    fn row_request(rows: &[usize], body: &str) -> PreparedRowRequest {
+        let mut members = Vec::with_capacity(rows.len());
+        for row in rows {
+            members.push(position(2, *row));
+        }
+        PreparedRowRequest {
+            members,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    fn refused(row: usize) -> RejectedSinkRecord<SinkRecordPosition> {
+        RejectedSinkRecord::invalid(
+            position(2, row),
+            Timestamp::from_unix_nanos(1),
+            "refused".to_string(),
+            [],
+        )
+    }
+
+    /// Checks a preparation of rows 0, 1, 3 and 4 of batch 2, whose mapping was evaluated at 30.
+    fn check(preparation: RowRequestPreparation) -> EmitterRuntimeResult<CheckedPreparation> {
+        CheckedPreparation::check(
+            preparation,
+            2,
+            &[0, 1, 3, 4],
+            Timestamp::from_unix_nanos(30),
+        )
+    }
+
+    #[test]
+    fn a_preparation_that_answers_every_row_once_in_order_is_kept_as_it_was_prepared() {
+        let checked = check(RowRequestPreparation {
+            requests: vec![row_request(&[0, 1], "first"), row_request(&[4], "second")],
+            rejected: vec![refused(3)],
+        })
+        .expect("every row is answered once and the requests follow source order");
+
+        let requests = checked
+            .requests
+            .iter()
+            .map(|request| {
+                (
+                    request.members.clone(),
+                    request.occurred_at,
+                    request.content.body.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requests,
+            vec![
+                (
+                    vec![position(2, 0), position(2, 1)],
+                    Timestamp::from_unix_nanos(30),
+                    b"first".to_vec()
+                ),
+                (
+                    vec![position(2, 4)],
+                    Timestamp::from_unix_nanos(30),
+                    b"second".to_vec()
+                ),
+            ]
+        );
+        let [refusal] = checked.rejected.as_slice() else {
+            panic!("the one refused row is delivered with its own error");
+        };
+        assert_eq!(refusal.position, position(2, 3));
+        assert_eq!(
+            refusal
+                .structured_error
+                .as_ref()
+                .map(|error| error.message.as_str()),
+            Some("refused")
+        );
+    }
+
+    #[test]
+    fn a_preparation_that_breaks_its_contract_fails_without_a_retry() {
+        let foreign_row = RowRequestPreparation {
+            requests: vec![
+                row_request(&[0, 1, 3], "first"),
+                PreparedRowRequest {
+                    members: vec![position(5, 4)],
+                    body: b"second".to_vec(),
+                },
+            ],
+            rejected: Vec::new(),
+        };
+        let cases = [
+            (
+                foreign_row,
+                RowPreparationViolation::Unselected { batch: 5, row: 4 },
+            ),
+            (
+                RowRequestPreparation {
+                    requests: vec![row_request(&[0, 1, 2, 3, 4], "first")],
+                    rejected: Vec::new(),
+                },
+                RowPreparationViolation::Unselected { batch: 2, row: 2 },
+            ),
+            (
+                RowRequestPreparation {
+                    requests: vec![
+                        row_request(&[0, 1], "first"),
+                        row_request(&[1, 3, 4], "second"),
+                    ],
+                    rejected: Vec::new(),
+                },
+                RowPreparationViolation::AnsweredTwice { row: 1 },
+            ),
+            (
+                RowRequestPreparation {
+                    requests: vec![row_request(&[0, 1, 3, 4], "first")],
+                    rejected: vec![refused(3)],
+                },
+                RowPreparationViolation::AnsweredTwice { row: 3 },
+            ),
+            (
+                RowRequestPreparation {
+                    requests: vec![
+                        row_request(&[3, 4], "first"),
+                        row_request(&[0, 1], "second"),
+                    ],
+                    rejected: Vec::new(),
+                },
+                RowPreparationViolation::OutOfOrder { row: 0 },
+            ),
+            (
+                RowRequestPreparation {
+                    requests: vec![
+                        row_request(&[0, 1, 3, 4], "first"),
+                        row_request(&[], "empty"),
+                    ],
+                    rejected: Vec::new(),
+                },
+                RowPreparationViolation::EmptyRequest,
+            ),
+            (
+                RowRequestPreparation {
+                    requests: vec![row_request(&[0, 1], "first")],
+                    rejected: vec![refused(4)],
+                },
+                RowPreparationViolation::Unanswered {
+                    unanswered: 1,
+                    rows: 4,
+                },
+            ),
+        ];
+        for (preparation, violation) in cases {
+            let error = check(preparation).expect_err("the preparation breaks its contract");
+            assert_eq!(
+                *error.current_context(),
+                EmitterRuntimeError::RowPreparation {
+                    batch_index: 2,
+                    violation,
+                }
+            );
+            assert!(
+                !emitter_publish_error_is_retryable(&error),
+                "the same sink would prepare the same rows the same way again"
+            );
+        }
     }
 }

@@ -5,14 +5,17 @@
 //! - **Owns.** One native gRPC exchange per test session: request identities, reply routing and
 //!   transfer reassembly, the subscriptions the session opened and the display text of their rows,
 //!   every frame about a subscription outside the lifetime its replies and events announced, the
-//!   notices it received, and raw frames a scenario sends to probe the server's refusals.
+//!   notices it received, the domain clock replies and frames it read in their arrival order, raw
+//!   frames a scenario sends to probe the server's refusals, and backup downloads and restore
+//!   streams a scenario shapes itself.
 //! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
 //!   to route subscription statements, and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
 //!   protocol.
 //!
 //! The session reads frames only while a caller waits for something, so every reply and event
-//! that arrives while it waits for another is kept until asked for.
+//! that arrives while it waits for another is kept until asked for. A successful clock detach
+//! retires unread frames from that attachment; the ordered clock log still retains them.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -25,23 +28,28 @@ use std::{
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use bytes::{BufMut as _, Bytes};
 use nervix_client_wire::{
-    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancelRequest, ClientMessage,
-    ClientRequest, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic, NoticeLevel,
-    OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage,
-    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionType, TransferAssembly, UnsubscribeDisposition,
-    UnsubscribeRequest, UploadChunk, UploadReply, UploadStart, VerifiedFrame,
+    AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
+    BackupArchiveStart, BackupDownloadFailed, BackupDownloadMessage, BackupDownloadRequest,
+    CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
+    CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
+    DomainClockDetachDisposition, DomainClockObserved, DomainClockTicked, LeaderRedirect,
+    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RestoreChunk, RestoreReply,
+    RestoreStart, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason,
+    SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
+    UploadReply, UploadStart, VerifiedFrame,
     grpc::{
-        ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
+        ClientBackupDownloadCodec, ClientExchangeCodec, ClientRestoreCodec, ClientUploadCodec,
+        DOWNLOAD_BACKUP_PATH, EXCHANGE_PATH, FrameDecoder, RESTORE_BACKUP_PATH,
+        UPLOAD_RESOURCE_PATH,
     },
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, ResourceName, ResourceUploadIdentity, SubscriptionName,
-    TransactionPosition, TransactionStatus,
+    ArchiveDigest, CommandExecutionReference, DomainName, ResourceName, ResourceUploadIdentity,
+    RestoreArchive, SubscriptionName, TransactionPosition, TransactionStatus,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
-use tokio::{sync::mpsc, time::Instant};
-use tokio_stream::wrappers::ReceiverStream;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc, time::Instant};
 use tonic::{
     Request, Status, Streaming,
     codec::{Codec, EncodeBuf, Encoder},
@@ -58,6 +66,8 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A row a subscription delivered, as a client displays it.
 #[derive(Debug, Clone)]
 pub(crate) struct TestSubscriptionEvent {
+    /// The subscription that delivered the row.
+    pub subscription: SubscriptionName,
     pub payload: String,
 }
 
@@ -80,6 +90,32 @@ pub(crate) struct TestServerEvent {
 #[derive(Debug)]
 struct OpenSubscription {
     schema: RowSchema,
+}
+
+/// A frame about a domain clock the session follows.
+#[derive(Debug, Clone)]
+pub(crate) enum TestClockFrame {
+    Observed(DomainClockObserved),
+    Ticked(DomainClockTicked),
+    Ended(DomainClockAttachmentEnded),
+}
+
+impl TestClockFrame {
+    pub(crate) fn domain(&self) -> &DomainName {
+        match self {
+            Self::Observed(observed) => &observed.domain,
+            Self::Ticked(ticked) => &ticked.domain,
+            Self::Ended(ended) => &ended.domain,
+        }
+    }
+}
+
+/// A domain clock reply or frame, in the order the session read it.
+#[derive(Debug, Clone)]
+pub(crate) enum TestClockLogEntry {
+    /// The terminal reply to an attach or detach request.
+    Reply(RequestId),
+    Frame(TestClockFrame),
 }
 
 /// A reply and the bytes of the frames that carried it.
@@ -142,6 +178,10 @@ pub(crate) struct TestSession {
     pending_subscriptions: VecDeque<TestSubscriptionEvent>,
     pending_subscription_ends: VecDeque<SubscriptionEnded>,
     pending_server_errors: VecDeque<TestServerEvent>,
+    /// Domain clock frames no step has taken yet.
+    pending_clock_frames: VecDeque<TestClockFrame>,
+    /// Every domain clock reply and frame, in the order the session read it.
+    clock_log: Vec<TestClockLogEntry>,
     /// Why the server said it ends the session, once it said so.
     ending: Option<SessionEndReason>,
     /// The status the server ended the call with, once it ended it.
@@ -249,6 +289,8 @@ pub(crate) async fn open_session_as(
         pending_subscriptions: VecDeque::new(),
         pending_subscription_ends: VecDeque::new(),
         pending_server_errors: VecDeque::new(),
+        pending_clock_frames: VecDeque::new(),
+        clock_log: Vec::new(),
         ending: None,
         ended: None,
     }))
@@ -301,7 +343,7 @@ pub(crate) async fn send_upload(server: &str, upload: TestUpload<'_>) -> io::Res
         };
         frames.push(frame.map_err(io::Error::other)?);
     }
-    let request = authorized(tokio_stream::iter(frames))?;
+    let request = authorized(nervix_primitives::stream::iter(frames))?;
     let response = client
         .client_streaming(
             request,
@@ -311,6 +353,216 @@ pub(crate) async fn send_upload(server: &str, upload: TestUpload<'_>) -> io::Res
         .await
         .map_err(io::Error::other)?;
     UploadReply::decode(response.get_ref()).map_err(io::Error::other)
+}
+
+/// How a backup download a scenario shapes itself ended.
+#[derive(Debug)]
+pub(crate) enum TestDownloadEnd {
+    /// Every frame arrived: the archive's start, and every byte after it.
+    Complete {
+        start: BackupArchiveStart,
+        bytes: Vec<u8>,
+    },
+    /// The scenario stopped reading and dropped the call, as a client that loses its connection
+    /// does.
+    Abandoned,
+    /// The node refused the download.
+    Refused(BackupDownloadFailed),
+    /// The node sent the download to the leader.
+    Redirected(LeaderRedirect),
+    /// The call itself failed with this status.
+    Status(Box<Status>),
+}
+
+/// A backup download a scenario shapes itself.
+pub(crate) struct TestDownload<'a> {
+    pub(crate) reference: &'a CommandExecutionReference,
+    /// The `authorization` metadata the call presents, or none.
+    pub(crate) authorization: Option<&'a str>,
+    /// Stops reading and drops the call once this many chunks arrived.
+    pub(crate) abandon_after_chunks: Option<usize>,
+}
+
+/// How long a download waits for each of its frames.
+const DOWNLOAD_FRAME_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Downloads the archive of a backup from `server`, as `download` shapes the call.
+pub(crate) async fn download_backup(
+    server: &str,
+    download: TestDownload<'_>,
+) -> io::Result<TestDownloadEnd> {
+    let limits = SessionLimits::DEFAULT;
+    let channel = session_channel(server).await?;
+    let mut client = tonic::client::Grpc::new(channel)
+        .max_decoding_message_size(limits.frame_bytes())
+        .max_encoding_message_size(limits.frame_bytes());
+    client.ready().await.map_err(io::Error::other)?;
+    let frame = BackupDownloadRequest {
+        execution_reference: download.reference.clone(),
+    }
+    .encode(&limits)
+    .map_err(io::Error::other)?;
+    let request = match download.authorization {
+        Some(authorization) => authorized_as(frame, authorization)?,
+        None => Request::new(frame),
+    };
+    let response = client
+        .server_streaming(
+            request,
+            http::uri::PathAndQuery::from_static(DOWNLOAD_BACKUP_PATH),
+            ClientBackupDownloadCodec::new(limits),
+        )
+        .await;
+    let mut frames = match response {
+        Ok(response) => response.into_inner(),
+        Err(status) => return Ok(TestDownloadEnd::Status(Box::new(status))),
+    };
+    let mut start = None;
+    let mut bytes = Vec::new();
+    let mut chunks = 0_usize;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let next = nervix_primitives::time::timeout(DOWNLOAD_FRAME_TIMEOUT, frames.message())
+            .await
+            .map_err(|_| io::Error::other("a download frame did not arrive within a minute"))?;
+        let frame = match next {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Err(io::Error::other("the download ended before its last frame")),
+            Err(status) => return Ok(TestDownloadEnd::Status(Box::new(status))),
+        };
+        match BackupDownloadMessage::decode(&frame).map_err(io::Error::other)? {
+            BackupDownloadMessage::Start(started) => start = Some(started),
+            BackupDownloadMessage::Chunk(chunk) => {
+                bytes.extend_from_slice(chunk.bytes());
+                chunks += 1;
+                if download.abandon_after_chunks == Some(chunks) {
+                    drop(frames);
+                    return Ok(TestDownloadEnd::Abandoned);
+                }
+            }
+            BackupDownloadMessage::Complete => {
+                let Some(start) = start else {
+                    return Err(io::Error::other("the download completed without its start"));
+                };
+                return Ok(TestDownloadEnd::Complete { start, bytes });
+            }
+            BackupDownloadMessage::Failed(failed) => return Ok(TestDownloadEnd::Refused(failed)),
+            BackupDownloadMessage::NotLeader(redirect) => {
+                return Ok(TestDownloadEnd::Redirected(redirect));
+            }
+        }
+    }
+}
+
+/// A restore stream a scenario shapes itself.
+pub(crate) struct TestRestore<'a> {
+    pub(crate) reference: &'a CommandExecutionReference,
+    /// The `RESTORE` statement the start names, as canonical NSPL.
+    pub(crate) statement: &'a str,
+    pub(crate) archive: &'a [u8],
+    /// The digest the start declares, when it is not the archive's own.
+    pub(crate) declared_digest: Option<[u8; 32]>,
+    /// Goes away without ending the stream once this many chunks were sent, as a client that loses
+    /// its connection does.
+    pub(crate) abandon_after_chunks: Option<usize>,
+}
+
+/// How a restore stream a scenario shaped itself ended.
+#[derive(Debug)]
+pub(crate) enum TestRestoreEnd {
+    /// The node answered the stream.
+    Replied(RestoreReply),
+    /// The scenario went away before the stream ended, and the node had not answered it.
+    Abandoned,
+    /// The call itself failed with this status.
+    Status(Box<Status>),
+}
+
+/// Archive bytes one restore chunk carries, as the Rust client sends them.
+const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
+
+/// How long a restore waits for its reply once every frame was sent: the restore applies before it
+/// answers.
+const RESTORE_REPLY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long an abandoned restore keeps its connection after its last chunk before it goes away.
+/// The scenario does not depend on it: a node that has not read the chunks by then has less to
+/// release.
+const RESTORE_ABANDON_HOLD: Duration = Duration::from_secs(1);
+
+/// Streams the restore `restore` shapes to `server`, and returns how it ended.
+pub(crate) async fn send_restore(
+    server: &str,
+    restore: TestRestore<'_>,
+) -> io::Result<TestRestoreEnd> {
+    let limits = SessionLimits::DEFAULT;
+    let channel = session_channel(server).await?;
+    let mut client = tonic::client::Grpc::new(channel)
+        .max_decoding_message_size(limits.frame_bytes())
+        .max_encoding_message_size(limits.frame_bytes());
+    client.ready().await.map_err(io::Error::other)?;
+    let length = u64::try_from(restore.archive.len()).map_err(io::Error::other)?;
+    let Some(total_bytes) = NonZeroU64::new(length) else {
+        return Err(io::Error::other("a restore streams a non-empty archive"));
+    };
+    let digest = match restore.declared_digest {
+        Some(declared) => declared,
+        None => *blake3::hash(restore.archive).as_bytes(),
+    };
+    let start = RestoreStart {
+        request_id: RequestId::new(NonZeroU64::MIN),
+        execution_reference: restore.reference.clone(),
+        statement: restore.statement.to_string(),
+        archive: RestoreArchive {
+            total_bytes,
+            digest: ArchiveDigest::from_bytes(digest),
+        },
+    }
+    .encode(&limits)
+    .map_err(io::Error::other)?;
+    let mut frames = vec![start];
+    for chunk in restore.archive.chunks(RESTORE_CHUNK_BYTES) {
+        frames.push(RestoreChunk::encode(chunk, &limits).map_err(io::Error::other)?);
+    }
+    let path = http::uri::PathAndQuery::from_static(RESTORE_BACKUP_PATH);
+    let codec = ClientRestoreCodec::new(limits);
+    let Some(chunks) = restore.abandon_after_chunks else {
+        let request = authorized(nervix_primitives::stream::iter(frames))?;
+        let call = client.client_streaming(request, path, codec);
+        let response = match nervix_primitives::time::timeout(RESTORE_REPLY_TIMEOUT, call).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(status)) => return Ok(TestRestoreEnd::Status(Box::new(status))),
+            Err(_) => {
+                return Err(io::Error::other(
+                    "the restore was not answered within five minutes",
+                ));
+            }
+        };
+        let reply = RestoreReply::decode(response.get_ref()).map_err(io::Error::other)?;
+        return Ok(TestRestoreEnd::Replied(reply));
+    };
+    let Some(sent) = chunks.checked_add(1) else {
+        return Err(io::Error::other(
+            "a scenario abandons a restore after a handful of chunks",
+        ));
+    };
+    frames.truncate(sent);
+    // The stream never ends, so only a node that refuses it outright answers before the client
+    // goes away; dropping the call resets the stream, as a lost connection does.
+    let parts = nervix_primitives::stream::StreamExt::chain(
+        nervix_primitives::stream::iter(frames),
+        nervix_primitives::stream::pending(),
+    );
+    let request = authorized(parts)?;
+    let call = client.client_streaming(request, path, codec);
+    match nervix_primitives::time::timeout(RESTORE_ABANDON_HOLD, call).await {
+        Ok(Ok(response)) => {
+            let reply = RestoreReply::decode(response.get_ref()).map_err(io::Error::other)?;
+            Ok(TestRestoreEnd::Replied(reply))
+        }
+        Ok(Err(status)) => Ok(TestRestoreEnd::Status(Box::new(status))),
+        Err(_) => Ok(TestRestoreEnd::Abandoned),
+    }
 }
 
 /// A command outcome for a subscription statement the session sent as its own request.
@@ -339,6 +591,8 @@ fn subscription_outcome(
         inspection: None,
         wasm_state: None,
         resource: None,
+        backup: None,
+        restore: None,
     }
 }
 
@@ -488,6 +742,18 @@ impl TestSession {
                     self.closed_subscriptions.insert(handle.clone());
                 }
             }
+            ReplyBody::DomainClockAttach(_) => {
+                self.clock_log.push(TestClockLogEntry::Reply(request_id));
+            }
+            ReplyBody::DomainClockDetach(outcome) => {
+                if let DomainClockDetachDisposition::Detached(domain) = &outcome.disposition {
+                    // These frames arrived before the detach reply. Keep their ordering evidence
+                    // in clock_log without presenting them as events after the attachment ended.
+                    self.pending_clock_frames
+                        .retain(|frame| frame.domain() != domain);
+                }
+                self.clock_log.push(TestClockLogEntry::Reply(request_id));
+            }
             _ => {}
         }
         self.replies
@@ -515,8 +781,10 @@ impl TestSession {
                     .map_err(io::Error::other)?;
                 for payload in lines {
                     self.delivered_payloads.push(payload.clone());
-                    self.pending_subscriptions
-                        .push_back(TestSubscriptionEvent { payload });
+                    self.pending_subscriptions.push_back(TestSubscriptionEvent {
+                        subscription: rows.subscription().name.clone(),
+                        payload,
+                    });
                 }
             }
             ServerEvent::SubscriptionRowsSkipped(skipped) => {
@@ -547,12 +815,88 @@ impl TestSession {
                     self.record_outside_lifetime("a loss report", &lost.subscription);
                 }
             }
-            ServerEvent::Leadership(_)
+            ServerEvent::DomainClockObserved(observed) => {
+                self.file_clock_frame(TestClockFrame::Observed(observed));
+            }
+            ServerEvent::DomainClockTicked(ticked) => {
+                self.file_clock_frame(TestClockFrame::Ticked(ticked));
+            }
+            ServerEvent::DomainClockAttachmentEnded(ended) => {
+                self.file_clock_frame(TestClockFrame::Ended(ended));
+            }
+            // Producers are driven through the producer session, never through this one.
+            ServerEvent::ProducerAdmissionChanged(_)
+            | ServerEvent::ProducerEnded(_)
+            | ServerEvent::Leadership(_)
             | ServerEvent::Domains(_)
             | ServerEvent::DomainSnapshot(_)
             | ServerEvent::Cluster(_) => {}
         }
         Ok(())
+    }
+
+    fn file_clock_frame(&mut self, frame: TestClockFrame) {
+        self.clock_log.push(TestClockLogEntry::Frame(frame.clone()));
+        self.pending_clock_frames.push_back(frame);
+    }
+
+    /// Every domain clock reply and frame, in the order the session read them.
+    pub(crate) fn clock_log(&self) -> &[TestClockLogEntry] {
+        &self.clock_log
+    }
+
+    /// Drops unread frames for `domain` that were filed while waiting for a reply already read.
+    /// The caller checks the clock log's wire order before discarding them.
+    pub(crate) fn discard_queued_clock_frames_for(&mut self, domain: &DomainName) {
+        self.pending_clock_frames
+            .retain(|frame| frame.domain() != domain);
+    }
+
+    /// Sends a request attaching the session to the clock of `domain`, without waiting for its
+    /// reply.
+    pub(crate) async fn send_domain_clock_attach(
+        &mut self,
+        domain: DomainName,
+    ) -> io::Result<RequestId> {
+        let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
+        let (request_id, _) = self.send_request(request).await?;
+        Ok(request_id)
+    }
+
+    /// Sends a request detaching the session from the clock of `domain`, without waiting for its
+    /// reply.
+    pub(crate) async fn send_domain_clock_detach(
+        &mut self,
+        domain: DomainName,
+    ) -> io::Result<RequestId> {
+        let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
+        let (request_id, _) = self.send_request(request).await?;
+        Ok(request_id)
+    }
+
+    /// Waits for the next domain clock frame no step has taken yet.
+    pub(crate) async fn try_next_clock_frame(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> io::Result<Option<TestClockFrame>> {
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(frame) = self.pending_clock_frames.pop_front() {
+                return Ok(Some(frame));
+            }
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
+            let open = match read {
+                Ok(open) => open?,
+                Err(_) => return Ok(None),
+            };
+            if !open {
+                return Err(io::Error::other(format!(
+                    "the session ended before a domain clock frame: {:?}",
+                    self.ended
+                )));
+            }
+        }
     }
 
     /// Records a frame about `subscription` that arrived while the session did not hold it.
@@ -587,11 +931,11 @@ impl TestSession {
     async fn received_reply(&mut self, request_id: RequestId) -> io::Result<ReceivedReply> {
         let deadline = Instant::now() + REPLY_TIMEOUT;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(reply) = self.replies.remove(&request_id) {
                 return Ok(reply);
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => {
@@ -931,11 +1275,11 @@ impl TestSession {
     ) -> io::Result<Option<TestSubscriptionEvent>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.pending_subscriptions.pop_front() {
                 return Ok(Some(event));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -968,11 +1312,11 @@ impl TestSession {
     ) -> io::Result<Option<SubscriptionEnded>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(ended) = self.pending_subscription_ends.pop_front() {
                 return Ok(Some(ended));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -990,8 +1334,8 @@ impl TestSession {
     pub(crate) async fn read_for(&mut self, duration: Duration) -> io::Result<()> {
         let deadline = Instant::now() + duration;
         loop {
-            tokio::task::consume_budget().await;
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            nervix_primitives::task::consume_budget().await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             match read {
                 Ok(open) => {
                     if !open? {
@@ -1009,11 +1353,11 @@ impl TestSession {
     ) -> io::Result<Option<TestServerEvent>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.pending_server_errors.pop_front() {
                 return Ok(Some(event));
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             let open = match read {
                 Ok(open) => open?,
                 Err(_) => return Ok(None),
@@ -1034,11 +1378,11 @@ impl TestSession {
     ) -> io::Result<Status> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = &self.ended {
                 return Ok(status.clone());
             }
-            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
             match read {
                 Ok(open) => {
                     open?;

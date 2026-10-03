@@ -10,21 +10,9 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 
-use std::{
-    collections::VecDeque,
-    future::Future,
-    pin::Pin,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::VecDeque, future::Future, pin::Pin, time::Duration};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
@@ -46,10 +34,16 @@ use nervix_connector::{
     SinkStartResult, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
+use nervix_primitives::{
+    sync::{
+        StdArc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Instant, sleep},
+};
 pub use source::{
     NatsMessageHeaders, NatsSource, NatsSourceError, NatsSourceMessage, NatsSourcePlan,
 };
-use tokio::time::{Instant, sleep};
 
 const NATS: &str = "nats";
 
@@ -197,7 +191,7 @@ impl NatsSink {
         let mut sink = self.client.clone();
         let mut queued = Vec::with_capacity(records.len());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             let headers = if record.headers.is_empty() {
@@ -251,7 +245,7 @@ impl NatsSink {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             let confirmation = if record.headers.is_empty() {
@@ -302,7 +296,7 @@ impl NatsSink {
             }
         }
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
                 outcome.fail(error);
                 return outcome;
@@ -329,7 +323,7 @@ impl NatsSink {
             Self::harvest_ready_after_oldest_failure(pending, outcome);
             return Err(Self::confirm_timeout_error(timeout));
         }
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             result = &mut oldest.confirmation => Some(result),
             _ = sleep(remaining) => None,
@@ -446,6 +440,13 @@ impl NatsSink {
         Report::new(SinkStartError::Initialize { sink: NATS }).attach_printable(error.to_string())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "formats the typed external NATS driver failure; no internal runtime \
+                      ownership is inferred"
+        )
+    )]
     fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
         Report::new(SinkPublishError::Publish { sink: NATS }).attach_printable(error.to_string())
     }

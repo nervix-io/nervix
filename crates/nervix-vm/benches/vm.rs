@@ -1,9 +1,9 @@
-use std::{net::IpAddr, sync::Arc as StdArc};
+use std::net::IpAddr;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BinaryArray, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray,
-    StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
+    BinaryArray, BooleanArray, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    ListArray, StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -11,16 +11,17 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
+use nervix_execution::Executor;
 use nervix_models::Timestamp;
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
-    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SMALL_SET_CAPACITY, SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
+    CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, INLINE_ROW_LIMIT,
+    OutputMode, RuntimeError, SMALL_SET_CAPACITY, SemanticScopePolicy, TypedArray, TypedBatch,
     compile_program_with_options_for_bindings, execute_program_with_selection_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 #[path = "vm/workloads.rs"]
 mod workloads;
@@ -29,8 +30,8 @@ mod workloads;
 #[path = "vm/allocation_probe.rs"]
 mod allocation_probe;
 
-/// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
-/// amortization curve below it and the cost of the blocking hop above it.
+/// Row counts spanning `INLINE_ROW_LIMIT` so the sweep shows both the
+/// amortization curve below it and the cost of the executor hop above it.
 const SWEEP_ROW_COUNTS: [usize; 8] = [1, 8, 64, 256, 1_024, 4_096, 16_384, 65_536];
 
 #[derive(Debug, Error)]
@@ -43,14 +44,31 @@ enum BenchmarkProgramError {
 
 type BenchmarkProgramResult<T> = error_stack::Result<T, BenchmarkProgramError>;
 
-async fn execute_benchmark_program(
-    program: &Arc<CompiledProgram>,
-    batch: &TypedBatch,
-) -> Result<TypedBatch, RuntimeError> {
-    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
-    execute_program_with_selection_in_context(program, batch, &context)
-        .await
-        .map(|result| result.batch)
+/// The runtime a benchmark drives the VM on, and the executor a node would admit offloaded
+/// executions through. The executor is built once, so a measured execution pays admission but not
+/// the executor's construction.
+struct BenchmarkRuntime {
+    runtime: nervix_primitives::runtime::Runtime,
+    executor: Executor,
+}
+
+impl BenchmarkRuntime {
+    fn execute(
+        &self,
+        program: &Arc<CompiledProgram>,
+        batch: &TypedBatch,
+    ) -> error_stack::Result<TypedBatch, RuntimeError> {
+        let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+        let executed = self
+            .runtime
+            .block_on(execute_program_with_selection_in_context(
+                &self.executor,
+                program,
+                batch,
+                &context,
+            ))?;
+        Ok(executed.batch)
+    }
 }
 
 fn parse_program(source: &str) -> BenchmarkProgramResult<SpannedNode<Program>> {
@@ -838,28 +856,14 @@ fn string_search_benches(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("constant_set", text_length),
             &batch,
-            |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&constant),
-                        black_box(batch),
-                    ))
-                })
-            },
+            |b, batch| b.iter(|| runtime.execute(black_box(&constant), black_box(batch))),
         );
         for cardinality in [1, 16, 64] {
             let batch = multi_pattern_batch(cardinality, text_length);
             group.bench_with_input(
                 BenchmarkId::new(format!("dynamic_{cardinality}"), text_length),
                 &batch,
-                |b, batch| {
-                    b.iter(|| {
-                        runtime.block_on(execute_benchmark_program(
-                            black_box(&dynamic),
-                            black_box(batch),
-                        ))
-                    })
-                },
+                |b, batch| b.iter(|| runtime.execute(black_box(&dynamic), black_box(batch))),
             );
         }
     }
@@ -967,7 +971,7 @@ fn compile_correlate_output() -> Arc<CompiledProgram> {
 
 /// Rows in a numeric kernel batch. The batch stays at the inline execution threshold, so a
 /// measurement is the kernels themselves rather than the blocking-pool hop a larger batch takes.
-const NUMERIC_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+const NUMERIC_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 /// How many rows of a numeric kernel batch hold operands that make every checked operation in the
 /// program fail, which is what separates the kernel's clean path from its error reporting.
@@ -1085,6 +1089,20 @@ fn numeric_arithmetic_outputs(data_type: &DataType) -> [(&'static str, DataType)
     ]
 }
 
+/// The operators the arithmetic program computes without dividing. A division by a column is a
+/// scalar `idiv` per lane, which dominates the full program, so this program measures the sums,
+/// differences and products alone over the same batches.
+const ADD_SUB_MUL_SOURCE: &str = "SET sum = input.left + input.right, difference = input.left - \
+                                  input.right, product = input.left * input.right";
+
+fn add_sub_mul_outputs(data_type: &DataType) -> [(&'static str, DataType); 3] {
+    [
+        ("sum", data_type.clone()),
+        ("difference", data_type.clone()),
+        ("product", data_type.clone()),
+    ]
+}
+
 /// A failing row pairs the maximum value with a negative operand, which overflows the difference
 /// and the product, and divides by zero, which fails the quotient and the remainder. No pair of
 /// operands overflows both a sum and a difference, so the sum of a failing row succeeds.
@@ -1158,6 +1176,46 @@ fn i32_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> 
         ],
     )
     .expect("i32 arithmetic benchmark batch must build")
+}
+
+fn benchmark_row_i16(row: usize) -> i16 {
+    i16::try_from(row).assured("benchmark rows are reduced below 1,000 before the conversion")
+}
+
+/// The operands [`i32_arithmetic_batch`] holds, at 16 bits: every product of a row that does not
+/// fail stays within ±4,000.
+fn i16_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let left = Int16Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i16::MAX
+        } else {
+            benchmark_row_i16(row % 1_000) - 500
+        }
+    }));
+    let right = Int16Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            -2
+        } else {
+            benchmark_row_i16(row % 17) - 8
+        }
+    }));
+    let divisor = Int16Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            0
+        } else {
+            benchmark_row_i16(row % 13) + 1
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Int16(left),
+            TypedArray::Int16(right),
+            TypedArray::Int16(divisor),
+        ],
+    )
+    .expect("i16 arithmetic benchmark batch must build")
 }
 
 fn benchmark_row_f64(row: usize) -> f64 {
@@ -1558,6 +1616,26 @@ fn numeric_kernel_benches(c: &mut Criterion) {
         numeric_arithmetic_schema(&DataType::Int32),
         &numeric_arithmetic_outputs(&DataType::Int32),
     );
+    let i16_arithmetic_compiled = compile_numeric_program(
+        NUMERIC_ARITHMETIC_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int16),
+        &numeric_arithmetic_outputs(&DataType::Int16),
+    );
+    let i64_add_sub_mul_compiled = compile_numeric_program(
+        ADD_SUB_MUL_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int64),
+        &add_sub_mul_outputs(&DataType::Int64),
+    );
+    let i32_add_sub_mul_compiled = compile_numeric_program(
+        ADD_SUB_MUL_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int32),
+        &add_sub_mul_outputs(&DataType::Int32),
+    );
+    let i16_add_sub_mul_compiled = compile_numeric_program(
+        ADD_SUB_MUL_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int16),
+        &add_sub_mul_outputs(&DataType::Int16),
+    );
     let f64_arithmetic_compiled = compile_numeric_program(
         NUMERIC_ARITHMETIC_SOURCE,
         numeric_arithmetic_schema(&DataType::Float64),
@@ -1607,18 +1685,55 @@ fn numeric_kernel_benches(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("numeric_kernels");
     group.throughput(Throughput::Elements(NUMERIC_KERNEL_ROWS.arch_into()));
+    struct ConstantDivisionCase {
+        name: &'static str,
+        data_type: DataType,
+        source: &'static str,
+        batch: fn(&CompiledProgram, FailureDensity) -> TypedBatch,
+    }
+    let constant_cases = [
+        ConstantDivisionCase {
+            name: "i16_constant_division",
+            data_type: DataType::Int16,
+            source: "SET quotient = input.left / 7 AS I16, remainder = input.left % 7 AS I16",
+            batch: i16_arithmetic_batch,
+        },
+        ConstantDivisionCase {
+            name: "i32_constant_division",
+            data_type: DataType::Int32,
+            source: "SET quotient = input.left / 7 AS I32, remainder = input.left % 7 AS I32",
+            batch: i32_arithmetic_batch,
+        },
+        ConstantDivisionCase {
+            name: "i64_constant_division",
+            data_type: DataType::Int64,
+            source: "SET quotient = input.left / 7, remainder = input.left % 7",
+            batch: i64_arithmetic_batch,
+        },
+    ];
+    for case in constant_cases {
+        let program = compile_numeric_program(
+            case.source,
+            numeric_arithmetic_schema(&case.data_type),
+            &[
+                ("quotient", case.data_type.clone()),
+                ("remainder", case.data_type),
+            ],
+        );
+        let batch = (case.batch)(&program, FailureDensity::None);
+        group.bench_with_input(
+            BenchmarkId::new(case.name, "no_failures"),
+            &batch,
+            |b, batch| b.iter(|| runtime.execute(black_box(&program), black_box(batch))),
+        );
+    }
     for failures in FailureDensity::ALL {
         let batch = i64_arithmetic_batch(&i64_arithmetic_compiled, failures);
         group.bench_with_input(
             BenchmarkId::new("i64_arithmetic", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&i64_arithmetic_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&i64_arithmetic_compiled), black_box(batch)))
             },
         );
         let batch = i32_arithmetic_batch(&i32_arithmetic_compiled, failures);
@@ -1626,12 +1741,39 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("i32_arithmetic", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&i32_arithmetic_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&i32_arithmetic_compiled), black_box(batch)))
+            },
+        );
+        let batch = i16_arithmetic_batch(&i16_arithmetic_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i16_arithmetic", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| runtime.execute(black_box(&i16_arithmetic_compiled), black_box(batch)))
+            },
+        );
+        let batch = i64_arithmetic_batch(&i64_add_sub_mul_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i64_add_sub_mul", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| runtime.execute(black_box(&i64_add_sub_mul_compiled), black_box(batch)))
+            },
+        );
+        let batch = i32_arithmetic_batch(&i32_add_sub_mul_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i32_add_sub_mul", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| runtime.execute(black_box(&i32_add_sub_mul_compiled), black_box(batch)))
+            },
+        );
+        let batch = i16_arithmetic_batch(&i16_add_sub_mul_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i16_add_sub_mul", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| runtime.execute(black_box(&i16_add_sub_mul_compiled), black_box(batch)))
             },
         );
         let batch = f64_arithmetic_batch(&f64_arithmetic_compiled, failures);
@@ -1639,12 +1781,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("f64_arithmetic", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&f64_arithmetic_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&f64_arithmetic_compiled), black_box(batch)))
             },
         );
         let batch = numeric_unary_batch(&numeric_unary_compiled, failures);
@@ -1652,12 +1789,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("numeric_unary", failures.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&numeric_unary_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&numeric_unary_compiled), black_box(batch)))
             },
         );
         for (label, compiled) in [
@@ -1669,14 +1801,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(label, failures.label()),
                 &batch,
-                |b, batch| {
-                    b.iter(|| {
-                        runtime.block_on(execute_benchmark_program(
-                            black_box(compiled),
-                            black_box(batch),
-                        ))
-                    })
-                },
+                |b, batch| b.iter(|| runtime.execute(black_box(compiled), black_box(batch))),
             );
         }
         for (label, compiled) in [
@@ -1687,14 +1812,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(label, failures.label()),
                 &batch,
-                |b, batch| {
-                    b.iter(|| {
-                        runtime.block_on(execute_benchmark_program(
-                            black_box(compiled),
-                            black_box(batch),
-                        ))
-                    })
-                },
+                |b, batch| b.iter(|| runtime.execute(black_box(compiled), black_box(batch))),
             );
         }
     }
@@ -1702,14 +1820,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
     group.bench_with_input(
         BenchmarkId::new("comparison", "nan_and_nulls"),
         &batch,
-        |b, batch| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&comparison_compiled),
-                    black_box(batch),
-                ))
-            })
-        },
+        |b, batch| b.iter(|| runtime.execute(black_box(&comparison_compiled), black_box(batch))),
     );
     for nulls in NullDensity::ALL {
         let batch = transcendental_batch(&transcendental_compiled, nulls);
@@ -1717,12 +1828,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
             BenchmarkId::new("transcendental", nulls.label()),
             &batch,
             |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&transcendental_compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&transcendental_compiled), black_box(batch)))
             },
         );
     }
@@ -1731,7 +1837,7 @@ fn numeric_kernel_benches(c: &mut Criterion) {
 
 /// Rows in a datetime kernel batch, which stays at the inline execution threshold like a numeric
 /// kernel batch.
-const DATETIME_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+const DATETIME_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 fn datetime_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -1854,14 +1960,7 @@ fn datetime_kernel_benches(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(program.name, failures.label()),
                 &batch,
-                |b, batch| {
-                    b.iter(|| {
-                        runtime.block_on(execute_benchmark_program(
-                            black_box(&compiled),
-                            black_box(batch),
-                        ))
-                    })
-                },
+                |b, batch| b.iter(|| runtime.execute(black_box(&compiled), black_box(batch))),
             );
         }
     }
@@ -2041,23 +2140,16 @@ fn calendar_kernel_benches(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(program.name, failures.label()),
                 &batch,
-                |b, batch| {
-                    b.iter(|| {
-                        runtime.block_on(execute_benchmark_program(
-                            black_box(&compiled),
-                            black_box(batch),
-                        ))
-                    })
-                },
+                |b, batch| b.iter(|| runtime.execute(black_box(&compiled), black_box(batch))),
             );
         }
     }
     group.finish();
 }
 
-/// Rows in every membership benchmark batch. It stays at the blocking threshold so no batch pays
-/// the blocking hop.
-const MEMBERSHIP_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+/// Rows in every membership benchmark batch. It stays at the inline limit so no batch pays the
+/// executor hop.
+const MEMBERSHIP_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 /// Set sizes on both sides of `SMALL_SET_CAPACITY`, where a set stops comparing a value with each
 /// element and looks it up by key instead.
@@ -2133,12 +2225,7 @@ fn membership_kernel_benches(c: &mut Criterion) {
                 &[("hit", DataType::Boolean)],
             );
             group.bench_with_input(BenchmarkId::new(name, size), &batch, |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&compiled),
-                        black_box(batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&compiled), black_box(batch)))
             });
         }
     }
@@ -2168,20 +2255,15 @@ fn membership_kernel_benches(c: &mut Criterion) {
         let compiled =
             compile_numeric_program(source, membership_schema(), &[("hit", output_type)]);
         group.bench_with_input(BenchmarkId::new(name, "columns"), &batch, |b, batch| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&compiled),
-                    black_box(batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&compiled), black_box(batch)))
         });
     }
     group.finish();
 }
 
-/// Rows in every network benchmark batch. It stays at the blocking threshold so no batch pays the
-/// blocking hop.
-const NETWORK_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+/// Rows in every network benchmark batch. It stays at the inline limit so no batch pays the
+/// executor hop.
+const NETWORK_KERNEL_ROWS: usize = INLINE_ROW_LIMIT;
 
 fn network_schema() -> StdArc<Schema> {
     StdArc::new(Schema::new(vec![
@@ -2300,20 +2382,15 @@ fn network_kernel_benches(c: &mut Criterion) {
     for (name, source, output_type) in programs {
         let compiled = compile_numeric_program(source, network_schema(), &[("out", output_type)]);
         group.bench_with_input(BenchmarkId::new(name, "columns"), &batch, |b, batch| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&compiled),
-                    black_box(batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&compiled), black_box(batch)))
         });
     }
     group.finish();
 }
 
-/// Rows in every JSON extraction benchmark batch. It stays at the blocking threshold so no batch
-/// pays the blocking hop.
-const JSON_EXTRACTION_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+/// Rows in every JSON extraction benchmark batch. It stays at the inline limit so no batch pays
+/// the executor hop.
+const JSON_EXTRACTION_ROWS: usize = INLINE_ROW_LIMIT;
 
 /// Four columns holding the same documents, so a program reading one field from each parses every
 /// document four times while a program reading four fields from one column parses it once.
@@ -2403,14 +2480,7 @@ fn json_extraction_benches(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new(program.name, "columns"),
             &batch,
-            |b, batch| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&compiled),
-                        black_box(batch),
-                    ))
-                })
-            },
+            |b, batch| b.iter(|| runtime.execute(black_box(&compiled), black_box(batch))),
         );
     }
     group.finish();
@@ -2552,10 +2622,10 @@ fn compile_conditional(program: &ConditionalProgram) -> Arc<CompiledProgram> {
 /// narrowed to the rows it selects should cost in proportion to those rows, an arm no row selects
 /// should cost almost nothing, and an arm over a vectorized kernel should stay flat.
 ///
-/// The batch is the largest the VM executes inline, so no hop to the blocking pool blurs what the
-/// arm itself costs; the batch-size sweep above covers the hop.
+/// The batch is the largest the VM executes inline, so no hop to the executor's workers blurs what
+/// the arm itself costs; the batch-size sweep above covers the hop.
 fn conditional_arm_benches(c: &mut Criterion) {
-    const ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+    const ROWS: usize = INLINE_ROW_LIMIT;
 
     let runtime = benchmark_runtime();
     let mut group = c.benchmark_group("conditional_arm");
@@ -2567,24 +2637,20 @@ fn conditional_arm_benches(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(program.name, selectivity.label()),
                 &selectivity,
-                |b, _| {
-                    b.iter(|| {
-                        runtime.block_on(execute_benchmark_program(
-                            black_box(&compiled),
-                            black_box(&batch),
-                        ))
-                    })
-                },
+                |b, _| b.iter(|| runtime.execute(black_box(&compiled), black_box(&batch))),
             );
         }
     }
     group.finish();
 }
 
-fn benchmark_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("benchmark runtime must build")
+fn benchmark_runtime() -> BenchmarkRuntime {
+    BenchmarkRuntime {
+        runtime: nervix_primitives::runtime::Builder::new_current_thread()
+            .build()
+            .expect("benchmark runtime must build"),
+        executor: Executor::default(),
+    }
 }
 
 fn execute_benches(c: &mut Criterion) {
@@ -2606,67 +2672,42 @@ fn execute_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_program");
     group.bench_function("arithmetic_filter_optimized_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
+            runtime.execute(
                 black_box(&arithmetic_compiled),
                 black_box(&arithmetic_batch),
-            ))
+            )
         })
     });
     group.bench_function("arithmetic_filter_unoptimized_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
+            runtime.execute(
                 black_box(&arithmetic_unoptimized),
                 black_box(&arithmetic_batch),
-            ))
+            )
         })
     });
     group.bench_function("string_builtins_optimized_8192", |b| {
-        b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
-                black_box(&string_compiled),
-                black_box(&string_batch),
-            ))
-        })
+        b.iter(|| runtime.execute(black_box(&string_compiled), black_box(&string_batch)))
     });
     group.bench_function("string_builtins_unoptimized_8192", |b| {
-        b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
-                black_box(&string_unoptimized),
-                black_box(&string_batch),
-            ))
-        })
+        b.iter(|| runtime.execute(black_box(&string_unoptimized), black_box(&string_batch)))
     });
     group.bench_function("long_tail_builtins_8192", |b| {
-        b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
-                black_box(&long_tail_compiled),
-                black_box(&long_tail_batch),
-            ))
-        })
+        b.iter(|| runtime.execute(black_box(&long_tail_compiled), black_box(&long_tail_batch)))
     });
     group.bench_function("literal_operands_8192", |b| {
         b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
+            runtime.execute(
                 black_box(&literal_operands_compiled),
                 black_box(&string_batch),
-            ))
+            )
         })
     });
     group.bench_function("regex_constant_patterns_8192", |b| {
-        b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
-                black_box(&regex_constant_compiled),
-                black_box(&regex_batch),
-            ))
-        })
+        b.iter(|| runtime.execute(black_box(&regex_constant_compiled), black_box(&regex_batch)))
     });
     group.bench_function("regex_argument_patterns_8192", |b| {
-        b.iter(|| {
-            runtime.block_on(execute_benchmark_program(
-                black_box(&regex_argument_compiled),
-                black_box(&regex_batch),
-            ))
-        })
+        b.iter(|| runtime.execute(black_box(&regex_argument_compiled), black_box(&regex_batch)))
     });
     group.finish();
 }
@@ -2708,70 +2749,33 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("arithmetic_filter", rows),
             &rows,
-            |b, _| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&arithmetic_compiled),
-                        black_box(&batch),
-                    ))
-                })
-            },
+            |b, _| b.iter(|| runtime.execute(black_box(&arithmetic_compiled), black_box(&batch))),
         );
         group.bench_with_input(BenchmarkId::new("numeric_compare", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&numeric_compare_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&numeric_compare_compiled), black_box(&batch)))
         });
 
         let batch = float_batch(rows);
         group.bench_with_input(BenchmarkId::new("float_arithmetic", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&float_arithmetic_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&float_arithmetic_compiled), black_box(&batch)))
         });
         group.bench_with_input(
             BenchmarkId::new("nullable_kernel_casts", rows),
             &rows,
             |b, _| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&nullable_casts_compiled),
-                        black_box(&batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&nullable_casts_compiled), black_box(&batch)))
             },
         );
 
         let batch = string_batch(rows);
         group.bench_with_input(BenchmarkId::new("string_builtins", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&string_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&string_compiled), black_box(&batch)))
         });
         group.bench_with_input(BenchmarkId::new("text_transform", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&text_transform_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&text_transform_compiled), black_box(&batch)))
         });
         group.bench_with_input(BenchmarkId::new("literal_operands", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&literal_operands_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&literal_operands_compiled), black_box(&batch)))
         });
 
         let batch = regex_batch(rows);
@@ -2779,43 +2783,25 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
             BenchmarkId::new("regex_constant_patterns", rows),
             &rows,
             |b, _| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&regex_constant_compiled),
-                        black_box(&batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&regex_constant_compiled), black_box(&batch)))
             },
         );
         group.bench_with_input(
             BenchmarkId::new("regex_argument_patterns", rows),
             &rows,
             |b, _| {
-                b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
-                        black_box(&regex_argument_compiled),
-                        black_box(&batch),
-                    ))
-                })
+                b.iter(|| runtime.execute(black_box(&regex_argument_compiled), black_box(&batch)))
             },
         );
 
         let batch = list_batch(rows);
         group.bench_with_input(BenchmarkId::new("list_builtins", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&list_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&list_compiled), black_box(&batch)))
         });
         group.bench_with_input(BenchmarkId::new("fixed_collection", rows), &rows, |b, _| {
             b.iter(|| {
                 runtime
-                    .block_on(execute_benchmark_program(
-                        black_box(&fixed_collection_compiled),
-                        black_box(&batch),
-                    ))
+                    .execute(black_box(&fixed_collection_compiled), black_box(&batch))
                     .assured("the fixed collection benchmark has valid inputs")
             })
         });
@@ -2826,10 +2812,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     runtime
-                        .block_on(execute_benchmark_program(
-                            black_box(&ragged_collection_compiled),
-                            black_box(&batch),
-                        ))
+                        .execute(black_box(&ragged_collection_compiled), black_box(&batch))
                         .assured("the ragged collection benchmark has valid inputs")
                 })
             },
@@ -2837,12 +2820,7 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
 
         let batch = stateful_batch(&key_projection_compiled, rows);
         group.bench_with_input(BenchmarkId::new("key_projection", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&key_projection_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&key_projection_compiled), black_box(&batch)))
         });
 
         let batch = stateful_batch(&window_aggregate_input_compiled, rows);
@@ -2851,32 +2829,22 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
             &rows,
             |b, _| {
                 b.iter(|| {
-                    runtime.block_on(execute_benchmark_program(
+                    runtime.execute(
                         black_box(&window_aggregate_input_compiled),
                         black_box(&batch),
-                    ))
+                    )
                 })
             },
         );
 
         let batch = correlation_batch(&correlate_where_compiled, rows);
         group.bench_with_input(BenchmarkId::new("correlate_where", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&correlate_where_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&correlate_where_compiled), black_box(&batch)))
         });
 
         let batch = correlation_batch(&correlate_output_compiled, rows);
         group.bench_with_input(BenchmarkId::new("correlate_output", rows), &rows, |b, _| {
-            b.iter(|| {
-                runtime.block_on(execute_benchmark_program(
-                    black_box(&correlate_output_compiled),
-                    black_box(&batch),
-                ))
-            })
+            b.iter(|| runtime.execute(black_box(&correlate_output_compiled), black_box(&batch)))
         });
     }
     group.finish();

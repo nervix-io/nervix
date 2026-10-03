@@ -11,8 +11,8 @@ use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
     DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
 };
+use nervix_primitives::sync::Arc;
 use tempfile::TempDir;
-use triomphe::Arc;
 
 use super::{
     BranchKey, ReplicatedWasmProcessorState, RuntimeState, RuntimeStatePlacement,
@@ -66,7 +66,11 @@ impl WasmCheckpointBenchmark {
                     identifier: processor.clone(),
                     branch_key: Some(key),
                 };
-                ReplicatedWasmProcessorState::new(placement, None)
+                ReplicatedWasmProcessorState::new(
+                    placement,
+                    None,
+                    Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+                )
             })
             .collect();
         Self {

@@ -13,7 +13,7 @@ It is responsible for:
 
 The most important property is that control-plane state is authoritative. A runtime node only exists because the control plane says it exists.
 
-Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them.
+Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
 
 In practice, the control plane covers:
 
@@ -81,7 +81,9 @@ The cluster owns the transaction, not the TCP or WebSocket connection. Its owner
 state, structured semantic statements, and commit progress are replicated. The original statement
 source is retained for display, but execution never reparses that text. `BEGIN`, queueing,
 `COMMIT`, and `REVERT` are leader operations; clients transparently follow the normal leader
-redirect, including for the initial `BEGIN`.
+redirect, including for the initial `BEGIN`. [Transactions Over The
+Protocol](./client-session-protocol.md#transactions-over-the-protocol) describes how a transaction
+travels over the client session protocol and how clients recover its requests exactly.
 
 A transaction is `OPEN`, `COMMITTING`, or finished as `COMMITTED`, `FAILED`, `REVERTED`, or
 `EXPIRED`. A client retains the transaction id and attaches it after reconnecting. Attach is
@@ -91,8 +93,8 @@ The transaction reports the domain it is bound to, and an attaching or reconnect
 that domain as its selected domain. An unclean transport loss or leadership change leaves an open
 transaction available for attach. Binding is leader-local soft state, so a leader that does not
 hold it reports the session as detached; clients treat that as a routing condition, attach the
-transaction again, and replay the command. A clean end of the session reverts a bound open
-transaction.
+transaction again, and replay the command. A session that its client closes cleanly, with no
+request in flight, reverts the open transaction bound to it on the leader.
 
 Only the bound domain's replicated configuration effects may be queued:
 
@@ -112,9 +114,9 @@ that bind the named resource.
 
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
-Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
-`UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate, non-transaction content. Run those
-statements outside `BEGIN`/`COMMIT`.
+Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, `RESTORE`, and node scheduling or membership
+operations (`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate,
+non-transaction content. Run those statements outside `BEGIN`/`COMMIT`.
 
 Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
 side-effect-free ordered plan, then checks the new statement against that plan. The planner uses one
@@ -296,7 +298,10 @@ state, pending count, progress, age, and idle time for live transactions and ret
 It also runs on its own beside an attached transaction without entering its queue or changing its
 session binding.
 
-An unbound `OPEN` transaction expires after its idle timeout; a bound transaction does not, and a
+An `OPEN` transaction expires once it has been inactive for its idle timeout, whether or not a
+session is bound to it. Attaching it, appending to it, and a commit's admission or failure renew
+that deadline; an open connection, a session binding, and reads of the transaction do not. The
+deadline is a durable UTC instant, so time the cluster spends stopped counts toward it. A
 `COMMITTING` transaction never expires. Defaults and server settings are:
 
 | Setting | Environment variable | Default |
@@ -328,6 +333,12 @@ Scheduling uses only observations that are current when it computes and publishe
 changed topology or effective-health revision causes the candidate to be recomputed. A newer
 observation with the same effective health does not invalidate an otherwise current candidate.
 
+The leader's effective availability view also defines the required process incarnations for
+authoritative visibility, runtime preparation and readiness, and HTTPS listener installation.
+Connected followers fetch that view with the leader's Raft term before completing a command. If
+the leader has retired an unreachable node, a follower's independent healthy observation of that
+node does not keep its runtime barrier open. The local incarnation must still finish its own work.
+
 The current leader owns membership changes and serializes them one at a time. Learner admission or
 catch-up and voting-membership changes each have a ten-second wait deadline. When that deadline
 expires, Nervix stops waiting and observes effective committed membership again before a later
@@ -348,8 +359,8 @@ rule claims, applies rank resolution, rejects equal-rank policy conflicts, and f
 `REQUIRE COLOCATION` groups before publishing the schedule. A rejected candidate writes nothing
 and leaves the prior models and schedule active.
 
-Schedule publication preserves the existing primary and replicas of every single-owner ingestor
-while all cluster nodes in that assignment are live. Outbound WebSocket-client ingestors follow
+Schedule publication preserves the existing primary and replicas of every single-owner ingestor,
+client ingestors included, while all cluster nodes in that assignment are live. Outbound WebSocket-client ingestors follow
 this rule along with the other client sources, so unrelated graph changes, cluster-node joins or
 uncordons, and soft placement changes do not restart their external sessions. Endpoint-source and
 Syslog ingestors are the only ingestors whose assignments follow live membership, because their
@@ -409,7 +420,10 @@ operator `PAUSE` or `RESUME` statement.
   drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
   only the affected ingestor instances under their declared source mode, then starts their desired
   source configuration from the published schedule. A `SET QUIESCE` operation still uses this
-  level; the mode active when the hold began governs that hold. Reingestor alterations replace their relay consumers and
+  level; the mode active when the hold began governs that hold. A client ingestor suspends
+  admission for the hold, and its producers stay attached across the swap unless the alteration
+  changed their endpoint contract; see [Client Ingestors](./ingestors.md#client-ingestors).
+  Reingestor alterations replace their relay consumers and
   branch-entrypoint wiring; generator alterations quiesce and replace their timed task after
   flushing pending route output.
   Correlator, window-processor, inferencer, and WASM-processor structural changes use this level
@@ -437,6 +451,14 @@ operator `PAUSE` or `RESUME` statement.
   removing a vhost's TLS, binding a vhost to another TLS resource, and branch schema, TTL, and
   eviction settings. Their consumers read that configuration when they are built, so the domain
   rebuilds around the new models rather than reconfiguring in place.
+
+For an HTTP emitter, the method and path expressions are part of its sink definition. Replacing
+them, the client reference, body selection, or retry mode takes `ENTITY_PAUSE`; a `FLUSH`-only
+alteration remains `DYNAMIC`. The gate keeps the admitted request with its original destination
+and prepared bytes until the old task drains. If it cannot drain, the mutation remains unapplied.
+A transaction that drops and recreates the same emitter evaluates its complete candidate as one
+model change and still drains the old emitter before replacement. Changes to a client's own
+definition use the configuration-entity `DOMAIN_PAUSE` above.
 
 An entity-paused model change also gates everything downstream of the affected model, so a
 dependent node cannot observe a half-applied change through its input relay.
@@ -486,6 +508,48 @@ operation serves every trigger: the `RESET WASM PROCESSOR ... STATE` statement, 
 records as an ordered effect rather than a model mutation, a guest's request for a new lifetime of
 its own branch, and `ON REJECTED STATE RESET`. See
 [Coordinated Reset](./wasm-state.md#coordinated-reset).
+
+## Restoring A Backup
+
+A restore is a persistent administrative command whose progress is replicated state; the operator
+view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
+under its execution reference only after the archive verified and the whole restore planned, and
+admission takes the mutation lease of every domain the restore creates. The admitted execution
+records the `RESTORE` statement, the size and digest of its archive, every step the restore has
+applied, and what its users step did. The terminal result stores the typed restore report beside
+the outcome, so a retry after the restore finished returns the same report.
+
+Two consensus commands change the cluster on a restore's behalf. Each is refused unless the
+execution it names is an applying restore:
+
+- **Apply restore step** applies one step's effect and records the step in the restore's execution,
+  in one command. The users step imports every archived user with its password hash under the
+  user policy, and checks every user before it writes any. A domain step creates the domain stopped,
+  with its declared resources and their version sequences, only under the restore's lease and only
+  where neither the domain nor a catalog of those resources exists. The resource and model steps of
+  a domain carry no effect of their own: they record that the commands which applied the domain's
+  versions or models are complete. A step already recorded changes nothing, and a step whose
+  prerequisite is not recorded is refused: a cluster restore imports its users before it creates a
+  domain, and each domain is created, then given its resource versions, then its models.
+- **Import resource version** publishes one completed version under its archived number, as
+  [Restored Versions](./resource-versions.md#restored-versions) describes. It is refused before
+  the domain is created, and, for a version not imported yet, once the domain's resource step is
+  recorded.
+
+A domain's models are applied as one direct model batch under the restore's lease, with full graph
+validation and the leader's content checks, and without the statement and source-byte limits of a
+transaction. The lease keeps every other command from changing the domain while the restore holds
+it, so a leader that finds exactly the archived models already committed knows that an earlier
+attempt applied them, and records the step without applying them again.
+
+A step's effect and its record commit together, and an import or a model batch that committed
+before its step was recorded is recognized rather than repeated, so a leader that resumes a restore
+never applies a step's effect twice, whether or not an earlier leader's last proposal committed.
+Only the node a client streamed the archive to holds it. Reconciliation therefore leaves an
+applying restore alone on a leader without its archive, and the restore resumes from its first
+step not recorded when a retry streams the archive to that leader. Once the retry validity of the
+execution reference ends without one, the leader finishes the restore as failed, and the steps it
+recorded stay applied.
 
 ## Planned Ownership Handoffs And Failover
 
@@ -599,9 +663,11 @@ the drain until its timeout. When every node terminates at once, each node compl
 admitted work within its own drain timeout, and work that reaches a peer after that peer finished
 its drain is negatively acknowledged.
 
-`DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
-gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
-can join the cluster normally.
+`DROP NODE` records the stopped process incarnation before removing its Raft membership. It reads
+the newest identity from both live gossip and the failure detector's dead process identities, so a
+node can still be removed after Chitchat stops reporting it as live. Delayed gossip cannot admit
+that process again. Starting the node again creates a newer incarnation, which can join the cluster
+normally.
 
 Unexpected owner loss remains a termination and uses the failover path. The failed task and its
 volatile buffers disappear immediately, attached work is negatively acknowledged, and the scheduler

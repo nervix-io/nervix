@@ -28,6 +28,12 @@ which nodes exist in a domain, which server is primary for each node, and which 
 replicas. A relay is one of those runtime nodes: it has one owner, and only materialized relay state
 has scheduler-selected replicas.
 
+The decision layer converts each committed domain schedule into one in-memory typed execution
+revision, including node identity, placement, branch and schema contracts, resources, source and
+sink plans, processor programs, and message-error routes. The runtime binds local resources and
+executes that revision without reading a Model. [Execution Plans](./execution-plans.md) follows
+construction, publication, incremental application, rebuilds, and recovery end to end.
+
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
 Before a transaction changes that graph, the control plane plans its ordered execution steps and
@@ -70,10 +76,15 @@ boundary, its source and sink families, delivery and commit points, special inte
 failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
 public NSPL forms.
 
-Every expression follows the same one-way conversion. Parsing produces expression Models, the
-expression VM lowers each Model once into a program and compiles it against exact types and
-sensitivity, and the data plane executes the compiled program over Arrow batches with a caller-supplied
-domain timestamp. Registry validation uses the same compiler when a statement is applied. The
+[HTTP Emitter Architecture](./http-emitter-architecture.md) traces one HTTP request from its
+validated configuration and Arrow source record through preparation, response classification,
+retry, acknowledgement, and recovery, with the one- and three-node qualification evidence.
+
+Every expression follows the same one-way conversion. Parsing produces expression Models;
+registry validation compiles them to check exact types and sensitivity. The decision layer lowers
+the committed schedule into typed programs, and node installation compiles them against its bound
+schemas and UDFs. The data plane executes those programs over Arrow batches with a caller-supplied
+domain timestamp. The
 [VM Functions](./vm-functions.md) chapter defines that pipeline, columnar execution and its
 selected-row conditionals, row and batch errors, kernel and SIMD choices, every function family,
 branch-local window aggregates and sketches, and how to add a function. [Expression
@@ -117,6 +128,18 @@ the node. Application health is observed separately from transport connectivity.
 The [Cluster Interconnect](./interconnect.md) chapter defines peer identity, connection topology,
 wire contracts, resource isolation, exchange forms, relay delivery and reconciliation, consensus
 and bulk traffic, domain-clock progress, application health, lifecycle behavior, and observability.
+
+Clients reach the cluster through a separate public boundary. Every node serves the client session
+protocol: FlatBuffers frames, verified against one public schema and bounded by fixed session
+limits, over native gRPC and the console's binary WebSocket. A request identity pairs each reply
+with its request, while a durable execution reference names a command's effects across retries,
+redirects, reconnects, and restarts, so a client recovers an uncertain outcome exactly instead of
+repeating it. Row subscriptions deliver typed cells encoded directly from Arrow columns.
+
+The [Client Session Protocol](./client-session-protocol.md) chapter defines that boundary, its
+framing, correlation, dispositions, exact recovery, redirect and reconnection, subscriptions,
+uploads, bindings, and guarantees, and the [Client Implementation
+Manual](./client-implementation-manual.md) states what a client implementation must do.
 
 Stopping a node is its own ordered lifecycle. One owner advertises that the process incarnation is
 terminating, closes public admission, keeps the services admitted work depends on alive while the

@@ -49,6 +49,7 @@ Feature: Generator node
       | 1            |
       | 3            |
 
+  @retained_task_handles
   Scenario Outline: Generator materialized state and output remain isolated per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -144,6 +145,82 @@ Feature: Generator node
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+      | 3            | 1             |
+
+  @execution_resource_plan
+  Scenario Outline: Generator recreates only the evicted concrete branch after restart
+    Given branched relay expiration scan interval is configured as "100ms"
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (tenant STRING, amount I64);
+      CREATE SCHEMA generated_notification (tenant STRING, total I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (tenant string, amount integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE SCHEMA tenant_branch_schema (tenant STRING);
+      CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY tenant_branch
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
+      CREATE VHOST edge generator-lru-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR notification_source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TIMESTAMP NOW
+        TO notifications INHERIT ALL BRANCHED BY tenant_branch
+          SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms
+        BRANCHED BY tenant_branch
+        TO generated_notifications
+          SET tenant = branch.tenant, total = relay_state.notifications.amount
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION generated_subscription TO generated_notifications;
+      START;
+      """
+    When http payload is posted to host "generator-lru-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","amount":10}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      key={"tenant":"acme"} payload={"tenant":"acme","total":10}
+      """
+    When http payload is posted to host "generator-lru-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","amount":20}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      key={"tenant":"beta"} payload={"tenant":"beta","total":20}
+      """
+    And within "5s" node "node-1" eventually reports describe relay as "not exists"
+      """
+      DESCRIBE RELAY notifications WHERE (tenant = 'acme');
+      """
+    When the cluster is restarted
+    Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports status containing "{{domain}} status=Running"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION generated_after_restart TO generated_notifications;
+      """
+    When http payload is posted to host "generator-lru-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","amount":30}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      key={"tenant":"acme"} payload={"tenant":"acme","total":30}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
       | 3            | 1             |
 
   Scenario Outline: Generator projects columnar materialized state and branch keys

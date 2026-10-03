@@ -7,16 +7,23 @@
 
 use std::time::Duration;
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::CommandRequest;
 use nervix_consensus::{
-    ReplicatedTransaction, TransactionActivity, TransactionOutcome, TransactionState,
+    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionActivity,
+    TransactionMutationError, TransactionOutcome, TransactionState,
 };
+#[cfg(feature = "testing")]
+use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
 use nervix_models::{
-    CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ModelName, Timestamp,
-    TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
+    CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ImpactPlanningBasis, ModelName,
+    Timestamp, TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
+    TransactionPreviewIdentity,
 };
 
+#[cfg(feature = "testing")]
+use super::super::test_fixtures::build_test_service_with_probe;
 use super::{
     super::{
         command_result::CommandDiagnostic,
@@ -46,7 +53,201 @@ fn planning_error_message_includes_attached_validation_detail() {
     );
 }
 
-#[tokio::test]
+#[test]
+fn transaction_commit_proposal_retains_consensus_failure_for_display_and_redirect() {
+    let error = Report::new(ConsensusError::LeadershipLost { leader_id: None })
+        .change_context(ConsensusTransactionError::Consensus)
+        .change_context(super::TransactionCommitError::Proposal);
+
+    assert!(matches!(
+        error.downcast_ref::<ConsensusError>(),
+        Some(ConsensusError::LeadershipLost { leader_id: None })
+    ));
+    assert_eq!(
+        super::transaction_commit_error_message(&error),
+        "raft proposal lost leadership"
+    );
+}
+
+#[test]
+fn transaction_commit_preserves_mutation_conflict_reason() {
+    let error = Report::new(ConsensusTransactionError::Mutation(
+        TransactionMutationError::StepConflict {
+            id: "tx-conflict".to_string(),
+            reason: "schedule changed".to_string(),
+        },
+    ))
+    .change_context(super::TransactionCommitError::Proposal);
+
+    assert_eq!(
+        error.current_context().planning_input_conflict(&error),
+        Some("schedule changed")
+    );
+    assert_eq!(
+        super::transaction_commit_error_message(&error),
+        "transaction 'tx-conflict' commit step conflicted with replicated state: schedule changed"
+    );
+
+    let planning = Report::new(super::TransactionCommitError::PlanningInputsChanged {
+        id: "tx-conflict".to_string(),
+        reason: "schema changed".to_string(),
+    });
+    assert_eq!(
+        planning
+            .current_context()
+            .planning_input_conflict(&planning),
+        Some("schema changed")
+    );
+}
+
+#[test]
+fn transaction_commit_message_uses_the_owning_error_without_a_nested_cause() {
+    let error = Report::new(super::TransactionCommitError::TaskJoin {
+        id: "tx-join".to_string(),
+    });
+    assert_eq!(
+        error.current_context().planning_input_conflict(&error),
+        None
+    );
+    assert_eq!(
+        super::transaction_commit_error_message(&error),
+        "transaction 'tx-join' commit task failed"
+    );
+}
+
+#[nervix_primitives::test]
+async fn transaction_consensus_response_keeps_storage_and_mutation_classifications() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(true).await;
+
+    let storage =
+        Report::new(ConsensusError::Storage).change_context(ConsensusTransactionError::Consensus);
+    let response = service.transaction_consensus_error_response(storage).await;
+    assert!(!response.succeeded(), "{response:?}");
+    assert!(
+        response.message.contains("consensus storage"),
+        "{response:?}"
+    );
+
+    let missing_cause = Report::new(ConsensusTransactionError::Consensus);
+    let response = service
+        .transaction_consensus_error_response(missing_cause)
+        .await;
+    assert!(!response.succeeded(), "{response:?}");
+    assert!(
+        response.message.contains("consensus proposal failed"),
+        "{response:?}"
+    );
+
+    let mutation = Report::new(ConsensusTransactionError::Mutation(
+        TransactionMutationError::StepConflict {
+            id: "tx-conflict".to_string(),
+            reason: "schedule changed".to_string(),
+        },
+    ));
+    let response = service.transaction_consensus_error_response(mutation).await;
+    assert!(!response.succeeded(), "{response:?}");
+    assert!(
+        response.message.contains("schedule changed"),
+        "{response:?}"
+    );
+
+    let mutation = Report::new(ConsensusTransactionError::Mutation(
+        TransactionMutationError::StepConflict {
+            id: "tx-conflict".to_string(),
+            reason: "schedule changed".to_string(),
+        },
+    ));
+    let response = service
+        .transaction_commit_admission_response(mutation)
+        .await;
+    assert!(!response.succeeded(), "{response:?}");
+    assert!(
+        response.message.contains("schedule changed"),
+        "{response:?}"
+    );
+
+    let expected = Box::new(TransactionPreviewIdentity {
+        transaction_id: "tx-preview".to_string(),
+        position: TransactionPosition::new(1),
+        planning_basis: ImpactPlanningBasis::new([1; 32]),
+    });
+    let current = Box::new(TransactionPreviewIdentity {
+        transaction_id: "tx-preview".to_string(),
+        position: TransactionPosition::new(2),
+        planning_basis: ImpactPlanningBasis::new([2; 32]),
+    });
+    let stale = Report::new(ConsensusTransactionError::Mutation(
+        TransactionMutationError::PreviewStale { expected, current },
+    ));
+    let response = service.transaction_commit_admission_response(stale).await;
+    assert!(matches!(
+        response.disposition,
+        super::CommandDisposition::PreviewStale { .. }
+    ));
+    assert!(
+        response.message.contains("nothing was applied"),
+        "{response:?}"
+    );
+
+    drop(service);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn empty_transaction_commit_storage_failure_is_reported() {
+    let probe = ConsensusTestProbe::default();
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service_with_probe(true, probe.clone()).await;
+    let id = "empty-storage-failure".to_string();
+    let owner = SessionSubscriptions::new().user;
+    let activity = service.transaction_activity();
+    let transaction = ReplicatedTransaction::open(
+        id.clone(),
+        DomainName::parse("default").assured("the test domain name is valid"),
+        owner.clone(),
+        activity,
+    );
+    service
+        .inner
+        .consensus
+        .open_transaction(transaction, DEFAULT_TRANSACTION_MAX_OPEN)
+        .await
+        .assured("the test transaction opens below the admission limit");
+    probe.storage_fault().fail_next(
+        format!("finish-empty-transaction-commit:{id}"),
+        StorageBoundary::BeforeCommit,
+    );
+
+    let result = service
+        .commit_identified_transaction(id.clone(), owner, activity, None)
+        .await;
+    assert!(!result.succeeded(), "{result:?}");
+    assert!(result.message.contains("consensus storage"), "{result:?}");
+    assert!(matches!(
+        service
+            .inner
+            .consensus
+            .current_transaction(&id)
+            .await
+            .map(|tx| tx.state),
+        Some(TransactionState::Committing(_))
+    ));
+
+    drop(service);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[nervix_primitives::test]
 async fn attaching_an_overdue_transaction_atomically_expires_it() {
     let TestService {
         service,
@@ -141,7 +342,7 @@ fn transaction_recovery_rotates_fairly_after_the_last_considered_identity() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
     let TestService {
         service,
@@ -228,7 +429,7 @@ async fn process_command_commits_explicit_transaction_without_trailing_semicolon
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_queues_transaction_across_requests_and_reverts() {
     let TestService {
         service,
@@ -338,7 +539,7 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_begin_inside_begin() {
     let TestService {
         service,
@@ -388,7 +589,7 @@ async fn process_command_rejects_begin_inside_begin() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_domain_and_user_creation_inside_a_transaction() {
     let TestService {
         service,
@@ -454,7 +655,7 @@ async fn process_command_rejects_domain_and_user_creation_inside_a_transaction()
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_begin_without_an_existing_domain() {
     let TestService {
         service,
@@ -499,7 +700,7 @@ async fn process_command_rejects_begin_without_an_existing_domain() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_statements_selecting_another_domain() {
     let TestService {
         service,
@@ -564,7 +765,7 @@ async fn process_command_rejects_statements_selecting_another_domain() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
     let TestService {
         service,

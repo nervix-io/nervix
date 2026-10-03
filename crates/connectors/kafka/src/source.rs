@@ -23,6 +23,10 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, Timestamp, TopicName};
+use nervix_primitives::{
+    sync::{Arc, watch},
+    time::{Instant, sleep_until},
+};
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -30,12 +34,7 @@ use rdkafka::{
     topic_partition_list::{Offset, TopicPartitionList},
 };
 use thiserror::Error;
-use tokio::{
-    sync::watch,
-    time::{Instant, sleep_until},
-};
-use tracing::warn;
-use triomphe::Arc;
+use tracing::{debug, warn};
 
 const KAFKA: &str = "kafka";
 const DOMAIN_ASSIGNMENT_RETRY: Duration = Duration::from_millis(100);
@@ -79,9 +78,24 @@ pub type KafkaDomainOffsetResult<T> = Result<T, Report<KafkaDomainOffsetError>>;
 
 /// Runtime services used only by Kafka's domain-owned offset mode.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained host service is invoked by each admitted driver operation"
+    )
+)]
 pub trait KafkaDomainOffsetServices: Send + Sync + 'static {
     fn generation(&self) -> Option<u64>;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a resumed Kafka driver resolves its initial assigned offsets before \
+                      consuming records"
+        )
+    )]
     async fn initialization(
         &self,
         partitions: &[i32],
@@ -119,7 +133,13 @@ impl KafkaDomainOffsetHost {
         &self,
         partitions: &[i32],
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
-        self.inner.services.initialization(partitions).await
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Kafka resume installs its exact domain-offset placement before polling; the source \
+             retains the resulting position",
+            self.inner.services.initialization(partitions)
+        )
+        .await
     }
 
     pub async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
@@ -185,6 +205,8 @@ pub enum KafkaSourceError {
     UnsupportedDomainOffset { topic: String, partition: i32 },
     #[error("failed to seek Kafka topic '{topic}' partition {partition}")]
     Seek { topic: String, partition: i32 },
+    #[error("failed to read the Kafka partition assignment for topic '{topic}'")]
+    ReadAssignment { topic: String },
     #[error("Kafka topic '{topic}' partition {partition} returned the maximum offset")]
     OffsetOverflow { topic: String, partition: i32 },
     #[error("Kafka batch timeout exceeds the monotonic clock range")]
@@ -451,7 +473,7 @@ impl BrokerSourceConnector for KafkaSource {
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let first = match &mut self.offset_mode {
             KafkaSourceOffsetMode::Domain { rebalance, .. } => {
-                tokio::select! {
+                nervix_primitives::select! {
                     changed = rebalance.changed() => {
                         return if changed.is_ok() {
                             Ok(SourceBatch::ResumeRequired)
@@ -485,8 +507,8 @@ impl BrokerSourceConnector for KafkaSource {
                 .attach(KafkaSourceError::BatchDeadline)
         })?;
         while messages.len() < request.max_messages.get() {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = sleep_until(deadline) => break,
                 next = self.consumer.recv() => {
                     match next {
@@ -514,7 +536,7 @@ impl BrokerSourceConnector for KafkaSource {
                 .change_context(SourceError::Acknowledge { connector: KAFKA }),
             KafkaSourceOffsetMode::Domain { offsets, .. } => {
                 for position in positions {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     offsets
                         .commit(position)
                         .await
@@ -528,8 +550,25 @@ impl BrokerSourceConnector for KafkaSource {
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let starts = earliest_message_offsets(positions)
             .change_context(SourceError::Reject { connector: KAFKA })?;
+        let assigned = self
+            .assigned_partitions()
+            .change_context(SourceError::Reject { connector: KAFKA })?;
         for position in starts {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
+            // Kafka can seek only a partition this consumer is fetching. A rebalance may have moved
+            // the partition to another group member while the batch was in flight; it needs no
+            // seek, because whichever member is assigned it next, this one included, resumes it
+            // from the committed offset, and no offset past an unacknowledged record was committed.
+            if !assigned.contains(&position) {
+                debug!(
+                    topic = position.topic.as_str(),
+                    partition = position.partition,
+                    offset = position.offset,
+                    "rejected Kafka partition is no longer assigned; its next holder resumes it \
+                     from the committed offset"
+                );
+                continue;
+            }
             self.seek(&position)
                 .change_context(SourceError::Reject { connector: KAFKA })?;
         }
@@ -621,6 +660,19 @@ impl KafkaSource {
             })
     }
 
+    fn assigned_partitions(&self) -> Result<AssignedPartitions, Report<KafkaSourceError>> {
+        let assignment = self.consumer.assignment().map_err(|source| {
+            Report::new(KafkaSourceError::ReadAssignment {
+                topic: self.topic.as_str().to_string(),
+            })
+            .attach_printable(source.to_string())
+        })?;
+        Ok(AssignedPartitions::of_topic(
+            self.topic.as_str(),
+            &assignment,
+        ))
+    }
+
     fn seek(&self, position: &KafkaOffsetPosition) -> Result<(), Report<KafkaSourceError>> {
         self.consumer
             .seek(
@@ -636,6 +688,30 @@ impl KafkaSource {
                 })
                 .attach_printable(source.to_string())
             })
+    }
+}
+
+/// The partitions of the source topic that the consumer's current assignment holds.
+struct AssignedPartitions {
+    topic: String,
+    partitions: BTreeSet<i32>,
+}
+
+impl AssignedPartitions {
+    fn of_topic(topic: &str, assignment: &TopicPartitionList) -> Self {
+        let partitions = assignment
+            .elements_for_topic(topic)
+            .iter()
+            .map(|element| element.partition())
+            .collect();
+        Self {
+            topic: topic.to_string(),
+            partitions,
+        }
+    }
+
+    fn contains(&self, position: &KafkaOffsetPosition) -> bool {
+        position.topic == self.topic && self.partitions.contains(&position.partition)
     }
 }
 
@@ -729,6 +805,13 @@ fn topic_partitions(
         .collect())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the Kafka driver owns timestamp lookup and its caller-supplied partition \
+                  iterator"
+    )
+)]
 fn offsets_for_partitions_by_timestamp<I>(
     consumer: &StreamConsumer,
     topic: &str,
@@ -932,7 +1015,7 @@ impl TopicPartitionInspector {
     pub async fn partitions(&self, topic: &str) -> Result<Vec<i32>, Report<KafkaSourceError>> {
         let consumer = self.consumer.clone();
         let topic = topic.to_string();
-        tokio::task::spawn_blocking(move || topic_partitions(&consumer, &topic))
+        nervix_primitives::task::spawn_blocking(move || topic_partitions(&consumer, &topic))
             .await
             .map_err(|source| {
                 Report::new(KafkaSourceError::InspectPartitions)
@@ -988,5 +1071,33 @@ mod tests {
             earliest_message_offsets(&positions).assured("the positions are positive")[0].offset,
             11,
         );
+    }
+
+    #[test]
+    fn kafka_rewinds_only_partitions_the_consumer_is_assigned() {
+        let mut assignment = TopicPartitionList::new();
+        assignment.add_partition("events", 0);
+        assignment.add_partition("events", 2);
+        assignment.add_partition("audit", 1);
+        let assigned = AssignedPartitions::of_topic("events", &assignment);
+
+        let assigned_start = KafkaOffsetPosition {
+            topic: "events".to_string(),
+            partition: 2,
+            offset: 7,
+        };
+        let moved_start = KafkaOffsetPosition {
+            topic: "events".to_string(),
+            partition: 1,
+            offset: 7,
+        };
+        let other_topic_start = KafkaOffsetPosition {
+            topic: "audit".to_string(),
+            partition: 1,
+            offset: 7,
+        };
+        assert!(assigned.contains(&assigned_start));
+        assert!(!assigned.contains(&moved_start));
+        assert!(!assigned.contains(&other_topic_start));
     }
 }

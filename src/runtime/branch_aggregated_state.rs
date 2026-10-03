@@ -1,10 +1,7 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-use ahash::RandomState;
-use nervix_execution::sync::DashMap;
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
@@ -18,24 +15,40 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one branch state placement",
+        bound = "one installed primary/replica role set and synchronous role replacement",
+        reason = "assignment roles belong to the retained replicated state"
+    )
+)]
 pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
-    roles: parking_lot::RwLock<StateReplicationRoles>,
+    roles: nervix_primitives::sync::blocking::RwLock<StateReplicationRoles>,
     pub(super) physical_node_id: ClusterNodeName,
     pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     pub(super) dirty: AtomicBool,
-    pub(super) replica_progress: DashMap<String, u64, RandomState>,
-    pub(super) replication_notify: Notify,
+    /// What each replica reported holding and the offer of the newest snapshot to them while this
+    /// node aggregates the metrics, and the owner's announcements while it replicates them.
+    replication: CheckpointReplication,
 }
 
 impl ReplicatedBranchAggregatedState {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
         physical_node_id: ClusterNodeName,
-        _replica_nodes: Vec<ClusterNodeName>,
-        _required_replica_acks: usize,
         metrics: &RuntimeMetrics,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> Result<Self, RuntimePersistenceError> {
@@ -55,13 +68,14 @@ impl ReplicatedBranchAggregatedState {
         }
         Ok(Self {
             placement,
-            roles: parking_lot::RwLock::new(StateReplicationRoles::owned_by(primary_node)),
+            roles: nervix_primitives::sync::blocking::RwLock::new(StateReplicationRoles::owned_by(
+                primary_node,
+            )),
             physical_node_id,
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
             dirty: AtomicBool::new(false),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
+            replication: CheckpointReplication::new(),
         })
     }
 
@@ -73,12 +87,24 @@ impl ReplicatedBranchAggregatedState {
         *self.roles.write() = roles;
     }
 
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
+    }
+
     pub(super) fn mark_metrics_updated(&self) -> u64 {
         let lsm = self.current_lsm.advance();
         self.dirty.store(true, Ordering::SeqCst);
         lsm
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn latest_snapshot(
         &self,
         metrics: &RuntimeMetrics,
@@ -97,6 +123,14 @@ impl ReplicatedBranchAggregatedState {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn apply_snapshot(
         &self,
         metrics: &RuntimeMetrics,
@@ -113,10 +147,17 @@ impl ReplicatedBranchAggregatedState {
         );
         self.current_lsm.adopt(lsm);
         self.dirty.store(true, Ordering::SeqCst);
-        self.replication_notify.notify_waiters();
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
     pub(super) fn restore_persisted_snapshot(
         &self,
         metrics: &RuntimeMetrics,
@@ -144,13 +185,7 @@ impl ReplicatedBranchAggregatedState {
         self.last_persisted_lsm
             .store(snapshot.lsm, Ordering::SeqCst);
         self.dirty.store(false, Ordering::SeqCst);
-        self.replication_notify.notify_waiters();
         Ok(())
-    }
-
-    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
-        self.replica_progress.insert(node_id.to_string(), lsm);
-        self.replication_notify.notify_waiters();
     }
 }
 

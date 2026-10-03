@@ -9,7 +9,7 @@
 //!   client sends.
 //! - **Must not know.** How a transport frames, correlates or delivers what the pipeline returns.
 
-use std::sync::Arc as StdArc;
+use std::time::Duration;
 
 use ahash::RandomState;
 use futures_util::future::BoxFuture;
@@ -20,7 +20,6 @@ use nervix_client_wire::{
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
@@ -30,24 +29,25 @@ use nervix_models::{
 use nervix_nspl::{
     Token, Word,
     client_statement::{
-        ClientStatement, CompletionExpectation, parse_client_statement_sources,
-        suggest_client_expectations, upload_resource_path_fragment, upload_resource_path_range,
+        ClientStatement, CompletionExpectation, local_path_fragment,
+        parse_client_statement_sources, suggest_client_expectations,
     },
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{Arc, CancellationToken, Mutex as AsyncMutex, StdArc, broadcast},
+};
 use nervix_recovery::Discarded;
 use nervix_vm::program::FunctionName;
-use tokio::{
-    sync::{Mutex as AsyncMutex, broadcast},
-    time::Duration,
-};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
+    backup::ServerRetainedBackups,
+    client_consumers::ClientConsumerRouter,
+    client_producers::ClientProducerRouter,
     command_execution::{
         CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
     },
@@ -55,18 +55,21 @@ use super::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
     },
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
+    configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
     resource::{
         completed_resource_version_suggestions, resource_named_before_version,
         resource_ref_suggestions, resource_version_suggestions,
     },
+    restore::ServerRestoreArchives,
     runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
     subscription::{
         SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
+        SubscriptionSampler,
     },
     tls::HttpsListenerCertificates,
     transaction::TransactionRecovery,
@@ -163,7 +166,14 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) events: SessionEvents,
     /// Also held by every subscription delivery, whose interest lease releases into it.
     pub(in crate::application) subscription_interests: SubscriptionInterests,
+    /// The draws every subscription on this node samples its rows with.
+    pub(in crate::application) subscription_sampler: SubscriptionSampler,
     pub(in crate::application) interconnect: Transport,
+    /// Attaches the producers of this node's sessions, locally or through the node that executes
+    /// their ingestor.
+    pub(in crate::application) client_producers: ClientProducerRouter,
+    /// Routes each client emitter consumer to its current execution owner.
+    pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
@@ -195,6 +205,12 @@ pub(in crate::application) struct SessionServiceInner {
     /// Repeated observations of the same missing version join that one installation.
     pub(in crate::application) resource_replication_executions:
         DashMap<ResourceId, StdArc<AsyncMutex<()>>, RandomState>,
+    /// The archives this node's backups assembled, until a download collects each or its retry
+    /// validity ends.
+    pub(in crate::application) retained_backups: ServerRetainedBackups,
+    /// The verified archives this node's restores read, until each restore finishes or its retry
+    /// validity ends.
+    pub(in crate::application) restore_archives: ServerRestoreArchives,
 }
 
 /// The node-local handles that install the newest admitted runtime state.
@@ -228,7 +244,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
     Box::pin(async move {
         let local_node_id = consensus.local_node_id();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(installation) = admission.begin_installation(shutdown).await else {
                 return Ok(());
             };
@@ -243,14 +259,8 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
                 warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
             }
-            let runtime_application = runtime
-                .apply_cluster_state(
-                    local_node_id,
-                    state.revision,
-                    &state.domains,
-                    &state.domain_clock_authorities,
-                    &state.schedule,
-                )
+            let runtime_application = admission
+                .apply_planned_cluster_state(runtime, local_node_id, &state)
                 .await;
             // The listener presents the certificates of the same revision before this node reports
             // it prepared. A failed installation keeps the certificates already presented and is
@@ -266,7 +276,16 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     "failed to install the HTTPS listener TLS configuration"
                 );
             }
-            runtime_application?;
+            runtime_application.map_err(|error| {
+                crate::runtime::RuntimeError::BuildDomainExecution {
+                    domain: "cluster".to_string(),
+                    reason: format!("{error:#}"),
+                }
+            })?;
+            #[cfg(feature = "testing")]
+            runtime
+                .pause_runtime_preparation_if_armed(local_node_id)
+                .await;
             cluster
                 .set_local_runtime_revision_prepared(state.revision)
                 .await;
@@ -291,7 +310,9 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     },
                 );
             };
-            let Some(deadline) = tokio::time::Instant::now().checked_add(readiness_timeout) else {
+            let Some(deadline) =
+                nervix_primitives::time::Instant::now().checked_add(readiness_timeout)
+            else {
                 return Err(
                     crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                         node_unavailability_timeout,
@@ -301,6 +322,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             };
             let preparation = wait_for_application_revision(
                 cluster,
+                consensus,
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimePrepared,
@@ -309,7 +331,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             tokio::pin!(preparation);
             let supersession = consensus.wait_for_runtime_revision_after(state.revision);
             tokio::pin!(supersession);
-            let preparation_result = tokio::select! {
+            let preparation_result = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return Ok(()),
                 newer_revision = &mut supersession => {
@@ -361,7 +383,10 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 );
                 continue;
             }
-            runtime.start_running_domain_ingestors().await?;
+            runtime
+                .start_running_domain_ingestors()
+                .await
+                .map_err(|report| crate::runtime::RuntimeError::IngestorStart { report })?;
             debug!(
                 %local_node_id,
                 revision = state.revision,
@@ -373,6 +398,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             drop(activation);
             let readiness = wait_for_application_revision(
                 cluster,
+                consensus,
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimeReady,
@@ -381,7 +407,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             tokio::pin!(readiness);
             let supersession = consensus.wait_for_runtime_revision_after(state.revision);
             tokio::pin!(supersession);
-            let readiness_result = tokio::select! {
+            let readiness_result = nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => return Ok(()),
                 newer_revision = &mut supersession => {
@@ -776,6 +802,7 @@ struct CompletionPageBasis {
 struct ChoicePageBasis {
     revision: u64,
     query_digest: String,
+    content_digest: Option<String>,
 }
 
 impl ChoicePageBasis {
@@ -784,6 +811,39 @@ impl ChoicePageBasis {
         hasher.update(&[match request.target() {
             ChoiceTarget::DomainPace => 0,
             ChoiceTarget::PlacementPolicy => 1,
+            ChoiceTarget::Schema => 2,
+            ChoiceTarget::Branch => 3,
+            ChoiceTarget::Relay => 4,
+            ChoiceTarget::RelayField => 5,
+            ChoiceTarget::WireJsonSchema => 6,
+            ChoiceTarget::WireCborSchema => 7,
+            ChoiceTarget::WireAvroSchema => 8,
+            ChoiceTarget::Resource => 9,
+            ChoiceTarget::CompletedResourceVersion => 10,
+            ChoiceTarget::Vhost => 11,
+            ChoiceTarget::SignalingProtocol => 12,
+            ChoiceTarget::Codec => 13,
+            ChoiceTarget::CodecField => 14,
+            ChoiceTarget::IngestHttpSource => 15,
+            ChoiceTarget::IngestKafkaSource => 16,
+            ChoiceTarget::IngestPulsarSource => 17,
+            ChoiceTarget::IngestMqttSource => 18,
+            ChoiceTarget::IngestNatsSource => 19,
+            ChoiceTarget::IngestRabbitMqSource => 20,
+            ChoiceTarget::IngestRedisPubSubSource => 21,
+            ChoiceTarget::IngestPrometheusSource => 22,
+            ChoiceTarget::IngestZeroMqSource => 23,
+            ChoiceTarget::IngestSqsSource => 24,
+            ChoiceTarget::IngestEndpointSource => 25,
+            ChoiceTarget::IngestWebsocketsSource => 26,
+            ChoiceTarget::IngestSyslogSource => 27,
+            ChoiceTarget::IngestCodec => 28,
+            ChoiceTarget::IngestUnbranchedRelay => 29,
+            ChoiceTarget::IngestBranchedRelay => 30,
+            ChoiceTarget::BranchField => 31,
+            ChoiceTarget::ProcessorCompatibleInputRelay => 32,
+            ChoiceTarget::ProcessorInputBranchRelay => 33,
+            ChoiceTarget::ProcessorMaterializedRelay => 34,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -792,11 +852,18 @@ impl ChoicePageBasis {
         Self {
             revision,
             query_digest: hasher.finalize().to_hex().to_string(),
+            content_digest: None,
         }
+    }
+
+    fn with_content_digest(mut self, digest: String) -> Self {
+        self.content_digest = Some(digest);
+        self
     }
 
     fn page(&self, request: &ChoiceLookupRequest, candidates: Vec<Choice>) -> ChoiceOutcome {
         let mut candidate_hasher = blake3::Hasher::new();
+        hash_optional_choice_text(&mut candidate_hasher, self.content_digest.as_deref());
         for candidate in &candidates {
             hash_choice_value(&mut candidate_hasher, &candidate.value);
             hash_choice_text(&mut candidate_hasher, &candidate.presentation.label);
@@ -855,7 +922,7 @@ impl ChoicePageBasis {
     }
 }
 
-fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
+pub(in crate::application) fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
     let length =
         u64::try_from(value.len()).assured("choice text fits the bounded session transfer limit");
     hasher.update(&length.to_le_bytes());
@@ -904,10 +971,18 @@ fn hash_choice_value(hasher: &mut blake3::Hasher, value: &ChoiceValue) {
             hasher.update(&[3]);
             hash_choice_text(hasher, resource.as_str());
         }
+        ChoiceValue::ResourceVersion(version) => {
+            hasher.update(&[6]);
+            hash_choice_text(hasher, &version.to_string());
+        }
         ChoiceValue::Model(node) => {
             hasher.update(&[4]);
             hash_choice_text(hasher, node.kind.as_str());
             hash_choice_text(hasher, node.identifier.as_str());
+        }
+        ChoiceValue::Field(field) => {
+            hasher.update(&[5]);
+            hash_choice_text(hasher, field.as_str());
         }
     }
 }
@@ -981,7 +1056,45 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
             })
             .collect()
         }
-        ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => {
+        ChoiceTarget::DomainPace
+        | ChoiceTarget::PlacementPolicy
+        | ChoiceTarget::Schema
+        | ChoiceTarget::Branch
+        | ChoiceTarget::Relay
+        | ChoiceTarget::RelayField => {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        ChoiceTarget::WireJsonSchema
+        | ChoiceTarget::WireCborSchema
+        | ChoiceTarget::WireAvroSchema
+        | ChoiceTarget::Resource
+        | ChoiceTarget::CompletedResourceVersion => {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        ChoiceTarget::Vhost
+        | ChoiceTarget::SignalingProtocol
+        | ChoiceTarget::Codec
+        | ChoiceTarget::CodecField
+        | ChoiceTarget::IngestHttpSource
+        | ChoiceTarget::IngestKafkaSource
+        | ChoiceTarget::IngestPulsarSource
+        | ChoiceTarget::IngestMqttSource
+        | ChoiceTarget::IngestNatsSource
+        | ChoiceTarget::IngestRabbitMqSource
+        | ChoiceTarget::IngestRedisPubSubSource
+        | ChoiceTarget::IngestPrometheusSource
+        | ChoiceTarget::IngestZeroMqSource
+        | ChoiceTarget::IngestSqsSource
+        | ChoiceTarget::IngestEndpointSource
+        | ChoiceTarget::IngestWebsocketsSource
+        | ChoiceTarget::IngestSyslogSource
+        | ChoiceTarget::IngestCodec
+        | ChoiceTarget::IngestUnbranchedRelay
+        | ChoiceTarget::IngestBranchedRelay
+        | ChoiceTarget::BranchField
+        | ChoiceTarget::ProcessorCompatibleInputRelay
+        | ChoiceTarget::ProcessorInputBranchRelay
+        | ChoiceTarget::ProcessorMaterializedRelay => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1184,11 +1297,54 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn process_choice(
         &self,
         request: ChoiceLookupRequest,
+        session: &SessionView,
     ) -> ChoiceOutcome {
         let revision = self.inner.consensus.current_revision().await;
         let basis = ChoicePageBasis::new(&request, revision);
-        let choices = match choices_for(&request) {
-            Ok(choices) => choices,
+        let resolved = match request.target() {
+            ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => {
+                choices_for(&request).map(|choices| (choices, None))
+            }
+            ChoiceTarget::Schema
+            | ChoiceTarget::Branch
+            | ChoiceTarget::Relay
+            | ChoiceTarget::RelayField
+            | ChoiceTarget::WireJsonSchema
+            | ChoiceTarget::WireCborSchema
+            | ChoiceTarget::WireAvroSchema
+            | ChoiceTarget::Resource
+            | ChoiceTarget::CompletedResourceVersion => {
+                self.configured_choices_for(&request, session).await
+            }
+            ChoiceTarget::Vhost
+            | ChoiceTarget::SignalingProtocol
+            | ChoiceTarget::Codec
+            | ChoiceTarget::CodecField
+            | ChoiceTarget::IngestHttpSource
+            | ChoiceTarget::IngestKafkaSource
+            | ChoiceTarget::IngestPulsarSource
+            | ChoiceTarget::IngestMqttSource
+            | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestRabbitMqSource
+            | ChoiceTarget::IngestRedisPubSubSource
+            | ChoiceTarget::IngestPrometheusSource
+            | ChoiceTarget::IngestZeroMqSource
+            | ChoiceTarget::IngestSqsSource
+            | ChoiceTarget::IngestEndpointSource
+            | ChoiceTarget::IngestWebsocketsSource
+            | ChoiceTarget::IngestSyslogSource
+            | ChoiceTarget::IngestCodec
+            | ChoiceTarget::IngestUnbranchedRelay
+            | ChoiceTarget::IngestBranchedRelay
+            | ChoiceTarget::BranchField
+            | ChoiceTarget::ProcessorCompatibleInputRelay
+            | ChoiceTarget::ProcessorInputBranchRelay
+            | ChoiceTarget::ProcessorMaterializedRelay => {
+                self.configured_choices_for(&request, session).await
+            }
+        };
+        let (choices, content_digest) = match resolved {
+            Ok(resolved) => resolved,
             Err(status) => {
                 return ChoiceOutcome {
                     status,
@@ -1200,7 +1356,42 @@ impl SessionServiceImpl {
         if self.inner.consensus.current_revision().await != revision {
             return stale_choice_outcome();
         }
+        let basis = match content_digest {
+            Some(digest) => basis.with_content_digest(digest),
+            None => basis,
+        };
         basis.page(&request, choices)
+    }
+
+    /// Answers a question about the configuration of the domain `request` depends on, read with
+    /// the session's attached transaction prefix applied, so a model staged earlier in that
+    /// transaction is offered before commit.
+    async fn configured_choices_for(
+        &self,
+        request: &ChoiceLookupRequest,
+        session: &SessionView,
+    ) -> Result<(Vec<Choice>, Option<String>), ChoiceStatus> {
+        let Some(ConfiguredQuery { domain, question }) = ConfiguredQuery::of(request) else {
+            return Err(ChoiceStatus::MissingContext);
+        };
+        let domains = self.inner.consensus.current_domains().await;
+        if !domains.contains_key(domain) {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        let queued = self
+            .queued_configuration(session.binding(), Some(domain))
+            .await
+            .map_err(|_| ChoiceStatus::StaleContext)?;
+        let models = self
+            .inner
+            .registry
+            .resulting_models(domain, &queued.models)
+            .map_err(|_| ChoiceStatus::LookupFailed)?;
+        let resources = self.inner.consensus.current_resources().await;
+        let staged_resources = queued.resource_suggestions("");
+        let resolved = ConfiguredChoices::new(domain.clone(), models, resources, staged_resources)
+            .resolve(&question, request.search())?;
+        Ok((resolved.choices, Some(resolved.content_digest)))
     }
 
     /// The completions at the request's cursor, read against the session as `session` last left
@@ -1338,19 +1529,17 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>();
 
-        if let Some(fragment) = upload_resource_path_fragment(req.input(), cursor) {
-            let range = upload_resource_path_range(req.input(), cursor)
-                .assured("a detected upload path has a source range");
+        if let Some(local_path) = local_path_fragment(req.input(), cursor) {
             response_suggestions.push(Suggestion {
-                value: fragment.to_string(),
+                value: local_path.fragment.to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
                 edit: TextEdit {
-                    start: u32::try_from(range.start)
+                    start: u32::try_from(local_path.range.start)
                         .assured("the local path fragment is a slice of the bounded request"),
-                    end: u32::try_from(range.end).assured(
+                    end: u32::try_from(local_path.range.end).assured(
                         "a completion source fits the session frame limit below 2^32 bytes",
                     ),
-                    replacement: fragment.to_string(),
+                    replacement: local_path.fragment.to_string(),
                 },
             });
         }
@@ -1661,7 +1850,9 @@ impl SessionServiceImpl {
 }
 
 /// The answer to a request whose execution reference aged out of execution history.
-fn expired_reference(reference: &CommandExecutionReference) -> CommandResult {
+pub(in crate::application) fn expired_reference(
+    reference: &CommandExecutionReference,
+) -> CommandResult {
     let message = format!("command execution reference '{reference}' has expired");
     CommandResult {
         diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
@@ -1686,6 +1877,8 @@ pub(in crate::application) fn conflicting_reference(
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::{ModelKind, NodeRef};
+
     use super::{
         super::{
             subscription::SessionSubscriptions,
@@ -1773,6 +1966,57 @@ mod tests {
             ChoiceValue::PlacementPolicy(PlacementPolicy::SuggestSeparation)
         );
         assert!(second.page_cursor.is_none());
+
+        let schema_content_request = ChoiceLookupRequest::new(
+            ChoiceTarget::Schema,
+            vec![ChoiceSelection {
+                value: ChoiceValue::Domain(DomainName::parse("tenant").assured("valid domain")),
+            }],
+            String::new(),
+        )
+        .with_page(1, None)
+        .assured("one choice fits the bounded page size");
+        let schema_candidates = vec![
+            Choice {
+                value: ChoiceValue::Model(NodeRef::new(
+                    ModelKind::Schema,
+                    ModelName::parse("first").assured("valid schema name"),
+                )),
+                presentation: ChoicePresentation {
+                    label: "first".to_string(),
+                    detail: Some("1 fields".to_string()),
+                    group: Some("Schema".to_string()),
+                },
+            },
+            Choice {
+                value: ChoiceValue::Model(NodeRef::new(
+                    ModelKind::Schema,
+                    ModelName::parse("second").assured("valid schema name"),
+                )),
+                presentation: ChoicePresentation {
+                    label: "second".to_string(),
+                    detail: Some("1 fields".to_string()),
+                    group: Some("Schema".to_string()),
+                },
+            },
+        ];
+        let first = ChoicePageBasis::new(&schema_content_request, 42)
+            .with_content_digest("first schema shape".to_string())
+            .page(&schema_content_request, schema_candidates.clone());
+        let continued = ChoiceLookupRequest::new(
+            ChoiceTarget::Schema,
+            schema_content_request.dependencies().to_vec(),
+            String::new(),
+        )
+        .with_page(1, first.page_cursor)
+        .assured("one choice fits the bounded page size");
+        assert_eq!(
+            ChoicePageBasis::new(&continued, 42)
+                .with_content_digest("changed schema shape".to_string())
+                .page(&continued, schema_candidates)
+                .status,
+            ChoiceStatus::StaleContext
+        );
 
         let changed_dependency = request(DomainPaceChoice::Unpaced, "", Some(cursor.clone()));
         assert_eq!(
@@ -1965,7 +2209,7 @@ mod tests {
         assert_eq!(response.diagnostics[0].span, Some(42..43));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn placement_member_completion_expands_all_schedulable_runtime_names() {
         let TestService {
             service,
@@ -2025,7 +2269,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_offers_models_queued_in_the_open_transaction() {
         let TestService {
             service,
@@ -2050,7 +2294,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn schema_field_completion_uses_ordered_queued_alterations() {
         let TestService {
             service,
@@ -2133,7 +2377,7 @@ mod tests {
             .discarded("the temporary test fixture is already isolated from the next test");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn route_expression_completion_resolves_queued_relay_fields_and_vm_builtins() {
         let TestService {
             service,
@@ -2210,7 +2454,7 @@ mod tests {
             .discarded("the temporary test fixture is already isolated from the next test");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_reports_stale_context_when_an_attached_transaction_loses_its_domain() {
         let TestService { service, path, .. } = build_test_service(true).await;
         let mut subscriptions = SessionSubscriptions::new();
@@ -2232,7 +2476,7 @@ mod tests {
             .discarded("the temporary test fixture is already isolated from the next test");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_hides_models_dropped_in_the_open_transaction() {
         let TestService {
             service,
@@ -2281,7 +2525,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_keeps_queued_models_out_of_other_sessions() {
         let TestService {
             service,
@@ -2313,7 +2557,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_drops_queued_models_until_a_detached_transaction_is_attached() {
         let TestService {
             service,
@@ -2368,7 +2612,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn completion_moves_queued_models_to_the_session_that_takes_the_transaction_over() {
         let TestService {
             service,
@@ -2412,7 +2656,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn placement_member_completion_expands_queued_runtime_names() {
         let TestService {
             service,

@@ -7,9 +7,9 @@
 //! - **Depends on.** Tokio's monotonic clock and timers.
 //! - **Must not know.** What a phase does, which scenario runs it, or production deadlines.
 
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
-use tokio::time::{Duration, Instant};
+use nervix_primitives::time::Instant;
 
 /// The one monotonic deadline a harness phase must finish by, fixed when the phase starts.
 ///
@@ -86,7 +86,7 @@ impl PhaseDeadline {
         if self.has_passed() {
             return BeforeDeadline::Passed;
         }
-        let bounded = tokio::time::timeout(self.remaining(), operation).await;
+        let bounded = nervix_primitives::time::timeout(self.remaining(), operation).await;
         match bounded {
             Ok(output) => BeforeDeadline::Finished(output),
             Err(_) => BeforeDeadline::Passed,
@@ -95,7 +95,7 @@ impl PhaseDeadline {
 
     /// Waits one poll interval, or only until the deadline when that comes first.
     pub(crate) async fn pause(self, interval: Duration) {
-        tokio::time::sleep(interval.min(self.remaining())).await;
+        nervix_primitives::time::sleep(interval.min(self.remaining())).await;
     }
 
     /// Repeats `attempt` until `accepts` holds for one of its outputs or the deadline passes.
@@ -118,7 +118,7 @@ impl PhaseDeadline {
             last_failure: None,
         };
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.has_passed() {
                 return Err(expired);
             }

@@ -5,6 +5,14 @@
 //! May depend on: replicated WASM guest state, the state store, compiled WASM modules and schedules.
 //! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "WASM state assignment and checkpoint setup bind the exact guest-state generation"
+    )
+)]
+
 use super::*;
 
 /// How often a checkpoint waiting for its replicas reads the schedule again, so a changed
@@ -15,7 +23,15 @@ impl Runtime {
     /// Wait until every assigned replica has installed the branch lifecycle that authorizes a
     /// branch checkpoint. A reset uses this before offering its first guest checkpoint, so a
     /// replica can never reject that checkpoint merely because the lifecycle announcement raced
-    /// it.
+    /// it. The wait registers for the next replica report before it reads what the replicas hold.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a state-generation reset confirms its branch lifecycle before publishing \
+                      the first guest save"
+        )
+    )]
     pub(in crate::runtime) async fn confirm_branch_lru_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
@@ -41,7 +57,7 @@ impl Runtime {
                     })
                 })?;
             let node = execution
-                .schedule
+                .revision
                 .nodes
                 .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
                 .ok_or_else(|| {
@@ -62,114 +78,134 @@ impl Runtime {
         if replicas.is_empty() {
             return Ok(());
         }
-        loop {
-            tokio::task::consume_budget().await;
-            let awaiting = match self
-                .inner
-                .pending_state_checkpoint_announcements
-                .get(placement)
-            {
-                Some(pending) => replicas
-                    .iter()
-                    .filter(|replica| {
-                        pending
-                            .replica_progress
-                            .get(*replica)
-                            .is_none_or(|progress| *progress < lsm)
-                    })
-                    .cloned()
-                    .collect::<BTreeSet<_>>(),
-                // The announcement owner removes this entry only after every assigned replica
-                // acknowledged its target LSM.
-                None => return Ok(()),
-            };
-            if awaiting.is_empty() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
-                    placement: placement.clone(),
-                    lsm,
-                    awaiting: AwaitedReplicas(awaiting),
-                }));
-            }
-            sleep(Duration::from_millis(10)).await;
+        let lifecycle = self.replicated_branch_lifecycle(placement);
+        let replication = lifecycle.replication();
+        let every_replica_holds =
+            |progress: &ReplicaProgress| progress.holding(&replicas, lsm) == replicas.len();
+        let confirmed = nervix_primitives::time::timeout_at(
+            deadline,
+            replication.wait_until(every_replica_holds),
+        )
+        .await;
+        if confirmed.is_ok() {
+            return Ok(());
         }
+        let awaiting = replication.with_progress(|progress| progress.awaiting(&replicas, lsm));
+        if awaiting.is_empty() {
+            return Ok(());
+        }
+        Err(Report::new(StateReplicationError::ReplicaConfirmation {
+            placement: placement.clone(),
+            lsm,
+            awaiting: AwaitedReplicas(awaiting),
+        }))
     }
 
     pub(super) async fn prepare_ownership_handoff_wasm_guests(
         &self,
         domain: &DomainName,
-        scheduled: &ScheduledNode,
+        scheduled: &ExecutionNode,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> OwnershipHandoffResult<()> {
-        let Some(processor) = scheduled.wasm_processor() else {
+        if scheduled.kind() != ModelKind::WasmProcessor {
             return Ok(());
-        };
-        let input_relay = processor.from.first().ok_or_else(|| {
-            OwnershipHandoffError::state(format!(
-                "wasm processor '{}' has no input relay while preparing ownership handoff",
-                processor.name.as_str()
-            ))
-        })?;
-        let (input_schema, output_schemas) = {
+        }
+        let (processor, input_relay, input_schema, output_schemas) = {
             let execution = self.inner.executions.get(domain).ok_or_else(|| {
                 OwnershipHandoffError::state(format!(
                     "domain '{}' has no execution while preparing wasm ownership handoff",
                     domain.as_str()
                 ))
             })?;
+            let processor = execution
+                .revision
+                .processors
+                .processor(ModelKind::WasmProcessor, &scheduled.identifier)
+                .cloned()
+                .ok_or_else(|| {
+                    OwnershipHandoffError::state(format!(
+                        "wasm processor '{}' has no installed plan",
+                        scheduled.identifier.as_str()
+                    ))
+                })?;
+            let input_relay = processor
+                .spec
+                .input_relays
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    OwnershipHandoffError::state(format!(
+                        "wasm processor '{}' has no input relay while preparing ownership handoff",
+                        scheduled.identifier.as_str()
+                    ))
+                })?;
             let input_schema = execution
                 .relay_schemas
-                .get(input_relay)
+                .get(&input_relay)
                 .cloned()
                 .ok_or_else(|| {
                     OwnershipHandoffError::state(format!(
                         "wasm processor '{}' input relay '{}' has no runtime schema",
-                        processor.name.as_str(),
+                        scheduled.identifier.as_str(),
                         input_relay.as_str()
                     ))
                 })?;
-            let output_schemas = processor
-                .output_routes
+            let BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } =
+                &processor.spec.operation
+            else {
+                return Err(OwnershipHandoffError::state(format!(
+                    "wasm processor '{}' has a different installed operation",
+                    scheduled.identifier.as_str()
+                )));
+            };
+            let output_schemas = output_routes
                 .outputs()
                 .map(|output| {
                     let schema = execution.relay_schemas.get(&output.relay).cloned();
                     let Some(schema) = schema else {
                         return Err(OwnershipHandoffError::state(format!(
                             "wasm processor '{}' output relay '{}' has no runtime schema",
-                            processor.name.as_str(),
+                            scheduled.identifier.as_str(),
                             output.relay.as_str()
                         )));
                     };
                     Ok((output.relay.clone(), schema))
                 })
                 .collect::<OwnershipHandoffResult<Vec<_>>>()?;
-            (input_schema, output_schemas)
+            (processor, input_relay, input_schema, output_schemas)
+        };
+        let BranchedProcessorOperationSpec::WasmProcessor {
+            resource,
+            resource_version,
+            file,
+            limits,
+            ..
+        } = &processor.spec.operation
+        else {
+            return Err(OwnershipHandoffError::state(format!(
+                "wasm processor '{}' has a different installed operation",
+                scheduled.identifier.as_str()
+            )));
         };
         let restore = || OwnershipHandoffError::WasmRestore {
-            processor: processor.name.clone().into(),
+            processor: scheduled.identifier.clone(),
         };
         let compiled = self
             .compile_wasm_processor_module(
                 domain,
-                &processor.name,
-                &processor.resource,
-                processor.resource_version,
-                &processor.file,
+                scheduled.identifier.clone(),
+                resource,
+                *resource_version,
+                file,
             )
             .await
             .change_context_lazy(restore)?;
         let domain_clock = self
             .bind_domain_clock(domain)
             .change_context_lazy(restore)?;
-        let pinned = ResourceId::new(
-            domain.clone(),
-            processor.resource.clone(),
-            processor.resource_version,
-        );
+        let pinned = ResourceId::new(domain.clone(), resource.clone(), *resource_version);
         for (placement, snapshot) in checkpoints {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if placement.state.kind() != RuntimeStateKind::WasmProcessor {
                 continue;
             }
@@ -188,14 +224,14 @@ impl Runtime {
             };
             let execution_now = domain_clock.snapshot().change_context_lazy(restore)?.now();
             let module = WasmBranchModule {
-                processor: processor.name.clone().into(),
+                processor: scheduled.identifier.clone(),
                 branch: placement.branch_key.clone(),
                 resource: pinned.clone(),
-                file: processor.file.clone(),
+                file: file.clone(),
             };
             let saved = RestorableGuestState::of_snapshot(snapshot);
             compiled
-                .instantiate_branch(module, processor.limits, init, execution_now, saved)
+                .instantiate_branch(module, *limits, init, execution_now, saved)
                 .await
                 .change_context_lazy(restore)?;
         }
@@ -219,30 +255,25 @@ impl Runtime {
                 placement: placement.clone(),
             })
         };
-        if !self.runtime_state_placement_is_current(placement) {
+        let assignment = state.assignment.load();
+        let Some(assignment) = assignment.as_ref() else {
+            return Err(superseded());
+        };
+        let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+        if !assignment.identity.names(placement.state, branch.as_ref()) {
             return Err(superseded());
         }
         let dispatcher = self.inner.remote_dispatcher.load();
-        // A runtime that has not joined a cluster executes every node it runs, with no replicas.
         let Some(dispatcher) = dispatcher.as_deref() else {
             return Ok(WasmCheckpointBoundary::LocalStorage);
         };
-        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+        let Some(owners) = assignment.checkpoint_owners.as_ref() else {
             return Err(superseded());
         };
-        let node = NodeRef::new(placement.kind, placement.identifier.clone());
-        let Some(scheduled) = execution.schedule.nodes.get(&node) else {
-            return Err(superseded());
-        };
-        if !scheduled.executes_on(dispatcher.local_node_id()) {
+        if !owners.executors.contains(dispatcher.local_node_id()) {
             return Err(superseded());
         }
-        let replicas = scheduled
-            .replica_nodes()
-            .into_iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        Ok(WasmCheckpointBoundary::assigned(replicas))
+        Ok(WasmCheckpointBoundary::assigned(owners.replicas.clone()))
     }
 
     /// Write a captured checkpoint to this node's stable storage, and offer it to the replicas its
@@ -265,7 +296,7 @@ impl Runtime {
         // A runtime without a state store, which only unit tests construct, has no stable storage
         // for a checkpoint to reach.
         if let Some(store) = self.inner.state_store.as_ref() {
-            let written = tokio::time::timeout_at(
+            let written = nervix_primitives::time::timeout_at(
                 deadline,
                 store.persist_wasm_checkpoint(placement, captured.saved()),
             )
@@ -281,7 +312,7 @@ impl Runtime {
         }
         let durable = state.record_locally_durable(captured);
         if let WasmCheckpointBoundary::Replicas(_) = durable.boundary() {
-            self.notify_runtime_state_replicas(placement, revision);
+            self.announce_checkpoint(placement, state.replication(), revision);
         }
         Ok(durable)
     }
@@ -304,8 +335,8 @@ impl Runtime {
         };
         let mut replicas = captured_replicas;
         loop {
-            tokio::task::consume_budget().await;
-            let progressed = state.replica_progress_signal().notified();
+            nervix_primitives::task::consume_budget().await;
+            let progressed = state.replication().progress_signal().notified();
             tokio::pin!(progressed);
             progressed.as_mut().enable();
             let assigned = self.wasm_checkpoint_boundary(state)?;
@@ -333,13 +364,21 @@ impl Runtime {
                 .checked_add(WASM_CHECKPOINT_REPLAN_INTERVAL)
                 .assured("a recheck interval of a fraction of a second stays within Instant")
                 .min(deadline);
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = &mut progressed => {}
                 _ = sleep_until(recheck) => {}
             }
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(in crate::runtime) fn replicated_wasm_processor_state(
         &self,
         placement: RuntimeStatePlacement,
@@ -356,10 +395,16 @@ impl Runtime {
                 .stored_runtime_state_snapshot(&placement)
                 .map_err(|error| error.current_context().clone())?,
         };
-        let state = Arc::new(ReplicatedWasmProcessorState::new(
-            placement.clone(),
-            initial,
+        let catalog = self.branch_checkpoint_catalog(&placement);
+        let assignment = self.state_assignment(&DomainNodeRef::node_in(
+            placement.domain.clone(),
+            placement.kind,
+            placement.identifier.clone(),
         ));
+        let state = Arc::new(
+            ReplicatedWasmProcessorState::new(placement.clone(), initial, assignment)
+                .cataloged(&catalog),
+        );
         self.inner
             .replicated_wasm_processor_states
             .insert(placement, state.clone());

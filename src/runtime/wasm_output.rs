@@ -236,7 +236,7 @@ impl WasmOutputValidator<'_> {
                     }
                 }
                 for token_set in &output.acks.acked {
-                    self.validate_terminal_set(token_set, &mut terminal_tokens, "ACK")?;
+                    self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "ACK")?;
                 }
                 for token_set in &output.acks.nacked {
                     self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "NACK")?;
@@ -258,15 +258,6 @@ impl WasmOutputValidator<'_> {
             });
         }
         Ok(())
-    }
-
-    pub(super) fn validate_terminal_set(
-        &self,
-        token_set: &WasmAckTokenSet,
-        terminal_tokens: &mut HashSet<u64>,
-        decision: &str,
-    ) -> Result<(), WasmOutputError> {
-        self.validate_terminal_tokens(&token_set.tokens, terminal_tokens, decision)
     }
 
     pub(super) fn validate_terminal_tokens(
@@ -780,6 +771,10 @@ pub(super) struct WasmRouteDispatchContext<'a> {
     pub(super) execution_now: Timestamp,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the admitted expression executor owns its generic effects")
+)]
 pub(super) async fn dispatch_wasm_output_route(
     context: WasmRouteDispatchContext<'_>,
     mut decoded: WasmDecodedOutputBatch,
@@ -897,6 +892,7 @@ pub(super) async fn dispatch_wasm_output_route(
             .collect(),
     };
     let lookup_columns = match compute_lookup_hash_map_columns(
+        context.branch.runtime.executor(),
         program,
         &FilterMapBatchInputs {
             carrier: &decoded.batch.batch,
@@ -967,6 +963,7 @@ pub(super) async fn dispatch_wasm_output_route(
         }
     };
     let executed = match execute_program_with_selection_in_context(
+        context.branch.runtime.executor(),
         &program.compiled,
         &vm_input,
         &VmExecutionContext {
@@ -1094,9 +1091,9 @@ pub(super) async fn dispatch_wasm_output_route(
         .branch
         .runtime
         .handle_planned_message_errors_with_policy(
+            context.branch.routing_snapshot.as_deref(),
             &context.branch.domain,
-            context.node_kind,
-            context.processor,
+            NodeRef::new(context.node_kind, context.processor.clone()),
             Some(&output.relay),
             &output.message_error_policy,
             planned_errors,
@@ -1130,10 +1127,9 @@ pub(super) async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let metadata = success_input_rows
-        .iter()
-        .map(|input_row| decoded.batch.metadata[*input_row].clone())
-        .collect::<Vec<_>>();
+    let metadata = decoded.batch.metadata.take(&success_input_rows).verified(
+        "the program selects rows of this batch, whose metadata has one entry for every row",
+    );
     let mut batch_acks = Vec::with_capacity(success_input_rows.len());
     for row in &success_input_rows {
         let Some(acks) = ack_queues[*row].pop_front() else {
@@ -1287,6 +1283,7 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
                 .runtime
                 .handle_message_error_with_policy(
                     MessageErrorSourceContext {
+                        routing: branch.routing_snapshot.as_deref(),
                         domain: &branch.domain,
                         node_kind,
                         node: processor,
@@ -1384,8 +1381,13 @@ pub(super) fn relay_batch_from_wasm_output(
     if batch.schema().as_ref() != schema.arrow_schema().as_ref() {
         return Err(Report::new(WasmOutputError::OutputSchemaMismatch));
     }
-    let batch = RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks)
-        .change_context(WasmOutputError::OutputRelayBatch)?;
+    let batch = RelayRecordBatch::from_filtered_parts(
+        key.clone(),
+        batch,
+        RecordMetadataColumns::from_rows(metadata),
+        acks,
+    )
+    .change_context(WasmOutputError::OutputRelayBatch)?;
     Ok(WasmDecodedOutputBatch {
         batch,
         uninitialized_columns,
@@ -1394,23 +1396,25 @@ pub(super) fn relay_batch_from_wasm_output(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
+    use std::time::Duration;
 
     use ahash::HashSet;
     use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
     use arrow_schema::Schema as ArrowSchema;
     use nervix_models::ParseAsType;
+    use nervix_primitives::{
+        sync::{Arc, StdArc},
+        time::timeout,
+    };
     use nervix_wasm::{
         WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumnRef,
         WasmOutputRow, WasmRoutedOutput,
     };
-    use tokio::time::{Duration, timeout};
-    use triomphe::Arc;
 
     use super::*;
     use crate::runtime_ack::{AckOutcome, AckSet};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (_, ack_map) = wasm_input_for_values(&schema, &[10]).await;
@@ -1469,7 +1473,7 @@ mod tests {
         assert!(outputs[0].uninitialized_columns.contains(&0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let output_schema =
@@ -1499,7 +1503,7 @@ mod tests {
         assert_eq!(outputs[0].batch.batch().num_rows(), 2);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let enriched_schema = test_schema(&[
@@ -1756,7 +1760,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_routed_output_fanout_waits_for_every_downstream_ack() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, mut ack_map) = wasm_input_for_values(&schema, &[2]).await;
@@ -1810,9 +1814,9 @@ mod tests {
             },
         )
         .expect("first routed batch must build");
-        let completion_task = tokio::spawn(completion.wait());
+        let completion_task = nervix_primitives::task::spawn(completion.wait());
         first.batch.acks[0].ack_success();
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         assert!(
             !completion_task.is_finished(),
             "the first downstream ACK must not complete the fanned-out input"
@@ -1840,7 +1844,7 @@ mod tests {
         assert_eq!(outcome, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_guest_generated_rows_use_execution_time_without_replacing_source_metadata() {
         let input_schema = test_schema(&[("input_value", ParseAsType::I32)]);
         let output_schema = test_schema(&[("value", ParseAsType::I32)]);
@@ -1883,11 +1887,21 @@ mod tests {
         )
         .expect("generated output must build a relay batch");
         assert_eq!(
-            generated.batch.metadata[0].ingested_at_low_watermark(),
+            generated
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_low_watermark(),
             execution_now
         );
         assert_eq!(
-            generated.batch.metadata[0].ingested_at_high_watermark(),
+            generated
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_high_watermark(),
             execution_now
         );
 
@@ -1922,16 +1936,26 @@ mod tests {
         )
         .expect("source-backed output must build a relay batch");
         assert_eq!(
-            forwarded.batch.metadata[0].ingested_at_low_watermark(),
+            forwarded
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_low_watermark(),
             source_time
         );
         assert_eq!(
-            forwarded.batch.metadata[0].ingested_at_high_watermark(),
+            forwarded
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_high_watermark(),
             source_time
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let output_schema = test_schema(&[("value", ParseAsType::I32)]);
@@ -2036,7 +2060,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let renamed_schema = test_schema(&[("renamed_value", ParseAsType::I32)]);
@@ -2158,7 +2182,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_callback_rejects_tokens_that_are_both_carried_and_terminal() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10]).await;
@@ -2224,7 +2248,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_reference_to_terminally_removed_or_other_branch_token_is_rejected() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, _) = wasm_input_for_values(&schema, &[10]).await;
@@ -2246,7 +2270,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_callback_validation_is_all_or_nothing_for_terminal_decisions() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, mut ack_map) = wasm_input_for_values(&schema, &[10]).await;

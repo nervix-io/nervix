@@ -11,13 +11,16 @@ use std::num::NonZeroU64;
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     self as wire, AttachDisposition, AttachOutcome, CommandDisposition, Diagnostic,
-    InspectionOutcome, LeaderRedirect, OutcomeOrigin, SourceSpan, StatementOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, UnsubscribeDisposition,
-    UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, InspectionOutcome, LeaderRedirect, OutcomeOrigin,
+    RestoreUploadFailure, SourceSpan, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
+    SubscriptionOpened, UnsubscribeDisposition, UnsubscribeOutcome, UploadDisposition,
+    UploadFailure, UploadReply,
 };
 use nervix_models::{
-    CommandExecutionReference, ResourceDescription, ResourceUploadIdentity, TransactionInspection,
-    TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
+    BackupArchiveSummary, CommandExecutionReference, ResourceDescription, ResourceUploadIdentity,
+    RestoreReport, TransactionInspection, TransactionOperationAdmission,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
 
@@ -25,8 +28,8 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     /// Stable identity of the logical server command across redirects and reconnects. `None` for
-    /// a statement the client serves itself — `USE`, `LIST DOMAINS` and `UPLOAD RESOURCE` — and
-    /// for a subscription request.
+    /// a statement the client serves itself — `USE`, `LIST DOMAINS`, `ATTACH DOMAIN CLOCK`,
+    /// `DETACH DOMAIN CLOCK` and `UPLOAD RESOURCE` — and for a subscription request.
     pub execution_reference: Option<CommandExecutionReference>,
     /// Whether the outcome was produced now or recovered from an earlier attempt of the same
     /// command. `None` when no command request produced it.
@@ -52,6 +55,12 @@ pub struct CommandOutcome {
     /// Present when the statement opened a subscription.
     pub subscription: Option<Box<SubscriptionOpened>>,
     pub resource_upload: Option<ResourceUploadOutcome>,
+    /// The archive a completed `BACKUP` assembled, which the client downloaded to the file the
+    /// statement names.
+    pub backup: Option<Box<BackupArchiveSummary>>,
+    /// What a `RESTORE` that verified its archive applied, the step it failed at if one failed, or
+    /// for a dry run what it would apply.
+    pub restore: Option<Box<RestoreReport>>,
 }
 
 /// What became of a resource upload.
@@ -99,6 +108,8 @@ impl CommandOutcome {
             resource: None,
             subscription: None,
             resource_upload: None,
+            backup: None,
+            restore: None,
         }
     }
 
@@ -113,6 +124,20 @@ impl CommandOutcome {
 
     pub(crate) fn failed_locally(message: String) -> Self {
         Self::local(CommandDisposition::Failed, message)
+    }
+
+    /// The outcome of a restore stream the leader refused before its restore ran.
+    pub(crate) fn restore_refused(
+        reference: CommandExecutionReference,
+        failure: RestoreUploadFailure,
+        message: String,
+    ) -> Self {
+        let mut outcome = Self::local(
+            CommandDisposition::Failed,
+            format!("restore refused ({failure:?}): {message}"),
+        );
+        outcome.execution_reference = Some(reference);
+        outcome
     }
 
     /// The outcome of an upload whose reply the client checked against the identity it sent.
@@ -214,6 +239,8 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             resource: outcome.resource,
             subscription: None,
             resource_upload: None,
+            backup: outcome.backup,
+            restore: outcome.restore,
         }
     }
 }
@@ -266,6 +293,36 @@ impl From<UnsubscribeOutcome> for CommandOutcome {
         let mut unsubscribed = Self::local(disposition, outcome.message);
         unsubscribed.diagnostics = outcome.diagnostics;
         unsubscribed
+    }
+}
+
+impl From<DomainClockAttachOutcome> for CommandOutcome {
+    /// Only an attachment completes: a refusal, including one saying the session already follows
+    /// the clock, fails with the server's reason.
+    fn from(outcome: DomainClockAttachOutcome) -> Self {
+        let disposition = match outcome.disposition {
+            DomainClockAttachDisposition::Attached { .. } => CommandDisposition::Completed {
+                already_existed: false,
+            },
+            DomainClockAttachDisposition::AlreadyAttached(_)
+            | DomainClockAttachDisposition::DomainNotFound(_)
+            | DomainClockAttachDisposition::Failed => CommandDisposition::Failed,
+        };
+        Self::local(disposition, outcome.message)
+    }
+}
+
+impl From<DomainClockDetachOutcome> for CommandOutcome {
+    fn from(outcome: DomainClockDetachOutcome) -> Self {
+        let disposition = match outcome.disposition {
+            DomainClockDetachDisposition::Detached(_) => CommandDisposition::Completed {
+                already_existed: false,
+            },
+            DomainClockDetachDisposition::NotAttached(_) | DomainClockDetachDisposition::Failed => {
+                CommandDisposition::Failed
+            }
+        };
+        Self::local(disposition, outcome.message)
     }
 }
 

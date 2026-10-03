@@ -19,9 +19,8 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
-use parking_lot::Mutex;
+use nervix_primitives::sync::{Arc, blocking::Mutex};
 use rkyv::{Archive, Deserialize, Serialize};
-use triomphe::Arc;
 
 use crate::{
     LogIdOf, StoredMembershipOf,

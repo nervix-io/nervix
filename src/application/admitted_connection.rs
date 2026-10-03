@@ -21,12 +21,12 @@ use std::{
 };
 
 use futures_util::{Stream, stream};
-use nervix_recovery::Reported as _;
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+use nervix_primitives::{
     net::{TcpListener, TcpStream},
+    sync::{CancellationToken, WaitForCancellationFutureOwned},
 };
-use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use nervix_recovery::Reported as _;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tonic::transport::server::Connected;
 
 /// A public listener whose accepted connections end when admission closes.
@@ -193,7 +193,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_admitted_connection_carries_data_while_admission_is_open() {
         let admission = CancellationToken::new();
         let (mut client, server) = tokio::io::duplex(64);
@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(&received, b"ping");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closing_admission_ends_a_read_that_waits_for_the_client() {
         let admission = CancellationToken::new();
         let (_client, server) = tokio::io::duplex(64);
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closing_admission_fails_every_later_write() {
         let admission = CancellationToken::new();
         let (_client, server) = tokio::io::duplex(64);

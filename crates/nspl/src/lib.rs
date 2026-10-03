@@ -9,7 +9,10 @@
 //! - **Must not know.** The registry, the runtime, the control plane or any engine. Parsing
 //!   produces a Model and stops.
 //!
+pub mod backup;
 pub mod branch;
+#[cfg(test)]
+mod canonical_round_trip_tests;
 pub mod client;
 #[cfg(feature = "client")]
 pub mod client_statement;
@@ -36,7 +39,6 @@ pub mod domain;
 pub mod drop_stmt;
 pub mod emitter;
 pub mod endpoint;
-mod expression_lexer;
 pub mod generator;
 pub mod inferencer;
 pub mod ingestor;

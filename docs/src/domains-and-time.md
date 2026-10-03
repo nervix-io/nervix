@@ -23,7 +23,10 @@ Paced domains maintain a domain clock.
 
 `PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
 fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
-is stored.
+is stored. Duration text anywhere in NSPL whose spans could add up to 18446744073709551615 seconds,
+however they are written, is rejected: a duration literal when the statement is parsed, and a
+duration string argument, such as the delay of `PERCENTILE_LINEAR_HISTOGRAM`, when the statement is
+validated.
 
 While the domain is running:
 
@@ -172,7 +175,9 @@ An explicit `START AT` timestamp must fit exactly in signed Unix nanoseconds. Th
 is `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`; valid RFC 3339 values
 immediately outside those endpoints are rejected by the command. Nervix converts accepted text to
 a timestamp at the language boundary and carries that timestamp through persistence and runtime
-state without reparsing it.
+state without reparsing it. An offset is converted to UTC, fractional digits past the ninth are
+truncated, and a leap second, which RFC 3339 writes as `:60`, reads as the instant one second past
+the second before it, because Unix nanoseconds have no leap seconds.
 
 `TIME RATE` accepts every positive finite `f64`, including scientific notation such as `5e-324`
 and `1.7976931348623157e308`. Zero, negative values, infinities, and NaN are rejected. The committed
@@ -220,6 +225,35 @@ acknowledgements, and its unchanged cadence deadline; while a retry is scheduled
 for the retry instead of the cadence, and a forced flush or drain still releases the buffer. The
 maximum batch size releases a buffer that has reached it as soon as no retry is pending.
 
+## Following A Domain Clock
+
+A client session can follow the active domain's clock instead of inferring it from the domain list:
+
+```nspl
+ATTACH DOMAIN CLOCK;
+DETACH DOMAIN CLOCK;
+```
+
+The attach reply, and a frame on every later change, carry the `START` generation and the clock as
+the serving node has it installed: stopped, uninstalled, unpaced, or paced with its `PERIOD`,
+`SKEW`, logical origin, UTC anchor, and `TIME RATE`. A paced clock is the committed mapping this
+chapter describes, so a client projects the domain's logical time for its own UTC observation with
+the same arithmetic every node uses, including rounding down, and reconstructs the admission window
+from the origin, `PERIOD`, and `SKEW`. A driver of a paced simulation can therefore choose
+`TIMESTAMP AT` values the ingestor admits, such as the newest reached center, and compute how long
+to wait until a logical instant. The projection uses the client host's UTC, so the synchronization
+requirement above extends to such a client: its offset from the cluster's hosts, multiplied by
+`TIME RATE`, shifts every projection. The session also receives each newest accepted tick as a
+replaceable frame with its id, logical boundary, authority UTC observation, and serving node's
+logical reading. A client can pace from those accepted boundaries even if its own UTC is offset;
+the serving node's reading gives it a cluster-side anchor.
+
+Both statements are session-local, are refused while a transaction is open, and follow each domain
+at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment) for the delivery
+contract and [Rust Client Library](client-library.md#following-a-domain-clock) for the helper that
+performs this arithmetic, which the shared C binding exposes to its hosts through
+`nx_session_domain_clock`.
+
 ## Execution-Time Snapshots
 
 Each accepted unit of domain work reads its domain clock once and uses that execution-time snapshot
@@ -265,6 +299,13 @@ leaves the mutation unapplied, restores the old graph, and automatically resumes
 outstanding-work error. An ALTER on a stopped domain only validates and persists the new schedule.
 Pure `CREATE` and `DROP` batches keep the immediate schedule-rebuild behavior. An all-no-op batch
 writes and publishes nothing and never pauses.
+
+For an HTTP emitter, this means a pending request must finish at the origin selected when it was
+admitted before a new method, path, body mode, or client takes effect. A failed drain keeps that
+emitter definition active. An operator facing a persistently unavailable origin may restore it,
+or `STOP`, change the configuration while stopped, and `START`. Stopping leaves no prepared HTTP
+request or retry state to carry over; an acknowledged source may redeliver unresolved attached
+work, including work the destination applied before its successful response was lost.
 
 Pause is not a restart: domain clock state, start version, broker offsets, branch identity, and
 eligible handoff residue are preserved across the quiesce cycle.

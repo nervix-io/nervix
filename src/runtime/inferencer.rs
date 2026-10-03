@@ -1,20 +1,29 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "inferencer preparation resolves the retained compiled session before branch \
+                  processing"
+    )
+)]
+
 use std::path::{Path, PathBuf};
 
 use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
 };
+use nervix_primitives::sync::{Arc, blocking::Mutex};
 use ordered_float::OrderedFloat;
 use ort::{
     session::{Session, SessionInputValue},
     value::Tensor,
 };
-use parking_lot::Mutex;
-use triomphe::Arc;
 
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
 
@@ -25,10 +34,12 @@ pub(super) enum InferencerError {
     InitializeSession,
     #[error("failed to load ONNX model '{}'", .path.display())]
     LoadModel { path: PathBuf },
-    #[error("failed to join ONNX model loading task")]
-    JoinModelLoad,
-    #[error("failed to join ONNX execution task")]
-    JoinExecution,
+    #[error("the node's bounded execution did not load the ONNX model")]
+    LoadExecution,
+    #[error("the node's bounded execution did not run the ONNX model")]
+    RunExecution,
+    #[error("the caller stopped waiting between two ONNX model invocations")]
+    Cancelled,
     #[error("cannot execute ONNX inference for an empty message batch")]
     EmptyMessageBatch,
     #[error("per-message ONNX invocation has invalid routing")]
@@ -151,35 +162,78 @@ impl std::fmt::Debug for OnnxInferencerSession {
     }
 }
 
+/// What loading a model is charged. ONNX Runtime allocates a session's memory itself and keeps it
+/// for as long as the inferencer holds the session, which no transient budget can stand for, so
+/// the charge only admits the load onto the bulk workers.
+const SESSION_LOAD_RESERVATION_BYTES: u64 = 1;
+
 impl OnnxInferencerSession {
-    pub(super) async fn load(path: &Path) -> error_stack::Result<Self, InferencerError> {
+    /// Load the model at `path` on the node's bulk workers: reading and optimizing a model is a
+    /// whole-file operation that must not hold a data or control worker.
+    pub(super) async fn load(
+        executor: &Executor,
+        path: &Path,
+    ) -> error_stack::Result<Self, InferencerError> {
         let path = path.to_path_buf();
-        let session = tokio::task::spawn_blocking(move || {
-            let mut builder =
-                Session::builder().change_context(InferencerError::InitializeSession)?;
-            builder
-                .commit_from_file(&path)
-                .change_context_lazy(|| InferencerError::LoadModel { path: path.clone() })
-        })
-        .await
-        .change_context(InferencerError::JoinModelLoad)??;
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, SESSION_LOAD_RESERVATION_BYTES)
+            .await
+            .change_context(InferencerError::LoadExecution)?;
+        let loaded = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(InferencerError::Cancelled)?;
+                let mut builder =
+                    Session::builder().change_context(InferencerError::InitializeSession)?;
+                builder
+                    .commit_from_file(&path)
+                    .change_context_lazy(|| InferencerError::LoadModel { path: path.clone() })
+            })
+            .await
+            .change_context(InferencerError::LoadExecution)?;
+        let session = loaded?;
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
         })
     }
 
+    /// Run the model over `batch` on the node's data workers, charged the bytes the batch's
+    /// columns hold, which is the usual order of the tensors they become and the model returns.
+    /// The run checks between model invocations whether its caller stopped waiting.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the branch retains its ONNX session while the admitted CPU job uses it",
+            key = "one branch inference session",
+            bound = "one admitted batch kernel call at a time; its memory charge precedes \
+                     execution and the guard never crosses await"
+        )
+    )]
     pub(super) async fn execute(
         &self,
+        executor: &Executor,
         batch: &RuntimeRecordBatch,
         inputs: &[InferencerTensorMapping],
         output_schema: &[InferencerTensorDeclaration],
         mode: InferencerExecutionMode,
     ) -> error_stack::Result<Vec<Vec<RuntimeValue>>, InferencerError> {
         let prepared = PreparedExecution::from_batch(batch, inputs, output_schema, mode)?;
-        let session = Arc::clone(&self.session);
-        tokio::task::spawn_blocking(move || prepared.run(&mut session.lock()))
+        let charge = batch
+            .estimated_bytes()
+            .min(executor.limits().relay_decoded_bytes.as_u64());
+        let reservation = executor
+            .reserve(MemoryClass::Relay, charge)
             .await
-            .change_context(InferencerError::JoinExecution)?
+            .change_context(InferencerError::RunExecution)?;
+        let session = Arc::clone(&self.session);
+        executor
+            .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
+                prepared.run(&mut session.lock(), cancellation)
+            })
+            .await
+            .change_context(InferencerError::RunExecution)?
     }
 }
 
@@ -220,6 +274,7 @@ impl PreparedExecution {
     fn run(
         self,
         session: &mut Session,
+        cancellation: &Cancellation,
     ) -> error_stack::Result<Vec<Vec<RuntimeValue>>, InferencerError> {
         let mut columns = self
             .output_schema
@@ -229,6 +284,9 @@ impl PreparedExecution {
         match self.mode {
             InferencerExecutionMode::PerMessage => {
                 for invocation in self.invocations {
+                    cancellation
+                        .check()
+                        .change_context(InferencerError::Cancelled)?;
                     let [message_index] = invocation.message_indices.as_slice() else {
                         return Err(Report::new(InferencerError::InvalidPerMessageRouting));
                     };
@@ -248,6 +306,9 @@ impl PreparedExecution {
             }
             InferencerExecutionMode::Batched => {
                 for invocation in self.invocations {
+                    cancellation
+                        .check()
+                        .change_context(InferencerError::Cancelled)?;
                     let message_indices = invocation.message_indices.clone();
                     let batch_size = message_indices.len();
                     let output_tensors =
@@ -858,18 +919,22 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
 
 #[cfg(test)]
 mod tests {
+    use nervix_execution::{CpuClass, Executor};
     use nervix_models::{
-        InferencerExecutionMode, InferencerTensorDimension, InferencerTensorElementType,
-        InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-        ParseAsType,
+        InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
+        InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+        InferencerTensorSchema, ParseAsType,
     };
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
-    use super::{PreparedExecution, PreparedInvocation, RuntimeTensorSchema, RuntimeTensorSlice};
+    use super::{
+        InferencerError, OnnxInferencerSession, PreparedExecution, PreparedInvocation,
+        RuntimeTensorSchema, RuntimeTensorSlice,
+    };
     use crate::{
         runtime::{
-            CompiledInferencerInputProgram,
+            CompiledInferencerInputProgram, FilledCpuClass, single_worker_executor,
             test_fixtures::{expression, named, test_schema},
         },
         runtime_schema::{RuntimeRecordBatch, RuntimeRow, RuntimeValue, test_runtime_row},
@@ -1164,5 +1229,114 @@ mod tests {
             )),
             "inferencer 'score_events' tensor name 'not a field' is not a valid field"
         );
+    }
+
+    /// A model whose one output returns its `matrix` input unchanged.
+    fn identity_model() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx")
+    }
+
+    fn matrix_value() -> RuntimeValue {
+        let row = |values: [f32; 3]| {
+            RuntimeValue::Array(
+                values
+                    .into_iter()
+                    .map(|value| RuntimeValue::F32(OrderedFloat(value)))
+                    .collect(),
+            )
+        };
+        RuntimeValue::Array(vec![row([1.0, 2.0, 3.0]), row([4.0, 5.0, 6.0])])
+    }
+
+    fn matrix_batch() -> RuntimeRecordBatch {
+        let row = test_runtime_row([("matrix".to_string(), matrix_value())]);
+        RuntimeRecordBatch::from_rows(row.batch().schema(), std::iter::once(&row))
+            .expect("one test row should form a batch")
+    }
+
+    fn matrix_schema() -> nervix_models::InferencerTensorSchema {
+        dense(vec![
+            InferencerTensorDimension::Fixed(nonzero!(2u32)),
+            InferencerTensorDimension::Fixed(nonzero!(3u32)),
+        ])
+    }
+
+    fn matrix_input() -> InferencerTensorMapping {
+        InferencerTensorMapping {
+            tensor: "matrix".to_string(),
+            schema: matrix_schema(),
+            expression: expression("input.matrix"),
+        }
+    }
+
+    fn transformed_output() -> InferencerTensorDeclaration {
+        InferencerTensorDeclaration {
+            tensor: "transformed".to_string(),
+            schema: matrix_schema(),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_model_loads_on_the_bulk_workers_and_runs_on_the_data_workers() {
+        let executor = Executor::default();
+        let session = OnnxInferencerSession::load(&executor, &identity_model())
+            .await
+            .expect("the identity model loads");
+        assert_eq!(executor.snapshot().bulk_cpu.completed, 1);
+
+        let outputs = session
+            .execute(
+                &executor,
+                &matrix_batch(),
+                &[matrix_input()],
+                &[transformed_output()],
+                InferencerExecutionMode::PerMessage,
+            )
+            .await
+            .expect("the identity model runs");
+
+        assert_eq!(outputs, vec![vec![matrix_value()]]);
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.data_cpu.admitted, 1);
+        assert_eq!(snapshot.data_cpu.completed, 1);
+        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
+        assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_node_without_room_refuses_to_load_or_run_a_model() {
+        let session = OnnxInferencerSession::load(&Executor::default(), &identity_model())
+            .await
+            .expect("the identity model loads");
+        let executor = single_worker_executor();
+        let filled_bulk = FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
+        let filled_data = FilledCpuClass::fill(&executor, CpuClass::Data).await;
+
+        let Err(load) = OnnxInferencerSession::load(&executor, &identity_model()).await else {
+            panic!("a full bulk class must refuse the load");
+        };
+        assert!(matches!(
+            load.current_context(),
+            InferencerError::LoadExecution
+        ));
+        let Err(run) = session
+            .execute(
+                &executor,
+                &matrix_batch(),
+                &[matrix_input()],
+                &[transformed_output()],
+                InferencerExecutionMode::PerMessage,
+            )
+            .await
+        else {
+            panic!("a full data class must refuse the run");
+        };
+        assert!(matches!(
+            run.current_context(),
+            InferencerError::RunExecution
+        ));
+        filled_bulk.release().await;
+        filled_data.release().await;
     }
 }

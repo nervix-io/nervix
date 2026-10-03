@@ -39,6 +39,10 @@ use nervix_interconnect::{
     InterconnectDuplexRequest as _, Transport,
 };
 use nervix_models::ClusterNodeName;
+use nervix_primitives::{
+    sync::{CancellationToken, DropGuard, mpsc},
+    time::{Instant, sleep_until, timeout},
+};
 use nervix_recovery::Discarded as _;
 use openraft::{
     error::{RPCError, Unreachable},
@@ -46,11 +50,6 @@ use openraft::{
     raft::{AppendEntriesRequest, StreamAppendResult},
 };
 use thiserror::Error;
-use tokio::{
-    sync::mpsc,
-    time::{Instant, sleep_until, timeout},
-};
-use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::debug;
 
 use crate::{LogIdOf, ProtocolReceiver, TypeConfig, validate_protocol_origin, wire};
@@ -178,7 +177,7 @@ impl AppendSubmission {
             .checked_add(self.batch_target_bytes)
             .is_none_or(|total| total > MAX_OUTSTANDING_APPEND_BYTES)
         {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(acknowledged) = self.acknowledged.recv().await else {
                 return Err(SubmissionStopped::GenerationEnded);
             };
@@ -221,8 +220,8 @@ impl AppendStreamIdleBound {
         let mut answer = pin!(answer);
         let mut stall = pin!(sleep_until(self.stalls_at(sender_accepted_at())));
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 output = &mut answer => {
                     self.last_answer_at = Instant::now();
@@ -369,11 +368,11 @@ where
         acknowledged: acknowledge_rx,
     };
     let submission_target = target.clone();
-    tokio::spawn(async move {
+    nervix_primitives::task::spawn(async move {
         let mut input = input;
         loop {
-            tokio::task::consume_budget().await;
-            let next = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let next = nervix_primitives::select! {
                 () = cancel_submission.cancelled() => None,
                 next = input.next() => next,
             };
@@ -491,7 +490,7 @@ impl ProtocolReceiver {
 mod tests {
     use std::{cell::Cell, future::pending};
 
-    use tokio::time::sleep;
+    use nervix_primitives::time::sleep;
 
     use super::*;
 
@@ -513,7 +512,7 @@ mod tests {
         "each healthy stream must outlast the idle bound it would miss if nothing moved",
     );
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_follower_that_keeps_accepting_bytes_is_not_cut_while_its_answer_is_outstanding() {
         let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
         let started_at = Instant::now();
@@ -521,7 +520,7 @@ mod tests {
         // The follower keeps taking the leader's bytes and answers only after several bounds.
         let answer = async {
             while started_at.elapsed() < SLOW_ANSWER {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 sleep(ACCEPTANCE_CADENCE).await;
                 sender_accepted_at.set(Instant::now());
             }
@@ -539,7 +538,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn an_outstanding_batch_with_neither_an_answer_nor_accepted_bytes_is_cut_after_the_bound()
     {
         let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
@@ -557,7 +556,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_follower_that_stops_accepting_bytes_is_cut_one_bound_after_its_last_acceptance() {
         let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
         let started_at = Instant::now();
@@ -586,7 +585,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn each_answer_restarts_the_bound_for_the_next_outstanding_batch() {
         let mut idle_bound = AppendStreamIdleBound::new(APPEND_STREAM_IDLE_BOUND);
         let started_at = Instant::now();

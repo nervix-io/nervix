@@ -1,11 +1,21 @@
 //! Ingestor runtime materialization.
 //!
 //! Layer: data plane.
-//! - **Owns.** Choosing which scheduled ingestors this node starts, stopping a running ingestor,
-//!   and compiling the dependencies every ingestor start reads.
-//! - **Depends on.** Ingestor plans, installed domain capabilities and the source start path.
+//! - **Owns.** Choosing which planned ingestors this node starts, stopping a running ingestor,
+//!   and binding the dependencies every ingestor start reads.
+//! - **Depends on.** Installed ingestor plans, installed domain capabilities and the source start
+//!   path.
 //! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "source task installation resolves retained branch, clock and acknowledgement \
+                  owners"
+    )
+)]
 
 use error_stack::ResultExt as _;
 
@@ -37,6 +47,8 @@ pub(in crate::runtime) enum LookupRuntimeError {
     ReadFile { lookup: LookupName, path: PathBuf },
     #[error("failed to decode lookup '{lookup}' line {line}")]
     DecodeLine { lookup: LookupName, line: usize },
+    #[error("the node's bounded execution did not unfold lookup '{lookup}' line {line}")]
+    UnfoldLine { lookup: LookupName, line: usize },
     #[error("failed to build lookup '{lookup}' record batch")]
     BuildBatch { lookup: LookupName },
     #[error("failed to read lookup '{lookup}' key field '{key}' at line {line}")]
@@ -54,9 +66,8 @@ pub(in crate::runtime) enum LookupRuntimeError {
 }
 
 pub(super) enum ScheduledIngestorStart {
-    Plan(Box<IngestorStartPlan>),
+    Plan(Arc<IngestorStartPlan>),
     Complete,
-    Error(RuntimeError),
 }
 
 /// One running ingestor: the tasks its source runs in and the branch runtimes its routes feed.
@@ -82,31 +93,40 @@ impl Runtime {
     pub(super) async fn start_missing_domain_ingestors(
         &self,
         domain: &DomainName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), IngestorStartError> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(Some(domain)) {
-                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(*plan).await?,
+                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(&plan).await?,
                 ScheduledIngestorStart::Complete => break,
-                ScheduledIngestorStart::Error(error) => return Err(error),
             }
         }
         Ok(())
     }
 
-    pub(crate) async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
+    pub(crate) async fn start_running_domain_ingestors(
+        &self,
+    ) -> error_stack::Result<(), IngestorStartError> {
         let _application = self.inner.schedule_application.lock().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(None) {
-                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(*plan).await?,
+                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(&plan).await?,
                 ScheduledIngestorStart::Complete => break,
-                ScheduledIngestorStart::Error(error) => return Err(error),
             }
+        }
+        // Every ingestor this node should run is running now, so the endpoint of a client ingestor
+        // that is not running here ends its producers for good.
+        let dispatcher = self.inner.remote_dispatcher.load();
+        if let Some(dispatcher) = dispatcher.as_deref() {
+            self.reconcile_client_ingestor_endpoints(dispatcher.local_node_id())
+                .await;
         }
         Ok(())
     }
 
+    /// The plan of the next ingestor this node executes but does not run, from the plans its
+    /// running domains installed with their schedules.
     pub(super) fn next_scheduled_ingestor_start_plan(
         &self,
         requested_domain: Option<&DomainName>,
@@ -134,71 +154,35 @@ impl Runtime {
             let Some(execution) = self.inner.executions.get(&domain) else {
                 continue;
             };
-            let passive_only = execution.passive_only;
-            let schedule = execution.schedule.clone();
-            drop(execution);
-
-            if passive_only {
+            if execution.passive_only {
                 continue;
             }
+            let mut local_plans = Vec::new();
+            for plan in execution.revision.entrypoints.ingestors() {
+                let identity =
+                    NodeRef::new(ModelKind::Ingestor, ModelName::from(&plan.ingestor.name));
+                let node = execution.revision.nodes.get(&identity).assured(
+                    "every domain execution is installed and updated with the entrypoint plans \
+                     decided from its planned revision",
+                );
+                if Self::scheduled_node_executes_locally(node, local_node_id) {
+                    local_plans.push(plan.clone());
+                }
+            }
+            drop(execution);
 
-            for node in schedule.nodes.values() {
-                if node.kind() != ModelKind::Ingestor
-                    || !Self::scheduled_node_executes_locally(node, local_node_id)
+            for plan in local_plans {
+                if !self
+                    .inner
+                    .ingestors
+                    .contains_key(&plan.ingestor.runtime_key())
                 {
-                    continue;
+                    return ScheduledIngestorStart::Plan(plan);
                 }
-
-                let key = node.identity().in_domain(&domain);
-                if self.inner.ingestors.contains_key(&key) {
-                    continue;
-                }
-
-                let Model::Ingestor(ingestor) = node.config.as_ref() else {
-                    continue;
-                };
-                let Some(source_model) =
-                    Self::source_model_for_scheduled_ingestor(&schedule, ingestor)
-                else {
-                    warn!(
-                        domain = domain.as_str(),
-                        ingestor = ingestor.name.as_str(),
-                        "cannot resume ingestor after memory pressure because its source model is \
-                         missing"
-                    );
-                    continue;
-                };
-
-                let plan = match IngestorStartPlan::decide(&domain, node, &source_model) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        return ScheduledIngestorStart::Error(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "cannot plan ingestor '{}': {error}",
-                                ingestor.name.as_str()
-                            ),
-                        });
-                    }
-                };
-                return ScheduledIngestorStart::Plan(Box::new(plan));
             }
         }
 
         ScheduledIngestorStart::Complete
-    }
-
-    pub(super) fn source_model_for_scheduled_ingestor(
-        schedule: &DomainSchedule,
-        ingestor: &CreateIngestor,
-    ) -> Option<Model> {
-        schedule
-            .nodes
-            .get(&NodeRef::new(
-                ingestor.source.source_kind(),
-                ingestor.source.source_ref(),
-            ))
-            .map(|node| (*node.config).clone())
     }
 
     pub(in crate::runtime) async fn stop_ingestor(
@@ -235,7 +219,11 @@ impl Runtime {
             branched.shutdown().await;
         }
 
+        self.inner.ingestor_statuses.remove(&key);
         self.clear_ingestor_readiness(domain, ingestor);
+        // A client ingestor's producers outlive this execution until the endpoint learns whether a
+        // restart keeps their contract.
+        self.uninstall_client_execution(domain, ingestor);
         if self
             .ingestor_quiesce_control(domain, ingestor)
             .is_some_and(|control| !control.is_quiesced())
@@ -253,165 +241,74 @@ impl Runtime {
         Ok(())
     }
 
+    /// Binds what every execution of `ingestor` dispatches through: its compiled node filter and
+    /// routes over its input schema, and the branched entrypoints its routes feed. The input
+    /// schema is what a transport's codec decodes its payloads into, as the staged routing
+    /// revision installed that codec, or the schema a client source's batches carry.
     pub(in crate::runtime) async fn ingestor_dependencies(
         &self,
-        domain: &DomainName,
         ingestor: &IngestorSpec,
-    ) -> Result<IngestorDependencies, RuntimeError> {
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: match ingestor.routes.first() {
-                    Some(route) => route.relay.as_str().to_string(),
-                    None => "<missing>".to_string(),
-                },
-            });
-        };
-        let Some(codec) = execution.codecs.get(&ingestor.decode_using_codec).cloned() else {
-            return Err(RuntimeError::CodecNotInstantiated {
-                domain: domain.as_str().to_string(),
-                codec: ingestor.decode_using_codec.as_str().to_string(),
-            });
-        };
-        let empty_branching = ResolvedBranching::unbranched();
-        let filter_where = compile_expression_filter_program(
-            RuntimeCompileTarget {
-                domain,
-                identifier: &ModelName::from(&ingestor.name),
+        input: &IngestorInputPlan,
+    ) -> error_stack::Result<BoundIngestor, IngestorStartError> {
+        let domain = &ingestor.domain;
+        /// What the ingestor binds from its domain's execution, read under one lookup.
+        struct BindingExecution {
+            routing: StdArc<DomainRoutingSnapshot>,
+            generation: u64,
+        }
+        let BindingExecution {
+            routing,
+            generation,
+        } = match self.inner.executions.get(domain) {
+            Some(execution) => BindingExecution {
+                routing: execution.routing.staged(),
+                generation: execution.start_version,
             },
-            ingestor.filter_where.as_ref(),
-            RuntimeVmSchema {
-                schema: codec.schema().arrow_schema(),
-                sensitivity: codec.schema().vm_sensitivity(),
-            },
-            ingestor.allow_header_reads,
-            MessageErrorOperation::FilterWhere,
-            RuntimeVmCompileContext {
-                available_materialized_streams: &execution.materialized_stream_specs,
-                available_lookups: &execution.lookups,
-                current_branching: &empty_branching,
-                udfs: Some(&execution.udfs),
-            },
-        )?;
-        let mut output_routes = RelayProcessorOutputsNode {
-            routes: Vec::with_capacity(ingestor.routes.len()),
-        };
-        for output in &ingestor.routes {
-            if !execution.relay_services.contains_key(&output.relay) {
-                return Err(RuntimeError::RelayNotInstantiated {
-                    domain: domain.as_str().to_string(),
-                    relay: output.relay.as_str().to_string(),
-                });
+            None => {
+                return Err(Report::new(
+                    IngestorStartError::DomainExecutionUnavailable {
+                        domain: domain.clone(),
+                        ingestor: ingestor.name.clone(),
+                    },
+                ));
             }
-            let output_schema = execution
-                .relay_schemas
-                .get(&output.relay)
-                .cloned()
-                .ok_or_else(|| RuntimeError::RelayNotInstantiated {
-                    domain: domain.as_str().to_string(),
-                    relay: output.relay.as_str().to_string(),
-                })?;
-            let compiled_program = compile_ingestor_filter_map_program(
-                domain,
-                &ingestor.name,
-                ingestor.metadata_kind,
-                ingestor.allow_header_reads,
-                &output.construction,
-                RuntimeVmSchemaPair {
-                    input: codec.schema().arrow_schema(),
-                    input_sensitivity: codec.schema().vm_sensitivity(),
-                    output: output_schema.arrow_schema(),
-                    output_sensitivity: output_schema.vm_sensitivity(),
-                },
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &execution.materialized_stream_specs,
-                    available_lookups: &execution.lookups,
-                    current_branching: &empty_branching,
-                    udfs: Some(&execution.udfs),
-                },
-            )?;
-            let target_branch_schema = relay_branch_schema_for_routing(&execution, &output.relay);
-            let compiled_branch_program = compile_output_branch_program(
-                RuntimeCompileTarget {
-                    domain,
-                    identifier: &ModelName::from(&ingestor.name),
-                },
-                output.branch.as_ref(),
-                RuntimeVmSchema {
-                    schema: codec.schema().arrow_schema(),
-                    sensitivity: codec.schema().vm_sensitivity(),
-                },
-                RuntimeVmSchema {
-                    schema: output_schema.arrow_schema(),
-                    sensitivity: output_schema.vm_sensitivity(),
-                },
-                target_branch_schema,
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &execution.materialized_stream_specs,
-                    available_lookups: &execution.lookups,
-                    current_branching: &empty_branching,
-                    udfs: Some(&execution.udfs),
-                },
-            )?;
-            let flush_policy = output
-                .flush_policy
-                .as_ref()
-                .map(|policy| {
-                    Self::parse_runtime_node_flush_policy(
-                        domain,
-                        "ingestor output",
-                        &output.relay,
-                        policy,
-                    )
-                })
-                .transpose()?;
-            output_routes.routes.push(RelayProcessorOutputNode {
-                relay: output.relay.clone(),
-                construction: output.construction.clone(),
-                branch: output.branch.clone(),
-                flush_policy,
-                message_error_policy: output.message_error_policy.clone(),
-                pending: Vec::new(),
-                flush_timer: BranchBufferTimer::default(),
-                compiled_program,
-                compiled_branch_program,
-            });
-        }
-        if output_routes.base_relay().is_none() {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "ingestor '{}' must declare at least one output route",
-                    ingestor.name.as_str()
-                ),
-            });
-        }
-        let model_index = execution
-            .schedule
-            .nodes
-            .values()
-            .map(|node| (*node.config).clone())
-            .collect::<ModelIndex>();
-        let mut branched_templates = HashMap::default();
-        if let Some(specs) = execution
-            .branched_ingestors
-            .get(&ModelName::from(&ingestor.name))
-        {
-            for spec in specs {
-                let template = materialize_ingestor_route_template(
-                    spec,
-                    &model_index,
-                    &execution.relay_registries,
-                    &execution.relay_services,
-                )
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: reason.to_string(),
-                })?;
-                branched_templates.insert(spec.root_relay.clone(), template);
+        };
+        let input = match input {
+            IngestorInputPlan::Transport(transport) => {
+                let Some(codec) = routing.codecs.get(&transport.codec).cloned() else {
+                    return Err(Report::new(IngestorStartError::CodecNotInstantiated {
+                        domain: domain.clone(),
+                        codec: transport.codec.clone(),
+                    }));
+                };
+                BoundIngestorInput::Transport {
+                    codec,
+                    source: transport.source.clone(),
+                }
             }
-        }
-        drop(execution);
+            IngestorInputPlan::Client(plan) => BoundIngestorInput::Client {
+                plan: plan.clone(),
+                generation,
+            },
+        };
+        let input_schema = input.schema();
+        let programs = ExecutionBuildDeps::from_routing(domain, &routing)
+            .bind_ingestor(ingestor, &input_schema)
+            .change_context_lazy(|| IngestorStartError::Bind {
+                domain: domain.clone(),
+            })?;
+        let relays = RelayRuntimeHandles {
+            services: &routing.relay_services,
+        };
+        let branched_templates = relays
+            .route_templates(
+                ModelKind::Ingestor,
+                &ModelName::from(&ingestor.name),
+                &ingestor.routes,
+            )
+            .change_context_lazy(|| IngestorStartError::Bind {
+                domain: domain.clone(),
+            })?;
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let metrics = self.inner.metrics.resolve_global_node_message_metrics(
@@ -421,35 +318,37 @@ impl Runtime {
             physical_node_id,
             "received",
         );
-        Ok(IngestorDependencies {
-            output_routes,
-            filter_where,
-            codec,
-            branched_templates,
-            metrics,
+        Ok(BoundIngestor {
+            input,
+            dependencies: IngestorDependencies {
+                handles: self
+                    .ingest_task_handles(domain, &ingestor.name)
+                    .change_context_lazy(|| IngestorStartError::Bind {
+                        domain: domain.clone(),
+                    })?,
+                output_routes: programs.routes,
+                filter_where: programs.filter_where,
+                branched_templates,
+                metrics,
+            },
         })
     }
 
     pub(in crate::runtime) async fn load_lookup_runtime(
         &self,
-        domain: &DomainName,
-        lookup: CreateLookup,
+        lookup: LookupResourcePlan,
         codec: Arc<CompiledCodec>,
     ) -> LookupRuntimeResult<LookupRuntime> {
+        let domain = &lookup.resource.domain;
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(LookupRuntimeError::ResourceStoreUnavailable));
         };
-        let resource_id = ResourceId::new(
-            domain.clone(),
-            lookup.resource.clone(),
-            lookup.resource_version,
-        );
         let path = resource_store
-            .resolve_content_path(&resource_id, &lookup.path)
+            .resolve_content_path(&lookup.resource, &lookup.path)
             .change_context(LookupRuntimeError::ResolveContentPath {
                 domain: domain.clone(),
                 lookup: lookup.name.clone(),
-                resource: lookup.resource.clone(),
+                resource: lookup.resource.identifier.clone(),
                 path: lookup.path.clone(),
             })?;
         let file = tokio::fs::File::open(&path).await.map_err(|source| {
@@ -477,21 +376,35 @@ impl Runtime {
             })
             .attach_printable(source.to_string())
         })? {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             line_number += 1;
             if line.trim().is_empty() {
                 continue;
             }
-            let messages =
-                decode_ingested_payload(&codec, line.as_bytes(), &mut decoder, &mut builder)
-                    .await
-                    .map_err(|source| {
-                        Report::new(LookupRuntimeError::DecodeLine {
-                            lookup: lookup.name.clone(),
-                            line: line_number,
-                        })
-                        .attach_printable(source.to_string())
-                    })?;
+            let decoded = decode_ingested_payload(
+                self.executor(),
+                QueueAdmission::RefuseWhenFull,
+                &codec,
+                line.as_bytes(),
+                &mut decoder,
+                &mut builder,
+            )
+            .await;
+            let messages = match decoded {
+                Ok(messages) => messages,
+                Err(PayloadDecodeFailure::Codec(report)) => {
+                    return Err(report.change_context(LookupRuntimeError::DecodeLine {
+                        lookup: lookup.name.clone(),
+                        line: line_number,
+                    }));
+                }
+                Err(PayloadDecodeFailure::NotAdmitted(report)) => {
+                    return Err(report.change_context(LookupRuntimeError::UnfoldLine {
+                        lookup: lookup.name.clone(),
+                        line: line_number,
+                    }));
+                }
+            };
             row_lines.extend(std::iter::repeat_n(line_number, messages));
         }
 
@@ -502,7 +415,7 @@ impl Runtime {
             })?;
         let mut entries = HashMap::new();
         for (row, line_number) in row_lines.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(value) = batch.value(row, lookup.key_field.as_str()).change_context(
                 LookupRuntimeError::ReadKey {
                     lookup: lookup.name.clone(),
@@ -530,7 +443,7 @@ impl Runtime {
             "received",
         );
         Ok(LookupRuntime {
-            model: lookup,
+            plan: lookup,
             schema,
             batch: Arc::new(batch),
             entries: Arc::new(entries),
@@ -556,9 +469,25 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    /// A runtime with the host's resolver installed, as every node's runtime has one.
+    async fn runtime_with_dns() -> Runtime {
+        let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
+            .await
+            .expect("the host's resolver configuration should load");
+        Runtime::with_persistence_and_temp_dir(
+            nervix_execution::Executor::default(),
+            Some(dns),
+            None,
+            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+            ConfiguredFaultInjection::default(),
+            PathBuf::from(DEFAULT_TEMP_DIR),
+        )
+        .expect("a runtime without persistence builds")
+    }
+
+    #[nervix_primitives::test]
     async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
-        let runtime = Runtime::default();
+        let runtime = runtime_with_dns().await;
         let domain = domain("default");
         runtime.sync_domains(&BTreeMap::from([(
             domain.clone(),
@@ -646,18 +575,22 @@ mod tests {
                                 max_batch_size: "1MiB".to_string(),
                             })
                             .with_branch(OutputBranch::Unbranched),
-                            decode_using_codec: codec.clone(),
-                            timestamp_source: None,
-                            source: IngestSource::Mqtt {
-                                client,
-                                topic: "notifications".to_string(),
-                                instances: nonzero!(2u64),
-                                mode: MqttIngestMode::NoAckSequential {
-                                    session: MqttSession::Clean,
-                                    qos: MqttQos::AtMostOnce,
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Mqtt {
+                                        client,
+                                        topic: "notifications".to_string(),
+                                        instances: nonzero!(2u64),
+                                        mode: MqttIngestMode::NoAckSequential {
+                                            session: MqttSession::Clean,
+                                            qos: MqttQos::AtMostOnce,
+                                        },
+                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
+                                    },
+                                    codec: codec.clone(),
                                 },
-                                quiesce: nervix_models::IngestQuiesceMode::Drop,
-                            },
+                            ),
+                            timestamp_source: None,
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })),
@@ -692,7 +625,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -776,21 +709,25 @@ mod tests {
                                 max_batch_size: "1MiB".to_string(),
                             })
                             .with_branch(OutputBranch::Unbranched),
-                            decode_using_codec: codec.clone(),
-                            timestamp_source: None,
-                            source: IngestSource::Mqtt {
-                                client,
-                                topic: "notifications".to_string(),
-                                instances: nonzero!(1u64),
-                                mode: MqttIngestMode::AckSequential {
-                                    timeout: "oops".to_string(),
-                                    retry_policy: RetryPolicy {
-                                        backoff: "100ms".to_string(),
-                                        max_backoff: "200ms".to_string(),
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Mqtt {
+                                        client,
+                                        topic: "notifications".to_string(),
+                                        instances: nonzero!(1u64),
+                                        mode: MqttIngestMode::AckSequential {
+                                            timeout: "oops".to_string(),
+                                            retry_policy: RetryPolicy {
+                                                backoff: "100ms".to_string(),
+                                                max_backoff: "200ms".to_string(),
+                                            },
+                                        },
+                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
                                     },
+                                    codec: codec.clone(),
                                 },
-                                quiesce: nervix_models::IngestQuiesceMode::Drop,
-                            },
+                            ),
+                            timestamp_source: None,
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })),

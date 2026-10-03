@@ -7,17 +7,19 @@
 //! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
 //!   entries, or registry state.
 
-use std::{num::NonZeroUsize, sync::Arc as StdArc};
+use std::num::NonZeroUsize;
 
 use ahash::HashSet;
+use error_stack::Report;
 use nervix_connector::{
     RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
 };
+use nervix_primitives::sync::StdArc;
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use thiserror::Error;
-use url::Url;
+use url::{Host, Url};
 
 pub const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
 pub const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
@@ -63,13 +65,13 @@ pub enum SyslogConfigError {
          found '{value}'"
     )]
     Framing { value: String },
-    #[error("invalid Syslog client config key 'max_message_size' value '{value}': {source}")]
+    #[error("invalid Syslog client config key 'max_message_size' value '{value}'")]
     MessageSize {
         value: String,
         #[source]
         source: std::num::ParseIntError,
     },
-    #[error("invalid Syslog client config key 'addr' value '{value}': {source}")]
+    #[error("invalid Syslog client config key 'addr' value '{value}'")]
     AddressParse {
         value: String,
         #[source]
@@ -102,6 +104,7 @@ pub struct SyslogClientConfig {
     pub protocol: SyslogProtocol,
     pub addr: String,
     pub server_name: String,
+    pub(crate) port: u16,
     pub max_message_size: NonZeroUsize,
     pub framing: SyslogFraming,
     entries: Vec<nervix_models::ClientConfigEntry>,
@@ -111,7 +114,7 @@ impl SyslogClientConfig {
     pub fn parse(
         entries: &[nervix_models::ClientConfigEntry],
         direction: SyslogDirection,
-    ) -> Result<Self, SyslogConfigError> {
+    ) -> error_stack::Result<Self, SyslogConfigError> {
         Self::validate_keys(entries)?;
         let protocol = Self::required_value(entries, "protocol")?;
         let protocol = match protocol.as_str() {
@@ -119,21 +122,21 @@ impl SyslogClientConfig {
             "tcp" => SyslogProtocol::Tcp,
             "tls" => SyslogProtocol::Tls,
             value => {
-                return Err(SyslogConfigError::Protocol {
+                return Err(Report::new(SyslogConfigError::Protocol {
                     value: value.to_string(),
-                });
+                }));
             }
         };
         let addr = Self::required_value(entries, "addr")?;
-        let server_name = Self::validate_addr(&addr)?;
+        let (server_name, port) = Self::validate_addr(&addr)?;
         let max_message_size = Self::optional_value(entries, "max_message_size")
             .map(|value| {
-                value
-                    .parse::<NonZeroUsize>()
-                    .map_err(|source| SyslogConfigError::MessageSize {
+                value.parse::<NonZeroUsize>().map_err(|source| {
+                    Report::new(SyslogConfigError::MessageSize {
                         value: value.to_string(),
                         source,
                     })
+                })
             })
             .transpose()?
             .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE);
@@ -142,50 +145,50 @@ impl SyslogClientConfig {
             "octet-counting" => SyslogFraming::OctetCounting,
             "non-transparent" => SyslogFraming::NonTransparent,
             value => {
-                return Err(SyslogConfigError::Framing {
+                return Err(Report::new(SyslogConfigError::Framing {
                     value: value.to_string(),
-                });
+                }));
             }
         };
         if protocol == SyslogProtocol::Udp && explicit_framing.is_some() {
-            return Err(SyslogConfigError::UdpFraming);
+            return Err(Report::new(SyslogConfigError::UdpFraming));
         }
         if protocol == SyslogProtocol::Tls && framing == SyslogFraming::NonTransparent {
-            return Err(SyslogConfigError::TlsFraming);
+            return Err(Report::new(SyslogConfigError::TlsFraming));
         }
 
         let tls = client_tls_paths(entries);
         match (protocol, direction) {
             (SyslogProtocol::Tls, SyslogDirection::Ingest) => {
                 if tls.cert_file.is_none() {
-                    return Err(SyslogConfigError::MissingTlsKey {
+                    return Err(Report::new(SyslogConfigError::MissingTlsKey {
                         direction: "ingestor",
                         key: "tls_cert_file",
-                    });
+                    }));
                 }
                 if tls.key_file.is_none() {
-                    return Err(SyslogConfigError::MissingTlsKey {
+                    return Err(Report::new(SyslogConfigError::MissingTlsKey {
                         direction: "ingestor",
                         key: "tls_key_file",
-                    });
+                    }));
                 }
             }
             (SyslogProtocol::Tls, SyslogDirection::Emit) => {
                 match (tls.cert_file.as_ref(), tls.key_file.as_ref()) {
                     (Some(_), Some(_)) | (None, None) => {}
                     (Some(_), None) => {
-                        return Err(SyslogConfigError::IdentityPair {
+                        return Err(Report::new(SyslogConfigError::IdentityPair {
                             direction: "emitter",
                             key: "tls_cert_file",
                             required: "tls_key_file",
-                        });
+                        }));
                     }
                     (None, Some(_)) => {
-                        return Err(SyslogConfigError::IdentityPair {
+                        return Err(Report::new(SyslogConfigError::IdentityPair {
                             direction: "emitter",
                             key: "tls_key_file",
                             required: "tls_cert_file",
-                        });
+                        }));
                     }
                 }
             }
@@ -197,7 +200,7 @@ impl SyslogClientConfig {
                 } else {
                     "tls_key_file"
                 };
-                return Err(SyslogConfigError::TlsWithPlainProtocol { key });
+                return Err(Report::new(SyslogConfigError::TlsWithPlainProtocol { key }));
             }
             (SyslogProtocol::Udp | SyslogProtocol::Tcp, _) => {}
         }
@@ -206,6 +209,7 @@ impl SyslogClientConfig {
             protocol,
             addr,
             server_name,
+            port,
             max_message_size,
             framing,
             entries: entries.to_vec(),
@@ -215,10 +219,10 @@ impl SyslogClientConfig {
     fn required_value(
         entries: &[nervix_models::ClientConfigEntry],
         key: &'static str,
-    ) -> Result<String, SyslogConfigError> {
+    ) -> error_stack::Result<String, SyslogConfigError> {
         match Self::optional_value(entries, key) {
             Some(value) => Ok(value.to_string()),
-            None => Err(SyslogConfigError::MissingKey { key }),
+            None => Err(Report::new(SyslogConfigError::MissingKey { key })),
         }
     }
 
@@ -234,7 +238,7 @@ impl SyslogClientConfig {
 
     fn validate_keys(
         entries: &[nervix_models::ClientConfigEntry],
-    ) -> Result<(), SyslogConfigError> {
+    ) -> error_stack::Result<(), SyslogConfigError> {
         let known = [
             "protocol",
             "addr",
@@ -247,25 +251,25 @@ impl SyslogClientConfig {
         let mut seen = HashSet::default();
         for entry in entries {
             if !known.contains(&entry.key.as_str()) {
-                return Err(SyslogConfigError::UnknownKey {
+                return Err(Report::new(SyslogConfigError::UnknownKey {
                     key: entry.key.clone(),
-                });
+                }));
             }
             if !seen.insert(entry.key.clone()) {
-                return Err(SyslogConfigError::DuplicateKey {
+                return Err(Report::new(SyslogConfigError::DuplicateKey {
                     key: entry.key.clone(),
-                });
+                }));
             }
         }
         Ok(())
     }
 
-    fn validate_addr(addr: &str) -> Result<String, SyslogConfigError> {
+    fn validate_addr(addr: &str) -> error_stack::Result<(String, u16), SyslogConfigError> {
         let parsed = Url::parse(&format!("syslog://{addr}")).map_err(|source| {
-            SyslogConfigError::AddressParse {
+            Report::new(SyslogConfigError::AddressParse {
                 value: addr.to_string(),
                 source,
-            }
+            })
         })?;
         if !parsed.username().is_empty()
             || parsed.password().is_some()
@@ -273,116 +277,122 @@ impl SyslogClientConfig {
             || parsed.fragment().is_some()
             || parsed.path() != ""
         {
-            return Err(SyslogConfigError::AddressShape {
+            return Err(Report::new(SyslogConfigError::AddressShape {
                 value: addr.to_string(),
-            });
+            }));
         }
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| SyslogConfigError::AddressHostMissing {
+        let host = parsed.host().ok_or_else(|| {
+            Report::new(SyslogConfigError::AddressHostMissing {
                 value: addr.to_string(),
-            })?;
-        if parsed.port().is_none() {
-            return Err(SyslogConfigError::AddressPortMissing {
+            })
+        })?;
+        let port = parsed.port().ok_or_else(|| {
+            Report::new(SyslogConfigError::AddressPortMissing {
                 value: addr.to_string(),
-            });
-        }
-        Ok(host.to_string())
+            })
+        })?;
+        let host = match host {
+            Host::Domain(name) => name.to_string(),
+            Host::Ipv4(address) => address.to_string(),
+            Host::Ipv6(address) => address.to_string(),
+        };
+        Ok((host, port))
     }
 
-    pub fn tls_client_config(&self) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
+    pub fn tls_client_config(
+        &self,
+    ) -> error_stack::Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
         RustlsClientConfigSource::new(&self.entries)
             .build_with_default_roots()
-            .map_err(|error| SyslogConfigError::TlsMaterial {
-                reason: error.to_string(),
+            .map_err(|error| {
+                let reason = error.to_string();
+                error.change_context(SyslogConfigError::TlsMaterial { reason })
             })
     }
 
-    pub fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
+    pub fn tls_server_config(
+        &self,
+    ) -> error_stack::Result<StdArc<ServerConfig>, SyslogConfigError> {
         install_rustls_crypto_provider();
         let tls = client_tls_paths(&self.entries);
-        let cert_file = tls
-            .cert_file
-            .as_ref()
-            .ok_or(SyslogConfigError::MissingTlsKey {
+        let cert_file = tls.cert_file.as_ref().ok_or_else(|| {
+            Report::new(SyslogConfigError::MissingTlsKey {
                 direction: "ingestor",
                 key: "tls_cert_file",
-            })?;
-        let key_file = tls
-            .key_file
-            .as_ref()
-            .ok_or(SyslogConfigError::MissingTlsKey {
+            })
+        })?;
+        let key_file = tls.key_file.as_ref().ok_or_else(|| {
+            Report::new(SyslogConfigError::MissingTlsKey {
                 direction: "ingestor",
                 key: "tls_key_file",
-            })?;
+            })
+        })?;
         let cert_pem =
             read_tls_file(cert_file, "Syslog TLS server certificate").map_err(|error| {
-                SyslogConfigError::TlsMaterial {
-                    reason: error.to_string(),
-                }
+                let reason = error.to_string();
+                error.change_context(SyslogConfigError::TlsMaterial { reason })
             })?;
         let key_pem =
             read_tls_file(key_file, "Syslog TLS server private key").map_err(|error| {
-                SyslogConfigError::TlsMaterial {
-                    reason: error.to_string(),
-                }
+                let reason = error.to_string();
+                error.change_context(SyslogConfigError::TlsMaterial { reason })
             })?;
         let certs = CertificateDer::pem_slice_iter(&cert_pem)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| SyslogConfigError::TlsMaterial {
-                reason: format!(
+            .map_err(|error| {
+                let reason = format!(
                     "invalid Syslog client config key 'tls_cert_file' '{}': {error}",
                     cert_file.display()
-                ),
+                );
+                Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
             })?;
         if certs.is_empty() {
-            return Err(SyslogConfigError::TlsMaterial {
+            return Err(Report::new(SyslogConfigError::TlsMaterial {
                 reason: format!(
                     "invalid Syslog client config key 'tls_cert_file' '{}': no certificates found",
                     cert_file.display()
                 ),
-            });
+            }));
         }
         let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|error| {
-            SyslogConfigError::TlsMaterial {
-                reason: format!(
-                    "invalid Syslog client config key 'tls_key_file' '{}': {error}",
-                    key_file.display()
-                ),
-            }
+            let reason = format!(
+                "invalid Syslog client config key 'tls_key_file' '{}': {error}",
+                key_file.display()
+            );
+            Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
         })?;
         let builder = ServerConfig::builder();
         let config = if let Some(ca_file) = tls.ca_file.as_ref() {
             let ca_pem =
                 read_tls_file(ca_file, "Syslog TLS client CA certificate").map_err(|error| {
-                    SyslogConfigError::TlsMaterial {
-                        reason: error.to_string(),
-                    }
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
                 })?;
             let mut roots = RootCertStore::empty();
             for cert in CertificateDer::pem_slice_iter(&ca_pem) {
-                let cert = cert.map_err(|error| SyslogConfigError::TlsMaterial {
-                    reason: format!(
+                let cert = cert.map_err(|error| {
+                    let reason = format!(
                         "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
                         ca_file.display()
-                    ),
+                    );
+                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
                 })?;
-                roots
-                    .add(cert)
-                    .map_err(|error| SyslogConfigError::TlsMaterial {
-                        reason: format!(
-                            "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                            ca_file.display()
-                        ),
-                    })?;
+                roots.add(cert).map_err(|error| {
+                    let reason = format!(
+                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                        ca_file.display()
+                    );
+                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
+                })?;
             }
             let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
                 .build()
-                .map_err(|error| SyslogConfigError::TlsMaterial {
-                    reason: format!(
+                .map_err(|error| {
+                    let reason = format!(
                         "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
                         ca_file.display()
-                    ),
+                    );
+                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
                 })?;
             builder
                 .with_client_cert_verifier(verifier)
@@ -390,8 +400,9 @@ impl SyslogClientConfig {
         } else {
             builder.with_no_client_auth().with_single_cert(certs, key)
         }
-        .map_err(|error| SyslogConfigError::TlsMaterial {
-            reason: format!("invalid Syslog TLS server identity: {error}"),
+        .map_err(|error| {
+            let reason = format!("invalid Syslog TLS server identity: {error}");
+            Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
         })?;
         Ok(StdArc::new(config))
     }
@@ -402,6 +413,8 @@ mod tests {
     use nervix_models::ClientConfigEntry;
 
     use super::*;
+
+    type InvalidCase<'a> = (&'a [(&'a str, &'a str)], SyslogDirection, &'a str);
 
     fn entries(values: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
         values
@@ -486,6 +499,123 @@ mod tests {
     }
 
     #[test]
+    fn invalid_client_settings_name_the_setting_that_failed() {
+        let cases: &[InvalidCase<'_>] = &[
+            (
+                &[],
+                SyslogDirection::Emit,
+                "missing Syslog client config key 'protocol'",
+            ),
+            (
+                &[("protocol", "tcp")],
+                SyslogDirection::Emit,
+                "config key 'addr'",
+            ),
+            (
+                &[
+                    ("protocol", "tcp"),
+                    ("addr", "localhost:5514"),
+                    ("extra", "x"),
+                ],
+                SyslogDirection::Emit,
+                "unknown Syslog client config key 'extra'",
+            ),
+            (
+                &[
+                    ("protocol", "tcp"),
+                    ("protocol", "udp"),
+                    ("addr", "localhost:5514"),
+                ],
+                SyslogDirection::Emit,
+                "duplicate Syslog client config key 'protocol'",
+            ),
+            (
+                &[
+                    ("protocol", "tcp"),
+                    ("addr", "localhost:5514"),
+                    ("max_message_size", "0"),
+                ],
+                SyslogDirection::Emit,
+                "max_message_size",
+            ),
+            (
+                &[
+                    ("protocol", "tcp"),
+                    ("addr", "localhost:5514"),
+                    ("framing", "invalid"),
+                ],
+                SyslogDirection::Emit,
+                "config key 'framing'",
+            ),
+            (
+                &[("protocol", "tcp"), ("addr", "localhost:invalid")],
+                SyslogDirection::Emit,
+                "config key 'addr'",
+            ),
+            (
+                &[("protocol", "tcp"), ("addr", "localhost:5514?query=1")],
+                SyslogDirection::Emit,
+                "config key 'addr'",
+            ),
+            (
+                &[
+                    ("protocol", "udp"),
+                    ("addr", "localhost:5514"),
+                    ("tls_ca_file", "/tmp/ca.pem"),
+                ],
+                SyslogDirection::Emit,
+                "TLS files require protocol=tls",
+            ),
+            (
+                &[
+                    ("protocol", "tls"),
+                    ("addr", "localhost:6514"),
+                    ("tls_cert_file", "/tmp/cert.pem"),
+                ],
+                SyslogDirection::Ingest,
+                "tls_key_file",
+            ),
+            (
+                &[
+                    ("protocol", "tls"),
+                    ("addr", "localhost:6514"),
+                    ("tls_key_file", "/tmp/key.pem"),
+                ],
+                SyslogDirection::Emit,
+                "tls_cert_file",
+            ),
+        ];
+        for (values, direction, expected) in cases {
+            let error = SyslogClientConfig::parse(&entries(values), *direction)
+                .expect_err("the invalid setting must be rejected");
+            assert!(error.to_string().contains(*expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_setting_that_does_not_parse_keeps_its_parser_error_beneath_it() {
+        let error = SyslogClientConfig::parse(
+            &entries(&[
+                ("protocol", "tcp"),
+                ("addr", "localhost:5514"),
+                ("max_message_size", "many"),
+            ]),
+            SyslogDirection::Emit,
+        )
+        .expect_err("a message size must be a positive integer");
+
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::MessageSize { value, .. } if value == "many"
+        ));
+        assert_eq!(
+            format!("{error:#}"),
+            "invalid Syslog client config key 'max_message_size' value 'many': invalid digit \
+             found in string"
+        );
+    }
+
+    #[test]
     fn syslog_tls_material_read_failures_keep_their_context() {
         let missing = "/definitely/missing/nervix-syslog-tls.pem";
         let emitter = SyslogClientConfig::parse(
@@ -500,7 +630,11 @@ mod tests {
         let error = emitter
             .tls_client_config()
             .expect_err("a missing emitter CA file must fail");
-        assert!(matches!(error, SyslogConfigError::TlsMaterial { .. }));
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::TlsMaterial { .. }
+        ));
+        assert!(error.contains::<nervix_connector::ClientConfigError>());
 
         let ingestor = SyslogClientConfig::parse(
             &entries(&[
@@ -515,7 +649,11 @@ mod tests {
         let error = ingestor
             .tls_server_config()
             .expect_err("a missing server certificate must fail");
-        assert!(matches!(error, SyslogConfigError::TlsMaterial { .. }));
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::TlsMaterial { .. }
+        ));
+        assert!(error.contains::<nervix_connector::ClientConfigError>());
 
         let root = tempfile::tempdir().expect("temporary Syslog TLS directory should open");
         let certificate = root.path().join("certificate.pem");
@@ -535,6 +673,10 @@ mod tests {
         let error = ingestor
             .tls_server_config()
             .expect_err("a missing server private key must fail");
-        assert!(matches!(error, SyslogConfigError::TlsMaterial { .. }));
+        assert!(matches!(
+            error.current_context(),
+            SyslogConfigError::TlsMaterial { .. }
+        ));
+        assert!(error.contains::<nervix_connector::ClientConfigError>());
     }
 }

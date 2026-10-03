@@ -234,6 +234,11 @@ impl ClusterDns {
 
     /// Answer `node_id`'s name with `answer` from the next question on.
     pub(crate) fn answer(&self, node_id: &str, answer: FixtureAnswer) {
+        self.answer_name(&qualified_name(node_id), answer);
+    }
+
+    /// Answer `name` with `answer` from the next question on.
+    pub(crate) fn answer_name(&self, name: &str, answer: FixtureAnswer) {
         let answer = match answer {
             FixtureAnswer::NameNotFound => DnsAnswer::NameNotFound {
                 negative_ttl: FIXTURE_TTL,
@@ -243,15 +248,16 @@ impl ClusterDns {
             },
             FixtureAnswer::Silence => DnsAnswer::Silent,
         };
-        self.authority.set(&qualified_name(node_id), answer);
+        self.authority.set(name, answer);
     }
 
-    /// Publish a separately provisioned service under a name in this scenario's zone.
-    pub(crate) fn publish_service(&self, name: &str, address: IpAddr) {
+    /// Publish a separately provisioned service under `name`, answered with `addresses` in that
+    /// order.
+    pub(crate) fn publish_service(&self, name: &str, addresses: Vec<IpAddr>) {
         self.authority.set(
             name,
             DnsAnswer::Addresses {
-                addresses: vec![address],
+                addresses,
                 ttl: FIXTURE_TTL,
             },
         );

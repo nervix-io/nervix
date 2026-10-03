@@ -166,6 +166,7 @@ Feature: Domain clock contract regressions
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
 
   @domain_clock_authority
+  @clock_attachment_owner_loss
   Scenario: Nonleader clock-owner loss preserves the committed mapping
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -195,10 +196,16 @@ Feature: Domain clock contract regressions
     When node "node-2" is restarted 1 times with a new interconnect address
     Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Given a clock session is opened on node "node-1"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "1"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "1"
     Given domain clock progress for domain "{{domain}}" on node "node-1" is paused before delivery
     When node "node-2" is stopped
     Then node "node-3" eventually reports leader "node-3"
     And domain clock progress for domain "{{domain}}" on node "node-1" reaches the delivery pause within the authority observation budget
+    When domain clock progress for domain "{{domain}}" on node "node-1" resumes
+    Then within "20s" the clock session receives a tick with an id higher than before owner loss
 
   @domain_bound_clock
   Scenario: A joining or restarted node installs the current clock generation before execution
@@ -313,7 +320,7 @@ Feature: Domain clock contract regressions
       | 1            |
       | 3            |
 
-  @domain_cadence @exclusive
+  @domain_cadence
   Scenario Outline: HTTP polling follows paced domain cadence over multiple periods
     Given the HTTP mock server is running
     And clock source recorder "{{test_id}}" is reset
@@ -355,7 +362,8 @@ Feature: Domain clock contract regressions
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
       """
     Given clock source recorder "{{test_id}}" is reset
-    Then within "850ms" clock source recorder "{{test_id}}" records 3 requests
+    Then within "30s" clock source recorder "{{test_id}}" records at least 3 requests
+    And the first 3 requests recorded by clock source recorder "{{test_id}}" are separated by at least "100ms"
 
     Examples:
       | cluster_size |

@@ -13,11 +13,29 @@
 //!
 //! Every request is captured in full before it is answered, and each one takes the next response
 //! from the script. Once the script is empty, requests take the receiver's standing response, which
-//! is a complete `200` without a body until a scenario replaces it. A response can complete
-//! normally, answer after a delay, precede its final response with an interim one, declare more body
-//! than it sends and then stall, never answer, close the connection without answering, or write
-//! arbitrary bytes. The last three are how a scenario loses a response the endpoint already acted
-//! on, holds an attempt past its timeout, and sends framing no valid endpoint would.
+//! is a complete `200` without a body until a scenario replaces it. A request for a target the
+//! scenario gave its own answer takes that answer instead, so requests whose order is not part of
+//! the contract, such as those of independent branches, can each be answered deliberately. A
+//! response can complete normally, answer after a delay, precede its final response with an interim
+//! one, carry a generated body of a given size, declare more body than it sends and then stall,
+//! never answer, answer only once the scenario releases it, close the connection without answering,
+//! or write arbitrary bytes. The last four are how a scenario holds an attempt past its timeout,
+//! keeps an attempt unresolved for exactly as long as it needs to observe it, loses a response the
+//! endpoint already acted on, and sends framing no valid endpoint would. Generated field counts and
+//! value bytes can be set independently for the interim and final block, and a `Retry-After` date is
+//! computed when its response is written. Capture times precede the scripted response, so timing
+//! assertions need no silence window.
+//!
+//! # What the receiver observes of its clients
+//!
+//! Beyond the requests themselves, the receiver records two things about how its clients treat
+//! their answers. It keeps the most requests that were ever awaiting a response at once: a request
+//! awaits from its capture until the receiver begins writing its final head, or until its
+//! connection ends without one, so a client that sends its next request only after reading the
+//! previous final head never has two. And it counts the responses a client abandoned: those whose
+//! connection the client closed while the receiver still held it, or still had part of the response
+//! to write. A client that stops reading at the final head of a stalled or oversized body abandons
+//! it; a stop of the receiver itself abandons nothing.
 //!
 //! # Bounds
 //!
@@ -29,18 +47,22 @@
 //! before it aborts and joins the ones that remain, and reports how many it had to force.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fmt, io,
     net::SocketAddr,
     num::ParseIntError,
     path::Path,
     str::FromStr,
-    sync::Arc as StdArc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use parking_lot::Mutex;
+use nervix_primitives::{
+    net::{TcpListener, TcpStream},
+    sync::{Arc, CancellationToken, StdArc, blocking::Mutex, watch},
+    task::{AbortOnDropHandle, JoinSet},
+    time::Instant,
+};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{
     RootCertStore, ServerConfig,
@@ -50,15 +72,8 @@ use rustls::{
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use tempfile::TempDir;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-    sync::watch,
-    task::JoinSet,
-};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_rustls::TlsAcceptor;
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
-use triomphe::Arc;
 
 /// How long stopping waits for connections to end on their own before it aborts and joins them,
 /// in seconds. Every await a connection makes also waits for the receiver's cancellation, so the
@@ -90,8 +105,22 @@ pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_CAPTURED_REQUESTS: usize = 4096;
 /// The most faults one receiver keeps. Faults beyond it are counted but not kept. A policy input.
 pub(crate) const MAX_RECORDED_FAULTS: usize = 256;
+/// The largest generated response header value the script permits. It reaches beyond the
+/// emitter's 64 KiB response limit without letting one scenario allocate without a bound.
+const MAX_SCRIPTED_HEADER_VALUE_BYTES: usize = 128 * 1024;
+/// The largest generated response body the script permits. A policy input: many times the socket
+/// buffers of a loopback connection, so a client that reads only the head cannot absorb the body
+/// in its kernel buffers, and written in chunks, so the receiver never holds it in memory.
+const MAX_SCRIPTED_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Enough generated fields to exceed the emitter limit without unbounded fixture allocation.
+const MAX_SCRIPTED_HEADER_COUNT: usize = 512;
+/// The longest delay a scripted `Retry-After` date may ask for. A policy input: far longer than
+/// any scenario waits, and short enough that the date it produces is always representable.
+const MAX_SCRIPTED_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// The bytes one read takes from a connection.
 const READ_CHUNK_BYTES: usize = 16 * 1024;
+/// The bytes a generated response body is written from, one chunk at a time.
+static GENERATED_BODY_CHUNK: [u8; READ_CHUNK_BYTES] = [b'x'; READ_CHUNK_BYTES];
 
 const _: () = assert!(
     HTTP_EMITTER_HEADER_BYTES + HTTP_EMITTER_TARGET_BYTES < MAX_REQUEST_HEAD_BYTES,
@@ -137,6 +166,10 @@ pub(crate) enum ReceiverResponse {
     LoseResponse,
     /// Capture the request, then write nothing until the client leaves or the receiver stops.
     HoldResponse,
+    /// Capture the request, then write nothing until the scenario releases held responses, and
+    /// answer with the response they are released with. Released as this form again, the request
+    /// is held like [`ReceiverResponse::HoldResponse`].
+    HoldUntilReleased,
     /// Capture the request, write these bytes, then close the connection.
     Raw(Vec<u8>),
 }
@@ -146,11 +179,16 @@ pub(crate) enum ReceiverResponse {
 pub(crate) struct ScriptedResponse {
     status: u16,
     headers: Vec<ResponseHeader>,
-    body: Vec<u8>,
+    body: ResponseBody,
     interim: Option<u16>,
+    interim_extra_headers: usize,
+    interim_header_value_bytes: Option<usize>,
     delay: Option<Duration>,
     body_delivery: BodyDelivery,
     extra_headers: usize,
+    header_value_bytes: Option<usize>,
+    /// Write `Retry-After` as the HTTP date this long after the head is written.
+    retry_after_date_in: Option<Duration>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,16 +204,38 @@ enum BodyDelivery {
     Stalled,
 }
 
+/// The content a response carries after its head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResponseBody {
+    /// Exactly these bytes.
+    Bytes(Vec<u8>),
+    /// This many generated bytes, written in chunks rather than held in memory.
+    Generated(usize),
+}
+
+impl ResponseBody {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Generated(size) => *size,
+        }
+    }
+}
+
 impl ScriptedResponse {
     fn status(status: u16) -> Self {
         Self {
             status,
             headers: Vec::new(),
-            body: Vec::new(),
+            body: ResponseBody::Bytes(Vec::new()),
             interim: None,
+            interim_extra_headers: 0,
+            interim_header_value_bytes: None,
             delay: None,
             body_delivery: BodyDelivery::Complete,
             extra_headers: 0,
+            header_value_bytes: None,
+            retry_after_date_in: None,
         }
     }
 
@@ -185,14 +245,18 @@ impl ScriptedResponse {
         !(informational || self.status == 204 || self.status == 304)
     }
 
+    /// The final head, built when it is written, so a `Retry-After` date is measured from then.
     fn head(&self) -> Vec<u8> {
         let mut head = status_line(self.status).into_bytes();
         for header in &self.headers {
             head.extend_from_slice(format!("{}: {}\r\n", header.name, header.value).as_bytes());
         }
-        for index in 0..self.extra_headers {
-            head.extend_from_slice(format!("x-fixture-extra-{index}: extra\r\n").as_bytes());
+        if let Some(delay) = self.retry_after_date_in {
+            head.extend_from_slice(
+                format!("retry-after: {}\r\n", http_date_after(delay)).as_bytes(),
+            );
         }
+        Self::append_generated_headers(&mut head, self.extra_headers, self.header_value_bytes);
         if self.carries_content() {
             let declared = match self.body_delivery {
                 BodyDelivery::Complete => self.body.len(),
@@ -208,7 +272,34 @@ impl ScriptedResponse {
         head
     }
 
+    fn interim_head(&self) -> Option<Vec<u8>> {
+        let status = self.interim?;
+        let mut head = status_line(status).into_bytes();
+        Self::append_generated_headers(
+            &mut head,
+            self.interim_extra_headers,
+            self.interim_header_value_bytes,
+        );
+        head.extend_from_slice(b"\r\n");
+        Some(head)
+    }
+
+    fn append_generated_headers(head: &mut Vec<u8>, count: usize, value_bytes: Option<usize>) {
+        for index in 0..count {
+            head.extend_from_slice(format!("x-fixture-extra-{index}: extra\r\n").as_bytes());
+        }
+        if let Some(value_bytes) = value_bytes {
+            head.extend_from_slice(b"x-fixture-fill: ");
+            head.extend(std::iter::repeat_n(b'x', value_bytes));
+            head.extend_from_slice(b"\r\n");
+        }
+    }
+
     fn parse_clause(&mut self, clause: &str) -> Result<(), ReceiverScriptError> {
+        if let Some(bytes) = clause.strip_prefix("header value bytes ") {
+            self.header_value_bytes = Some(Self::header_value_size(bytes)?);
+            return Ok(());
+        }
         if let Some(header) = clause.strip_prefix("header ") {
             let Some((name, value)) = header.split_once(':') else {
                 return Err(ReceiverScriptError::Header {
@@ -221,8 +312,28 @@ impl ScriptedResponse {
             });
             return Ok(());
         }
+        if let Some(size) = clause.strip_prefix("body bytes ") {
+            self.body = ResponseBody::Generated(Self::body_size(size)?);
+            return Ok(());
+        }
         if let Some(body) = clause.strip_prefix("body ") {
-            self.body = body.as_bytes().to_vec();
+            self.body = ResponseBody::Bytes(body.as_bytes().to_vec());
+            return Ok(());
+        }
+        if let Some(delay) = clause.strip_prefix("retry after date in ") {
+            let delay = Self::duration(delay)?;
+            if delay > MAX_SCRIPTED_RETRY_AFTER {
+                return Err(ReceiverScriptError::RetryAfterDelay { delay });
+            }
+            self.retry_after_date_in = Some(delay);
+            return Ok(());
+        }
+        if let Some(count) = clause.strip_prefix("interim extra headers ") {
+            self.interim_extra_headers = Self::header_count(count)?;
+            return Ok(());
+        }
+        if let Some(bytes) = clause.strip_prefix("interim header value bytes ") {
+            self.interim_header_value_bytes = Some(Self::header_value_size(bytes)?);
             return Ok(());
         }
         if let Some(status) = clause.strip_prefix("interim ") {
@@ -230,13 +341,7 @@ impl ScriptedResponse {
             return Ok(());
         }
         if let Some(delay) = clause.strip_prefix("after ") {
-            let delay = humantime::parse_duration(delay).map_err(|source| {
-                ReceiverScriptError::Duration {
-                    text: delay.to_string(),
-                    source,
-                }
-            })?;
-            self.delay = Some(delay);
+            self.delay = Some(Self::duration(delay)?);
             return Ok(());
         }
         if clause == "stall body" {
@@ -244,15 +349,50 @@ impl ScriptedResponse {
             return Ok(());
         }
         if let Some(count) = clause.strip_prefix("extra headers ") {
-            self.extra_headers = count.parse().map_err(|source| ReceiverScriptError::Count {
-                text: count.to_string(),
-                source,
-            })?;
+            self.extra_headers = Self::header_count(count)?;
             return Ok(());
         }
         Err(ReceiverScriptError::UnknownClause {
             clause: clause.to_string(),
         })
+    }
+
+    fn duration(text: &str) -> Result<Duration, ReceiverScriptError> {
+        nervix_models::parse_duration_text(text).map_err(|report| ReceiverScriptError::Duration {
+            text: text.to_string(),
+            source: report.current_context().clone(),
+        })
+    }
+
+    fn header_count(text: &str) -> Result<usize, ReceiverScriptError> {
+        let count = Self::parse_count(text)?;
+        if count > MAX_SCRIPTED_HEADER_COUNT {
+            return Err(ReceiverScriptError::HeaderCount { count });
+        }
+        Ok(count)
+    }
+
+    fn parse_count(text: &str) -> Result<usize, ReceiverScriptError> {
+        text.parse().map_err(|source| ReceiverScriptError::Count {
+            text: text.to_string(),
+            source,
+        })
+    }
+
+    fn header_value_size(text: &str) -> Result<usize, ReceiverScriptError> {
+        let size = Self::parse_count(text)?;
+        if size > MAX_SCRIPTED_HEADER_VALUE_BYTES {
+            return Err(ReceiverScriptError::HeaderValueSize { size });
+        }
+        Ok(size)
+    }
+
+    fn body_size(text: &str) -> Result<usize, ReceiverScriptError> {
+        let size = Self::parse_count(text)?;
+        if size > MAX_SCRIPTED_BODY_BYTES {
+            return Err(ReceiverScriptError::BodySize { size });
+        }
+        Ok(size)
     }
 }
 
@@ -262,6 +402,26 @@ fn status_line(status: u16) -> String {
         Err(_) => "Fixture",
     };
     format!("HTTP/1.1 {status} {reason}\r\n")
+}
+
+/// The IMF-fixdate `delay` after the current actual UTC, rounded up to a whole second, so the date
+/// never asks for less than `delay` however soon a client reads it.
+fn http_date_after(delay: Duration) -> String {
+    let delay = chrono::TimeDelta::from_std(delay)
+        .assured("a scripted Retry-After delay is at most one day, which a TimeDelta holds");
+    let at = chrono::Utc::now()
+        .checked_add_signed(delay)
+        .assured("one day after the current date is a representable date");
+    let mut seconds = at.timestamp();
+    if at.timestamp_subsec_nanos() > 0 {
+        seconds = seconds
+            .checked_add(1)
+            .assured("a representable date is far from the end of the i64 second range");
+    }
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .assured("rounding a representable date up by less than a second stays representable")
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
 }
 
 fn parse_status(text: &str) -> Result<u16, ReceiverScriptError> {
@@ -283,23 +443,30 @@ fn parse_status(text: &str) -> Result<u16, ReceiverScriptError> {
 pub(crate) enum ReceiverScriptError {
     #[error(
         "receiver script line {line:?} is not one of `respond <status>`, `lose response`, `hold \
-         response`, or `raw <bytes>`"
+         response`, `hold response until released`, or `raw <bytes>`"
     )]
     UnknownForm { line: String },
     #[error("{text:?} is not a three-digit HTTP status")]
     Status { text: String },
     #[error(
-        "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, \
-         `interim <status>`, `after <duration>`, `stall body`, or `extra headers <count>`"
+        "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, `body \
+         bytes <count>`, `retry after date in <duration>`, `interim <status>`, `interim extra \
+         headers <count>`, `interim header value bytes <count>`, `after <duration>`, `stall \
+         body`, `extra headers <count>`, or `header value bytes <count>`"
     )]
     UnknownClause { clause: String },
+    #[error(
+        "a scripted Retry-After date {delay:?} ahead exceeds the receiver script limit of \
+         {MAX_SCRIPTED_RETRY_AFTER:?}"
+    )]
+    RetryAfterDelay { delay: Duration },
     #[error("header clause {clause:?} has no `:` between its name and value")]
     Header { clause: String },
     #[error("{text:?} is not a duration")]
     Duration {
         text: String,
         #[source]
-        source: humantime::DurationError,
+        source: nervix_models::DurationTextError,
     },
     #[error("{text:?} is not a header count")]
     Count {
@@ -307,6 +474,12 @@ pub(crate) enum ReceiverScriptError {
         #[source]
         source: ParseIntError,
     },
+    #[error("generated response header value of {size} bytes exceeds the receiver script limit")]
+    HeaderValueSize { size: usize },
+    #[error("generated response body of {size} bytes exceeds the receiver script limit")]
+    BodySize { size: usize },
+    #[error("{count} generated response headers exceed the receiver script limit")]
+    HeaderCount { count: usize },
     #[error("raw bytes {text:?} end inside an escape; use `\\r`, `\\n`, or `\\\\`")]
     Escape { text: String },
 }
@@ -315,7 +488,8 @@ impl FromStr for ReceiverResponse {
     type Err = ReceiverScriptError;
 
     /// Reads one script line: `respond <status>` followed by `;`-separated clauses,
-    /// `lose response`, `hold response`, or `raw <bytes>` with `\r`, `\n`, and `\\` escapes.
+    /// `lose response`, `hold response`, `hold response until released`, or `raw <bytes>` with
+    /// `\r`, `\n`, and `\\` escapes.
     fn from_str(line: &str) -> Result<Self, Self::Err> {
         let line = line.trim();
         if line == "lose response" {
@@ -323,6 +497,9 @@ impl FromStr for ReceiverResponse {
         }
         if line == "hold response" {
             return Ok(Self::HoldResponse);
+        }
+        if line == "hold response until released" {
+            return Ok(Self::HoldUntilReleased);
         }
         if let Some(raw) = line.strip_prefix("raw ") {
             return Ok(Self::Raw(unescape_raw(raw)?));
@@ -365,22 +542,43 @@ fn unescape_raw(text: &str) -> Result<Vec<u8>, ReceiverScriptError> {
     Ok(bytes)
 }
 
-/// One request exactly as the receiver read it.
+/// One request exactly as the receiver read it. Two captures are equal when their request lines,
+/// their header fields in the order they arrived, and their bodies are byte for byte the same.
 #[derive(Clone, Debug)]
 pub(crate) struct CapturedRequest {
     pub(crate) method: String,
     pub(crate) target: String,
     headers: Vec<CapturedHeader>,
     pub(crate) body: Vec<u8>,
+    /// When the receiver finished reading the request, before its scripted response began.
+    pub(crate) received_at: Instant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CapturedHeader {
     name: String,
     value: Vec<u8>,
 }
 
+/// Byte equality deliberately excludes capture time so a retry can be compared with the
+/// request it repeats.
+impl PartialEq for CapturedRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.method == other.method
+            && self.target == other.target
+            && self.headers == other.headers
+            && self.body == other.body
+    }
+}
+
+impl Eq for CapturedRequest {}
+
 impl CapturedRequest {
+    /// `<METHOD> <target>`, as a scenario names a request.
+    pub(crate) fn request_line(&self) -> String {
+        format!("{} {}", self.method, self.target)
+    }
+
     /// Every value sent under `name`, compared without ASCII case, in the order they arrived.
     pub(crate) fn header_values(&self, name: &str) -> Vec<&[u8]> {
         self.headers
@@ -393,6 +591,7 @@ impl CapturedRequest {
 
 impl fmt::Display for CapturedRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "received at {:?}", self.received_at)?;
         writeln!(formatter, "{} {}", self.method, self.target)?;
         for header in &self.headers {
             writeln!(
@@ -497,6 +696,28 @@ pub(crate) enum ReceiverWaitError {
         waited: Duration,
         faults: usize,
         latest_fault: LatestFault,
+    },
+    #[error(
+        "the receiver captured no request with the request line '{request_line}' within \
+         {waited:?}; it captured {captured} request(s) and {faults} fault(s), the latest: \
+         {latest_fault}"
+    )]
+    RequestLine {
+        request_line: String,
+        captured: usize,
+        waited: Duration,
+        faults: usize,
+        latest_fault: LatestFault,
+    },
+    #[error(
+        "clients abandoned {abandoned} of the {expected} unfinished responses expected within \
+         {waited:?}; the receiver captured {captured} request(s)"
+    )]
+    Abandoned {
+        expected: usize,
+        abandoned: usize,
+        captured: usize,
+        waited: Duration,
     },
 }
 
@@ -621,11 +842,69 @@ struct ReceiverState {
     faults: Mutex<RecordedFaults>,
     captured_count: watch::Sender<usize>,
     fault_count: watch::Sender<usize>,
+    /// The response every request held until released answers with, once a scenario releases
+    /// them. A release holds for every such request, including one held after it.
+    release: watch::Sender<Option<ReceiverResponse>>,
+    awaiting: Mutex<AwaitingResponses>,
+    /// How many responses clients abandoned before the receiver finished them.
+    abandoned_count: watch::Sender<usize>,
+}
+
+/// The requests captured but not yet answered with a final head, now and at their most.
+#[derive(Default)]
+struct AwaitingResponses {
+    current: usize,
+    most: usize,
+}
+
+/// One captured request that awaits its response until the guard is released or dropped, whichever
+/// comes first.
+struct AwaitingResponse {
+    state: Option<Arc<ReceiverState>>,
+}
+
+impl AwaitingResponse {
+    fn begin(state: &Arc<ReceiverState>) -> Self {
+        {
+            let mut awaiting = state.awaiting.lock();
+            awaiting.current = awaiting
+                .current
+                .checked_add(1)
+                .assured("a receiver's awaiting requests are bounded by its captures");
+            awaiting.most = awaiting.most.max(awaiting.current);
+        }
+        Self {
+            state: Some(state.clone()),
+        }
+    }
+
+    /// Ends the wait, once: the receiver begins writing the final head, so a sequential client can
+    /// no longer be waiting for it when it sends the next request, or the connection is ending
+    /// without one. A connection releases it before it counts an abandoned response, so whoever
+    /// observes the abandonment also observes the request no longer awaiting.
+    fn release(&mut self) {
+        if let Some(state) = self.state.take() {
+            let mut awaiting = state.awaiting.lock();
+            awaiting.current = awaiting
+                .current
+                .checked_sub(1)
+                .assured("each awaiting request is released once, after it was counted");
+        }
+    }
+}
+
+impl Drop for AwaitingResponse {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 struct ReceiverScript {
     pending: VecDeque<ReceiverResponse>,
     standing: ReceiverResponse,
+    /// The answer every request for one exact target takes, ahead of the script, which it leaves
+    /// untouched.
+    by_target: BTreeMap<String, ReceiverResponse>,
 }
 
 #[derive(Default)]
@@ -646,16 +925,41 @@ impl ReceiverState {
             script: Mutex::new(ReceiverScript {
                 pending: VecDeque::new(),
                 standing: ReceiverResponse::Respond(ScriptedResponse::status(200)),
+                by_target: BTreeMap::new(),
             }),
             captured: Mutex::new(Vec::new()),
             faults: Mutex::new(RecordedFaults::default()),
             captured_count: watch::Sender::new(0),
             fault_count: watch::Sender::new(0),
+            release: watch::Sender::new(None),
+            awaiting: Mutex::new(AwaitingResponses::default()),
+            abandoned_count: watch::Sender::new(0),
         }
     }
 
-    fn next_response(&self) -> ReceiverResponse {
+    /// Counts one response a client abandoned before the receiver finished it.
+    fn abandoned(&self) {
+        self.abandoned_count.send_modify(|abandoned| {
+            *abandoned = abandoned
+                .checked_add(1)
+                .assured("a receiver's abandoned responses are bounded by its captures");
+        });
+    }
+
+    fn has_request_line(&self, request_line: &str) -> bool {
+        self.captured
+            .lock()
+            .iter()
+            .any(|request| request.request_line() == request_line)
+    }
+
+    /// The response a request for `target` takes: the answer the scenario gave that target, or
+    /// else the next scripted response, or else the standing one.
+    fn next_response(&self, target: &str) -> ReceiverResponse {
         let mut script = self.script.lock();
+        if let Some(response) = script.by_target.get(target) {
+            return response.clone();
+        }
         match script.pending.pop_front() {
             Some(response) => response,
             None => script.standing.clone(),
@@ -764,7 +1068,7 @@ impl HttpReceiver {
             tls_files,
             state,
             cancellation,
-            accept_loop: AbortOnDropHandle::new(tokio::spawn(accept_loop.run())),
+            accept_loop: AbortOnDropHandle::new(nervix_primitives::task::spawn(accept_loop.run())),
         })
     }
 
@@ -804,6 +1108,17 @@ impl HttpReceiver {
         self.state.script.lock().standing = response;
     }
 
+    /// Answers every request for exactly `target`, its path and query, with `response`, ahead of
+    /// the script, which such a request leaves untouched.
+    pub(crate) fn answer_requests_for(&self, target: String, response: ReceiverResponse) {
+        self.state.script.lock().by_target.insert(target, response);
+    }
+
+    /// Answers every request held until released, now and later, with `response`.
+    pub(crate) fn release_held_responses(&self, response: ReceiverResponse) {
+        self.state.release.send_replace(Some(response));
+    }
+
     pub(crate) fn captured(&self) -> Vec<CapturedRequest> {
         self.state.captured.lock().clone()
     }
@@ -815,8 +1130,11 @@ impl HttpReceiver {
         within: Duration,
     ) -> Result<Vec<CapturedRequest>, ReceiverWaitError> {
         let mut captured_count = self.state.captured_count.subscribe();
-        let waited =
-            tokio::time::timeout(within, captured_count.wait_for(|count| *count >= expected)).await;
+        let waited = nervix_primitives::time::timeout(
+            within,
+            captured_count.wait_for(|count| *count >= expected),
+        )
+        .await;
         match waited {
             Ok(Ok(_)) => Ok(self.captured()),
             Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Requests {
@@ -825,6 +1143,60 @@ impl HttpReceiver {
                 waited: within,
                 faults: self.state.fault_total(),
                 latest_fault: self.state.latest_fault(),
+            }),
+        }
+    }
+
+    /// Waits until the receiver has captured a request whose request line is `request_line`.
+    pub(crate) async fn wait_for_request_line(
+        &self,
+        request_line: &str,
+        within: Duration,
+    ) -> Result<Vec<CapturedRequest>, ReceiverWaitError> {
+        let mut captured_count = self.state.captured_count.subscribe();
+        let state = self.state.clone();
+        let waited = nervix_primitives::time::timeout(
+            within,
+            captured_count.wait_for(|_| state.has_request_line(request_line)),
+        )
+        .await;
+        match waited {
+            Ok(Ok(_)) => Ok(self.captured()),
+            Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::RequestLine {
+                request_line: request_line.to_string(),
+                captured: *self.state.captured_count.borrow(),
+                waited: within,
+                faults: self.state.fault_total(),
+                latest_fault: self.state.latest_fault(),
+            }),
+        }
+    }
+
+    /// The most captured requests that were ever awaiting their final head at once.
+    pub(crate) fn most_awaiting_responses(&self) -> usize {
+        self.state.awaiting.lock().most
+    }
+
+    /// Waits until clients have abandoned at least `expected` responses before the receiver
+    /// finished them.
+    pub(crate) async fn wait_for_abandoned_responses(
+        &self,
+        expected: usize,
+        within: Duration,
+    ) -> Result<(), ReceiverWaitError> {
+        let mut abandoned = self.state.abandoned_count.subscribe();
+        let waited = nervix_primitives::time::timeout(
+            within,
+            abandoned.wait_for(|count| *count >= expected),
+        )
+        .await;
+        match waited {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Abandoned {
+                expected,
+                abandoned: *self.state.abandoned_count.borrow(),
+                captured: *self.state.captured_count.borrow(),
+                waited: within,
             }),
         }
     }
@@ -839,8 +1211,11 @@ impl HttpReceiver {
     ) -> Result<(), ReceiverWaitError> {
         let mut fault_count = self.state.fault_count.subscribe();
         let state = self.state.clone();
-        let waited =
-            tokio::time::timeout(within, fault_count.wait_for(|_| state.has_fault(expected))).await;
+        let waited = nervix_primitives::time::timeout(
+            within,
+            fault_count.wait_for(|_| state.has_fault(expected)),
+        )
+        .await;
         match waited {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(_)) | Err(_) => Err(ReceiverWaitError::Fault {
@@ -862,7 +1237,7 @@ impl HttpReceiver {
             mut accept_loop,
             ..
         } = self;
-        let joined = tokio::time::timeout(RECEIVER_STOP_BUDGET, &mut accept_loop).await;
+        let joined = nervix_primitives::time::timeout(RECEIVER_STOP_BUDGET, &mut accept_loop).await;
         let ending = match joined {
             Ok(Ok(connections)) => AcceptLoopEnding::Returned(connections),
             Ok(Err(error)) => AcceptLoopEnding::Failed(error),
@@ -900,7 +1275,7 @@ pub(crate) enum AcceptLoopEnding {
     /// The accept loop outlived the stop budget and was aborted and joined.
     Aborted,
     /// The accept loop panicked.
-    Failed(tokio::task::JoinError),
+    Failed(nervix_primitives::task::JoinError),
 }
 
 impl HttpReceiverStop {
@@ -953,7 +1328,13 @@ pub(crate) struct ConnectionSummary {
 }
 
 impl ConnectionSummary {
-    fn joined(&mut self, joined: Result<(), tokio::task::JoinError>) {
+    /// Counts a connection the accept loop started serving.
+    pub(crate) fn started(&mut self) {
+        self.served = checked_increment(self.served);
+    }
+
+    /// Counts how a connection's task ended once the accept loop joined it.
+    pub(crate) fn joined(&mut self, joined: Result<(), nervix_primitives::task::JoinError>) {
         match joined {
             Ok(()) => {}
             Err(error) if error.is_panic() => {
@@ -983,8 +1364,8 @@ impl AcceptLoop {
         let mut summary = ConnectionSummary::default();
         let mut next_connection = 0_u64;
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.cancellation.cancelled() => break,
                 Some(joined) = connections.join_next(), if !connections.is_empty() => {
@@ -1008,21 +1389,21 @@ impl AcceptLoop {
                     next_connection = next_connection
                         .checked_add(1)
                         .assured("a receiver cannot accept 2^64 connections");
-                    summary.served = checked_increment(summary.served);
+                    summary.started();
                     connections.spawn(connection.serve(stream, self.acceptor.clone()));
                 }
             }
         }
-        let deadline = tokio::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
+        let deadline = nervix_primitives::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
         loop {
-            tokio::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, connections.join_next()).await {
+            nervix_primitives::task::consume_budget().await;
+            match nervix_primitives::time::timeout_at(deadline, connections.join_next()).await {
                 Ok(Some(joined)) => summary.joined(joined),
                 Ok(None) => break,
                 Err(_) => {
                     connections.abort_all();
                     while let Some(joined) = connections.join_next().await {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         summary.joined(joined);
                     }
                     break;
@@ -1035,7 +1416,8 @@ impl AcceptLoop {
 
 /// Why one connection stopped serving requests.
 enum ConnectionEnd {
-    /// The client closed between requests, or the receiver stopped.
+    /// The client closed between requests, the receiver stopped, or the client abandoned a
+    /// response, which the receiver has already counted.
     Closed,
     /// The connection did something the receiver recorded as a fault.
     Faulted(ReceiverFault),
@@ -1052,7 +1434,7 @@ impl Connection {
         let ending = match acceptor {
             None => self.serve_requests(stream).await,
             Some(acceptor) => {
-                let accepted = tokio::select! {
+                let accepted = nervix_primitives::select! {
                     () = self.cancellation.cancelled() => return,
                     accepted = acceptor.accept(stream) => accepted,
                 };
@@ -1077,13 +1459,14 @@ impl Connection {
     {
         let mut buffer = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = match self.read_request(&mut stream, &mut buffer).await {
                 Ok(Some(request)) => request,
                 Ok(None) => return ConnectionEnd::Closed,
                 Err(fault) => return ConnectionEnd::Faulted(fault),
             };
             let closes = request.closes;
+            let target = request.captured.target.clone();
             match self.state.capture(request.captured) {
                 Capture::Kept => {}
                 Capture::AtLimit => {
@@ -1093,15 +1476,28 @@ impl Connection {
                     });
                 }
             }
-            let answered = match self.state.next_response() {
-                ReceiverResponse::Respond(response) => self.respond(&mut stream, &response).await,
+            // The request awaits its response from its capture until the receiver begins writing a
+            // final head, or until its connection ends without one.
+            let mut awaiting = AwaitingResponse::begin(&self.state);
+            let mut response = self.state.next_response(&target);
+            if let ReceiverResponse::HoldUntilReleased = response {
+                response = match self.hold_until_released(&mut stream, &mut awaiting).await {
+                    Ok(released) => released,
+                    Err(end) => return end,
+                };
+            }
+            let answered = match response {
+                ReceiverResponse::Respond(response) => {
+                    self.respond(&mut stream, &response, &mut awaiting).await
+                }
                 ReceiverResponse::LoseResponse => return ConnectionEnd::Closed,
-                ReceiverResponse::HoldResponse => {
-                    return self.hold(&mut stream).await;
+                ReceiverResponse::HoldResponse | ReceiverResponse::HoldUntilReleased => {
+                    return self.hold(&mut stream, &mut awaiting).await;
                 }
                 ReceiverResponse::Raw(bytes) => {
-                    return match self.write(&mut stream, &bytes).await {
-                        Ok(Answered::Continue | Answered::Hold) => ConnectionEnd::Closed,
+                    awaiting.release();
+                    return match self.write(&mut stream, &bytes, &mut awaiting).await {
+                        Ok(()) => ConnectionEnd::Closed,
                         Err(end) => end,
                     };
                 }
@@ -1109,7 +1505,7 @@ impl Connection {
             match answered {
                 Ok(Answered::Continue) if !closes => {}
                 Ok(Answered::Continue) => return ConnectionEnd::Closed,
-                Ok(Answered::Hold) => return self.hold(&mut stream).await,
+                Ok(Answered::Hold) => return self.hold(&mut stream, &mut awaiting).await,
                 Err(end) => return end,
             }
         }
@@ -1119,24 +1515,24 @@ impl Connection {
         &self,
         stream: &mut S,
         response: &ScriptedResponse,
+        awaiting: &mut AwaitingResponse,
     ) -> Result<Answered, ConnectionEnd>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
         if let Some(delay) = response.delay {
-            tokio::select! {
+            nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
-                () = tokio::time::sleep(delay) => {}
+                () = nervix_primitives::time::sleep(delay) => {}
             }
         }
-        if let Some(interim) = response.interim {
-            let mut interim_head = status_line(interim).into_bytes();
-            interim_head.extend_from_slice(b"\r\n");
-            self.write(stream, &interim_head).await?;
+        if let Some(interim_head) = response.interim_head() {
+            self.write(stream, &interim_head, awaiting).await?;
         }
-        self.write(stream, &response.head()).await?;
+        awaiting.release();
+        self.write(stream, &response.head(), awaiting).await?;
         if response.carries_content() {
-            self.write(stream, &response.body).await?;
+            self.write_body(stream, &response.body, awaiting).await?;
         }
         if response.status == 101 {
             return Ok(Answered::Hold);
@@ -1147,11 +1543,18 @@ impl Connection {
         }
     }
 
-    async fn write<S>(&self, stream: &mut S, bytes: &[u8]) -> Result<Answered, ConnectionEnd>
+    /// Writes `bytes` of a response. A client that is gone before they are written abandoned the
+    /// response, which the receiver counts rather than records as a fault.
+    async fn write<S>(
+        &self,
+        stream: &mut S,
+        bytes: &[u8],
+        awaiting: &mut AwaitingResponse,
+    ) -> Result<(), ConnectionEnd>
     where
         S: AsyncWrite + Unpin,
     {
-        let written = tokio::select! {
+        let written = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
             written = async {
                 stream.write_all(bytes).await?;
@@ -1159,27 +1562,101 @@ impl Connection {
             } => written,
         };
         match written {
-            Ok(()) => Ok(Answered::Continue),
-            Err(source) => Err(self.connection_failed(source)),
+            Ok(()) => Ok(()),
+            Err(_) => {
+                awaiting.release();
+                self.state.abandoned();
+                Err(ConnectionEnd::Closed)
+            }
         }
     }
 
-    /// Writes nothing more, discarding whatever the client sends, until it leaves or the receiver
-    /// stops.
-    async fn hold<S>(&self, stream: &mut S) -> ConnectionEnd
+    /// Writes a response body, a generated one chunk by chunk so it is never held in memory.
+    async fn write_body<S>(
+        &self,
+        stream: &mut S,
+        body: &ResponseBody,
+        awaiting: &mut AwaitingResponse,
+    ) -> Result<(), ConnectionEnd>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let size = match body {
+            ResponseBody::Bytes(bytes) => return self.write(stream, bytes, awaiting).await,
+            ResponseBody::Generated(size) => *size,
+        };
+        let mut remaining = size;
+        while remaining > 0 {
+            nervix_primitives::task::consume_budget().await;
+            let length = remaining.min(GENERATED_BODY_CHUNK.len());
+            self.write(stream, &GENERATED_BODY_CHUNK[..length], awaiting)
+                .await?;
+            remaining = remaining
+                .checked_sub(length)
+                .verified("the chunk written is at most the bytes that remain");
+        }
+        Ok(())
+    }
+
+    /// Writes nothing more, discarding whatever the client sends, until it leaves, which abandons
+    /// the response, or the receiver stops.
+    async fn hold<S>(&self, stream: &mut S, awaiting: &mut AwaitingResponse) -> ConnectionEnd
     where
         S: AsyncRead + Unpin,
     {
         let mut discard = vec![0_u8; READ_CHUNK_BYTES];
         loop {
-            tokio::task::consume_budget().await;
-            let read = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let read = nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return ConnectionEnd::Closed,
                 read = stream.read(&mut discard) => read,
             };
             match read {
-                Ok(0) | Err(_) => return ConnectionEnd::Closed,
+                Ok(0) | Err(_) => {
+                    awaiting.release();
+                    self.state.abandoned();
+                    return ConnectionEnd::Closed;
+                }
                 Ok(_) => {}
+            }
+        }
+    }
+
+    /// Writes nothing, discarding whatever the client sends, until the scenario releases held
+    /// responses, and returns the response they are released with. The client leaving or the
+    /// receiver stopping ends the connection first.
+    async fn hold_until_released<S>(
+        &self,
+        stream: &mut S,
+        awaiting: &mut AwaitingResponse,
+    ) -> Result<ReceiverResponse, ConnectionEnd>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut release = self.state.release.subscribe();
+        let mut discard = vec![0_u8; READ_CHUNK_BYTES];
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
+                () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
+                released = release.wait_for(Option::is_some) => {
+                    let released = released.assured(
+                        "the connection keeps the receiver state, and with it the release sender, \
+                         alive",
+                    );
+                    let response = released
+                        .clone()
+                        .verified("wait_for returns only once the release holds a response");
+                    return Ok(response);
+                }
+                read = stream.read(&mut discard) => match read {
+                    Ok(0) | Err(_) => {
+                        awaiting.release();
+                        self.state.abandoned();
+                        return Err(ConnectionEnd::Closed);
+                    }
+                    Ok(_) => {}
+                },
             }
         }
     }
@@ -1195,7 +1672,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         let head = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(head) = self.parse_head(buffer)? {
                 break head;
             }
@@ -1231,6 +1708,7 @@ impl Connection {
                 target: head.target,
                 headers: head.headers,
                 body,
+                received_at: Instant::now(),
             },
             closes: head.closes,
         }))
@@ -1304,7 +1782,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         while buffer.len() < length {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.fill(stream, buffer).await? {
                 Filled::Read => {}
                 Filled::Closed => {
@@ -1332,7 +1810,7 @@ impl Connection {
         };
         let mut body = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let parsed =
                 httparse::parse_chunk_size(buffer).map_err(|_| ReceiverFault::MalformedChunk {
                     connection: self.id,
@@ -1363,7 +1841,7 @@ impl Connection {
                 .checked_add(2)
                 .verified("the chunk size was checked against the body limit above");
             while buffer.len() < chunk_with_delimiter {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !self.fill_body(stream, buffer).await? {
                     return Ok(None);
                 }
@@ -1390,7 +1868,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if buffer.starts_with(b"\r\n") {
                 buffer.drain(..2);
                 return Ok(true);
@@ -1435,7 +1913,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         let mut chunk = vec![0_u8; READ_CHUNK_BYTES];
-        let read = tokio::select! {
+        let read = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return Ok(Filled::Stopped),
             read = stream.read(&mut chunk) => read,
         };
@@ -1450,13 +1928,6 @@ impl Connection {
                 source: StdArc::new(source),
             }),
         }
-    }
-
-    fn connection_failed(&self, source: io::Error) -> ConnectionEnd {
-        ConnectionEnd::Faulted(ReceiverFault::Connection {
-            connection: self.id,
-            source: StdArc::new(source),
-        })
     }
 }
 

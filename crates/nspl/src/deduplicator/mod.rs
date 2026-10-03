@@ -9,11 +9,12 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        completion_tokens, deduplicator_name, deduplicator_ref, duration_lit, filter_where_clause,
-        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, lex_input, materialized_state_dependencies, render_expression_tokens,
-        suggest_from, suggestions_from_errors, tok,
+        completion_tokens, deduplicator_name, deduplicator_ref, duration_lit, embedded,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
+        nested_expression_tokens, suggest_from, suggestions_from_errors, tok,
     },
+    semantic_program::read_expression_list,
 };
 
 fn boundary_token(token: &Token) -> bool {
@@ -30,20 +31,10 @@ fn boundary_token(token: &Token) -> bool {
 fn deduplicate_on_exprs<'src>()
 -> impl Parser<'src, &'src [Token], Vec<nervix_models::Expression>, extra::Err<ParseError<'src>>> + Clone
 {
-    kw_phrase2(Identifier::Deduplicate, Identifier::On)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .labelled("deduplicate_on"),
-        )
-        .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+    kw_phrase2(Identifier::Deduplicate, Identifier::On).ignore_then(embedded(
+        nested_expression_tokens(boundary_token).labelled("deduplicate_on"),
+        read_expression_list,
+    ))
 }
 
 pub fn create_deduplicator_parser<'src>()
@@ -276,6 +267,45 @@ mod tests {
             panic!("first operation should set the deduplication key");
         };
         assert_eq!(expressions.len(), 2);
+    }
+
+    #[test]
+    fn a_max_call_stays_in_the_key_before_max_time() {
+        let parsed = parse_create_deduplicator(
+            "CREATE DEDUPLICATOR distinct_peaks FROM readings FILTER WHERE max(input.readings) > \
+             output.total DEDUPLICATE ON max(input.readings), input.id MAX TIME 10m UNBRANCHED TO \
+             distinct_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("a call to max must stay in the filter and the key");
+
+        assert_eq!(
+            parsed.filter_where,
+            Some(
+                crate::parse_expression("max(input.readings) > output.total")
+                    .expect("valid expression")
+            )
+        );
+        assert_eq!(
+            parsed.deduplicate_on,
+            vec![
+                crate::parse_expression("max(input.readings)").expect("valid expression"),
+                crate::parse_expression("input.id").expect("valid expression"),
+            ]
+        );
+        assert_eq!(parsed.max_time, "10m");
+    }
+
+    #[test]
+    fn a_bare_max_still_begins_max_time() {
+        assert!(
+            parse_create_deduplicator(
+                "CREATE DEDUPLICATOR distinct_peaks FROM readings DEDUPLICATE ON input.id, max \
+                 MAX TIME 10m UNBRANCHED TO distinct_readings INHERIT ALL FLUSH IMMEDIATE ON \
+                 MESSAGE ERROR LOG;"
+            )
+            .is_err(),
+            "a bare max heads the MAX TIME clause, so the key before it ends in a comma"
+        );
     }
 
     #[test]

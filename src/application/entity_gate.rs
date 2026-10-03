@@ -7,7 +7,7 @@
 //! - **Depends on.** The interconnect to reach every node and the runtime for the local gate.
 //! - **Must not know.** Why the caller is altering the entity.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -20,7 +20,7 @@ use nervix_interconnect::{
     EntityGateRequest as RemoteEntityGateRequest, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{ClusterNodeName, CoordinationIdentity, DomainName, NodeRef, RelayName};
-use tokio::time::{Duration, interval, sleep};
+use nervix_primitives::time::{interval, sleep};
 use tracing::{debug, warn};
 
 use super::{
@@ -219,7 +219,7 @@ struct EntityGateEngagement<'a> {
     relays: &'a [RelayName],
     affected_entities: &'a [NodeRef],
     purpose: EntityGatePurpose,
-    deadline: tokio::time::Instant,
+    deadline: nervix_primitives::time::Instant,
     reason: &'a str,
 }
 
@@ -230,7 +230,7 @@ struct EntityGateStatusQuery<'a> {
     relays: &'a [RelayName],
     affected_entities: &'a [NodeRef],
     purpose: EntityGatePurpose,
-    deadline: tokio::time::Instant,
+    deadline: nervix_primitives::time::Instant,
 }
 
 impl ClusterEntityGate {
@@ -426,7 +426,7 @@ impl SessionServiceImpl {
                 Err(error) => EntityGateEngagementOutcome::Rejected(error.to_string()),
             };
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
         let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
         let response = self
             .inner
@@ -485,7 +485,7 @@ impl SessionServiceImpl {
             }
             return Ok(status);
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
         self.inner
             .interconnect
             .request_with_timeout(
@@ -566,11 +566,11 @@ impl SessionServiceImpl {
         mut release: PendingClusterEntityGateRelease,
     ) {
         while !release.nodes.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let nodes = release.nodes.clone();
             for node in nodes {
-                tokio::task::consume_budget().await;
-                let result = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let result = nervix_primitives::select! {
                     _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.release_entity_gate_on_node(
                         &node,
@@ -596,7 +596,7 @@ impl SessionServiceImpl {
             if release.nodes.is_empty() {
                 return;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
@@ -609,7 +609,7 @@ impl SessionServiceImpl {
         relays: &[RelayName],
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
-        deadline: tokio::time::Instant,
+        deadline: nervix_primitives::time::Instant,
         impact: Option<(
             &TransactionStepImpactRecorder,
             nervix_models::PauseRequirement,
@@ -666,7 +666,7 @@ impl SessionServiceImpl {
         };
         let mut engaged_node = false;
         for node in &nodes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             gate.record_attempt(node.clone());
             let engagement = self
                 .engage_entity_gate_on_node(
@@ -734,14 +734,14 @@ impl SessionServiceImpl {
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         required_live_nodes: &[ClusterNodeName],
-        deadline: tokio::time::Instant,
+        deadline: nervix_primitives::time::Instant,
     ) -> Result<(), Report<DomainAlterError>> {
         let domain = &gate.domain;
         let mut polling = interval(Duration::from_millis(25));
-        polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut last_status = None::<(ClusterNodeName, EntityDrainStatusEnvelope)>;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             polling.tick().await;
             #[cfg(feature = "testing")]
             let force_timeout = self.inner.runtime.take_forced_entity_drain_timeout(domain);
@@ -768,7 +768,7 @@ impl SessionServiceImpl {
             }
             let mut all_drained = true;
             for node in &gate.nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self
                     .entity_drain_status_on_node(
                         node,
@@ -803,7 +803,7 @@ impl SessionServiceImpl {
                             }));
                         }
                         all_drained = false;
-                        if tokio::time::Instant::now() >= deadline {
+                        if nervix_primitives::time::Instant::now() >= deadline {
                             warn!(
                                 domain = domain.as_str(),
                                 %node, error = %error, "failed to retrieve entity drain status"
@@ -815,7 +815,7 @@ impl SessionServiceImpl {
             if all_drained && !force_timeout {
                 return Ok(());
             }
-            if force_timeout || tokio::time::Instant::now() >= deadline {
+            if force_timeout || nervix_primitives::time::Instant::now() >= deadline {
                 let Some((pending_node, last_status)) = last_status.or_else(|| {
                     // A gate holding no nodes has nothing left to drain, so there is no pending
                     // node to name and no timeout to report.
@@ -852,7 +852,7 @@ impl SessionServiceImpl {
     ) -> bool {
         let domain = gate.domain.clone();
         for node in gate.nodes.clone() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self
                 .release_entity_gate_on_node(&node, &gate.coordination, &domain)
                 .await
@@ -901,7 +901,7 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<bool, EntityGateControlError> {
         let mut every_release_confirmed = true;
         while !gate.nodes.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let available_nodes = self
                 .available_node_ids()
                 .await
@@ -909,7 +909,7 @@ impl SessionServiceImpl {
                 .collect::<BTreeSet<_>>();
             let nodes = gate.nodes.clone();
             for node in nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if node != *self.inner.consensus.local_node_id() && !available_nodes.contains(&node)
                 {
                     every_release_confirmed = false;
@@ -928,7 +928,7 @@ impl SessionServiceImpl {
                 gate.release_owner = None;
                 return Ok(every_release_confirmed);
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => {
                     return Err(Report::new(EntityGateControlError::ReleaseInterrupted {
                         domain: gate.domain.clone(),
@@ -979,14 +979,14 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::Duration;
+    use std::time::Duration;
 
     use super::{
         super::test_fixtures::{TestService, build_test_service},
         *,
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test(start_paused = true)]
     async fn unavailable_gate_participants_preserve_request_context() {
         use super::super::test_fixtures::named;
 
@@ -1019,7 +1019,7 @@ mod tests {
                     relays: &[],
                     affected_entities: &[],
                     purpose: EntityGatePurpose::ModelAlteration,
-                    deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                    deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(2),
                 },
             )
             .await
@@ -1049,7 +1049,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn gate_release_rejects_the_wrong_domain_without_losing_the_runtime_cause() {
         use super::super::test_fixtures::named;
 
@@ -1079,7 +1079,7 @@ mod tests {
             relays: &[],
             affected_entities: &[],
             purpose: EntityGatePurpose::ModelAlteration,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
         };
         let error = service
             .entity_drain_status_on_node(local, query)
@@ -1149,7 +1149,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
         let TestService {
             service,
@@ -1172,7 +1172,7 @@ mod tests {
                 &[],
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
-                    deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+                    deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
                     reason: "canceled coordinator test",
                 },
             )
@@ -1189,14 +1189,14 @@ mod tests {
         gate.record_attempt(service.inner.consensus.local_node_id().clone());
         drop(gate);
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        nervix_primitives::time::timeout(Duration::from_secs(2), async {
             while service
                 .inner
                 .runtime
                 .entity_gate_operation_is_held(&coordination)
             {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

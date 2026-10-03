@@ -6,16 +6,12 @@
 //! - **Depends on.** Chrono and serialization primitives.
 //! - **Must not know.** Domain clocks, scheduling, runtime state or transport behavior.
 
-use std::{
-    fmt,
-    str::FromStr,
-    sync::atomic::{AtomicI64, Ordering},
-    time::Duration,
-};
+use std::{fmt, str::FromStr, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::atomic::{AtomicI64, Ordering};
 use rkyv::{
     Archive, Archived, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
     rancor::Fallible,
@@ -128,6 +124,12 @@ impl Timestamp {
             "the difference between two i64 values is at most u64::MAX",
         )))
     }
+
+    /// The RFC 3339 text of the instant in UTC, with as many fractional digits as it needs and a
+    /// `Z` offset, which [`Timestamp::from_str`] parses back to the same instant.
+    pub fn to_rfc3339(self) -> String {
+        self.0.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+    }
 }
 
 impl fmt::Display for Timestamp {
@@ -136,17 +138,24 @@ impl fmt::Display for Timestamp {
     }
 }
 
+/// A `DateTime` becomes a timestamp through its count of Unix nanoseconds, which is what keeps the
+/// value space exactly those counts. chrono can represent a leap second as a second instant sharing
+/// a count with the one after it; Unix time has no leap seconds, so that instant becomes the
+/// ordinary one it counts as, and every representation of the timestamp agrees on it.
 impl TryFrom<DateTime<Utc>> for Timestamp {
     type Error = TimestampError;
 
     fn try_from(value: DateTime<Utc>) -> Result<Self, Self::Error> {
-        if value.timestamp_nanos_opt().is_none() {
+        let Some(unix_nanos) = value.timestamp_nanos_opt() else {
             return Err(TimestampError::OutsideUnixNanosecondRange { timestamp: value });
-        }
-        Ok(Self(value))
+        };
+        Ok(Self::from_unix_nanos(unix_nanos))
     }
 }
 
+/// Reads RFC 3339 text, converting its offset to UTC. Fractional digits past the ninth are
+/// truncated, and a leap second, which RFC 3339 writes as `:60`, reads as the instant one second
+/// past the second before it.
 impl FromStr for Timestamp {
     type Err = TimestampError;
 
@@ -300,6 +309,20 @@ mod tests {
     }
 
     #[test]
+    fn a_leap_second_reads_as_the_instant_after_the_second_before_it() {
+        let leap = "2016-12-31T23:59:60.5Z"
+            .parse::<Timestamp>()
+            .expect("RFC 3339 names a leap second with :60");
+        let next = "2017-01-01T00:00:00.5Z"
+            .parse::<Timestamp>()
+            .expect("the instant after the leap second is ordinary");
+
+        assert_eq!(leap, next);
+        assert_eq!(Timestamp::from_unix_nanos(leap.unix_nanos()), leap);
+        assert_eq!(leap.to_rfc3339(), "2017-01-01T00:00:00.500Z");
+    }
+
+    #[test]
     fn accepts_both_signed_unix_nanosecond_endpoints() {
         for (text, unix_nanos) in [
             ("1677-09-21T00:12:43.145224192Z", i64::MIN),
@@ -314,6 +337,24 @@ mod tests {
                     .expect("endpoint is valid RFC 3339 and signed Unix nanoseconds")
                     .unix_nanos(),
                 unix_nanos
+            );
+        }
+    }
+
+    #[test]
+    fn rfc3339_text_uses_utc_and_only_the_fractional_digits_it_needs() {
+        for (unix_nanos, text) in [
+            (0, "1970-01-01T00:00:00Z"),
+            (1_500_000_000, "1970-01-01T00:00:01.500Z"),
+            (-1, "1969-12-31T23:59:59.999999999Z"),
+            (i64::MAX, "2262-04-11T23:47:16.854775807Z"),
+        ] {
+            let timestamp = Timestamp::from_unix_nanos(unix_nanos);
+            assert_eq!(timestamp.to_rfc3339(), text);
+            assert_eq!(
+                text.parse::<Timestamp>()
+                    .expect("the rendered text is RFC 3339"),
+                timestamp
             );
         }
     }

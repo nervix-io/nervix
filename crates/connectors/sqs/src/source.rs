@@ -5,16 +5,18 @@
 //! - **Owns.** The SQS client a source configuration declares, queue-URL lookup, long polling,
 //!   message attributes as ingest headers, and deleting a message once it is acknowledged.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
-//!   Tokio and the AWS SQS SDK.
+//!   Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Debug};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
     Client as SqsClient,
+    error::SdkError,
+    operation::get_queue_url::GetQueueUrlError,
     types::{Message as SqsMessage, MessageAttributeValue},
 };
 use error_stack::{Report, ResultExt as _};
@@ -23,8 +25,11 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult,
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, QueueName};
 use thiserror::Error;
+
+use crate::connection::{FailedRequest, SqsTrust};
 
 const SQS: &str = "sqs";
 /// How long one receive request waits for a message before the service answers empty.
@@ -61,13 +66,22 @@ pub struct SqsSourcePlan {
 }
 
 impl SqsSourcePlan {
-    pub async fn connect(config: &[ClientConfigEntry], queue: &QueueName) -> SqsSourceResult<Self> {
-        let client = Self::client_from_config(config).await?;
+    /// The client `config` declares, whose every connection resolves the endpoint host through
+    /// `dns`, and the URL of `queue`, which must already exist.
+    pub async fn connect(
+        config: &[ClientConfigEntry],
+        queue: &QueueName,
+        dns: DnsResolver,
+    ) -> SqsSourceResult<Self> {
+        let client = Self::client_from_config(config, dns).await?;
         let queue_url = Self::queue_url(&client, queue.as_str()).await?;
         Ok(Self { client, queue_url })
     }
 
-    async fn client_from_config(config: &[ClientConfigEntry]) -> SqsSourceResult<SqsClient> {
+    async fn client_from_config(
+        config: &[ClientConfigEntry],
+        dns: DnsResolver,
+    ) -> SqsSourceResult<SqsClient> {
         let endpoint = client_config_value(config, "endpoint", "SQS")
             .change_context(SqsSourceError::ClientConfig)?;
         let region = optional_client_config_value(config, "region")
@@ -80,7 +94,15 @@ impl SqsSourcePlan {
             .unwrap_or("x")
             .to_string();
 
-        let mut loader = aws_config::defaults(BehaviorVersion::latest())
+        let trust = match client_tls_paths(config).ca_file.as_ref() {
+            Some(ca_file) => {
+                let ca_pem = read_tls_file(ca_file, "TLS CA certificate")
+                    .change_context(SqsSourceError::ClientConfig)?;
+                SqsTrust::ca(ca_pem).change_context(SqsSourceError::BuildTlsContext)?
+            }
+            None => SqsTrust::Platform,
+        };
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
             .region(aws_sdk_sqs::config::Region::new(region))
             .endpoint_url(endpoint)
             .credentials_provider(Credentials::new(
@@ -89,59 +111,41 @@ impl SqsSourcePlan {
                 None,
                 None,
                 "nervix-sqs",
-            ));
-        if let Some(ca_file) = client_tls_paths(config).ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")
-                .change_context(SqsSourceError::ClientConfig)?;
-            let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
-                .with_trust_store(
-                    aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(ca_pem),
-                )
-                .build()
-                .map_err(|source| {
-                    Report::new(SqsSourceError::BuildTlsContext)
-                        .attach_printable(source.to_string())
-                })?;
-            let http_client = aws_smithy_http_client::Builder::new()
-                .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
-                    aws_smithy_http_client::tls::rustls_provider::CryptoMode::AwsLc,
-                ))
-                .tls_context(tls_context)
-                .build_https();
-            loader = loader.http_client(http_client);
-        }
-        let sdk_config = loader.load().await;
+            ))
+            .http_client(trust.http_client(dns))
+            .load()
+            .await;
         Ok(SqsClient::new(&sdk_config))
     }
 
     async fn queue_url(client: &SqsClient, queue: &str) -> SqsSourceResult<String> {
-        let queue_url = client
-            .get_queue_url()
-            .queue_name(queue)
-            .send()
-            .await
-            .map_err(|source| {
-                let missing = source
-                    .as_service_error()
-                    .is_some_and(|error| error.is_queue_does_not_exist());
-                Self::queue_lookup_error(queue, missing, source.to_string())
-            })?
-            .queue_url()
-            .map(ToOwned::to_owned);
-        Self::require_queue_url(queue, queue_url)
+        let response = match client.get_queue_url().queue_name(queue).send().await {
+            Ok(response) => response,
+            Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
+        };
+        Self::require_queue_url(queue, response.queue_url().map(ToOwned::to_owned))
     }
 
-    fn queue_lookup_error(queue: &str, missing: bool, reason: String) -> Report<SqsSourceError> {
-        let report = if missing {
-            Report::new(SqsSourceError::MissingQueue {
+    fn queue_lookup_error<R: Debug + 'static>(
+        queue: &str,
+        error: &SdkError<GetQueueUrlError, R>,
+    ) -> Report<SqsSourceError> {
+        let failure = FailedRequest::new(error);
+        let missing = error
+            .as_service_error()
+            .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
+        if missing {
+            return Report::new(SqsSourceError::MissingQueue {
                 queue: queue.to_string(),
             })
-        } else {
-            Report::new(SqsSourceError::ResolveQueue {
+            .attach_printable(failure.description());
+        }
+        failure.report(
+            SqsSourceError::ResolveQueue {
                 queue: queue.to_string(),
-            })
-        };
-        report.attach_printable(reason)
+            },
+            "SQS GetQueueUrl failed",
+        )
     }
 
     fn require_queue_url(queue: &str, queue_url: Option<String>) -> SqsSourceResult<String> {
@@ -280,8 +284,8 @@ impl BrokerSourceConnector for SqsSource {
         _request: SourceBatchRequest,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         loop {
-            tokio::task::consume_budget().await;
-            let response = self
+            nervix_primitives::task::consume_budget().await;
+            let received = self
                 .client
                 .receive_message()
                 .queue_url(self.queue_url.clone())
@@ -289,11 +293,15 @@ impl BrokerSourceConnector for SqsSource {
                 .message_attribute_names("All")
                 .wait_time_seconds(LONG_POLL_SECONDS)
                 .send()
-                .await
-                .map_err(|source| {
-                    Report::new(SqsSourceError::Receive).attach_printable(source.to_string())
-                })
-                .change_context(SourceError::Read { connector: SQS })?;
+                .await;
+            let response = match received {
+                Ok(response) => response,
+                Err(error) => {
+                    let failure = FailedRequest::new(&error)
+                        .report(SqsSourceError::Receive, "SQS ReceiveMessage failed");
+                    return Err(failure.change_context(SourceError::Read { connector: SQS }));
+                }
+            };
             let received = response.messages.unwrap_or_default();
             if received.is_empty() {
                 continue;
@@ -308,20 +316,22 @@ impl BrokerSourceConnector for SqsSource {
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(receipt_handle) = position.receipt_handle.as_deref() else {
                 continue;
             };
-            self.client
+            let deleted = self
+                .client
                 .delete_message()
                 .queue_url(self.queue_url.clone())
                 .receipt_handle(receipt_handle)
                 .send()
-                .await
-                .map_err(|source| {
-                    Report::new(SqsSourceError::Delete).attach_printable(source.to_string())
-                })
-                .change_context(SourceError::Acknowledge { connector: SQS })?;
+                .await;
+            if let Err(error) = deleted {
+                let failure = FailedRequest::new(&error)
+                    .report(SqsSourceError::Delete, "SQS DeleteMessage failed");
+                return Err(failure.change_context(SourceError::Acknowledge { connector: SQS }));
+            }
         }
         Ok(())
     }
@@ -335,28 +345,50 @@ impl BrokerSourceConnector for SqsSource {
 
 #[cfg(test)]
 mod tests {
+    use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
+
     use super::*;
 
     #[test]
     fn queue_lookup_failures_are_distinct_and_keep_their_source_message() {
-        let missing = SqsSourcePlan::queue_lookup_error(
-            "missing-queue",
-            true,
-            "service reported a missing queue".to_string(),
+        let missing = SdkError::<GetQueueUrlError, ()>::service_error(
+            GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
+            (),
         );
+        let missing = SqsSourcePlan::queue_lookup_error("missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
             SqsSourceError::MissingQueue { queue } if queue == "missing-queue"
         ));
-        assert!(format!("{missing:?}").contains("service reported a missing queue"));
+        assert!(format!("{missing:?}").contains("service error"));
 
-        let connection =
-            SqsSourcePlan::queue_lookup_error("orders", false, "connection refused".to_string());
+        let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
+            "connection refused".into(),
+        ));
+        let connection = SqsSourcePlan::queue_lookup_error("orders", &refused);
         assert!(matches!(
             connection.current_context(),
             SqsSourceError::ResolveQueue { queue } if queue == "orders"
         ));
         assert!(format!("{connection:?}").contains("connection refused"));
+
+        let lookup = nervix_dns::DnsLookupError::new(
+            "sqs.nervix.test",
+            nervix_dns::DnsLookupFailure::Timeout,
+        );
+        let unresolved = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
+            Box::new(lookup),
+        ));
+        let unresolved = SqsSourcePlan::queue_lookup_error("orders", &unresolved);
+        assert!(matches!(
+            unresolved.current_context(),
+            SqsSourceError::ResolveQueue { queue } if queue == "orders"
+        ));
+        assert_eq!(
+            format!("{unresolved:#}"),
+            "failed to resolve SQS queue 'orders': resolving 'sqs.nervix.test' failed: no answer \
+             arrived in time"
+        );
 
         assert_eq!(
             SqsSourcePlan::require_queue_url("orders", Some("queue-url".to_string()))

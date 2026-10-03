@@ -9,12 +9,20 @@
 //! - **Must not know.** Domains, graphs, schedules or the runtime. Cluster topology and current
 //!   application health are the whole answers it gives.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "gossip membership and management health coordinate topology outside record \
+                  processing"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
@@ -24,30 +32,28 @@ use chitchat::{
     Serializable as _, spawn_chitchat,
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
+use error_stack::Report;
+use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
-use nervix_execution::sync::{ArcSwap, DashMap, Guard};
 use nervix_interconnect::{
     ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
-    RequestSubquota, Transport as InterconnectTransport,
+    RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
 };
-use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use rkyv::{Archive, Deserialize, Serialize};
-#[cfg(not(feature = "shuttle"))]
-use tokio as chitchat_tokio;
-use tokio::{
-    sync::{broadcast, mpsc, watch},
+use nervix_primitives::{
+    collections::DashMap,
+    publication::{ArcSwap, Guard},
+    stream::StreamExt,
+    sync::{CancellationToken, StdArc, blocking::Mutex, broadcast, mpsc, watch},
     task::JoinHandle,
+    time::Instant,
 };
-#[cfg(feature = "shuttle")]
-use tokio_real as chitchat_tokio;
-use tokio_stream::StreamExt;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use nervix_recovery::Discarded as _;
+use rkyv::{Archive, Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
@@ -65,15 +71,17 @@ const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 const GOSSIP_QUEUE_CAPACITY: usize = 1024;
+/// A slow destination can retain only this many unsent datagrams behind its one exchange worker.
+const GOSSIP_OUTGOING_QUEUE_CAPACITY: usize = 4;
 /// Leaves room for the typed request fields inside the 64-KiB management-event limit.
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
-    chitchat: Arc<chitchat_tokio::sync::Mutex<Chitchat>>,
+    chitchat: StdArc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
     /// The membership task owns the other reference and replaces this snapshot whenever the
     /// Chitchat live-node state watcher changes.
-    subscription_interest: Arc<SubscriptionInterestPublication>,
+    subscription_interest: StdArc<SubscriptionInterestPublication>,
     /// The transport the gossip server and the membership task also hold, kept here so shutdown
     /// can close it before it asks the gossip server to stop.
     gossip_transport: InterconnectGossipTransport,
@@ -182,11 +190,11 @@ impl SubscriptionInterestPublication {
 
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = SubscriptionInterestIndex::from_live_node_states(nodes);
-        self.index.store(Arc::new(index));
+        self.index.store(StdArc::new(index));
         self.changed.send_replace(());
     }
 
-    fn load(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
+    fn load(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
         self.index.load()
     }
 
@@ -199,7 +207,7 @@ impl SubscriptionInterestPublication {
     ) {
         let mut changes = self.changed.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self
                 .load()
                 .contains(subscriber, domain, relay, minimum_version)
@@ -335,10 +343,31 @@ pub(crate) enum PeerHealthResultDisposition {
 /// The effective state of one current peer-health target at a particular monotonic instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeerHealthStatus {
-    Unknown,
+    /// No probe of the current target has completed.
+    Unobserved,
+    /// The latest observation is older than the node-unavailability interval.
+    Stale,
+    /// A recent observation decided nothing, such as a probe refused for local capacity.
+    Inconclusive,
+    /// The latest recent probe reached the peer's application.
     Healthy,
+    /// Recent probes have failed for less than the node-unavailability interval.
     Failure,
+    /// Probes have failed continuously for the node-unavailability interval.
     Unavailable,
+}
+
+impl PeerHealthStatus {
+    /// Whether this status is recent evidence that keeps a peer available while Chitchat has
+    /// stopped listing it live. A healthy, briefly failing, or capacity-refused observation from
+    /// the current interval does; a peer with no observation in that interval, or one that failed
+    /// for the whole interval, falls back to its gossip liveness.
+    const fn bridges_gossip_lapse(self) -> bool {
+        match self {
+            Self::Healthy | Self::Failure | Self::Inconclusive => true,
+            Self::Unobserved | Self::Stale | Self::Unavailable => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +376,7 @@ pub(crate) struct PeerHealthSnapshot {
     revision: u64,
     scheduling_revision: u64,
     statuses: BTreeMap<ClusterNodeName, PeerHealthStatus>,
+    targets: BTreeMap<ClusterNodeName, PeerHealthProbeTarget>,
     latest_outcomes: BTreeMap<ClusterNodeName, PeerHealthObservationKind>,
     observation_times: BTreeMap<ClusterNodeName, Instant>,
 }
@@ -387,6 +417,39 @@ impl PeerHealthSnapshot {
                 }
             })
             .collect()
+    }
+
+    /// A previously discovered incarnation keeps its established health target while Chitchat
+    /// briefly stops calling it live, for as long as application health observed it within the
+    /// node-unavailability interval. A replacement incarnation or endpoint needs fresh discovery.
+    pub(crate) fn retains_known_node(&self, node: &GossipNode) -> bool {
+        let Some(status) = self.status(&node.node_id) else {
+            return false;
+        };
+        status.bridges_gossip_lapse()
+            && self
+                .targets
+                .get(&node.node_id)
+                .is_some_and(|target| target.matches_gossip_node(node))
+    }
+
+    fn retain_known_nodes(
+        &self,
+        availability: &mut GossipState,
+        known_nodes: &BTreeMap<ClusterNodeName, GossipNode>,
+    ) {
+        let live_node_ids = availability
+            .live_nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        for (node_id, node) in known_nodes {
+            if !live_node_ids.contains(node_id) && self.retains_known_node(node) {
+                availability.live_nodes.push(node.clone());
+                availability.dead_node_ids.remove(node_id);
+            }
+        }
+        availability.dead_node_ids.extend(self.unavailable_nodes());
     }
 }
 
@@ -555,6 +618,11 @@ impl PeerHealthStateSnapshot {
             revision: self.revision,
             scheduling_revision: self.scheduling_revision,
             statuses: self.effective_statuses.clone(),
+            targets: self
+                .peers
+                .iter()
+                .map(|(node_id, peer)| (node_id.clone(), peer.target.clone()))
+                .collect(),
             latest_outcomes: self
                 .peers
                 .iter()
@@ -642,23 +710,24 @@ impl PeerHealthStateSnapshot {
 impl RetainedPeerHealth {
     fn effective_status(&self, now: Instant, observation_freshness: Duration) -> PeerHealthStatus {
         let Some(observation) = self.observation.as_ref() else {
-            return PeerHealthStatus::Unknown;
+            return PeerHealthStatus::Unobserved;
         };
+        // An observation completed after `now` was read is recent but not yet evaluable.
         let Some(age) = now.checked_duration_since(observation.observed_at) else {
-            return PeerHealthStatus::Unknown;
+            return PeerHealthStatus::Inconclusive;
         };
         if age >= observation_freshness {
-            return PeerHealthStatus::Unknown;
+            return PeerHealthStatus::Stale;
         }
         match observation.outcome {
             PeerHealthObservationKind::Healthy => PeerHealthStatus::Healthy,
-            PeerHealthObservationKind::CapacityExhausted => PeerHealthStatus::Unknown,
+            PeerHealthObservationKind::CapacityExhausted => PeerHealthStatus::Inconclusive,
             PeerHealthObservationKind::Failure => {
                 let Some(failure_since) = observation.failure_since else {
-                    return PeerHealthStatus::Unknown;
+                    return PeerHealthStatus::Inconclusive;
                 };
                 let Some(failure_age) = now.checked_duration_since(failure_since) else {
-                    return PeerHealthStatus::Unknown;
+                    return PeerHealthStatus::Inconclusive;
                 };
                 if failure_age >= observation_freshness {
                     PeerHealthStatus::Unavailable
@@ -703,12 +772,12 @@ impl PeerHealthStateWatcher {
         let scheduling_revision = self.state.borrow_and_update().scheduling_revision();
         async move {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let next_transition = self
                     .state
                     .borrow()
                     .next_effective_transition(Instant::now(), self.observation_freshness);
-                tokio::select! {
+                nervix_primitives::select! {
                     changed = self.state.changed() => {
                         changed.assured(
                             "the cluster handle retains its peer-health state sender for its \
@@ -722,7 +791,7 @@ impl PeerHealthStateWatcher {
                     }
                     _ = async {
                         match next_transition {
-                            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                            Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
                             None => std::future::pending::<()>().await,
                         }
                     } => return,
@@ -738,7 +807,8 @@ impl PeerHealthStateWatcher {
 /// retained-input change. The watcher owns that deadline so consumers can re-evaluate cluster state
 /// without sampling it on an interval.
 pub(crate) struct ClusterStateWatcher {
-    live_node_states: chitchat_tokio::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
+    live_node_states:
+        nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
     peer_health_state: PeerHealthStateWatcher,
 }
 
@@ -752,7 +822,7 @@ impl ClusterStateWatcher {
         } = self;
         let peer_health_change = peer_health_state.wait_for_change_or_next_transition();
         async move {
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = live_node_states.changed() => changed.assured(
                     "the cluster handle retains its Chitchat state sender for its lifetime",
                 ),
@@ -771,8 +841,10 @@ pub struct ClusterSettings {
     pub console_advertise_url: NodeServiceUrl,
     pub interconnect_advertise_addr: NodeEndpoint,
     pub bootstrap_host: Option<String>,
+    pub recovery_endpoints: BTreeSet<NodeEndpoint>,
     pub interconnect: InterconnectTransport,
     pub node_unavailability_timeout: Duration,
+    pub fault_injection: crate::ConfiguredFaultInjection,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -820,14 +892,16 @@ impl InterconnectRequest for GossipExchange {
 
 #[derive(Clone)]
 struct InterconnectGossipTransport {
-    inner: Arc<InterconnectGossipTransportInner>,
+    inner: StdArc<InterconnectGossipTransportInner>,
 }
 
 struct InterconnectGossipTransportInner {
     listen_addr: SocketAddr,
     advertise_addr: SocketAddr,
     interconnect: InterconnectTransport,
+    fault_injection: crate::ConfiguredFaultInjection,
     routes: DashMap<SocketAddr, GossipRoute>,
+    outgoing: DashMap<SocketAddr, nervix_primitives::unmodeled::sync::mpsc::Sender<Vec<u8>>>,
     incoming_tx: mpsc::Sender<GossipDatagram>,
     incoming_rx: Mutex<Option<mpsc::Receiver<GossipDatagram>>>,
     /// Cancelled by [`InterconnectGossipTransport::close`]; every exchange in flight or started
@@ -846,11 +920,22 @@ struct GossipRoute {
     target: PeerTarget,
 }
 
+/// Chitchat requires a standard error; keep the interconnect report inside that boundary.
+#[derive(Debug, thiserror::Error)]
+enum GossipExchangeFailure {
+    #[error("{0}")]
+    Transport(Report<TransportError>),
+    #[error("{0}")]
+    Request(Report<RequestError>),
+}
+
 impl InterconnectGossipTransport {
     fn build(
         interconnect: InterconnectTransport,
         advertise_addr: SocketAddr,
         seed_targets: Vec<(SocketAddr, PeerTarget)>,
+        local_node_id: ClusterNodeName,
+        fault_injection: crate::ConfiguredFaultInjection,
     ) -> io::Result<Self> {
         let (incoming_tx, incoming_rx) = mpsc::channel(GOSSIP_QUEUE_CAPACITY);
         let routes = DashMap::new();
@@ -864,21 +949,37 @@ impl InterconnectGossipTransport {
             );
         }
         let transport = Self {
-            inner: Arc::new(InterconnectGossipTransportInner {
+            inner: StdArc::new(InterconnectGossipTransportInner {
                 listen_addr: interconnect.local_addr(),
                 advertise_addr,
                 interconnect: interconnect.clone(),
+                fault_injection: fault_injection.clone(),
                 routes,
+                outgoing: DashMap::new(),
                 incoming_tx,
                 incoming_rx: Mutex::new(Some(incoming_rx)),
                 closed: CancellationToken::new(),
             }),
         };
         let handler_transport = transport.clone();
+        #[cfg(not(feature = "testing"))]
+        drop((local_node_id, fault_injection));
         interconnect
             .register_handler::<GossipExchange, _, _>(move |context, request| {
                 let transport = handler_transport.clone();
-                async move { transport.receive(context, request).await }
+                #[cfg(feature = "testing")]
+                let local_node_id = local_node_id.clone();
+                #[cfg(feature = "testing")]
+                let fault_injection = fault_injection.clone();
+                async move {
+                    #[cfg(feature = "testing")]
+                    if fault_injection
+                        .gossip_exchange_is_blocked(context.peer_node_id(), &local_node_id)
+                    {
+                        std::future::pending::<()>().await;
+                    }
+                    transport.receive(context, request).await
+                }
             })
             .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(transport)
@@ -952,14 +1053,70 @@ impl InterconnectGossipTransport {
         }
     }
 
-    /// Makes every gossip exchange in flight, and every exchange started afterwards, fail at once.
-    ///
-    /// The gossip server reads its stop command only between rounds, and a round exchanges with
-    /// each selected peer in turn under a one-second request timeout. Closing the transport before
-    /// the server is asked to stop ends a round that is still waiting on peers which are stopping
-    /// themselves, instead of holding shutdown for as long as that round takes.
+    /// Stops queued and in-flight gossip exchanges before the Chitchat server is asked to stop.
     fn close(&self) {
         self.inner.closed.cancel();
+    }
+
+    /// Enqueues one datagram without waiting for its destination's interconnect request.
+    ///
+    /// Every destination has its own bounded queue and worker. A stalled peer can fill only its
+    /// own queue, while Chitchat continues receiving and sending to the other peers.
+    fn enqueue(&self, to: SocketAddr, payload: Vec<u8>) -> anyhow::Result<()> {
+        if self.inner.closed.is_cancelled() {
+            anyhow::bail!("interconnect gossip transport is closed");
+        }
+        let sender = self
+            .inner
+            .outgoing
+            .entry(to)
+            .or_insert_with(|| {
+                let (sender, receiver) = nervix_primitives::unmodeled::sync::mpsc::channel(
+                    GOSSIP_OUTGOING_QUEUE_CAPACITY,
+                );
+                let transport = self.clone();
+                nervix_primitives::unmodeled::task::spawn(async move {
+                    transport.send_queued(to, receiver).await;
+                });
+                sender
+            })
+            .value()
+            .clone();
+        match sender.try_send(payload) {
+            Ok(()) => Ok(()),
+            Err(nervix_primitives::unmodeled::sync::mpsc::error::TrySendError::Full(_)) => {
+                debug!(peer = %to, "dropped gossip datagram because the peer queue is full");
+                Ok(())
+            }
+            Err(nervix_primitives::unmodeled::sync::mpsc::error::TrySendError::Closed(_)) => {
+                anyhow::bail!("interconnect gossip peer queue is closed")
+            }
+        }
+    }
+
+    async fn send_queued(
+        &self,
+        to: SocketAddr,
+        mut receiver: nervix_primitives::unmodeled::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        loop {
+            nervix_primitives::unmodeled::task::consume_budget().await;
+            let payload = nervix_primitives::unmodeled::select! {
+                _ = self.inner.closed.cancelled() => return,
+                payload = receiver.recv() => match payload {
+                    Some(payload) => payload,
+                    None => return,
+                },
+            };
+            let exchange = self.exchange(to, payload);
+            match self.inner.closed.run_until_cancelled(exchange).await {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    debug!(peer = %to, %error, "gossip exchange failed");
+                }
+                None => return,
+            }
+        }
     }
 
     async fn exchange(&self, to: SocketAddr, payload: Vec<u8>) -> anyhow::Result<()> {
@@ -971,13 +1128,23 @@ impl InterconnectGossipTransport {
             },
         };
         let node_id = match route.node_id {
-            Some(node_id) => node_id,
+            Some(node_id) => {
+                // The application-health topology can retire a peer after Chitchat declares it
+                // dead. Chitchat still probes that peer, including on a bootstrap node with no
+                // configured seeds, so restore the authenticated route before trying the probe.
+                self.inner
+                    .interconnect
+                    .register_outbound_target(node_id.clone(), route.target.endpoint())
+                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
+                node_id
+            }
             None => {
                 let node_id = self
                     .inner
                     .interconnect
                     .bootstrap_target(route.target.clone())
-                    .await?;
+                    .await
+                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 self.inner.routes.insert(
                     to,
                     GossipRoute {
@@ -988,6 +1155,9 @@ impl InterconnectGossipTransport {
                 node_id
             }
         };
+        if let Some(delay) = self.inner.fault_injection.gossip_send_delay(&node_id) {
+            nervix_primitives::unmodeled::time::sleep(delay).await;
+        }
         let response = self
             .inner
             .interconnect
@@ -999,7 +1169,7 @@ impl InterconnectGossipTransport {
                 },
             )
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Request(error)))?;
         response?;
         Ok(())
     }
@@ -1037,17 +1207,7 @@ impl GossipSocket for InterconnectGossipSocket {
         if payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
             anyhow::bail!("gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes");
         }
-        let exchange = self.transport.exchange(to, payload);
-        let Some(result) = self
-            .transport
-            .inner
-            .closed
-            .run_until_cancelled(exchange)
-            .await
-        else {
-            anyhow::bail!("interconnect gossip transport is closed");
-        };
-        result
+        self.transport.enqueue(to, payload)
     }
 
     async fn recv(&mut self) -> anyhow::Result<(SocketAddr, ChitchatMessage)> {
@@ -1090,30 +1250,46 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         .next()
         .assured("a successful resolution holds at least one target")
         .addr;
-    let mut seed_targets = Vec::new();
-    let seed_nodes = match settings.bootstrap_host.as_deref() {
-        Some(seed) => {
-            let seed = seed
-                .parse::<NodeEndpoint>()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let targets = settings
-                .interconnect
-                .resolve(&seed)
-                .await
-                .map_err(|report| io::Error::other(report.into_error()))?;
-            let mut addresses = Vec::new();
-            for target in targets {
-                addresses.push(target.addr.to_string());
-                seed_targets.push((target.addr, target));
+    let mut seed_targets = BTreeMap::new();
+    let mut seed_nodes = BTreeSet::new();
+    let recovered = join_all(settings.recovery_endpoints.into_iter().map(|endpoint| {
+        let interconnect = &settings.interconnect;
+        async move { (endpoint.clone(), interconnect.resolve(&endpoint).await) }
+    }))
+    .await;
+    for (endpoint, result) in recovered {
+        match result {
+            Ok(targets) => {
+                for target in targets {
+                    seed_nodes.insert(target.addr.to_string());
+                    seed_targets.insert(target.addr, target);
+                }
             }
-            addresses
+            Err(error) => {
+                warn!(%endpoint, %error, "could not resolve a recovered Raft peer for gossip");
+            }
         }
-        None => Vec::new(),
-    };
+    }
+    if let Some(seed) = settings.bootstrap_host.as_deref() {
+        let seed = seed
+            .parse::<NodeEndpoint>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let targets = settings
+            .interconnect
+            .resolve(&seed)
+            .await
+            .map_err(|report| io::Error::other(report.into_error()))?;
+        for target in targets {
+            seed_nodes.insert(target.addr.to_string());
+            seed_targets.insert(target.addr, target);
+        }
+    }
     let transport = InterconnectGossipTransport::build(
         settings.interconnect.clone(),
         gossip_advertise_addr,
-        seed_targets,
+        seed_targets.into_iter().collect(),
+        node_id.clone(),
+        settings.fault_injection,
     )?;
     let chitchat_id = ChitchatId {
         node_id: node_id.to_string(),
@@ -1126,7 +1302,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         cluster_id: settings.cluster_id.clone(),
         gossip_interval: Duration::from_millis(500),
         listen_addr: settings.interconnect.local_addr(),
-        seed_nodes,
+        seed_nodes: seed_nodes.into_iter().collect(),
         failure_detector_config: chitchat::FailureDetectorConfig::default(),
         marked_for_deletion_grace_period: Duration::from_secs(60),
         catchup_callback: None,
@@ -1169,13 +1345,13 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let events = ClusterEvents::new();
     let chitchat_state = chitchat.chitchat();
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
-    let subscription_interest = Arc::new(SubscriptionInterestPublication::new());
+    let subscription_interest = StdArc::new(SubscriptionInterestPublication::new());
     let subscription_interest_publisher = subscription_interest.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
-    let membership_task = tokio::spawn(async move {
+    let membership_task = nervix_primitives::task::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             subscription_interest_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
             let report = membership_report(&nodes);
@@ -1227,6 +1403,11 @@ impl ClusterHandle {
         self.events.subscribe()
     }
 
+    /// The identifier every node of this cluster was configured with.
+    pub async fn cluster_id(&self) -> String {
+        self.chitchat.lock().await.cluster_id().to_string()
+    }
+
     pub async fn local_node_identity(&self) -> ClusterNodeIdentity {
         let chitchat = self.chitchat.lock().await;
         let identity = chitchat.self_chitchat_id();
@@ -1239,7 +1420,7 @@ impl ClusterHandle {
 
     pub(crate) async fn subscribe_live_node_states(
         &self,
-    ) -> chitchat_tokio::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
+    ) -> nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
         self.chitchat.lock().await.live_nodes_watcher()
     }
 
@@ -1296,16 +1477,27 @@ impl ClusterHandle {
         let live_nodes = current_live_nodes(&chitchat);
         let live_node_ids = live_nodes.keys().cloned().collect::<BTreeSet<_>>();
 
-        let dead_node_ids = chitchat
+        let dead_node_identities = chitchat
             .dead_nodes()
-            .filter_map(|node_id| ClusterNodeName::parse(&node_id.node_id).ok())
-            .filter(|node_id| !live_node_ids.contains(node_id))
+            .filter_map(cluster_node_identity)
             .collect::<BTreeSet<_>>();
+        let dead_node_ids = dead_node_identities
+            .iter()
+            .map(|identity| identity.node_id().clone())
+            .filter(|node_id| !live_node_ids.contains(node_id))
+            .collect();
 
         GossipState {
             live_nodes: live_nodes.into_values().collect(),
             dead_node_ids,
+            dead_node_identities,
         }
+    }
+
+    /// Every known incarnation with usable advertisements, including a recently dead one.
+    pub(crate) async fn known_nodes(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
+        let chitchat = self.chitchat.lock().await;
+        current_known_nodes(&chitchat)
     }
 
     /// One live node as gossip currently describes it, with the endpoints it advertises.
@@ -1316,15 +1508,16 @@ impl ClusterHandle {
         live_nodes.remove(node)
     }
 
-    /// Current topology with only effective application-health unavailability added.
+    /// Current topology with established targets retained until application health fails.
     ///
     /// Membership reconciliation consumes [`Self::gossip_state`] directly. Runtime coordination
-    /// and scheduling use this availability view so an unknown observation never removes a peer.
+    /// and scheduling use this availability view so a gossip lapse or unknown observation cannot
+    /// remove a previously established peer before its application-health interval expires.
     pub(crate) async fn availability_state(&self) -> GossipState {
         let mut state = self.gossip_state().await;
-        state
-            .dead_node_ids
-            .extend(self.peer_health_snapshot().unavailable_nodes());
+        let known_nodes = self.known_nodes().await;
+        self.peer_health_snapshot()
+            .retain_known_nodes(&mut state, &known_nodes);
         state
     }
 
@@ -1488,7 +1681,7 @@ impl ClusterHandle {
             .is_some()
     }
 
-    pub(crate) fn subscription_interest_index(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
+    pub(crate) fn subscription_interest_index(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
         self.subscription_interest.load()
     }
 
@@ -1531,8 +1724,8 @@ impl ClusterHandle {
         result: PeerHealthProbeResult,
     ) -> PeerHealthResultDisposition {
         let chitchat = self.chitchat.lock().await;
-        let current_live_nodes = current_live_nodes(&chitchat);
-        let Some(current_node) = current_live_nodes.get(result.target.node_id()) else {
+        let current_known_nodes = current_known_nodes(&chitchat);
+        let Some(current_node) = current_known_nodes.get(result.target.node_id()) else {
             return PeerHealthResultDisposition::Superseded;
         };
         if !result.target.matches_gossip_node(current_node) {
@@ -1576,7 +1769,12 @@ impl ClusterHandle {
                     Some(PeerHealthStatus::Healthy) => "connected",
                     Some(PeerHealthStatus::Failure) => "probe-failed",
                     Some(PeerHealthStatus::Unavailable) => "unavailable",
-                    Some(PeerHealthStatus::Unknown) | None => "unknown",
+                    Some(
+                        PeerHealthStatus::Unobserved
+                        | PeerHealthStatus::Stale
+                        | PeerHealthStatus::Inconclusive,
+                    )
+                    | None => "unknown",
                 };
                 let outcome = match effective.latest_outcome(node_id) {
                     Some(PeerHealthObservationKind::Healthy) => "healthy",
@@ -1787,6 +1985,26 @@ fn current_live_nodes(chitchat: &Chitchat) -> BTreeMap<ClusterNodeName, GossipNo
     live_nodes
 }
 
+fn current_known_nodes(chitchat: &Chitchat) -> BTreeMap<ClusterNodeName, GossipNode> {
+    let mut known_nodes: BTreeMap<ClusterNodeName, GossipNode> = BTreeMap::new();
+    for (node_id, state) in chitchat.node_states() {
+        let Some(node) = to_gossip_node(node_id, state) else {
+            continue;
+        };
+        match known_nodes.entry(node.node_id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut current) => {
+                if node.incarnation > current.get().incarnation {
+                    current.insert(node);
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(node);
+            }
+        }
+    }
+    known_nodes
+}
+
 pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
     let port = grpc_addr.port().checked_add(1)?;
     Some(SocketAddr::new(grpc_addr.ip(), port))
@@ -1795,6 +2013,76 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gossip_errors_keep_their_typed_interconnect_report() {
+        let transport = anyhow::Error::new(GossipExchangeFailure::Transport(Report::new(
+            TransportError::ShuttingDown,
+        )));
+        let GossipExchangeFailure::Transport(report) = transport
+            .downcast_ref::<GossipExchangeFailure>()
+            .assured("the gossip transport error was wrapped in GossipExchangeFailure")
+        else {
+            panic!("the transport failure must retain its transport report");
+        };
+        assert!(matches!(
+            report.current_context(),
+            TransportError::ShuttingDown
+        ));
+        assert_eq!(transport.to_string(), "transport is shutting down");
+
+        let node = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+        let request = anyhow::Error::new(GossipExchangeFailure::Request(Report::new(
+            RequestError::Timeout {
+                node: node.clone(),
+                request: GossipExchange::NAME,
+                timeout: GossipExchange::TIMEOUT,
+            },
+        )));
+        let GossipExchangeFailure::Request(report) = request
+            .downcast_ref::<GossipExchangeFailure>()
+            .assured("the gossip request error was wrapped in GossipExchangeFailure")
+        else {
+            panic!("the request failure must retain its request report");
+        };
+        assert!(matches!(
+            report.current_context(),
+            RequestError::Timeout { node: target, request, .. }
+                if target == &node && *request == GossipExchange::NAME
+        ));
+        assert!(request.to_string().contains("node-2"));
+        assert!(request.to_string().contains(GossipExchange::NAME));
+        assert!(request.to_string().contains("timed out"));
+    }
+
+    #[nervix_primitives::test]
+    async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() {
+        let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+        let interconnect =
+            crate::application::test_fixtures::test_interconnect("test", &node).await;
+        let address = interconnect.local_addr();
+        let peer = PeerTarget::new(address, address.ip().to_string());
+        let gossip = InterconnectGossipTransport::build(
+            interconnect.clone(),
+            address,
+            vec![(address, peer)],
+            node.clone(),
+            crate::ConfiguredFaultInjection::default(),
+        )
+        .assured("the gossip handler is registered once");
+
+        gossip
+            .exchange(address, vec![1])
+            .await
+            .assured("the initial authenticated exchange establishes the route");
+        interconnect.replace_live_nodes(&BTreeSet::new());
+        gossip
+            .exchange(address, vec![2])
+            .await
+            .assured("a retained gossip route reconnects after its peer left the live set");
+
+        interconnect.shutdown().await;
+    }
 
     #[test]
     fn a_gossip_exchange_larger_than_one_message_is_refused() {
@@ -1865,6 +2153,168 @@ mod tests {
             generation_id: incarnation,
             gossip_advertise_addr: SocketAddr::from(([127, 0, 0, 1], 47392)),
         }
+    }
+
+    #[test]
+    fn established_health_target_survives_gossip_loss_until_continuous_failure() {
+        let timeout = Duration::from_secs(10);
+        let started_at = Instant::now();
+        let almost_unavailable = started_at
+            .checked_add(Duration::from_secs(9))
+            .assured("the test observation time fits in the monotonic clock range");
+        let unavailable_at = started_at
+            .checked_add(timeout)
+            .assured("the test observation time fits in the monotonic clock range");
+        let endpoint = "node-2.example:7001";
+        let mut health = PeerHealthStateSnapshot::default();
+        let target = health
+            .replace_endpoints(
+                [health_endpoint("node-2", 7, endpoint)],
+                started_at,
+                timeout,
+            )
+            .into_iter()
+            .next()
+            .assured("one endpoint produces one health target");
+        health.record_result(
+            PeerHealthProbeResult::new(target.clone(), PeerHealthProbeOutcome::Failure, started_at),
+            timeout,
+        );
+        health.record_result(
+            PeerHealthProbeResult::new(target, PeerHealthProbeOutcome::Failure, almost_unavailable),
+            timeout,
+        );
+
+        let mut gossip_state = NodeState::for_test();
+        gossip_state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, endpoint);
+        let node = to_gossip_node(&gossip_id("node-2", 7), &gossip_state)
+            .assured("the test gossip identity is valid");
+        let node_id = node.node_id.clone();
+        let known_nodes = BTreeMap::from([(node_id.clone(), node.clone())]);
+        let gossip_miss = || GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: BTreeSet::from([node_id.clone()]),
+            dead_node_identities: BTreeSet::from([node.identity()]),
+        };
+
+        let mut available = gossip_miss();
+        health
+            .effective_snapshot(almost_unavailable, timeout)
+            .retain_known_nodes(&mut available, &known_nodes);
+        assert_eq!(available.live_node_ids(), BTreeSet::from([node_id.clone()]));
+        assert!(available.dead_node_ids.is_empty());
+
+        let mut failed = gossip_miss();
+        health
+            .effective_snapshot(unavailable_at, timeout)
+            .retain_known_nodes(&mut failed, &known_nodes);
+        assert!(failed.live_node_ids().is_empty());
+        assert_eq!(failed.dead_node_ids, BTreeSet::from([node_id.clone()]));
+
+        let replacement = to_gossip_node(&gossip_id("node-2", 8), &gossip_state)
+            .assured("the test replacement gossip identity is valid");
+        assert!(
+            !health
+                .effective_snapshot(almost_unavailable, timeout)
+                .retains_known_node(&replacement)
+        );
+        let mut changed_endpoint_state = NodeState::for_test();
+        changed_endpoint_state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, "node-2.example:7002");
+        let changed_endpoint = to_gossip_node(&gossip_id("node-2", 7), &changed_endpoint_state)
+            .assured("the test changed gossip endpoint is valid");
+        assert!(
+            !health
+                .effective_snapshot(almost_unavailable, timeout)
+                .retains_known_node(&changed_endpoint)
+        );
+    }
+
+    #[test]
+    fn a_gossip_lapse_is_bridged_only_while_health_was_observed_within_the_interval() {
+        let timeout = Duration::from_secs(10);
+        let healthy_at = Instant::now();
+        let capacity_at = healthy_at
+            .checked_add(Duration::from_secs(9))
+            .assured("the test observation time fits in the monotonic clock range");
+        let healthy_stale_at = healthy_at
+            .checked_add(timeout)
+            .assured("the test observation time fits in the monotonic clock range");
+        let capacity_stale_at = capacity_at
+            .checked_add(timeout)
+            .assured("the test observation time fits in the monotonic clock range");
+        let endpoint = "node-2.example:7001";
+        let mut health = PeerHealthStateSnapshot::default();
+        let target = health
+            .replace_endpoints(
+                [health_endpoint("node-2", 7, endpoint)],
+                healthy_at,
+                timeout,
+            )
+            .into_iter()
+            .next()
+            .assured("one endpoint produces one health target");
+        health.record_result(
+            PeerHealthProbeResult::new(
+                target.clone(),
+                PeerHealthProbeOutcome::Healthy(health_identity("node-2", 7)),
+                healthy_at,
+            ),
+            timeout,
+        );
+
+        let mut gossip_state = NodeState::for_test();
+        gossip_state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, endpoint);
+        let node = to_gossip_node(&gossip_id("node-2", 7), &gossip_state)
+            .assured("the test gossip identity is valid");
+        let node_id = node.node_id.clone();
+        let known_nodes = BTreeMap::from([(node_id.clone(), node.clone())]);
+        let gossip_miss = || GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: BTreeSet::from([node_id.clone()]),
+            dead_node_identities: BTreeSet::from([node.identity()]),
+        };
+
+        let mut recently_healthy = gossip_miss();
+        health
+            .effective_snapshot(capacity_at, timeout)
+            .retain_known_nodes(&mut recently_healthy, &known_nodes);
+        assert_eq!(
+            recently_healthy.live_node_ids(),
+            BTreeSet::from([node_id.clone()])
+        );
+
+        // No probe completed after the healthy one, as when no probe to a stopped peer finishes:
+        // the observation ages out and gossip's verdict applies.
+        let mut stale = gossip_miss();
+        health
+            .effective_snapshot(healthy_stale_at, timeout)
+            .retain_known_nodes(&mut stale, &known_nodes);
+        assert!(stale.live_node_ids().is_empty());
+        assert_eq!(stale.dead_node_ids, BTreeSet::from([node_id.clone()]));
+
+        health.record_result(
+            PeerHealthProbeResult::new(
+                target,
+                PeerHealthProbeOutcome::CapacityExhausted,
+                capacity_at,
+            ),
+            timeout,
+        );
+        let mut inconclusive = gossip_miss();
+        health
+            .effective_snapshot(healthy_stale_at, timeout)
+            .retain_known_nodes(&mut inconclusive, &known_nodes);
+        assert_eq!(
+            inconclusive.live_node_ids(),
+            BTreeSet::from([node_id.clone()])
+        );
+
+        let mut inconclusive_stale = gossip_miss();
+        health
+            .effective_snapshot(capacity_stale_at, timeout)
+            .retain_known_nodes(&mut inconclusive_stale, &known_nodes);
+        assert!(inconclusive_stale.live_node_ids().is_empty());
+        assert_eq!(inconclusive_stale.dead_node_ids, BTreeSet::from([node_id]));
     }
 
     #[test]
@@ -2029,7 +2479,7 @@ mod tests {
         assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events", 1));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn subscription_interest_visibility_requires_the_current_advertisement() {
         let (node_id, mut state) = subscription_state("node-1", 7, 7101, &[("sales", "events")]);
         let subscriber = health_identity("node-1", 7);
@@ -2068,7 +2518,7 @@ mod tests {
                 .load()
                 .contains(&subscriber, "sales", "events", minimum_version)
         );
-        tokio::time::timeout(Duration::from_secs(30), visible)
+        nervix_primitives::time::timeout(Duration::from_secs(30), visible)
             .await
             .assured("publishing the renewed interest releases its visibility wait");
         assert!(!publication.load().contains(
@@ -2146,7 +2596,7 @@ mod tests {
             state
                 .effective_snapshot(started_at, timeout)
                 .status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
+            Some(PeerHealthStatus::Unobserved)
         );
 
         assert!(matches!(
@@ -2268,7 +2718,7 @@ mod tests {
         let stale = state.effective_snapshot(stale_at, timeout);
         assert_eq!(
             stale.status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
+            Some(PeerHealthStatus::Stale)
         );
         assert!(stale.unavailable_nodes().is_empty());
     }
@@ -2309,7 +2759,7 @@ mod tests {
         assert_eq!(
             capacity
                 .status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
+            Some(PeerHealthStatus::Inconclusive)
         );
         assert_eq!(
             capacity.latest_outcome(
@@ -2320,11 +2770,11 @@ mod tests {
         assert!(capacity.unavailable_nodes().is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cluster_state_watcher_observes_a_health_target_change_after_wait_preparation() {
         let observation_freshness = Duration::from_secs(10);
         let (_live_state, live_state_receiver) =
-            chitchat_tokio::sync::watch::channel(BTreeMap::new());
+            nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
         let (peer_health_state, peer_health_state_receiver) =
             watch::channel(PeerHealthStateSnapshot::default());
         let mut watcher = ClusterStateWatcher {
@@ -2343,10 +2793,10 @@ mod tests {
             );
         });
 
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = &mut waiting => {}
-            () = tokio::task::yield_now() => {
+            () = nervix_primitives::task::yield_now() => {
                 panic!("a health target update after wait preparation must wake the waiter")
             }
         }

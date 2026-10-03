@@ -8,23 +8,53 @@
 //! is held to the frames Rust writes. Setting `NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1` rewrites the
 //! corpus instead of checking it; `just update-client-wire-corpus` does that.
 
-use std::{fmt::Write as _, fs, path::PathBuf};
+use std::{
+    fmt::Write as _,
+    fs,
+    num::{NonZeroU32, NonZeroU64},
+    path::PathBuf,
+    time::Duration,
+};
 
 use bytes::Bytes;
-use meticulous::ResultExt as _;
-use nervix_models::{ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy, SchemaField};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{
+    AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
+    ClientBatchDefect, ClientConsumerLimits, ClientOutcomeUncertainty, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    CommandExecutionReference, DomainClockObservation, DomainClockObservedState,
+    DomainClockTickObservation, ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy,
+    RequestedResourceVersion, RestoreArchive, RestoreMode, RestoreReport, RestoreStep,
+    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField, Timestamp,
+};
 
 use super::{
-    fixtures::{limits, name, request},
-    samples::{client_messages, command_outcome, leader, row_schema, rows_frame, subscription},
+    fixtures::{limits, name, non_zero, request},
+    samples::{
+        client_messages, command_outcome, domain_clock_observations, leader, producer,
+        producer_description, producer_fields, row_schema, rows_frame, subscription,
+    },
 };
 use crate::{
-    CellView, CellsView, Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue,
-    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainPaceChoice,
-    LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
-    ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition, SubscribeOutcome,
-    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
-    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadFrame,
+    BackupDownloadMessage, BackupDownloadRequest, BackupDownloadRequestFrame, CellView, CellsView,
+    Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, ClientFrame,
+    ClientMessage, ClientRequest, CloseEmitterOutcome, CloseIngestorDisposition,
+    CloseIngestorOutcome, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
+    DomainPaceChoice, EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened,
+    EmitterSettlement, LeaderRedirect, OpenEmitterDisposition, OpenEmitterOutcome,
+    OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
+    ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply, ReplyBody,
+    ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
+    RestoreMessage, RestoreReply, RestoreReplyFrame, RestoreStart, RestoreUploadFailure,
+    ServerEvent, ServerFrame, ServerMessage, SettleEmitterBatchOutcome, SubmissionOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded,
+    SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
+    SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal,
+    restore::RestoreChunk, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -75,14 +105,222 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("the corpus event fits the default limits");
+    let paced_clock = domain_clock_observations()
+        .into_iter()
+        .find(|clock| clock.generation == u64::MAX)
+        .assured("the samples hold a paced clock at the last generation");
+    let clock_attach = |id: u64, disposition: DomainClockAttachDisposition, message: &str| {
+        reply(
+            id,
+            ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+                disposition,
+                message: message.to_string(),
+            }),
+        )
+    };
+    let clock_detach = |id: u64, disposition: DomainClockDetachDisposition, message: &str| {
+        reply(
+            id,
+            ReplyBody::DomainClockDetach(DomainClockDetachOutcome {
+                disposition,
+                message: message.to_string(),
+            }),
+        )
+    };
+    let clock_observed = |generation: u64, state: DomainClockObservedState| {
+        DomainClockObserved {
+            domain: name("tenant"),
+            clock: DomainClockObservation { generation, state },
+        }
+        .encode(&limits())
+        .assured("a corpus clock frame fits the default limits")
+        .into_bytes()
+    };
+    let clock_ended = DomainClockAttachmentEnded {
+        domain: name("tenant"),
+        reason: DomainClockAttachmentEndReason::DomainRemoved,
+    }
+    .encode(&limits())
+    .assured("a corpus clock frame fits the default limits");
+    let submission = |id: u64, outcome: ClientSubmissionOutcome, message: &str| {
+        reply(
+            id,
+            ReplyBody::Submission(SubmissionOutcome {
+                outcome,
+                message: message.to_string(),
+            }),
+        )
+    };
+    let producer_opened = ProducerOpened {
+        domain: name("tenant"),
+        ingestor: name("orders_in"),
+        description: producer_description(AckWindow::Parallel { max: non_zero(8) }),
+    };
+    let producer_admission = ProducerAdmissionChanged {
+        producer: producer(),
+        admission: ClientProducerAdmission::Suspended,
+    }
+    .encode(&limits())
+    .assured("a corpus producer frame fits the default limits");
+    let producer_ended = ProducerEnded {
+        producer: producer(),
+        reason: ClientProducerEndReason::Relocated,
+        message: "ingestor 'orders_in' moved to node-2".to_string(),
+    }
+    .encode(&limits())
+    .assured("a corpus producer frame fits the default limits");
+    let download = |frame: crate::EncodedFrame<BackupDownloadFrame>| frame.into_bytes();
+    let backup = CommandOutcome {
+        backup: Some(Box::new(backup_archive())),
+        ..command_outcome(CommandDisposition::Completed {
+            already_existed: false,
+        })
+    };
+    let restore = CommandOutcome {
+        restore: Some(Box::new(restore_report())),
+        ..command_outcome(CommandDisposition::Failed)
+    };
+    let clock_ticked = DomainClockTicked {
+        domain: name("tenant"),
+        tick: DomainClockTickObservation {
+            generation: 7,
+            tick_id: 42,
+            logical_boundary: Timestamp::from_unix_nanos(1_000),
+            authority_utc: Timestamp::from_unix_nanos(2_000),
+            serving_logical: Timestamp::from_unix_nanos(3_000),
+        },
+    }
+    .encode(&limits())
+    .assured("a corpus tick frame fits the default limits");
     vec![
+        (
+            "backup_download_chunk.nxbd",
+            download(
+                BackupDownloadMessage::encode_chunk(&[0x00, 0x7f, 0x80, 0xff], &limits())
+                    .assured("a corpus chunk fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_complete.nxbd",
+            download(
+                BackupDownloadMessage::encode_complete(&limits())
+                    .assured("a corpus completion fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_failed.nxbd",
+            download(
+                BackupDownloadMessage::encode_failed(
+                    &BackupDownloadFailed {
+                        failure: BackupDownloadFailure::NotRetained,
+                        message: "no archive is retained under this reference".to_string(),
+                    },
+                    &limits(),
+                )
+                .assured("a corpus refusal fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_redirect.nxbd",
+            download(
+                BackupDownloadMessage::encode_redirect(
+                    &LeaderRedirect {
+                        leader: Some(leader()),
+                    },
+                    &limits(),
+                )
+                .assured("a corpus redirect fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_request.nxbq",
+            BackupDownloadRequest {
+                execution_reference: CommandExecutionReference::parse(
+                    "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44",
+                )
+                .assured("the corpus reference is a UUID"),
+            }
+            .encode(&limits())
+            .assured("a corpus download request fits the default limits")
+            .into_bytes(),
+        ),
+        (
+            "backup_download_start.nxbd",
+            download(
+                BackupDownloadMessage::encode_start(
+                    &BackupArchiveStart {
+                        total_bytes: NonZeroU64::MAX,
+                        digest: ArchiveDigest::from_bytes([0xa5; 32]),
+                    },
+                    &limits(),
+                )
+                .assured("a corpus start fits the default limits"),
+            ),
+        ),
+        ("client_attach_domain_clock.nxcm", client(15)),
         ("client_cancel.nxcm", client(13)),
         ("client_choice.nxcm", client(14)),
+        ("client_choice_relay_field.nxcm", client(17)),
+        ("client_close_emitter.nxcm", client(24)),
+        ("client_close_ingestor.nxcm", client(20)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
+        ("client_detach_domain_clock.nxcm", client(16)),
+        ("client_open_emitter.nxcm", client(21)),
+        ("client_open_ingestor.nxcm", client(18)),
+        ("client_read_emitter_batch.nxcm", client(22)),
+        ("client_settle_emitter_batch.nxcm", client(23)),
+        ("client_submit_batch.nxcm", client(19)),
         ("client_subscribe.nxcm", client(11)),
         ("client_suggest.nxcm", client(3)),
+        (
+            "restore_chunk.nxrm",
+            RestoreChunk::encode(&[0x00, 0x7f, 0x80, 0xff], &limits())
+                .assured("a corpus restore chunk fits the default limits")
+                .into_bytes(),
+        ),
+        (
+            "restore_failed.nxrr",
+            RestoreReply {
+                request_id: None,
+                disposition: RestoreDisposition::UploadFailed {
+                    failure: RestoreUploadFailure::DigestMismatch,
+                    message: "the archive does not have its declared digest".to_string(),
+                },
+            }
+            .encode(&limits())
+            .assured("a corpus restore refusal fits the default limits")
+            .into_bytes(),
+        ),
+        (
+            "restore_outcome.nxrr",
+            RestoreReply {
+                request_id: Some(request(1)),
+                disposition: RestoreDisposition::Outcome(Box::new(restore.clone())),
+            }
+            .encode(&limits())
+            .assured("a corpus restore outcome fits the default limits")
+            .into_bytes(),
+        ),
+        (
+            "restore_start.nxrm",
+            RestoreStart {
+                request_id: request(1),
+                execution_reference: CommandExecutionReference::parse(
+                    "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44",
+                )
+                .assured("the corpus reference is a UUID"),
+                statement: "RESTORE CLUSTER FROM 'cluster.nvxb' ON EXISTING USER SKIP;".to_string(),
+                archive: RestoreArchive {
+                    total_bytes: NonZeroU64::MAX,
+                    digest: ArchiveDigest::from_bytes([0x3c; 32]),
+                },
+            }
+            .encode(&limits())
+            .assured("a corpus restore start fits the default limits")
+            .into_bytes(),
+        ),
         (
             "server_choice.nxsm",
             reply(
@@ -123,6 +361,24 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                             },
                         },
                         Choice {
+                            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest),
+                            presentation: ChoicePresentation {
+                                label: "LATEST".to_string(),
+                                detail: Some("Highest completed version".to_string()),
+                                group: Some("Resource version".to_string()),
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(
+                                3,
+                            )),
+                            presentation: ChoicePresentation {
+                                label: "3".to_string(),
+                                detail: Some("Completed version".to_string()),
+                                group: Some("Resource version".to_string()),
+                            },
+                        },
+                        Choice {
                             value: ChoiceValue::Model(NodeRef::new(
                                 ModelKind::Relay,
                                 name::<ModelName>("orders"),
@@ -133,10 +389,22 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                                 group: Some("Models".to_string()),
                             },
                         },
+                        Choice {
+                            value: ChoiceValue::Field(name("amount")),
+                            presentation: ChoicePresentation {
+                                label: "amount".to_string(),
+                                detail: Some("I64 OPTIONAL".to_string()),
+                                group: Some("Relay field".to_string()),
+                            },
+                        },
                     ],
                     page_cursor: Some("choice-page-two".to_string()),
                 }),
             ),
+        ),
+        (
+            "server_command_backup.nxsm",
+            reply(6, ReplyBody::Command(Box::new(backup))),
         ),
         (
             "server_command_failed.nxsm",
@@ -159,12 +427,182 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_command_restore.nxsm",
+            reply(19, ReplyBody::Command(Box::new(restore))),
+        ),
+        (
             "server_command_unknown.nxsm",
             command(
                 4,
                 CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
             ),
         ),
+        (
+            "server_domain_clock_already_attached.nxsm",
+            clock_attach(
+                11,
+                DomainClockAttachDisposition::AlreadyAttached(name("tenant")),
+                "this session already follows the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_attach_failed.nxsm",
+            clock_attach(
+                12,
+                DomainClockAttachDisposition::Failed,
+                "session-scoped and client-local statements cannot be queued in a transaction",
+            ),
+        ),
+        (
+            "server_domain_clock_attached.nxsm",
+            clock_attach(
+                10,
+                DomainClockAttachDisposition::Attached {
+                    domain: name("tenant"),
+                    clock: paced_clock,
+                },
+                "attached to the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_detached.nxsm",
+            clock_detach(
+                14,
+                DomainClockDetachDisposition::Detached(name("tenant")),
+                "detached from the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_domain_not_found.nxsm",
+            clock_attach(
+                13,
+                DomainClockAttachDisposition::DomainNotFound(name("missing")),
+                "domain 'missing' does not exist",
+            ),
+        ),
+        ("server_domain_clock_ended.nxsm", clock_ended.into_bytes()),
+        (
+            "server_domain_clock_not_attached.nxsm",
+            clock_detach(
+                15,
+                DomainClockDetachDisposition::NotAttached(name("tenant")),
+                "this session does not follow the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_stopped.nxsm",
+            clock_observed(0, DomainClockObservedState::Stopped),
+        ),
+        ("server_domain_clock_ticked.nxsm", clock_ticked.into_bytes()),
+        (
+            "server_domain_clock_uninstalled.nxsm",
+            clock_observed(7, DomainClockObservedState::Uninstalled),
+        ),
+        (
+            "server_domain_clock_unpaced.nxsm",
+            clock_observed(1, DomainClockObservedState::Unpaced),
+        ),
+        (
+            "server_emitter_batch.nxsm",
+            reply(
+                23,
+                ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome {
+                    disposition: ReadEmitterDisposition::Batch(EmitterBatchReceived {
+                        identity: uuid::Uuid::from_bytes([0xA3; 16]),
+                        reference: uuid::Uuid::from_bytes([0xB4; 16]),
+                        source_relay: name("orders"),
+                        branch_fingerprint: Some([0xC5; 32]),
+                        batch: Bytes::from_static(b"ARROW-IPC-OUTPUT"),
+                        members: 2,
+                        execution_now: Timestamp::from_unix_nanos(1_700_000_000_000_000_000),
+                    }),
+                    message: String::new(),
+                }),
+            ),
+        ),
+        (
+            "server_emitter_closed.nxsm",
+            reply(
+                25,
+                ReplyBody::CloseEmitter(CloseEmitterOutcome {
+                    disposition: EmitterCloseDisposition::Closed,
+                    message: String::new(),
+                }),
+            ),
+        ),
+        (
+            "server_emitter_opened.nxsm",
+            reply(
+                22,
+                ReplyBody::OpenEmitter(OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Opened(Box::new(EmitterOpened {
+                        domain: name("tenant"),
+                        emitter: name("app_output"),
+                        fields: producer_fields(),
+                        generation: 4,
+                        contract: nervix_models::ClientEndpointContract::from_digest([7; 32]),
+                        window: AckWindow::Parallel { max: non_zero(8) },
+                        ack_timeout: Duration::from_secs(30),
+                        retry_backoff: Duration::from_millis(100),
+                        retry_max_backoff: Duration::from_secs(1),
+                        granted: ClientConsumerLimits {
+                            batches: NonZeroU32::new(8).assured("literal nonzero"),
+                            bytes: non_zero(4 * 1024 * 1024),
+                        },
+                        max_batch_bytes: 1024 * 1024,
+                        max_batch_rows: 16,
+                    })),
+                    message: "consumer attached".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_emitter_settled.nxsm",
+            reply(
+                24,
+                ReplyBody::SettleEmitterBatch(SettleEmitterBatchOutcome {
+                    disposition: EmitterSettlement::Confirmed,
+                    message: String::new(),
+                }),
+            ),
+        ),
+        (
+            "server_ingestor_closed.nxsm",
+            reply(
+                21,
+                ReplyBody::CloseIngestor(CloseIngestorOutcome {
+                    disposition: CloseIngestorDisposition::Closed,
+                    message: "producer 19 closed".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_ingestor_opened.nxsm",
+            reply(
+                19,
+                ReplyBody::OpenIngestor(OpenIngestorOutcome {
+                    disposition: OpenIngestorDisposition::Opened(Box::new(producer_opened)),
+                    message: "producer attached to ingestor 'orders_in'".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_ingestor_refused.nxsm",
+            reply(
+                19,
+                ReplyBody::OpenIngestor(OpenIngestorOutcome {
+                    disposition: OpenIngestorDisposition::Refused(
+                        ClientProducerRefusal::SchemaMismatch,
+                    ),
+                    message: "field 'card' differs in sensitivity".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_producer_admission.nxsm",
+            producer_admission.into_bytes(),
+        ),
+        ("server_producer_ended.nxsm", producer_ended.into_bytes()),
         (
             "server_rejected.nxsm",
             reply(
@@ -177,6 +615,36 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         ("server_rows.nxsm", rows_frame(&limits()).into_bytes()),
+        (
+            "server_submission_completed.nxsm",
+            submission(20, ClientSubmissionOutcome::Completed, ""),
+        ),
+        (
+            "server_submission_failed.nxsm",
+            submission(
+                20,
+                ClientSubmissionOutcome::ProcessingFailed(ClientProcessingFailure::AckTimedOut),
+                "no acknowledgement progress within 30s",
+            ),
+        ),
+        (
+            "server_submission_not_admitted.nxsm",
+            submission(
+                20,
+                ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::InvalidBatch(
+                    ClientBatchDefect::TooManyRows,
+                )),
+                "the batch has 70000 rows, more than the 65536 one batch may carry",
+            ),
+        ),
+        (
+            "server_submission_unknown.nxsm",
+            submission(
+                20,
+                ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::OwnerLost),
+                "the connection to node-2 was lost",
+            ),
+        ),
         ("server_subscription_ended.nxsm", ended.into_bytes()),
         (
             "server_subscription_opened.nxsm",
@@ -209,6 +677,85 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
     ]
+}
+
+/// A backup summary at the edges of every field's range: the largest archive, the earliest and
+/// latest instants, a present zero user count, and domains in ascending order.
+fn backup_archive() -> BackupArchiveSummary {
+    BackupArchiveSummary {
+        total_bytes: NonZeroU64::MAX,
+        digest: ArchiveDigest::from_bytes([0x5a; 32]),
+        captured_at: Timestamp::from_unix_nanos(i64::MIN),
+        retained_until: Timestamp::from_unix_nanos(i64::MAX),
+        resources: BackupResources::Omitted,
+        users: Some(0),
+        domains: vec![
+            BackupDomainSummary {
+                domain: name("analytics"),
+                revision: u64::MAX,
+                sections: 0,
+                section_bytes: u64::MAX,
+            },
+            BackupDomainSummary {
+                domain: name("tenant"),
+                revision: 1,
+                sections: 7,
+                section_bytes: 4096,
+            },
+        ],
+    }
+}
+
+/// A restore report of every step kind and outcome, user counts at the edges of their range, and
+/// a domain restored under another name.
+fn restore_report() -> RestoreReport {
+    RestoreReport {
+        mode: RestoreMode::Apply,
+        archive: RestoreArchive {
+            total_bytes: NonZeroU64::MAX,
+            digest: ArchiveDigest::from_bytes([0x3c; 32]),
+        },
+        captured_at: Timestamp::from_unix_nanos(i64::MIN),
+        users: Some(RestoredUsers {
+            created: u64::MAX,
+            skipped: 0,
+            replaced: 7,
+        }),
+        domains: vec![
+            RestoredDomain {
+                source: name("tenant"),
+                domain: name("tenant_copy"),
+                resource_versions: 3,
+                models: u64::MAX,
+                planned_models: None,
+            },
+            RestoredDomain {
+                source: name("analytics"),
+                domain: name("analytics"),
+                resource_versions: 0,
+                models: 0,
+                planned_models: None,
+            },
+        ],
+        steps: vec![
+            RestoreStepReport {
+                step: RestoreStep::Users,
+                outcome: RestoreStepOutcome::Applied,
+            },
+            RestoreStepReport {
+                step: RestoreStep::CreateDomain(name("tenant_copy")),
+                outcome: RestoreStepOutcome::Planned,
+            },
+            RestoreStepReport {
+                step: RestoreStep::ImportResources(name("tenant_copy")),
+                outcome: RestoreStepOutcome::Failed,
+            },
+            RestoreStepReport {
+                step: RestoreStep::ApplyModels(name("tenant_copy")),
+                outcome: RestoreStepOutcome::NotAttempted,
+            },
+        ],
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -316,9 +863,94 @@ fn choice_value(value: &ChoiceValue) -> String {
         ChoiceValue::PlacementPolicy(value) => format!("placement:{value:?}"),
         ChoiceValue::Domain(domain) => format!("domain:{}", domain.as_str()),
         ChoiceValue::Resource(resource) => format!("resource:{}", resource.as_str()),
+        ChoiceValue::ResourceVersion(version) => format!("resource-version:{version}"),
         ChoiceValue::Model(node) => {
             format!("model:{}/{}", node.kind.as_str(), node.identifier.as_str())
         }
+        ChoiceValue::Field(field) => format!("field:{}", field.as_str()),
+    }
+}
+
+fn clock_line(clock: &DomainClockObservation) -> String {
+    let generation = clock.generation;
+    match &clock.state {
+        DomainClockObservedState::Stopped => format!("CLOCK generation={generation} state=stopped"),
+        DomainClockObservedState::Uninstalled => {
+            format!("CLOCK generation={generation} state=uninstalled")
+        }
+        DomainClockObservedState::Unpaced => format!("CLOCK generation={generation} state=unpaced"),
+        DomainClockObservedState::Paced(paced) => format!(
+            "CLOCK generation={generation} state=paced period={} skew={} origin={} anchor={} \
+             rate=f64:{:016x}",
+            paced.period.as_nanos(),
+            paced.skew.as_nanos(),
+            paced.mapping.logical_start().unix_nanos(),
+            paced.mapping.wall_started_at().unix_nanos(),
+            paced.mapping.time_rate().get().to_bits()
+        ),
+    }
+}
+
+/// The schema's name for a schema enum value.
+fn schema_name(name: Option<&'static str>) -> &'static str {
+    name.assured("every value a corpus frame carries is declared by the schema")
+}
+
+fn producer_lines(id: u64, opened: &ProducerOpened, message: &str, lines: &mut Vec<String>) {
+    let ClientProducerDescription {
+        attachment,
+        fields,
+        generation,
+        contract,
+        policy,
+        grant,
+        admission,
+    } = &opened.description;
+    let window = match policy.window {
+        AckWindow::Sequential => "sequential".to_string(),
+        AckWindow::Parallel { max } => format!("parallel:{max}"),
+    };
+    lines.push(format!(
+        "REPLY {id} INGESTOR_OPENED domain={} ingestor={} generation={generation} contract={} \
+         attachment={} window={window} ack_timeout={} retry={}/{} granted={}/{} max_batch={}/{} \
+         admission={} message={}",
+        opened.domain.as_str(),
+        opened.ingestor.as_str(),
+        hex(contract.as_digest()),
+        hex(&attachment.as_u128().to_be_bytes()),
+        policy.ack_timeout.as_nanos(),
+        policy.retry_backoff.as_nanos(),
+        policy.retry_max_backoff.as_nanos(),
+        grant.batches,
+        grant.bytes,
+        grant.max_batch_bytes,
+        grant.max_batch_rows,
+        schema_name(wire::ProducerAdmission::from(*admission).variant_name()),
+        text(message)
+    ));
+    for field in fields {
+        lines.push(field_line("FIELD", field));
+    }
+}
+
+fn submission_line(id: u64, outcome: &SubmissionOutcome) -> String {
+    let message = text(&outcome.message);
+    match outcome.outcome {
+        ClientSubmissionOutcome::Completed => {
+            format!("REPLY {id} SUBMISSION completed message={message}")
+        }
+        ClientSubmissionOutcome::NotAdmitted(refusal) => format!(
+            "REPLY {id} SUBMISSION not_admitted refusal={} message={message}",
+            schema_name(wire_refusal(refusal).variant_name())
+        ),
+        ClientSubmissionOutcome::ProcessingFailed(failure) => format!(
+            "REPLY {id} SUBMISSION failed failure={} message={message}",
+            schema_name(wire::ProcessingFailure::from(failure).variant_name())
+        ),
+        ClientSubmissionOutcome::OutcomeUnknown(cause) => format!(
+            "REPLY {id} SUBMISSION unknown cause={} message={message}",
+            schema_name(wire::OutcomeUncertainty::from(cause).variant_name())
+        ),
     }
 }
 
@@ -328,46 +960,7 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
             let id = reply.request_id.get();
             match &reply.body {
                 ReplyBody::Command(outcome) => {
-                    lines.push(format!(
-                        "REPLY {id} COMMAND {} reference={} origin={:?} message={}",
-                        disposition(&outcome.disposition),
-                        outcome.execution_reference.as_str(),
-                        outcome.origin,
-                        text(&outcome.message)
-                    ));
-                    for diagnostic in &outcome.diagnostics {
-                        let span = match diagnostic.span {
-                            Some(span) => format!("{}..{}", span.start(), span.end()),
-                            None => "none".to_string(),
-                        };
-                        lines.push(format!(
-                            "DIAGNOSTIC span={span} message={}",
-                            text(&diagnostic.message)
-                        ));
-                    }
-                    match &outcome.disposition {
-                        CommandDisposition::NotLeader(LeaderRedirect {
-                            leader: Some(leader),
-                        }) => {
-                            let uri = |uri: &Option<url::Url>| match uri {
-                                Some(uri) => uri.as_str().to_string(),
-                                None => "none".to_string(),
-                            };
-                            lines.push(format!(
-                                "LEADER node={} grpc={} console={}",
-                                leader.node.as_str(),
-                                uri(&leader.grpc_uri),
-                                uri(&leader.web_console_uri)
-                            ));
-                        }
-                        CommandDisposition::NotLeader(LeaderRedirect { leader: None }) => {
-                            lines.push("LEADER none".to_string());
-                        }
-                        CommandDisposition::OutcomeUnknown(cause) => {
-                            lines.push(format!("UNKNOWN cause={cause:?}"));
-                        }
-                        _ => {}
-                    }
+                    render_command(&format!("REPLY {id} COMMAND"), outcome, lines);
                 }
                 ReplyBody::Rejected(rejected) => {
                     let field = rejected.field.as_deref().unwrap_or("none");
@@ -442,6 +1035,139 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                         }
                     }
                 }
+                ReplyBody::DomainClockAttach(outcome) => {
+                    let message = text(&outcome.message);
+                    match &outcome.disposition {
+                        DomainClockAttachDisposition::Attached { domain, clock } => {
+                            lines.push(format!(
+                                "REPLY {id} DOMAIN_CLOCK_ATTACH attached domain={} \
+                                 message={message}",
+                                domain.as_str()
+                            ));
+                            lines.push(clock_line(clock));
+                        }
+                        DomainClockAttachDisposition::AlreadyAttached(domain) => {
+                            lines.push(format!(
+                                "REPLY {id} DOMAIN_CLOCK_ATTACH already_attached domain={} \
+                                 message={message}",
+                                domain.as_str()
+                            ));
+                        }
+                        DomainClockAttachDisposition::DomainNotFound(domain) => {
+                            lines.push(format!(
+                                "REPLY {id} DOMAIN_CLOCK_ATTACH domain_not_found domain={} \
+                                 message={message}",
+                                domain.as_str()
+                            ));
+                        }
+                        DomainClockAttachDisposition::Failed => lines.push(format!(
+                            "REPLY {id} DOMAIN_CLOCK_ATTACH failed message={message}"
+                        )),
+                    }
+                }
+                ReplyBody::DomainClockDetach(outcome) => {
+                    let message = text(&outcome.message);
+                    let (disposition, domain) = match &outcome.disposition {
+                        DomainClockDetachDisposition::Detached(domain) => ("detached", domain),
+                        DomainClockDetachDisposition::NotAttached(domain) => {
+                            ("not_attached", domain)
+                        }
+                        DomainClockDetachDisposition::Failed => {
+                            panic!("the corpus holds no failed detach")
+                        }
+                    };
+                    lines.push(format!(
+                        "REPLY {id} DOMAIN_CLOCK_DETACH {disposition} domain={} message={message}",
+                        domain.as_str()
+                    ));
+                }
+                ReplyBody::OpenIngestor(outcome) => match &outcome.disposition {
+                    OpenIngestorDisposition::Opened(opened) => {
+                        producer_lines(id.get(), opened, &outcome.message, lines);
+                    }
+                    OpenIngestorDisposition::Refused(refusal) => lines.push(format!(
+                        "REPLY {id} INGESTOR_REFUSED refusal={} message={}",
+                        schema_name(wire::ProducerRefusal::from(*refusal).variant_name()),
+                        text(&outcome.message)
+                    )),
+                },
+                ReplyBody::Submission(outcome) => lines.push(submission_line(id.get(), outcome)),
+                ReplyBody::CloseIngestor(outcome) => {
+                    let disposition = match outcome.disposition {
+                        CloseIngestorDisposition::Closed => "closed",
+                        CloseIngestorDisposition::NotOpen => "not_open",
+                    };
+                    lines.push(format!(
+                        "REPLY {id} INGESTOR_CLOSE {disposition} message={}",
+                        text(&outcome.message)
+                    ));
+                }
+                ReplyBody::OpenEmitter(outcome) => match &outcome.disposition {
+                    OpenEmitterDisposition::Opened(opened) => {
+                        let window = match opened.window {
+                            AckWindow::Sequential => "sequential".to_string(),
+                            AckWindow::Parallel { max } => format!("parallel:{}", max.get()),
+                        };
+                        lines.push(format!(
+                            "REPLY {id} EMITTER_OPENED domain={} emitter={} generation={} \
+                             contract={} window={window} ack_timeout={} retry={}/{} granted={}/{} \
+                             max_batch={}/{} message={}",
+                            opened.domain.as_str(),
+                            opened.emitter.as_str(),
+                            opened.generation,
+                            opened.contract,
+                            opened.ack_timeout.as_nanos(),
+                            opened.retry_backoff.as_nanos(),
+                            opened.retry_max_backoff.as_nanos(),
+                            opened.granted.batches,
+                            opened.granted.bytes,
+                            opened.max_batch_bytes,
+                            opened.max_batch_rows,
+                            text(&outcome.message)
+                        ));
+                        for field in &opened.fields {
+                            lines.push(field_line("FIELD", field));
+                        }
+                    }
+                    OpenEmitterDisposition::Refused(refusal) => lines.push(format!(
+                        "REPLY {id} EMITTER_REFUSED refusal={} message={}",
+                        schema_name(wire::EmitterOpenRefusal::from(*refusal).variant_name()),
+                        text(&outcome.message)
+                    )),
+                },
+                ReplyBody::ReadEmitterBatch(outcome) => match &outcome.disposition {
+                    ReadEmitterDisposition::Batch(batch) => lines.push(format!(
+                        "REPLY {id} EMITTER_BATCH identity={} reference={} source={} branch={} \
+                         body={} members={} now={}",
+                        hex(batch.identity.as_bytes()),
+                        hex(batch.reference.as_bytes()),
+                        batch.source_relay.as_str(),
+                        batch
+                            .branch_fingerprint
+                            .as_ref()
+                            .map(|branch| hex(branch))
+                            .unwrap_or_else(|| "none".to_string()),
+                        hex(&batch.batch),
+                        batch.members,
+                        batch.execution_now.unix_nanos(),
+                    )),
+                    ReadEmitterDisposition::Ended => lines.push(format!(
+                        "REPLY {id} EMITTER_ENDED message={}",
+                        text(&outcome.message)
+                    )),
+                },
+                ReplyBody::SettleEmitterBatch(outcome) => lines.push(format!(
+                    "REPLY {id} EMITTER_SETTLED disposition={} message={}",
+                    schema_name(wire::EmitterSettlement::from(outcome.disposition).variant_name()),
+                    text(&outcome.message)
+                )),
+                ReplyBody::CloseEmitter(outcome) => lines.push(format!(
+                    "REPLY {id} EMITTER_CLOSE disposition={} message={}",
+                    schema_name(
+                        wire::EmitterCloseDisposition::from(outcome.disposition).variant_name()
+                    ),
+                    text(&outcome.message)
+                )),
                 other => panic!("the corpus holds no {other:?} reply"),
             }
         }
@@ -471,6 +1197,47 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 ended.subscription.name.as_str(),
                 ended.subscription.generation,
                 ended.reason,
+                text(&ended.message)
+            ));
+        }
+        ServerMessage::Event(ServerEvent::DomainClockObserved(observed)) => {
+            lines.push(format!(
+                "EVENT DOMAIN_CLOCK domain={}",
+                observed.domain.as_str()
+            ));
+            lines.push(clock_line(&observed.clock));
+        }
+        ServerMessage::Event(ServerEvent::DomainClockTicked(ticked)) => {
+            lines.push(format!(
+                "EVENT DOMAIN_CLOCK_TICK domain={} generation={} id={} boundary={} \
+                 authority_utc={} serving_logical={}",
+                ticked.domain.as_str(),
+                ticked.tick.generation,
+                ticked.tick.tick_id,
+                ticked.tick.logical_boundary.unix_nanos(),
+                ticked.tick.authority_utc.unix_nanos(),
+                ticked.tick.serving_logical.unix_nanos(),
+            ));
+        }
+        ServerMessage::Event(ServerEvent::DomainClockAttachmentEnded(ended)) => {
+            lines.push(format!(
+                "EVENT DOMAIN_CLOCK_ENDED domain={} reason={:?}",
+                ended.domain.as_str(),
+                ended.reason
+            ));
+        }
+        ServerMessage::Event(ServerEvent::ProducerAdmissionChanged(changed)) => {
+            lines.push(format!(
+                "EVENT PRODUCER_ADMISSION producer={} admission={}",
+                changed.producer,
+                schema_name(wire::ProducerAdmission::from(changed.admission).variant_name())
+            ));
+        }
+        ServerMessage::Event(ServerEvent::ProducerEnded(ended)) => {
+            lines.push(format!(
+                "EVENT PRODUCER_ENDED producer={} reason={} message={}",
+                ended.producer,
+                schema_name(wire::ProducerEndReason::from(ended.reason).variant_name()),
                 text(&ended.message)
             ));
         }
@@ -545,7 +1312,255 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
                 cancel.target.get()
             ));
         }
+        ClientRequest::AttachDomainClock(attach) => lines.push(format!(
+            "REQUEST {id} ATTACH_DOMAIN_CLOCK domain={}",
+            attach.domain.as_str()
+        )),
+        ClientRequest::DetachDomainClock(detach) => lines.push(format!(
+            "REQUEST {id} DETACH_DOMAIN_CLOCK domain={}",
+            detach.domain.as_str()
+        )),
+        ClientRequest::OpenIngestor(open) => {
+            lines.push(format!(
+                "REQUEST {id} OPEN_INGESTOR domain={} ingestor={} batches={} bytes={}",
+                open.domain.as_str(),
+                open.ingestor.as_str(),
+                open.limits.batches,
+                open.limits.bytes
+            ));
+            for field in &open.expected_fields {
+                lines.push(field_line("FIELD", field));
+            }
+        }
+        ClientRequest::SubmitBatch(submit) => lines.push(format!(
+            "REQUEST {id} SUBMIT_BATCH producer={} batch={}",
+            submit.producer,
+            hex(&submit.batch)
+        )),
+        ClientRequest::CloseIngestor(close) => lines.push(format!(
+            "REQUEST {id} CLOSE_INGESTOR producer={}",
+            close.producer
+        )),
+        ClientRequest::OpenEmitter(open) => {
+            lines.push(format!(
+                "REQUEST {id} OPEN_EMITTER domain={} emitter={} batches={} bytes={}",
+                open.domain.as_str(),
+                open.emitter.as_str(),
+                open.limits.batches,
+                open.limits.bytes
+            ));
+            for field in &open.expected_fields {
+                lines.push(field_line("FIELD", field));
+            }
+        }
+        ClientRequest::ReadEmitterBatch(read) => lines.push(format!(
+            "REQUEST {id} READ_EMITTER_BATCH consumer={}",
+            read.consumer
+        )),
+        ClientRequest::SettleEmitterBatch(settle) => lines.push(format!(
+            "REQUEST {id} SETTLE_EMITTER_BATCH consumer={} reference={} decision={}",
+            settle.consumer,
+            hex(settle.reference.as_bytes()),
+            match &settle.decision {
+                crate::EmitterBatchDecision::Ack => "ack".to_string(),
+                crate::EmitterBatchDecision::Retry => "retry".to_string(),
+                crate::EmitterBatchDecision::Reject(reason) => format!("reject:{}", text(reason)),
+            }
+        )),
+        ClientRequest::CloseEmitter(close) => lines.push(format!(
+            "REQUEST {id} CLOSE_EMITTER consumer={}",
+            close.consumer
+        )),
         other => panic!("the corpus holds no {other:?} request"),
+    }
+}
+
+/// The lines of one command outcome, the first of them after `head`.
+fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>) {
+    lines.push(format!(
+        "{head} {} reference={} origin={:?} message={}",
+        disposition(&outcome.disposition),
+        outcome.execution_reference.as_str(),
+        outcome.origin,
+        text(&outcome.message)
+    ));
+    for diagnostic in &outcome.diagnostics {
+        let span = match diagnostic.span {
+            Some(span) => format!("{}..{}", span.start(), span.end()),
+            None => "none".to_string(),
+        };
+        lines.push(format!(
+            "DIAGNOSTIC span={span} message={}",
+            text(&diagnostic.message)
+        ));
+    }
+    match &outcome.disposition {
+        CommandDisposition::NotLeader(LeaderRedirect {
+            leader: Some(leader),
+        }) => {
+            let uri = |uri: &Option<url::Url>| match uri {
+                Some(uri) => uri.as_str().to_string(),
+                None => "none".to_string(),
+            };
+            lines.push(format!(
+                "LEADER node={} grpc={} console={}",
+                leader.node.as_str(),
+                uri(&leader.grpc_uri),
+                uri(&leader.web_console_uri)
+            ));
+        }
+        CommandDisposition::NotLeader(LeaderRedirect { leader: None }) => {
+            lines.push("LEADER none".to_string());
+        }
+        CommandDisposition::OutcomeUnknown(cause) => {
+            lines.push(format!("UNKNOWN cause={cause:?}"));
+        }
+        _ => {}
+    }
+    if let Some(archive) = &outcome.backup {
+        let users = match archive.users {
+            Some(users) => users.to_string(),
+            None => "none".to_string(),
+        };
+        lines.push(format!(
+            "BACKUP total_bytes={} digest={} captured_at={} retained_until={} resources={:?} \
+             users={users}",
+            archive.total_bytes,
+            hex(archive.digest.as_bytes()),
+            archive.captured_at.unix_nanos(),
+            archive.retained_until.unix_nanos(),
+            archive.resources
+        ));
+        for domain in &archive.domains {
+            lines.push(format!(
+                "BACKUP_DOMAIN domain={} revision={} sections={} section_bytes={}",
+                domain.domain.as_str(),
+                domain.revision,
+                domain.sections,
+                domain.section_bytes
+            ));
+        }
+    }
+    if let Some(report) = &outcome.restore {
+        render_restore_report(report, lines);
+    }
+}
+
+fn render_restore_report(report: &RestoreReport, lines: &mut Vec<String>) {
+    let users = match &report.users {
+        Some(users) => format!(
+            "created:{},skipped:{},replaced:{}",
+            users.created, users.skipped, users.replaced
+        ),
+        None => "none".to_string(),
+    };
+    lines.push(format!(
+        "RESTORE mode={:?} total_bytes={} digest={} captured_at={} users={users}",
+        report.mode,
+        report.archive.total_bytes,
+        hex(report.archive.digest.as_bytes()),
+        report.captured_at.unix_nanos()
+    ));
+    for domain in &report.domains {
+        let planned = match &domain.planned_models {
+            Some(_) => "present",
+            None => "none",
+        };
+        lines.push(format!(
+            "RESTORE_DOMAIN source={} domain={} resource_versions={} models={} \
+             planned_models={planned}",
+            domain.source.as_str(),
+            domain.domain.as_str(),
+            domain.resource_versions,
+            domain.models
+        ));
+    }
+    for step in &report.steps {
+        let (kind, domain) = match &step.step {
+            RestoreStep::Users => ("Users", "none"),
+            RestoreStep::CreateDomain(domain) => ("CreateDomain", domain.as_str()),
+            RestoreStep::ImportResources(domain) => ("ImportResources", domain.as_str()),
+            RestoreStep::ApplyModels(domain) => ("ApplyModels", domain.as_str()),
+        };
+        lines.push(format!(
+            "RESTORE_STEP kind={kind} domain={domain} outcome={:?}",
+            step.outcome
+        ));
+    }
+}
+
+fn render_restore(message: &RestoreMessage, lines: &mut Vec<String>) {
+    match message {
+        RestoreMessage::Start(start) => lines.push(format!(
+            "RESTORE_START request={} reference={} statement={} total_bytes={} digest={}",
+            start.request_id.get(),
+            start.execution_reference.as_str(),
+            text(&start.statement),
+            start.archive.total_bytes,
+            hex(start.archive.digest.as_bytes())
+        )),
+        RestoreMessage::Chunk(chunk) => {
+            lines.push(format!("RESTORE_CHUNK bytes={}", hex(chunk.bytes())));
+        }
+    }
+}
+
+fn render_restore_reply(reply: &RestoreReply, lines: &mut Vec<String>) {
+    let request = match reply.request_id {
+        Some(request) => request.get().to_string(),
+        None => "none".to_string(),
+    };
+    match &reply.disposition {
+        RestoreDisposition::Outcome(outcome) => {
+            render_command(&format!("RESTORE_REPLY {request} COMMAND"), outcome, lines);
+        }
+        RestoreDisposition::UploadFailed { failure, message } => lines.push(format!(
+            "RESTORE_REPLY {request} FAILED failure={failure:?} message={}",
+            text(message)
+        )),
+    }
+}
+
+fn render_download_request(request: &BackupDownloadRequest, lines: &mut Vec<String>) {
+    lines.push(format!(
+        "REQUEST DOWNLOAD_BACKUP reference={}",
+        request.execution_reference.as_str()
+    ));
+}
+
+fn render_download(message: &BackupDownloadMessage, lines: &mut Vec<String>) {
+    match message {
+        BackupDownloadMessage::Start(start) => lines.push(format!(
+            "DOWNLOAD START total_bytes={} digest={}",
+            start.total_bytes,
+            hex(start.digest.as_bytes())
+        )),
+        BackupDownloadMessage::Chunk(chunk) => {
+            lines.push(format!("DOWNLOAD CHUNK bytes={}", hex(chunk.bytes())));
+        }
+        BackupDownloadMessage::Complete => lines.push("DOWNLOAD COMPLETE".to_string()),
+        BackupDownloadMessage::Failed(failed) => lines.push(format!(
+            "DOWNLOAD FAILED failure={:?} message={}",
+            failed.failure,
+            text(&failed.message)
+        )),
+        BackupDownloadMessage::NotLeader(LeaderRedirect {
+            leader: Some(leader),
+        }) => {
+            let uri = |uri: &Option<url::Url>| match uri {
+                Some(uri) => uri.as_str().to_string(),
+                None => "none".to_string(),
+            };
+            lines.push(format!(
+                "DOWNLOAD LEADER node={} grpc={} console={}",
+                leader.node.as_str(),
+                uri(&leader.grpc_uri),
+                uri(&leader.web_console_uri)
+            ));
+        }
+        BackupDownloadMessage::NotLeader(LeaderRedirect { leader: None }) => {
+            lines.push("DOWNLOAD LEADER none".to_string());
+        }
     }
 }
 
@@ -554,7 +1569,30 @@ fn report_of(frames: &[(&'static str, Bytes)]) -> String {
     let mut lines = Vec::new();
     for (file, bytes) in frames {
         lines.push(format!("FRAME {file}"));
-        if file.ends_with(".nxcm") {
+        if file.ends_with(".nxbq") {
+            let frame =
+                VerifiedFrame::<BackupDownloadRequestFrame>::verify(bytes.clone(), &limits())
+                    .assured("a corpus download request verifies");
+            let request =
+                BackupDownloadRequest::decode(&frame).assured("a corpus download request decodes");
+            render_download_request(&request, &mut lines);
+        } else if file.ends_with(".nxbd") {
+            let frame = VerifiedFrame::<BackupDownloadFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus download frame verifies");
+            let message =
+                BackupDownloadMessage::decode(&frame).assured("a corpus download frame decodes");
+            render_download(&message, &mut lines);
+        } else if file.ends_with(".nxrm") {
+            let frame = VerifiedFrame::<RestoreFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus restore frame verifies");
+            let message = RestoreMessage::decode(&frame).assured("a corpus restore frame decodes");
+            render_restore(&message, &mut lines);
+        } else if file.ends_with(".nxrr") {
+            let frame = VerifiedFrame::<RestoreReplyFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus restore reply verifies");
+            let reply = RestoreReply::decode(&frame).assured("a corpus restore reply decodes");
+            render_restore_reply(&reply, &mut lines);
+        } else if file.ends_with(".nxcm") {
             let frame = VerifiedFrame::<ClientFrame>::verify(bytes.clone(), &limits())
                 .assured("a corpus client frame verifies");
             let message = ClientMessage::decode(&frame).assured("a corpus client frame decodes");

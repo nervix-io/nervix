@@ -5,15 +5,33 @@
 //! - **Depends on.** Typed runtime snapshots, interconnect transfer and node schedules.
 //! - **Must not know.** NSPL parsing, graph validation or external connector configuration.
 
-use error_stack::ResultExt as _;
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "state assignment and recovery install a placement generation; recurring frame \
+                  and catch-up operations override this default"
+    )
+)]
 
-use super::*;
+use std::num::NonZeroUsize;
+
+use error_stack::ResultExt as _;
+use nervix_interconnect::BranchCheckpointCursor;
+
+use super::{
+    branch_checkpoint_catalog::BranchCheckpointCatalog,
+    branch_lifecycle_state::AnnouncedCheckpoint, *,
+};
 
 pub(super) const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// How many changes one page of an owner's branch checkpoint catalog lists. A change is a branch key
+/// and a revision, so a page stays far below the replication class's message limit.
+const BRANCH_CHECKPOINT_LISTING_PAGE: NonZeroUsize = nonzero_ext::nonzero!(256_usize);
 mod error;
-pub(crate) use error::{AwaitedReplicas, StateReplicationError};
+pub(crate) use self::error::{AwaitedReplicas, StateReplicationError};
 
 #[derive(Debug)]
 pub(crate) struct StateSyncAck {
@@ -24,6 +42,7 @@ mod handoff;
 mod preparation;
 mod published_branch_state;
 
+pub(in crate::runtime) use checkpoint_listing::OwnerCheckpointListing;
 use handoff::OwnershipHandoffTransitionRef;
 pub(in crate::runtime) use handoff::{
     ActivatedRuntimeStateHandoff, OwnershipHandoffActivation,
@@ -34,32 +53,24 @@ pub(in crate::runtime) use preparation::{
     PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateSnapshot,
 };
 pub(in crate::runtime) use published_branch_state::PublishedBranchState;
-
-#[derive(Debug, Clone)]
-pub(super) struct PendingStateReplicaSync {
-    source: ClusterNodeName,
-    target_lsm: u64,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct PendingStateCheckpointAnnouncement {
-    target_lsm: u64,
-    replica_progress: BTreeMap<ClusterNodeName, u64>,
-}
+use replica_branch_checkpoints::{BranchStep, Held, ReplicaBranchCheckpoints, StepOutcome};
+use replica_catch_up::RemoteStateOwner;
 
 impl Runtime {
+    /// Persist the branch lifecycle an owner formed, hold it as the lifecycle replicas
+    /// synchronize, and offer it to them.
     pub(super) fn persist_branch_lru_snapshot(
         &self,
         placement: RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        self.inner
-            .replicated_branch_lru_snapshots
-            .insert(placement.clone(), snapshot.clone());
+        let lsm = snapshot.lsm;
         if let Some(store) = self.inner.state_store.as_ref() {
-            store.persist_latest_snapshot(&placement, snapshot.lsm, &snapshot.payload)?;
+            store.persist_latest_snapshot(&placement, lsm, &snapshot.payload)?;
         }
-        self.notify_runtime_state_replicas(&placement, snapshot.lsm);
+        let lifecycle = self.replicated_branch_lifecycle(&placement);
+        lifecycle.publish(snapshot);
+        self.announce_checkpoint(&placement, lifecycle.replication(), lsm);
         Ok(())
     }
 
@@ -71,225 +82,115 @@ impl Runtime {
         snapshot: PersistedRuntimeStateEntry,
     ) {
         let lsm = snapshot.lsm;
-        self.inner
-            .replicated_branch_lru_snapshots
-            .insert(placement.clone(), snapshot);
-        self.notify_runtime_state_replicas(&placement, lsm);
+        let lifecycle = self.replicated_branch_lifecycle(&placement);
+        lifecycle.publish(snapshot);
+        self.announce_checkpoint(&placement, lifecycle.replication(), lsm);
     }
 
     pub(super) fn take_restorable_branch_lru_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
-        if let Some(snapshot) = self.take_transferred_runtime_state_snapshot(placement) {
+        if let Some(snapshot) = nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "one placement installation consumes the snapshot transferred for its concrete state \
+             lifetime",
+            self.take_transferred_runtime_state_snapshot(placement)
+        ) {
             return Ok(Some(snapshot));
         }
-        if let Some(snapshot) = self.inner.replicated_branch_lru_snapshots.get(placement) {
-            return Ok(Some(snapshot.clone()));
+        if let Some(held) = self.held_branch_lifecycle(placement) {
+            return Ok(Some(held.snapshot().clone()));
         }
         self.stored_runtime_state_snapshot(placement)
     }
 
-    fn state_checkpoint_notification(&self, placement: &RuntimeStatePlacement) -> Arc<Notify> {
+    /// The branch lifecycle this node holds for `placement`, created empty the first time an owner
+    /// publishes one, catalogues a branch state of the entity, or a replica task starts keeping
+    /// the entity current.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an owner installs the entity's lifecycle handle when it first publishes a \
+                      lifecycle or creates a branch state, and a replica task when it starts"
+        )
+    )]
+    pub(super) fn replicated_branch_lifecycle(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> Arc<ReplicatedBranchLifecycle> {
+        if let Some(lifecycle) = self.branch_lifecycle(placement) {
+            return lifecycle;
+        }
         self.inner
-            .state_checkpoint_notifications
+            .replicated_branch_lifecycles
             .entry(placement.clone())
-            .or_insert_with(|| Arc::new(Notify::new()))
+            .or_insert_with(|| Arc::new(ReplicatedBranchLifecycle::default()))
             .clone()
     }
 
-    pub(crate) fn handle_state_checkpoint_available(
+    /// The branch lifecycle this node holds for `placement`, when it holds one. Nothing is
+    /// created.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "replica frames, synchronization requests and catalog listing requests \
+                      resolve the entity's lifecycle handle"
+        )
+    )]
+    pub(super) fn branch_lifecycle(
         &self,
-        source: &ClusterNodeName,
-        checkpoint: nervix_interconnect::StateCheckpointAvailable,
-    ) {
-        let placement = match RuntimeStatePlacement::from_remote(checkpoint.placement) {
-            Ok(placement) => placement,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    "ignored invalid runtime state checkpoint notification"
-                );
-                return;
-            }
-        };
-        if !self.runtime_state_placement_is_current(&placement) {
-            return;
-        }
-        let dispatcher = self.inner.remote_dispatcher.load();
-        let Some(dispatcher) = dispatcher.as_deref() else {
-            return;
-        };
-        let local_node_id = dispatcher.local_node_id();
-        let valid_assignment = if let Some(execution) = self.inner.executions.get(&placement.domain)
-        {
-            if let Some(node) = execution
-                .schedule
-                .nodes
-                .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
-            {
-                node.execution_node() == Some(source)
-                    && node.is_assigned_to(local_node_id)
-                    && !node.is_primary_on(local_node_id)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if !valid_assignment {
-            return;
-        }
-        trace!(
-            domain = placement.domain.as_str(),
-            kind = placement.kind.as_str(),
-            name = placement.identifier.as_str(),
-            lsm = checkpoint.lsm,
-            "runtime state checkpoint is available"
-        );
-        self.state_checkpoint_notification(&placement).notify_one();
-        if let RuntimeStateKind::Deduplicator
-        | RuntimeStateKind::WasmProcessor
-        | RuntimeStateKind::WindowProcessor
-        | RuntimeStateKind::BranchLru = placement.state.kind()
-        {
-            self.schedule_passive_state_replica_sync(placement, source.clone(), checkpoint.lsm);
-        }
+        placement: &RuntimeStatePlacement,
+    ) -> Option<Arc<ReplicatedBranchLifecycle>> {
+        let lifecycle = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the entity's lifecycle \
+             handle for the frames, synchronization and listing requests that name it",
+            self.inner.replicated_branch_lifecycles.get(placement)
+        )?;
+        Some(lifecycle.clone())
     }
 
-    fn schedule_passive_state_replica_sync(
+    /// The newest branch lifecycle checkpoint this node holds in memory for `placement`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
+    fn held_branch_lifecycle(
         &self,
-        placement: RuntimeStatePlacement,
-        source: ClusterNodeName,
-        target_lsm: u64,
-    ) {
-        let should_spawn = match self
-            .inner
-            .pending_state_replica_syncs
-            .entry(placement.clone())
-        {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                let pending = entry.get_mut();
-                if pending.source != source {
-                    pending.source = source;
-                    pending.target_lsm = target_lsm;
-                } else {
-                    pending.target_lsm = pending.target_lsm.max(target_lsm);
-                }
-                false
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(PendingStateReplicaSync { source, target_lsm });
-                true
-            }
-        };
-        if should_spawn {
-            let runtime = self.clone();
-            self.inner.state_replication_tasks.spawn(async move {
-                runtime.reconcile_passive_state_replica(placement).await;
-            });
-        }
+        placement: &RuntimeStatePlacement,
+    ) -> Option<StdArc<BranchLifecycleCheckpoint>> {
+        self.branch_lifecycle(placement)?.latest()
     }
 
-    async fn reconcile_passive_state_replica(&self, placement: RuntimeStatePlacement) {
-        loop {
-            tokio::task::consume_budget().await;
-            let Some(pending) = self
-                .inner
-                .pending_state_replica_syncs
-                .get(&placement)
-                .map(|pending| pending.clone())
-            else {
-                return;
-            };
-            if !self.state_replica_assignment_is_current(&placement, &pending.source) {
-                self.inner.pending_state_replica_syncs.remove(&placement);
-                return;
-            }
-            let current_lsm = match self.passive_state_replica_lsm(&placement) {
-                Ok(current_lsm) => current_lsm,
-                Err(error) => {
-                    warn!(
-                        domain = placement.domain.as_str(),
-                        kind = placement.kind.as_str(),
-                        name = placement.identifier.as_str(),
-                        error = %error,
-                        "failed to read replicated runtime state progress"
-                    );
-                    None
-                }
-            };
-            if let Some(current_lsm) = current_lsm
-                && current_lsm >= pending.target_lsm
-            {
-                // The announced checkpoint arrived another way, such as through the replica poll
-                // task, and the acknowledgement it sent may be the one the owner is still missing.
-                if let Err(error) = self
-                    .acknowledge_durable_state_replica(&pending.source, &placement, current_lsm)
-                    .await
-                {
-                    warn!(
-                        domain = placement.domain.as_str(),
-                        kind = placement.kind.as_str(),
-                        name = placement.identifier.as_str(),
-                        error = %error,
-                        "failed to acknowledge a replicated runtime state checkpoint"
-                    );
-                }
-                let removed = self
-                    .inner
-                    .pending_state_replica_syncs
-                    .remove_if(&placement, |_, current| {
-                        current.source == pending.source && current.target_lsm <= pending.target_lsm
-                    })
-                    .is_some();
-                if removed {
-                    return;
-                }
-                continue;
-            }
-            let result = self
-                .request_state_sync_with_timeout(
-                    &pending.source,
-                    &placement,
-                    current_lsm,
-                    self.inner.state_replication_poll_interval,
-                )
-                .await;
-            match result {
-                Ok(Some(snapshot)) => {
-                    if let Err(error) = self
-                        .install_passive_state_replica_snapshot(
-                            &pending.source,
-                            &placement,
-                            snapshot,
-                        )
-                        .await
-                    {
-                        warn!(
-                            domain = placement.domain.as_str(),
-                            kind = placement.kind.as_str(),
-                            name = placement.identifier.as_str(),
-                            error = %error,
-                            "failed to install replicated runtime state checkpoint"
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    warn!(
-                        domain = placement.domain.as_str(),
-                        kind = placement.kind.as_str(),
-                        name = placement.identifier.as_str(),
-                        error = %error,
-                        "failed to fetch announced runtime state checkpoint"
-                    );
-                }
-            }
-            sleep(STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL).await;
-        }
+    /// The catalog the branch state `placement` places records the revisions it publishes in: the
+    /// catalog of its entity's branch lifecycle.
+    fn branch_checkpoint_catalog(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> BranchCheckpointCatalog {
+        let lifecycle = placement
+            .branch_lifecycle()
+            .assured("only the state of one branch of a branch-keyed entity is catalogued");
+        self.replicated_branch_lifecycle(&lifecycle)
+            .catalog()
+            .clone()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn state_replica_assignment_is_current(
         &self,
         placement: &RuntimeStatePlacement,
@@ -303,11 +204,16 @@ impl Runtime {
             return false;
         };
         let local_node_id = dispatcher.local_node_id();
-        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+        let Some(execution) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected assignment \
+             before processing state replication frames",
+            self.inner.executions.get(&placement.domain)
+        ) else {
             return false;
         };
         let Some(node) = execution
-            .schedule
+            .revision
             .nodes
             .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
         else {
@@ -318,39 +224,70 @@ impl Runtime {
             && !node.is_primary_on(local_node_id)
     }
 
-    fn passive_state_replica_lsm(
+    /// What this replica holds of the branch state `placement` places: its copy in memory, or else
+    /// what its storage holds. A replica task reads this once for each branch it looks at and
+    /// keeps it current itself from then on.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a replica task reads what this node holds of a branch once, when it first \
+                      looks at the branch, and keeps that record itself from then on"
+        )
+    )]
+    fn held_branch_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
-    ) -> Result<Option<u64>, Report<RuntimePersistenceError>> {
-        if placement.state.kind() == RuntimeStateKind::BranchLru
-            && let Some(snapshot) = self.inner.replicated_branch_lru_snapshots.get(placement)
-        {
-            return Ok(Some(snapshot.lsm));
-        }
+    ) -> Result<Held, Report<RuntimePersistenceError>> {
         if let Some(snapshot) = self.inner.passive_runtime_state_snapshots.get(placement) {
-            return Ok(Some(snapshot.lsm));
+            return Ok(Held::Revision(snapshot.lsm));
         }
-        let Some(store) = self.inner.state_store.as_ref() else {
-            return Ok(None);
-        };
-        let snapshot = store.latest_snapshot(placement)?;
-        if placement.state.kind() == RuntimeStateKind::BranchLru
-            && let Some(snapshot) = snapshot.as_ref()
-        {
-            self.inner
-                .replicated_branch_lru_snapshots
-                .insert(placement.clone(), snapshot.clone());
-        }
-        Ok(snapshot.map(|snapshot| snapshot.lsm))
+        self.stored_replica_checkpoint(placement)
     }
 
-    async fn install_passive_state_replica_snapshot(
+    /// What this node's storage holds of `placement`.
+    fn stored_replica_checkpoint(
         &self,
-        source: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
-        snapshot: PersistedRuntimeStateEntry,
+    ) -> Result<Held, Report<RuntimePersistenceError>> {
+        let Some(store) = self.inner.state_store.as_ref() else {
+            return Ok(Held::Nothing);
+        };
+        let Some(snapshot) = store.latest_snapshot(placement)? else {
+            return Ok(Held::Nothing);
+        };
+        Ok(Held::Revision(snapshot.lsm))
+    }
+
+    /// Hold in `lifecycle` the branch lifecycle this node's storage keeps for `placement`, when
+    /// `lifecycle` holds none yet, as a replica task that starts keeping the entity current does.
+    fn restore_replica_branch_lifecycle(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lifecycle: &ReplicatedBranchLifecycle,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
+        if lifecycle.latest().is_some() {
+            return Ok(());
+        }
+        let Some(store) = self.inner.state_store.as_ref() else {
+            return Ok(());
+        };
+        let Some(snapshot) = store.latest_snapshot(placement)? else {
+            return Ok(());
+        };
+        lifecycle.install(StdArc::new(BranchLifecycleCheckpoint::new(snapshot)));
+        Ok(())
+    }
+
+    /// Refuse a checkpoint `owner` sent of `placement` unless this node still replicates the
+    /// placement from that owner and the checkpoint is one of the placement.
+    fn verify_replica_checkpoint(
+        &self,
+        owner: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        snapshot: &PersistedRuntimeStateEntry,
     ) -> RuntimeStateResult<()> {
-        if !self.state_replica_assignment_is_current(placement, source) {
+        if !self.state_replica_assignment_is_current(placement, owner) {
             return Err(RuntimeStateOperationError::replication(
                 "runtime state replica assignment changed during synchronization",
             ));
@@ -364,26 +301,104 @@ impl Runtime {
                 "runtime state replica installation failed",
             ));
         }
-        self.validate_ownership_handoff_snapshot(placement, &snapshot)
-            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
-        if placement.branch_key.is_some()
-            && !self.replica_branch_is_known(source, placement).await?
-        {
-            return Err(RuntimeStateOperationError::replication(
-                "runtime state checkpoint belongs to an evicted branch",
-            ));
+        self.validate_ownership_handoff_snapshot(placement, snapshot)
+            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))
+    }
+
+    /// Install `snapshot`, the owner's checkpoint of the branch state `placement` places, as this
+    /// replica's copy, when it is newer than `held`, what this replica holds of the branch, and
+    /// `lifecycle`, the branch lifecycle this replica keeps for the entity, names the branch.
+    /// Returns what this replica holds of the branch afterwards.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "a replica task installs the checkpoints it fetches in every catch-up round"
+        )
+    )]
+    async fn install_replica_branch_checkpoint(
+        &self,
+        owner: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+        lifecycle: &ReplicatedBranchLifecycle,
+        held: Held,
+    ) -> RuntimeStateResult<Held> {
+        self.verify_replica_checkpoint(owner, placement, &snapshot)?;
+        if placement.branch_key.is_some() {
+            let named = lifecycle
+                .names(placement.branch_key.as_ref())
+                .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
+            if !named {
+                return Err(RuntimeStateOperationError::replication(
+                    "runtime state checkpoint belongs to an evicted branch",
+                ));
+            }
         }
-        let held = self.passive_state_replica_lsm(placement).map_err(|error| {
-            RuntimeStateOperationError::persistence(error.current_context().clone())
-        })?;
-        if let Some(held) = held
-            && held >= snapshot.lsm
+        if let Held::Revision(held_lsm) = held
+            && held_lsm >= snapshot.lsm
         {
             // This node already holds the checkpoint, or a newer one, and its earlier
             // acknowledgement may have been lost: the owner keeps announcing a checkpoint until
             // this node acknowledges it.
+            self.acknowledge_durable_state_replica(owner, placement, held_lsm)
+                .await?;
+            return Ok(held);
+        }
+        let snapshot = match self.inner.state_store.as_ref() {
+            Some(store) => {
+                let installed = store
+                    .persist_replica_snapshot_if_newer(placement, snapshot)
+                    .await
+                    .map_err(|error| {
+                        RuntimeStateOperationError::persistence(error.current_context().clone())
+                    })?;
+                let Some(installed) = installed else {
+                    // The storage already holds this revision or a newer one.
+                    let stored = self.stored_replica_checkpoint(placement).map_err(|error| {
+                        RuntimeStateOperationError::persistence(error.current_context().clone())
+                    })?;
+                    if let Held::Revision(stored_lsm) = stored {
+                        self.acknowledge_durable_state_replica(owner, placement, stored_lsm)
+                            .await?;
+                    }
+                    return Ok(stored);
+                };
+                installed
+            }
+            None => snapshot,
+        };
+        let lsm = snapshot.lsm;
+        self.hold_passive_state_replica_snapshot(placement, snapshot);
+        if self.inner.state_store.is_some() {
+            self.acknowledge_state_replica_install(owner, placement, lsm);
+        }
+        Ok(Held::Revision(lsm))
+    }
+
+    /// Install `snapshot`, the owner's branch lifecycle checkpoint of `placement`, into
+    /// `lifecycle`, the lifecycle this replica keeps for the entity, when it is newer than the one
+    /// held there.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "a replica task installs the checkpoints it fetches in every catch-up round"
+        )
+    )]
+    async fn install_replica_branch_lifecycle(
+        &self,
+        owner: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+        lifecycle: &ReplicatedBranchLifecycle,
+    ) -> RuntimeStateResult<()> {
+        self.verify_replica_checkpoint(owner, placement, &snapshot)?;
+        if let Some(held) = lifecycle.latest()
+            && held.lsm() >= snapshot.lsm
+        {
             return self
-                .acknowledge_durable_state_replica(source, placement, held)
+                .acknowledge_durable_state_replica(owner, placement, held.lsm())
                 .await;
         }
         let snapshot = match self.inner.state_store.as_ref() {
@@ -395,42 +410,64 @@ impl Runtime {
                         RuntimeStateOperationError::persistence(error.current_context().clone())
                     })?;
                 let Some(installed) = installed else {
-                    let held = self.passive_state_replica_lsm(placement).map_err(|error| {
-                        RuntimeStateOperationError::persistence(error.current_context().clone())
-                    })?;
-                    let Some(held) = held else {
+                    // The storage already holds this revision or a newer one.
+                    let stored = store
+                        .latest_snapshot(placement)
+                        .map_err(RuntimeStateOperationError::persistence)?;
+                    let Some(stored) = stored else {
                         return Ok(());
                     };
+                    let stored_lsm = stored.lsm;
+                    self.install_replica_branch_lru_snapshot(placement, lifecycle, stored)?;
                     return self
-                        .acknowledge_durable_state_replica(source, placement, held)
+                        .acknowledge_durable_state_replica(owner, placement, stored_lsm)
                         .await;
                 };
                 installed
             }
             None => snapshot,
         };
-        if placement.state.kind() == RuntimeStateKind::BranchLru {
-            self.install_replica_branch_lru_snapshot(placement, &snapshot)?;
-        } else {
-            match self
-                .inner
-                .passive_runtime_state_snapshots
-                .entry(placement.clone())
-            {
-                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                    if entry.get().lsm < snapshot.lsm {
-                        entry.insert(snapshot.clone());
-                    }
-                }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(snapshot.clone());
-                }
-            }
-        }
+        let lsm = snapshot.lsm;
+        self.install_replica_branch_lru_snapshot(placement, lifecycle, snapshot)?;
         if self.inner.state_store.is_some() {
-            self.acknowledge_state_replica_install(source, placement, snapshot.lsm);
+            self.acknowledge_state_replica_install(owner, placement, lsm);
         }
         Ok(())
+    }
+
+    /// Hold `snapshot` as this replica's copy of `placement` unless it already holds the same
+    /// revision or a newer one. The comparison needs only the revisions, so the registry's guard
+    /// covers one comparison and a move, never a copy of the payload.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "passive replication serializes requests and ownership-qualified snapshot \
+                      installation",
+            key = "passive state placement and assignment generation",
+            bound = "one reconciliation task and monotonic snapshot revision per assigned \
+                     placement"
+        )
+    )]
+    fn hold_passive_state_replica_snapshot(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) {
+        match self
+            .inner
+            .passive_runtime_state_snapshots
+            .entry(placement.clone())
+        {
+            nervix_primitives::collections::dash_map::Entry::Occupied(mut held) => {
+                if held.get().lsm < snapshot.lsm {
+                    held.insert(snapshot);
+                }
+            }
+            nervix_primitives::collections::dash_map::Entry::Vacant(vacant) => {
+                vacant.insert(snapshot);
+            }
+        }
     }
 
     /// Acknowledge revision `lsm` of `placement` to `source`, once this node's stable storage is
@@ -438,6 +475,14 @@ impl Runtime {
     ///
     /// An acknowledgement promises that the checkpoint survives this node, so a node without stable
     /// storage, which only unit tests construct, acknowledges nothing.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "assigned replica polling records durable progress and installs the selected \
+                      revision"
+        )
+    )]
     async fn acknowledge_durable_state_replica(
         &self,
         source: &ClusterNodeName,
@@ -454,108 +499,54 @@ impl Runtime {
         Ok(())
     }
 
-    /// Whether this replica's branch lifecycle names the branch of `placement`, fetching the
-    /// owner's branch lifecycle first when it does not name it yet.
+    /// Hold `snapshot` as the branch lifecycle this replica keeps in `lifecycle` for the entity of
+    /// `placement`, and drop the branch checkpoints this replica holds for branches the held
+    /// lifecycle no longer names.
     ///
-    /// An owner offers a new branch to its replicas as the branch appears, but the branch's first
-    /// checkpoint can still arrive before that lifecycle does, and a WASM branch acknowledges
-    /// nothing until its replicas hold that checkpoint.
-    async fn replica_branch_is_known(
-        &self,
-        source: &ClusterNodeName,
-        placement: &RuntimeStatePlacement,
-    ) -> RuntimeStateResult<bool> {
-        if self.replica_branch_is_current(placement)? {
-            return Ok(true);
-        }
-        let branch_lru = self.replica_branch_lru_placement(placement)?;
-        let held = self
-            .passive_state_replica_lsm(&branch_lru)
-            .map_err(|error| {
-                RuntimeStateOperationError::persistence(error.current_context().clone())
-            })?;
-        let fetched = self
-            .request_state_sync_with_timeout(
-                source,
-                &branch_lru,
-                held,
-                self.inner.state_replication_poll_interval,
-            )
-            .await
-            .map_err(|error| RuntimeStateOperationError::replication(format!("{error:#}")))?;
-        if let Some(snapshot) = fetched {
-            Box::pin(self.install_passive_state_replica_snapshot(source, &branch_lru, snapshot))
-                .await?;
-        }
-        self.replica_branch_is_current(placement)
-    }
-
-    /// The placement of the branch lifecycle that names the branch of `placement`.
-    fn replica_branch_lru_placement(
-        &self,
-        placement: &RuntimeStatePlacement,
-    ) -> RuntimeStateResult<RuntimeStatePlacement> {
-        self.state_placement(
-            &placement.domain,
-            RuntimeStateKind::BranchLru,
-            placement.kind,
-            placement.identifier.clone(),
-            None,
+    /// The pruning follows the lifecycle held after the installation, which is newer than
+    /// `snapshot` when a newer one was installed first: a branch that lifecycle does not name was
+    /// evicted.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
         )
-        .change_context_lazy(|| RuntimeStateOperationError::StateIdentity {
-            kind: placement.kind,
-            identifier: placement.identifier.clone(),
-        })
-    }
-
-    fn replica_branch_is_current(
-        &self,
-        placement: &RuntimeStatePlacement,
-    ) -> RuntimeStateResult<bool> {
-        let branch_lru = self.replica_branch_lru_placement(placement)?;
-        let snapshot = match self.inner.replicated_branch_lru_snapshots.get(&branch_lru) {
-            Some(snapshot) => Some(snapshot.clone()),
-            None => match self.inner.state_store.as_ref() {
-                Some(store) => store
-                    .latest_snapshot(&branch_lru)
-                    .map_err(RuntimeStateOperationError::persistence)?,
-                None => None,
-            },
-        };
-        let Some(snapshot) = snapshot else {
-            return Ok(false);
-        };
-        let entries = decode_branch_lru_snapshot(&snapshot.payload)
-            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
-        Ok(entries
-            .iter()
-            .any(|entry| entry.key.as_ref() == placement.branch_key.as_ref()))
-    }
-
+    )]
     fn install_replica_branch_lru_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
-        snapshot: &PersistedRuntimeStateEntry,
+        lifecycle: &ReplicatedBranchLifecycle,
+        snapshot: PersistedRuntimeStateEntry,
     ) -> RuntimeStateResult<()> {
-        let branches = decode_branch_lru_snapshot(&snapshot.payload)
-            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?
-            .into_iter()
-            .map(|entry| entry.key)
-            .collect::<HashSet<_>>();
-        self.inner
-            .passive_runtime_state_snapshots
-            .retain(|candidate, _| {
-                candidate.domain != placement.domain
-                    || candidate.kind != placement.kind
-                    || candidate.identifier != placement.identifier
-                    || candidate
-                        .branch_key
-                        .as_ref()
-                        .is_none_or(|branch| branches.contains(&Some(branch.clone())))
-            });
-        self.inner
-            .replicated_branch_lru_snapshots
-            .insert(placement.clone(), snapshot.clone());
+        let checkpoint = StdArc::new(BranchLifecycleCheckpoint::new(snapshot));
+        checkpoint
+            .branches()
+            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
+        let held = lifecycle.install(checkpoint);
+        let branches = held
+            .branches()
+            .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected assignment \
+             before processing state replication frames",
+            self.inner
+                .passive_runtime_state_snapshots
+                .retain(|candidate, _| {
+                    let same_entity = candidate.domain == placement.domain
+                        && candidate.kind == placement.kind
+                        && candidate.identifier == placement.identifier;
+                    if !same_entity {
+                        return true;
+                    }
+                    match candidate.branch_key.as_ref() {
+                        Some(branch) => branches.names(Some(branch)),
+                        None => true,
+                    }
+                })
+        );
         Ok(())
     }
 
@@ -570,7 +561,7 @@ impl Runtime {
         };
         let source = source.clone();
         let placement = placement.to_remote();
-        drop(tokio::spawn(async move {
+        drop(nervix_primitives::task::spawn(async move {
             if let Err(error) = dispatcher
                 .dispatch(
                     &source,
@@ -585,144 +576,13 @@ impl Runtime {
         }));
     }
 
-    fn notify_runtime_state_replicas(&self, placement: &RuntimeStatePlacement, lsm: u64) {
-        let should_spawn = match self
-            .inner
-            .pending_state_checkpoint_announcements
-            .entry(placement.clone())
-        {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                let pending = entry.get_mut();
-                pending.target_lsm = pending.target_lsm.max(lsm);
-                false
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(PendingStateCheckpointAnnouncement {
-                    target_lsm: lsm,
-                    replica_progress: BTreeMap::new(),
-                });
-                true
-            }
-        };
-        if should_spawn {
-            let runtime = self.clone();
-            let placement = placement.clone();
-            self.inner.state_replication_tasks.spawn(async move {
-                runtime
-                    .dispatch_pending_state_checkpoint_announcements(placement)
-                    .await;
-            });
-        }
-    }
-
-    async fn dispatch_pending_state_checkpoint_announcements(
-        &self,
-        placement: RuntimeStatePlacement,
-    ) {
-        loop {
-            tokio::task::consume_budget().await;
-            let pending = match self
-                .inner
-                .pending_state_checkpoint_announcements
-                .get(&placement)
-            {
-                Some(pending) => pending.value().clone(),
-                None => return,
-            };
-            let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
-                self.inner
-                    .pending_state_checkpoint_announcements
-                    .remove(&placement);
-                return;
-            };
-            let replica_nodes =
-                if let Some(execution) = self.inner.executions.get(&placement.domain) {
-                    if let Some(node) = execution
-                        .schedule
-                        .nodes
-                        .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
-                    {
-                        if node.is_primary_on(dispatcher.local_node_id()) {
-                            node.replica_nodes()
-                                .into_iter()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                        } else {
-                            Vec::new()
-                        }
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                };
-            if replica_nodes.is_empty() {
-                self.inner
-                    .pending_state_checkpoint_announcements
-                    .remove(&placement);
-                return;
-            }
-            let lagging_replicas = replica_nodes
-                .iter()
-                .filter(|replica| {
-                    pending
-                        .replica_progress
-                        .get(*replica)
-                        .is_none_or(|lsm| *lsm < pending.target_lsm)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if lagging_replicas.is_empty() {
-                let removed = self
-                    .inner
-                    .pending_state_checkpoint_announcements
-                    .remove_if(&placement, |_, current| {
-                        current.target_lsm <= pending.target_lsm
-                            && replica_nodes.iter().all(|replica| {
-                                current
-                                    .replica_progress
-                                    .get(replica)
-                                    .is_some_and(|lsm| *lsm >= current.target_lsm)
-                            })
-                    })
-                    .is_some();
-                if removed {
-                    return;
-                }
-                continue;
-            }
-            let checkpoint = nervix_interconnect::StateCheckpointAvailable {
-                placement: placement.to_remote(),
-                lsm: pending.target_lsm,
-            };
-            for replica in lagging_replicas {
-                tokio::task::consume_budget().await;
-                if let Err(error) = dispatcher
-                    .dispatch(
-                        &replica,
-                        Envelope::Control(
-                            nervix_interconnect::ControlEnvelope::StateCheckpointAvailable(
-                                checkpoint.clone(),
-                            ),
-                        ),
-                    )
-                    .await
-                {
-                    warn!(
-                        destination = %replica,
-                        error = %error,
-                        "failed to announce runtime state checkpoint"
-                    );
-                }
-            }
-            sleep(STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL).await;
-        }
-    }
-
+    /// Wait for what should make a replica task synchronize again: the owner announcing a newer
+    /// checkpoint through `replication`, or the poll interval passing. Returns `false` once the
+    /// task should stop.
     async fn wait_for_state_replica_sync_trigger(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,
-        notification: &Notify,
+        replication: &CheckpointReplication,
         poll_interval: Duration,
         initial_sync_pending: bool,
     ) -> bool {
@@ -730,18 +590,18 @@ impl Runtime {
             return true;
         }
         if self.inner.fault_injection.state_replica_polling_is_paused() {
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown_rx.changed() => {
                     changed.is_ok() && !*shutdown_rx.borrow()
                 }
-                _ = notification.notified() => true,
+                _ = replication.next_announcement() => true,
             }
         } else {
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown_rx.changed() => {
                     changed.is_ok() && !*shutdown_rx.borrow()
                 }
-                _ = notification.notified() => true,
+                _ = replication.next_announcement() => true,
                 _ = sleep(poll_interval) => true,
             }
         }
@@ -858,7 +718,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for (placement, state) in materialized {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let sealed = state
                 .seal_after(&self.inner.executor, None)
                 .await
@@ -877,7 +737,7 @@ impl Runtime {
             }
         }
         for (placement, state) in windows {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let snapshot = state
                 .latest_snapshot(&self.inner.executor)
                 .await
@@ -921,13 +781,8 @@ impl Runtime {
             match final_branch_lru {
                 Some(snapshot) => checkpoints.push((branch_lru.clone(), snapshot)),
                 None => {
-                    if let Some(snapshot) = self
-                        .inner
-                        .replicated_branch_lru_snapshots
-                        .get(&branch_lru)
-                        .map(|snapshot| snapshot.clone())
-                    {
-                        checkpoints.push((branch_lru.clone(), snapshot));
+                    if let Some(held) = self.held_branch_lifecycle(&branch_lru) {
+                        checkpoints.push((branch_lru.clone(), held.snapshot().clone()));
                     } else if let Some(store) = self.inner.state_store.as_ref()
                         && let Some(snapshot) = store
                             .latest_snapshot(&branch_lru)
@@ -1007,7 +862,7 @@ impl Runtime {
                 store
                     .persist_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)
                     .map_err(OwnershipHandoffError::persistence)?;
-                self.notify_runtime_state_replicas(placement, snapshot.lsm);
+                self.announce_stored_checkpoint(placement, snapshot.lsm);
             }
         }
         Ok(checkpoints
@@ -1147,7 +1002,7 @@ impl Runtime {
         };
 
         for (component, state) in Self::global_recovery_state_components(&scheduled) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let placement = self
                 .state_placement(
                     domain,
@@ -1179,7 +1034,7 @@ impl Runtime {
             && let Some((component, state)) = Self::branch_recovery_state_component(&scheduled)
         {
             for entry in entries {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let placement = self
                     .state_placement(
                         domain,
@@ -1261,7 +1116,7 @@ impl Runtime {
     }
 
     fn global_recovery_state_components(
-        scheduled: &ScheduledNode,
+        scheduled: &ExecutionNode,
     ) -> Vec<(OwnershipStateComponent, RuntimeStateKind)> {
         let mut components = Vec::new();
         for component in scheduled.ownership_state_components() {
@@ -1284,7 +1139,7 @@ impl Runtime {
     }
 
     fn branch_recovery_state_component(
-        scheduled: &ScheduledNode,
+        scheduled: &ExecutionNode,
     ) -> Option<(OwnershipStateComponent, RuntimeStateKind)> {
         Self::branch_recovery_state_component_kind(scheduled.kind())
     }
@@ -1367,14 +1222,14 @@ impl Runtime {
 
         let mut requests = FuturesUnordered::new();
         for source in recovery_sources {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
             requests.push(self.request_state_sync_with_timeout(source, placement, None, remaining));
         }
         while let Some(response) = requests.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let snapshot = match response {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) | Err(_) => continue,
@@ -1422,10 +1277,12 @@ impl Runtime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn ownership_handoff_entity_is_frozen(&self, entity: &DomainNodeRef) -> bool {
         self.inner
             .frozen_ownership_handoff_entities
-            .contains_key(entity)
+            .get(entity)
+            .is_some_and(|state| state.is_frozen())
     }
 
     pub(crate) fn ownership_handoff_entity_is_frozen_by(
@@ -1494,7 +1351,7 @@ impl Runtime {
         }
         let mut snapshots = Vec::with_capacity(runtimes.len());
         for runtime in runtimes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             snapshots.push(runtime.checkpoint().await?);
         }
         if snapshots.len() == 1 {
@@ -1540,7 +1397,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         entity: &NodeRef,
-    ) -> OwnershipHandoffResult<ScheduledNode> {
+    ) -> OwnershipHandoffResult<ExecutionNode> {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Err(OwnershipHandoffError::schedule(format!(
                 "{} '{}' is absent from the local schedule for domain '{}'",
@@ -1550,7 +1407,7 @@ impl Runtime {
             )));
         };
         execution
-            .schedule
+            .revision
             .nodes
             .get(entity)
             .cloned()
@@ -1575,7 +1432,7 @@ impl Runtime {
                 domain.as_str()
             ))
         })?;
-        let actual = Self::ownership_handoff_schedule_fingerprint(&execution.schedule)?;
+        let actual = execution.revision.ownership_handoff_fingerprint;
         if actual != expected {
             return Err(OwnershipHandoffError::schedule(format!(
                 "domain '{}' schedule changed during ownership handoff",
@@ -1592,7 +1449,7 @@ impl Runtime {
     fn expected_ownership_handoff_placements(
         &self,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> OwnershipHandoffResult<HashSet<RuntimeStatePlacement>> {
         let unplaceable = || OwnershipHandoffError::StatePlacement {
@@ -1783,7 +1640,7 @@ impl Runtime {
             .prepared_runtime_state_handoffs
             .entry(entity_ref.clone())
         {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            nervix_primitives::collections::dash_map::Entry::Occupied(mut entry) => {
                 let existing = entry.get();
                 let same_preparation = existing.coordination == replacement.coordination
                     && existing.operation_id == replacement.operation_id
@@ -1848,7 +1705,7 @@ impl Runtime {
                 }
                 entry.insert(replacement);
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
                 if let Some(store) = self.inner.state_store.as_ref() {
                     let transition = RuntimeStateHandoffTransition {
                         coordination: &replacement.coordination,
@@ -1919,7 +1776,7 @@ impl Runtime {
     pub(super) fn activate_prepared_ownership_handoff_state(
         &self,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         schedule_fingerprint: [u8; 32],
         instantiate_now: bool,
@@ -1975,9 +1832,8 @@ impl Runtime {
                     },
                 );
             } else if placement.state.kind() == RuntimeStateKind::BranchLru {
-                self.inner
-                    .replicated_branch_lru_snapshots
-                    .insert(placement.clone(), snapshot.clone());
+                self.replicated_branch_lifecycle(placement)
+                    .publish(snapshot.clone());
             } else {
                 self.inner
                     .passive_runtime_state_snapshots
@@ -2016,7 +1872,7 @@ impl Runtime {
     pub(super) fn activate_prepared_forced_ownership_recovery_state(
         &self,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         schedule_fingerprint: [u8; 32],
         instantiate_now: bool,
@@ -2108,9 +1964,8 @@ impl Runtime {
                     },
                 );
             } else if placement.state.kind() == RuntimeStateKind::BranchLru {
-                self.inner
-                    .replicated_branch_lru_snapshots
-                    .insert(placement.clone(), snapshot.clone());
+                self.replicated_branch_lifecycle(placement)
+                    .publish(snapshot.clone());
             } else {
                 self.inner
                     .passive_runtime_state_snapshots
@@ -2228,7 +2083,7 @@ impl Runtime {
         &self,
         local_node_id: &ClusterNodeName,
         request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
-        schedule: DomainSchedule,
+        revision: Arc<ExecutionRevision>,
     ) -> OwnershipHandoffResult<()> {
         let mut activation = {
             let _apply = self.inner.schedule_application.lock().await;
@@ -2247,10 +2102,10 @@ impl Runtime {
             let requires_reapply = prepared.activation_authorization.authorize();
             drop(prepared);
             if requires_reapply {
-                self.rebuild_domain_from_schedule(
+                self.rebuild_domain_from_revision(
                     local_node_id,
                     &request.domain,
-                    Some(schedule),
+                    Some(revision),
                     true,
                 )
                 .await
@@ -2301,22 +2156,20 @@ impl Runtime {
             .replicated_branch_aggregated_states
             .retain(|placement, _| !matches_entity(placement));
         self.inner
-            .replicated_branch_lru_snapshots
+            .replicated_branch_lifecycles
             .retain(|placement, _| !matches_entity(placement));
         self.inner
             .passive_runtime_state_snapshots
             .retain(|placement, _| !matches_entity(placement));
-        self.inner
-            .pending_state_replica_syncs
-            .retain(|placement, _| !matches_entity(placement));
-        self.inner
-            .pending_state_checkpoint_announcements
-            .retain(|placement, _| !matches_entity(placement));
-        self.inner
-            .state_checkpoint_notifications
-            .retain(|placement, _| !matches_entity(placement));
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "state installation consumes its one prepared checkpoint"
+        )
+    )]
     pub(super) fn take_prepared_runtime_state_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
@@ -2327,6 +2180,13 @@ impl Runtime {
             .map(|(_, prepared)| prepared.snapshot)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "state installation consumes its one transferred checkpoint"
+        )
+    )]
     fn take_transferred_runtime_state_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
@@ -2395,95 +2255,176 @@ impl Runtime {
         self.inner.state_snapshot_interval
     }
 
+    /// The checkpoint of `placement` this node holds when it is newer than `after_lsm`, as a
+    /// replica synchronizing the placement or a forced recovery asks for it.
+    ///
+    /// The checkpoint comes from the registry that keeps the placement's kind of state. Only a
+    /// placement this node holds no state for is answered from its storage.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) async fn handle_state_sync_request(
         &self,
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
+        let capture = || StateReplicationError::Capture {
+            placement: placement.clone(),
+        };
         // A branch state leaves its map before it is encoded, so an encode never holds a map shard
         // that a branch appearing or leaving elsewhere has to write.
-        let deduplicator = self
-            .inner
-            .replicated_deduplicator_states
-            .get(placement)
-            .map(|state| state.clone());
-        if let Some(state) = deduplicator {
-            return state.snapshot_after(after_lsm).change_context(
-                StateReplicationError::Capture {
-                    placement: placement.clone(),
-                },
-            );
-        }
-        if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
-            let snapshot = ReplicatedKafkaOffsetState::read(state.value())
-                .latest_snapshot()
-                .map_err(Report::new)
-                .change_context(StateReplicationError::Capture {
-                    placement: placement.clone(),
-                })?;
-            if snapshot.is_after(after_lsm) {
-                return Ok(Some(snapshot));
+        match placement.state.kind() {
+            RuntimeStateKind::Deduplicator => {
+                let state = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected \
+                     assignment before processing state replication frames",
+                    self.inner.replicated_deduplicator_states.get(placement)
+                )
+                .map(|state| state.clone());
+                if let Some(state) = state {
+                    return state.snapshot_after(after_lsm).change_context_lazy(capture);
+                }
             }
-        }
-        let window = self
-            .inner
-            .replicated_window_processor_states
-            .get(placement)
-            .map(|state| state.clone());
-        if let Some(state) = window
-            && let Some(snapshot) = state
-                .snapshot_after(after_lsm, &self.inner.executor)
-                .await
-                .change_context(StateReplicationError::Capture {
-                    placement: placement.clone(),
-                })?
-        {
-            return Ok(Some(snapshot));
-        }
-        let wasm = self
-            .inner
-            .replicated_wasm_processor_states
-            .get(placement)
-            .map(|state| state.clone());
-        if let Some(state) = wasm
-            && let Some(snapshot) = state.snapshot_after(after_lsm)
-        {
-            return Ok(Some(snapshot));
-        }
-        if let Some(state) = self
-            .inner
-            .replicated_branch_aggregated_states
-            .get(placement)
-        {
-            let snapshot = state
-                .latest_snapshot(&self.inner.metrics)
-                .map_err(Report::new)
-                .change_context(StateReplicationError::Capture {
-                    placement: placement.clone(),
-                })?;
-            if snapshot.is_after(after_lsm) {
-                return Ok(Some(snapshot));
+            RuntimeStateKind::KafkaOffset => {
+                let state = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected \
+                     assignment before processing state replication frames",
+                    self.inner.replicated_kafka_offset_states.get(placement)
+                )
+                .map(|state| state.clone());
+                if let Some(state) = state {
+                    let snapshot = ReplicatedKafkaOffsetState::read(&state)
+                        .latest_snapshot()
+                        .map_err(Report::new)
+                        .change_context_lazy(capture)?;
+                    return Ok(snapshot.after(after_lsm));
+                }
             }
+            RuntimeStateKind::WindowProcessor => {
+                let state = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected \
+                     assignment before processing state replication frames",
+                    self.inner.replicated_window_processor_states.get(placement)
+                )
+                .map(|state| state.clone());
+                if let Some(state) = state {
+                    return state
+                        .snapshot_after(after_lsm, &self.inner.executor)
+                        .await
+                        .change_context_lazy(capture);
+                }
+            }
+            RuntimeStateKind::WasmProcessor => {
+                let state = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected \
+                     assignment before processing state replication frames",
+                    self.inner.replicated_wasm_processor_states.get(placement)
+                )
+                .map(|state| state.clone());
+                if let Some(state) = state {
+                    return Ok(state.snapshot_after(after_lsm));
+                }
+            }
+            RuntimeStateKind::BranchAggregated => {
+                let state = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected \
+                     assignment before processing state replication frames",
+                    self.inner
+                        .replicated_branch_aggregated_states
+                        .get(placement)
+                )
+                .map(|state| state.clone());
+                if let Some(state) = state {
+                    let snapshot = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "the explicit state-snapshot response captures one retained metrics \
+                         placement revision outside record execution",
+                        state.latest_snapshot(&self.inner.metrics)
+                    )
+                    .map_err(Report::new)
+                    .change_context_lazy(capture)?;
+                    return Ok(snapshot.after(after_lsm));
+                }
+            }
+            RuntimeStateKind::BranchLru => {
+                if let Some(held) = self.held_branch_lifecycle(placement) {
+                    if !held.snapshot().is_after(after_lsm) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(held.snapshot().clone()));
+                }
+            }
+            // Correlator buffers are not replicated, and materialized relay state is fetched as a
+            // sealed stream, so neither has state to answer from here.
+            RuntimeStateKind::Correlator | RuntimeStateKind::MaterializedRelay => {}
         }
-        if let Some(snapshot) = self.inner.replicated_branch_lru_snapshots.get(placement)
-            && snapshot.is_after(after_lsm)
-        {
-            return Ok(Some(snapshot.clone()));
-        }
-        if let Some(store) = self.inner.state_store.as_ref()
-            && let Some(snapshot) = store
-                .latest_snapshot(placement)
-                .map_err(Report::new)
-                .change_context(StateReplicationError::Capture {
-                    placement: placement.clone(),
-                })?
-            && snapshot.is_after(after_lsm)
-        {
-            return Ok(Some(snapshot));
-        }
-        Ok(None)
+        let Some(store) = self.inner.state_store.as_ref() else {
+            return Ok(None);
+        };
+        let stored = store
+            .latest_snapshot(placement)
+            .map_err(Report::new)
+            .change_context_lazy(capture)?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        Ok(stored.after(after_lsm))
     }
 
+    /// Answer a replica's read of the catalog of branch checkpoints this node owns for the entity
+    /// whose branch lifecycle `placement` places: the first changes after `after`, or the first
+    /// entries of the catalog when `after` cannot say what changed.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "a replica task reads the catalog once per round and once more per further \
+                      page of changes"
+        )
+    )]
+    pub(crate) fn handle_branch_checkpoint_listing(
+        &self,
+        placement: &RuntimeStatePlacement,
+        after: Option<BranchCheckpointCursor>,
+    ) -> nervix_interconnect::BranchCheckpointListing {
+        self.branch_checkpoint_listing(placement, after).to_remote()
+    }
+
+    /// The first changes after `after` in the catalog of branch checkpoints this node owns for the
+    /// entity whose branch lifecycle `placement` places.
+    fn branch_checkpoint_listing(
+        &self,
+        placement: &RuntimeStatePlacement,
+        after: Option<BranchCheckpointCursor>,
+    ) -> OwnerCheckpointListing {
+        let Some(lifecycle) = self.branch_lifecycle(placement) else {
+            return OwnerCheckpointListing::Absent;
+        };
+        OwnerCheckpointListing::Listed(
+            lifecycle
+                .catalog()
+                .changes_after(after, BRANCH_CHECKPOINT_LISTING_PAGE),
+        )
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) fn runtime_state_placement_is_assigned_locally(
         &self,
         placement: &RuntimeStatePlacement,
@@ -2495,11 +2436,16 @@ impl Runtime {
         let Some(dispatcher) = dispatcher.as_deref() else {
             return false;
         };
-        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+        let Some(execution) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the selected assignment \
+             before processing state replication frames",
+            self.inner.executions.get(&placement.domain)
+        ) else {
             return false;
         };
         let Some(node) = execution
-            .schedule
+            .revision
             .nodes
             .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
         else {
@@ -2508,42 +2454,14 @@ impl Runtime {
         node.assigned_nodes.contains(dispatcher.local_node_id())
     }
 
-    pub(crate) fn handle_state_replication_ack(
-        &self,
-        node_id: &ClusterNodeName,
-        ack: StateSyncAck,
-    ) {
-        if let Some(mut pending) = self
-            .inner
-            .pending_state_checkpoint_announcements
-            .get_mut(&ack.placement)
-        {
-            let progress = pending.replica_progress.entry(node_id.clone()).or_default();
-            *progress = (*progress).max(ack.lsm);
-        }
-        if let Some(state) = self
-            .inner
-            .replicated_kafka_offset_states
-            .get(&ack.placement)
-        {
-            state.mark_replica_progress(node_id, ack.lsm);
-        }
-        if let Some(state) = self
-            .inner
-            .replicated_wasm_processor_states
-            .get(&ack.placement)
-        {
-            state.mark_replica_progress(node_id, ack.lsm);
-        }
-        if let Some(state) = self
-            .inner
-            .replicated_branch_aggregated_states
-            .get(&ack.placement)
-        {
-            state.mark_replica_progress(node_id, ack.lsm);
-        }
-    }
-
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "assigned replica polling records durable progress and installs the selected \
+                      revision"
+        )
+    )]
     pub(super) async fn request_state_sync_with_timeout(
         &self,
         target_node_id: &ClusterNodeName,
@@ -2587,35 +2505,6 @@ impl Runtime {
         }))
     }
 
-    pub(in crate::runtime) async fn wait_for_kafka_offset_replica_quorum(
-        &self,
-        state: &KafkaOffsetStateRead,
-        lsm: u64,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        if state.required_replica_acks() == 0 {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            tokio::task::consume_budget().await;
-            if state.replica_quorum_satisfied(lsm) {
-                return Ok(());
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaQuorum {
-                    placement: state.placement().clone(),
-                    lsm,
-                    required_acks: state.required_replica_acks(),
-                }));
-            }
-            tokio::select! {
-                _ = state.wait_for_replication_progress() => {}
-                _ = sleep_until(deadline) => {}
-            }
-        }
-    }
-
     pub(in crate::runtime) async fn persist_kafka_offset_snapshot(
         &self,
         state: &KafkaOffsetStatePersistence,
@@ -2632,10 +2521,9 @@ impl Runtime {
                     lsm,
                 })?;
             state.record_persisted(lsm);
-            self.notify_runtime_state_replicas(offsets.placement(), lsm);
+            self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         }
-        self.wait_for_kafka_offset_replica_quorum(offsets, lsm)
-            .await
+        offsets.wait_for_replica_quorum(lsm).await
     }
 
     /// Record a committed Kafka offset and wait until the offset state's replicas hold it.
@@ -2660,9 +2548,8 @@ impl Runtime {
         if offsets.required_replica_acks() == 0 {
             return Ok(());
         }
-        self.notify_runtime_state_replicas(offsets.placement(), lsm);
-        self.wait_for_kafka_offset_replica_quorum(offsets, lsm)
-            .await
+        self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
+        offsets.wait_for_replica_quorum(lsm).await
     }
 
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(
@@ -2684,6 +2571,11 @@ impl Runtime {
     /// by timestamp, and wake the readers waiting on materialized state once for all of them.
     ///
     /// The records applied before an assignment refusal still wake those readers.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the decoded checkpoint supplies iteration over the records \
+                                   admitted for one retained placement")
+    )]
     pub(in crate::runtime) async fn apply_materialized_stream_records(
         &self,
         state: &MaterializedRelayStateOriginator,
@@ -2693,7 +2585,7 @@ impl Runtime {
         let mut changed = false;
         let mut outcome = Ok(());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match state.update_last_by_timestamp(key, record) {
                 Ok(Some(_)) => changed = true,
                 Ok(None) => {}
@@ -2720,6 +2612,14 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(in crate::runtime) fn replicated_deduplicator_state(
         &self,
         placement: RuntimeStatePlacement,
@@ -2736,10 +2636,10 @@ impl Runtime {
                 .stored_runtime_state_snapshot(&placement)
                 .map_err(|error| error.current_context().clone())?,
         };
-        let state = Arc::new(ReplicatedDeduplicatorState::new(
-            placement.clone(),
-            initial,
-        )?);
+        let catalog = self.branch_checkpoint_catalog(&placement);
+        let state = Arc::new(
+            ReplicatedDeduplicatorState::new(placement.clone(), initial)?.cataloged(&catalog),
+        );
         self.inner
             .replicated_deduplicator_states
             .insert(placement, state.clone());
@@ -2782,6 +2682,14 @@ impl Runtime {
     /// Opening a sealed snapshot is bulk work that has to be admitted and charged, so it happens
     /// here, on a path that can wait, rather than inside the synchronous construction that
     /// publishes the state into the runtime.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(in crate::runtime) async fn prepare_materialized_stream_restore(
         &self,
         placement: &RuntimeStatePlacement,
@@ -2830,6 +2738,14 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(in crate::runtime) fn replicated_materialized_stream_state(
         &self,
         placement: RuntimeStatePlacement,
@@ -2867,6 +2783,14 @@ impl Runtime {
         ))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(in crate::runtime) fn replicated_window_processor_state(
         &self,
         placement: RuntimeStatePlacement,
@@ -2886,10 +2810,10 @@ impl Runtime {
                 .stored_runtime_state_snapshot(&placement)
                 .map_err(|error| error.current_context().clone())?,
         };
-        let state = Arc::new(ReplicatedWindowProcessorState::new(
-            placement.clone(),
-            initial,
-        )?);
+        let catalog = self.branch_checkpoint_catalog(&placement);
+        let state = Arc::new(
+            ReplicatedWindowProcessorState::new(placement.clone(), initial)?.cataloged(&catalog),
+        );
         self.inner
             .replicated_window_processor_states
             .insert(placement, state.clone());
@@ -2901,8 +2825,6 @@ impl Runtime {
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
         physical_node_id: ClusterNodeName,
-        replica_nodes: Vec<ClusterNodeName>,
-        required_replica_acks: usize,
     ) -> Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
@@ -2934,8 +2856,6 @@ impl Runtime {
             placement.clone(),
             primary_node,
             physical_node_id,
-            replica_nodes,
-            required_replica_acks,
             &self.inner.metrics,
             initial,
         )?);
@@ -2946,8 +2866,13 @@ impl Runtime {
     }
 }
 
+#[cfg(feature = "benchmarks")]
+pub mod benchmark;
+mod checkpoint_announcement;
+mod checkpoint_listing;
 mod lifecycle;
-mod ownership_handoff_fingerprint;
+mod replica_branch_checkpoints;
+mod replica_catch_up;
 mod tasks;
 mod wasm_processor_state;
 

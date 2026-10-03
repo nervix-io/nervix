@@ -8,15 +8,14 @@
 //! - **Depends on.** The VM frontend and compiler.
 //! - **Must not know.** How execution evaluates a test.
 
-use std::sync::Arc;
-
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::*;
 use crate::test_support::parse_program;
 
-fn operand_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+fn operand_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
         Field::new("status", DataType::Utf8, false),
         Field::new("region", DataType::Utf8, true),
         Field::new("priority", DataType::Int32, false),
@@ -27,7 +26,7 @@ fn operand_schema() -> Arc<Schema> {
         Field::new("raw", DataType::Binary, false),
         Field::new(
             "tags",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            DataType::List(StdArc::new(Field::new("item", DataType::Utf8, true))),
             true,
         ),
         Field::new("secret", DataType::Float64, false),
@@ -38,7 +37,7 @@ fn compile_assignment(
     expression: &str,
     output_type: DataType,
     output_nullable: bool,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let program = parse_program(&format!("SET out = {expression}")).expect("must parse");
     let input = operand_schema();
     let mut fields = input
@@ -49,14 +48,14 @@ fn compile_assignment(
     fields.push(Field::new("out", output_type, output_nullable));
     compile_program_for_bindings_with_sensitivity(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         SchemaSensitivity::from_sensitive_fields(["secret"]),
         [CompileBinding::writable("input", input)
             .with_sensitivity(SchemaSensitivity::from_sensitive_fields(["secret"]))],
     )
 }
 
-fn failure(expression: &str, output_type: DataType) -> CompileError {
+fn failure(expression: &str, output_type: DataType) -> error_stack::Report<CompileError> {
     compile_assignment(expression, output_type, true).expect_err("the expression must be rejected")
 }
 
@@ -156,7 +155,11 @@ fn nullability_follows_each_test_and_extremum() {
     for (expression, output_type) in optional {
         let error = compile_assignment(expression, output_type, false)
             .expect_err("a nullable result must not fill a required field");
-        assert_eq!(error.code, "null_for_required_field", "{expression}");
+        assert_eq!(
+            error.current_context().code(),
+            "null_for_required_field",
+            "{expression}"
+        );
     }
 }
 
@@ -252,11 +255,16 @@ fn operands_outside_each_signature_are_rejected_when_the_program_is_compiled() {
     ];
     for (expression, code, message) in cases {
         let error = failure(expression, DataType::Boolean);
-        assert_eq!(error.code, code, "{expression}: {}", error.message);
+        assert_eq!(
+            error.current_context().code(),
+            code,
+            "{expression}: {}",
+            error.current_context().message
+        );
         assert!(
-            error.message.starts_with(message),
+            error.current_context().message.starts_with(message),
             "{expression}: expected {message:?}, found {:?}",
-            error.message
+            error.current_context().message
         );
     }
 }
@@ -276,7 +284,11 @@ fn every_test_and_extremum_keeps_the_sensitivity_of_its_operands() {
         ("clamp(input.weight, 0.0, input.secret)", DataType::Float64),
     ] {
         let error = failure(expression, output_type);
-        assert_eq!(error.code, "sensitive_leak", "{expression}");
+        assert_eq!(
+            error.current_context().code(),
+            "sensitive_leak",
+            "{expression}"
+        );
     }
     compile_assignment(
         "leak_sensitive(input.secret) IN (1.0)",
@@ -304,7 +316,7 @@ fn a_set_is_evaluated_once_and_shared_by_every_identical_test() {
     }
     let compiled = compile_program_for_bindings(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
     )
     .expect("the program must compile");

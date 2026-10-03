@@ -15,9 +15,9 @@ use nervix_client_wire::{
     SuggestionKind, SuggestionStatus,
 };
 use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
-use crate::subscriptions::SubscriptionInterruption;
+use crate::subscriptions::{SubscriptionInterruption, SubscriptionRestorationFailure};
 
 /// One event of a subscription the client holds.
 #[derive(Debug, Clone)]
@@ -27,16 +27,24 @@ pub enum SubscriptionEvent {
     DeliveryLost(SubscriptionDeliveryLost),
     /// Rows were skipped; the subscription stays open.
     RowsSkipped(SubscriptionRowsSkipped),
-    /// The server closed the subscription. No further rows follow for its generation.
+    /// The server ended the subscription's generation, because its relay was redefined or removed.
+    /// It is the generation's last event, and the client never opens the generation again:
+    /// subscribing under its name opens a new one.
     Ended(SubscriptionEnded),
     /// The exchange ended, leaving a gap before any restoration on a new session.
     Interrupted(SubscriptionInterruption),
+    /// The current session refused to open the interrupted subscription again, or did not answer.
+    /// The subscription stays interrupted, and the client tries again later.
+    RestorationFailed(SubscriptionRestorationFailure),
     /// The client could not retain more events for this subscription. Its delivery on this
     /// exchange has ended, while unrelated subscriptions continue.
     ConsumerOverflow(SubscriptionHandle),
 }
 
 impl SubscriptionEvent {
+    /// The bytes an event is charged for itself, beyond the frame its rows keep alive.
+    pub(crate) const HEADER_BYTES: usize = std::mem::size_of::<Self>();
+
     /// The subscription the event belongs to.
     pub fn subscription(&self) -> &SubscriptionHandle {
         match self {
@@ -45,13 +53,17 @@ impl SubscriptionEvent {
             Self::RowsSkipped(skipped) => &skipped.subscription,
             Self::Ended(ended) => &ended.subscription,
             Self::Interrupted(interrupted) => &interrupted.subscription,
+            Self::RestorationFailed(failure) => &failure.subscription,
             Self::ConsumerOverflow(handle) => handle,
         }
     }
 
+    /// The bytes the event holds while it waits to be read: the whole frame its rows were read
+    /// from, and the event itself.
     pub(crate) fn queued_bytes(&self) -> usize {
         let dynamic_bytes = match self {
             Self::Rows(rows) => rows.rows.frame().len(),
+            Self::RestorationFailed(failure) => failure.message.len(),
             Self::DeliveryLost(_)
             | Self::RowsSkipped(_)
             | Self::Ended(_)
@@ -59,7 +71,7 @@ impl SubscriptionEvent {
             | Self::ConsumerOverflow(_) => 0,
         };
         dynamic_bytes
-            .checked_add(std::mem::size_of::<Self>())
+            .checked_add(Self::HEADER_BYTES)
             .assured("an event's decoded frame and in-memory header fit the process address space")
     }
 }

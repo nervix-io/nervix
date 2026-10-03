@@ -15,15 +15,14 @@ anyhow = { workspace = true }
 arch-into = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 error-stack = { workspace = true }
-humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-test-environment = { workspace = true }
 ordered-float = { workspace = true }
-parking_lot = { workspace = true }
 rcgen = { workspace = true }
 rdkafka = { workspace = true, features = [
   "tokio",
@@ -42,7 +41,6 @@ testcontainers = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
-triomphe = { workspace = true }
 upon = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 

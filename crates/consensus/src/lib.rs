@@ -10,26 +10,24 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "Raft log, snapshot and control-plane replication ownership is outside graph \
+                  processing"
+    )
+)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io,
     path::{Path, PathBuf},
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, Ordering},
-    },
     time::Duration,
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace};
 use futures_util::StreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -41,14 +39,24 @@ use nervix_models::{
     ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
     ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
 };
+use nervix_primitives::{
+    sync::{
+        Arc, Mutex as AsyncMutex, StdArc,
+        atomic::{AtomicU64, Ordering},
+        blocking::Mutex,
+        broadcast, watch,
+    },
+    task::JoinHandle,
+    time::{Instant, timeout},
+};
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::{
-    BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
-    Vote,
+    BasicNode, ChangeMembers, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta,
+    StoredMembership, Vote,
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
     metrics::RaftServerMetrics,
     network::{RPCOption, RaftNetworkV2},
@@ -61,7 +69,6 @@ use openraft::{
         async_runtime::watch::WatchReceiver,
     },
 };
-use parking_lot::Mutex;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
     rancor::Fallible,
@@ -72,14 +79,10 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tokio::{
-    sync::{Mutex as AsyncMutex, broadcast, watch},
-    task::JoinHandle,
-    time::{Instant, timeout},
-};
 use tracing::{error, info};
-use triomphe::Arc;
 
+#[cfg(test)]
+mod archive_count_tests;
 mod command_execution;
 mod connectivity_fault;
 mod domain_mutation;
@@ -87,6 +90,7 @@ mod durable_batch;
 mod raft_record;
 mod records;
 mod replication;
+mod restore;
 mod retention;
 mod snapshot;
 pub use command_execution::{
@@ -99,6 +103,7 @@ pub use command_execution::{
     CommandExecutionTransactionTarget, DiagnosticSpan,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
+pub use restore::{RestoreExecution, RestoreStepEffect, RestoredResource};
 pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -447,6 +452,21 @@ pub enum ConsensusCommand {
         key: Box<ResourceUploadKey>,
         reason: String,
     },
+    /// Applies one step of the applying restore `reference` names, and records it, unless it is
+    /// already recorded.
+    ApplyRestoreStep {
+        reference: nervix_models::CommandExecutionReference,
+        step: nervix_models::RestoreStep,
+        effect: Box<RestoreStepEffect>,
+    },
+    /// Records a resource version a restore imports under its archived number, published with the
+    /// leader's ready copy.
+    ImportResourceVersion {
+        reference: nervix_models::CommandExecutionReference,
+        key: Box<ResourceUploadKey>,
+        resource: Box<ResourceVersion>,
+        replica: Box<ResourceNodeStatus>,
+    },
     SetNodeCordoned {
         node_id: ClusterNodeName,
         cordoned: bool,
@@ -456,6 +476,7 @@ pub enum ConsensusCommand {
     },
     OpenTransaction {
         transaction: Box<ReplicatedTransaction>,
+        #[rkyv(with = nervix_models::CountAsU64)]
         max_open_transactions: usize,
     },
     QueueTransactionStatement {
@@ -485,7 +506,9 @@ pub enum ConsensusCommand {
     },
     AdvanceTransactionCommit {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected_next_statement: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         next_statement: usize,
         at: nervix_models::Timestamp,
         result: Box<TransactionStepResult>,
@@ -494,6 +517,7 @@ pub enum ConsensusCommand {
     },
     CompleteTransactionApplication {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
         actual: Box<nervix_models::ActualExecutionStepImpact>,
@@ -522,8 +546,41 @@ pub enum ConsensusCommand {
 )]
 pub enum ConsensusResponse {
     Applied,
-    Conflict(String),
+    Conflict(ConsensusConflict),
     Transaction(Box<TransactionMutationResponse>),
+}
+
+/// Why the replicated state machine refused a proposed change.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Error,
+)]
+pub enum ConsensusConflict {
+    #[error("{0}")]
+    Reason(String),
+    #[error("command execution reference '{reference}' has expired")]
+    ExecutionReferenceExpired {
+        reference: nervix_models::CommandExecutionReference,
+    },
+    #[error("command execution reference '{reference}' conflicts by {kind}")]
+    ExecutionReferenceConflict {
+        reference: nervix_models::CommandExecutionReference,
+        kind: CommandExecutionRequestConflict,
+    },
+}
+
+impl From<String> for ConsensusConflict {
+    fn from(reason: String) -> Self {
+        Self::Reason(reason)
+    }
 }
 
 #[derive(
@@ -532,6 +589,26 @@ pub enum ConsensusResponse {
 pub struct UserCredentials {
     pub name: UserName,
     pub password_hash: String,
+}
+
+/// The replicated configuration of the cluster as one applied revision left it.
+#[derive(Debug, Clone)]
+pub struct ConfigurationCapture {
+    /// The log entry the capture reflects.
+    pub applied: AppliedLogPosition,
+    pub domains: BTreeMap<DomainName, DomainState>,
+    /// Every domain's Models, as its schedule places them.
+    pub schedule: ClusterSchedule,
+    pub users: BTreeMap<UserName, UserCredentials>,
+    pub resources: ResourceVersionStatus,
+}
+
+/// An applied Raft log entry: the term of the leader that wrote it and its index, which is also
+/// the revision every read at that point reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedLogPosition {
+    pub term: u64,
+    pub index: u64,
 }
 
 impl std::fmt::Display for ConsensusCommand {
@@ -642,6 +719,20 @@ impl std::fmt::Display for ConsensusCommand {
             Self::FailResourceUpload { key, .. } => {
                 write!(f, "fail-resource-upload:{}", key.identity)
             }
+            Self::ApplyRestoreStep {
+                reference, step, ..
+            } => write!(f, "apply-restore-step:{reference}:{step}"),
+            Self::ImportResourceVersion {
+                reference,
+                resource,
+                ..
+            } => write!(
+                f,
+                "import-resource-version:{reference}:{}.{}@{}",
+                resource.id.domain.as_str(),
+                resource.id.identifier.as_str(),
+                resource.id.version
+            ),
             Self::SetNodeCordoned { node_id, cordoned } => {
                 if *cordoned {
                     write!(f, "cordon-node:{node_id}")
@@ -730,8 +821,6 @@ const RETENTION_ADMISSION_POLL: Duration = Duration::from_millis(50);
 /// How long one complete snapshot transfer may take.
 const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 
-static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Clone)]
 pub struct ConsensusSettings {
     pub cluster_name: String,
@@ -773,6 +862,7 @@ impl GossipNode {
 pub struct GossipState {
     pub live_nodes: Vec<GossipNode>,
     pub dead_node_ids: BTreeSet<ClusterNodeName>,
+    pub dead_node_identities: BTreeSet<ClusterNodeIdentity>,
 }
 
 impl GossipState {
@@ -822,6 +912,25 @@ impl GossipState {
 
     pub fn latest_nodes_by_id(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
         self.latest_nodes(self.live_nodes.iter())
+    }
+
+    /// The newest observed process for an explicit removal, including an incarnation that
+    /// Chitchat has marked dead and therefore no longer includes in `live_nodes`.
+    pub fn latest_observed_identity(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> Option<ClusterNodeIdentity> {
+        self.live_nodes
+            .iter()
+            .filter(|node| &node.node_id == node_id)
+            .map(GossipNode::identity)
+            .chain(
+                self.dead_node_identities
+                    .iter()
+                    .filter(|identity| identity.node_id() == node_id)
+                    .cloned(),
+            )
+            .max_by_key(ClusterNodeIdentity::incarnation)
     }
 
     fn latest_nodes<'a>(
@@ -950,10 +1059,13 @@ struct MembershipSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MembershipMutation {
+    UpdateAddress {
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+    },
     AddLearner {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
-        refresh: bool,
     },
     ChangeVoters {
         voters: BTreeSet<ClusterNodeName>,
@@ -984,12 +1096,16 @@ impl MembershipSnapshot {
             let known_address = self.nodes.get(&node.node_id);
             let is_voter = self.voters.contains(&node.node_id);
             let address_changed = known_address != Some(&advertised);
-            if !is_voter || address_changed {
-                let refresh = known_address.is_some() && address_changed;
+            if known_address.is_some() && address_changed {
+                mutations.push(MembershipMutation::UpdateAddress {
+                    node_id: node.node_id.clone(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+            if !is_voter {
                 mutations.push(MembershipMutation::AddLearner {
                     node_id: node.node_id.clone(),
                     endpoint,
-                    refresh,
                 });
             }
             desired_voters.insert(node.node_id);
@@ -1401,10 +1517,10 @@ enum SnapshotTransferError {
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
-    #[error("consensus storage failed: {0}")]
-    Storage(#[source] io::Error),
-    #[error("consensus storage failed: {0}")]
-    RaftStorage(#[source] openraft::StorageError<TypeConfig>),
+    #[error("consensus storage failed")]
+    Storage,
+    #[error("consensus storage failed")]
+    RaftStorage,
     #[error("raft startup failed")]
     Startup,
     #[error("failed to create raft client endpoint")]
@@ -1413,10 +1529,10 @@ pub enum ConsensusError {
     Transport,
     #[error("failed to establish a linearizable consensus read")]
     LinearizableRead,
-    #[error("{0}")]
-    Write(String),
+    #[error("raft write failed")]
+    RaftWrite,
     #[error("consensus state changed: {0}")]
-    Conflict(String),
+    Conflict(ConsensusConflict),
     #[error("raft returned an unexpected response to a state mutation")]
     UnexpectedResponse,
     #[error("raft proposal lost leadership")]
@@ -1480,26 +1596,56 @@ fn validate_protocol_origin(
     }))
 }
 
-impl From<RaftError<TypeConfig, ClientWriteError<TypeConfig>>> for ConsensusError {
-    fn from(error: RaftError<TypeConfig, ClientWriteError<TypeConfig>>) -> Self {
+impl ConsensusError {
+    /// Renders the semantic failure at a client boundary while retaining its typed source in
+    /// the report. Raft and I/O errors remain report frames rather than string-only variants.
+    pub fn report_message<C: error_stack::Context>(report: &Report<C>) -> String {
+        let Some(error) = report.downcast_ref::<Self>() else {
+            return report.to_string();
+        };
         match error {
-            RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) => {
-                Self::LeadershipLost {
-                    leader_id: forward.leader_id,
+            Self::Storage => match report.downcast_ref::<io::Error>() {
+                Some(source) => format!("consensus storage failed: {source}"),
+                None => error.to_string(),
+            },
+            Self::RaftStorage => {
+                match report.downcast_ref::<RaftError<TypeConfig, ClientWriteError<TypeConfig>>>() {
+                    Some(RaftError::Fatal(openraft::error::Fatal::StorageError(source))) => {
+                        format!("consensus storage failed: {source}")
+                    }
+                    _ => error.to_string(),
                 }
             }
-            RaftError::Fatal(openraft::error::Fatal::StorageError(error)) => {
-                Self::RaftStorage(error)
+            Self::RaftWrite => {
+                match report.downcast_ref::<RaftError<TypeConfig, ClientWriteError<TypeConfig>>>() {
+                    Some(source) => format!("raft write failed: {source}"),
+                    None => error.to_string(),
+                }
             }
-            error => Self::Write(format!("raft write failed: {error}")),
+            _ => error.to_string(),
         }
+    }
+
+    fn raft_write_report(
+        error: RaftError<TypeConfig, ClientWriteError<TypeConfig>>,
+    ) -> Report<Self> {
+        let context = match &error {
+            RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) => {
+                Self::LeadershipLost {
+                    leader_id: forward.leader_id.clone(),
+                }
+            }
+            RaftError::Fatal(openraft::error::Fatal::StorageError(_)) => Self::RaftStorage,
+            _ => Self::RaftWrite,
+        };
+        Report::new(error).change_context(context)
     }
 }
 
 #[derive(Debug, Error)]
 pub enum ConsensusTransactionError {
-    #[error(transparent)]
-    Consensus(#[from] ConsensusError),
+    #[error("consensus proposal failed")]
+    Consensus,
     #[error(transparent)]
     Mutation(#[from] TransactionMutationError),
     #[error("raft returned an invalid transaction response")]
@@ -1826,16 +1972,14 @@ impl Consensus {
     pub async fn open(
         path: impl AsRef<Path>,
         settings: ConsensusSettings,
-    ) -> Result<Self, ConsensusError> {
+    ) -> error_stack::Result<Self, ConsensusError> {
         let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
             .await
-            .map_err(ConsensusError::Storage)?;
+            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
         let store = FjallStore::from_database(db, settings.executor.clone())
             .await
-            .map_err(ConsensusError::Storage)?;
-        Self::from_store(store, settings, ())
-            .await
-            .map_err(|_| ConsensusError::Startup)
+            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
+        Self::from_store(store, settings, ()).await
     }
 
     #[cfg(feature = "testing")]
@@ -1846,14 +1990,14 @@ impl Consensus {
     ) -> Result<Self, Report<ConsensusError>> {
         let db = Self::open_database(path.as_ref().to_path_buf(), &settings.executor)
             .await
-            .map_err(ConsensusError::Storage)?;
+            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
         let store = FjallStore::from_database_with_storage_fault(
             db,
             settings.executor.clone(),
             test_probe.storage_fault(),
         )
         .await
-        .map_err(ConsensusError::Storage)?;
+        .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?;
         Self::from_store(store, settings, test_probe).await
     }
 
@@ -1924,7 +2068,7 @@ impl Consensus {
                 ..Default::default()
             }
             .validate()
-            .map_err(|_| ConsensusError::Startup)?,
+            .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?,
         );
 
         let connectivity = append_stream_open_recorder.connectivity_fault();
@@ -1934,6 +2078,7 @@ impl Consensus {
             executor: settings.executor.clone(),
             connectivity: connectivity.clone(),
             append_stream_open_recorder,
+            snapshot_transfer_ids: Arc::new(SnapshotTransferIds::new()),
         };
         let raft = Raft::new(
             settings.node_id.clone(),
@@ -1943,15 +2088,15 @@ impl Consensus {
             store.clone(),
         )
         .await
-        .map_err(|_| ConsensusError::Startup)?;
+        .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?;
         let events = ConsensusEvents::new();
         let metrics_raft = raft.clone();
         let metrics_events = events.clone();
-        let metrics_task = tokio::spawn(async move {
+        let metrics_task = nervix_primitives::task::spawn(async move {
             let mut rx = metrics_raft.metrics();
             let mut last_transition = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if rx.changed().await.is_err() {
                     break;
                 }
@@ -1983,7 +2128,7 @@ impl Consensus {
             }
         });
 
-        let retention_task = tokio::spawn(
+        let retention_task = nervix_primitives::task::spawn(
             retention::RetentionTask::new(raft.clone(), store.clone(), retention).run(),
         );
         let consensus = Self {
@@ -2004,7 +2149,7 @@ impl Consensus {
         };
         consensus
             .register_protocol_handlers()
-            .map_err(|_| ConsensusError::Startup)?;
+            .change_context(ConsensusError::Startup)?;
         Ok(consensus)
     }
 
@@ -2067,16 +2212,14 @@ impl Consensus {
                     let receiver = receiver.clone();
                     async move {
                         receiver.inner.connectivity.check().map_err(|error| {
-                            nervix_interconnect::StreamHandlerError::new(error.to_string())
+                            nervix_interconnect::StreamHandlerError::with_cause(Report::new(error))
                         })?;
                         validate_protocol_origin(
                             context.peer_node_id(),
                             &request.leader_node_id,
                             "an append stream",
                         )
-                        .map_err(|error| {
-                            nervix_interconnect::StreamHandlerError::new(error.to_string())
-                        })?;
+                        .map_err(nervix_interconnect::StreamHandlerError::with_cause)?;
                         let answers =
                             receiver.answer_append_stream(context.peer_node_id().clone(), items);
                         Ok(nervix_interconnect::DuplexResponses::new(answers.map(Ok)))
@@ -2417,7 +2560,7 @@ impl Observer {
     pub async fn wait_for_runtime_revision_after(&self, revision: u64) -> Option<u64> {
         let mut applied = self.subscribe_applied();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let current_revision = self.current_runtime_revision().await;
             if current_revision > revision {
                 return Some(current_revision);
@@ -2505,6 +2648,24 @@ impl Observer {
         }
     }
 
+    /// Capture the replicated configuration a backup reads, every part of it from one applied
+    /// revision, so no change committed while the backup runs can show in some parts and not in
+    /// others. Absent until the state machine has applied its first log entry.
+    pub async fn configuration_capture(&self) -> Option<ConfigurationCapture> {
+        let state = self.inner.store.inner.state();
+        let applied = state.last_applied_log_id.as_ref()?;
+        Some(ConfigurationCapture {
+            applied: AppliedLogPosition {
+                term: applied.leader_id.term,
+                index: applied.index,
+            },
+            domains: (&state.domains).into(),
+            schedule: (&state.schedule).into(),
+            users: (&state.users).into(),
+            resources: (&state.resources).into(),
+        })
+    }
+
     pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
         (&self.inner.store.inner.state().users).into()
     }
@@ -2531,6 +2692,17 @@ impl Observer {
 
     pub async fn current_leader(&self) -> Option<ClusterNodeName> {
         self.inner.raft.current_leader().await
+    }
+
+    /// The leader and term from one Raft metrics observation. Completion barriers use this as a
+    /// fence for a leader's availability view; an observation from another term cannot complete a
+    /// command on this node.
+    pub fn current_leader_tenure(&self) -> Option<LeaderTenure> {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        Some(LeaderTenure {
+            leader_id: metrics.current_leader?,
+            term: metrics.current_term,
+        })
     }
 
     pub async fn status_lines(&self) -> Vec<String> {
@@ -2619,6 +2791,18 @@ impl Observer {
             .collect()
     }
 
+    /// The membership already recovered from durable state, available before Raft publishes its
+    /// initial metrics. Startup uses these endpoints to find surviving peers after a restart.
+    pub fn stored_membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
+        let state = self.inner.store.inner.state();
+        state
+            .last_membership
+            .membership()
+            .nodes()
+            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
+            .collect()
+    }
+
     pub async fn membership_voter_ids(&self) -> BTreeSet<ClusterNodeName> {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         metrics.membership_config.membership().voter_ids().collect()
@@ -2652,6 +2836,17 @@ impl Observer {
 }
 
 impl Proposer {
+    fn applied_response(response: ConsensusResponse) -> error_stack::Result<(), ConsensusError> {
+        match response {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
     pub fn observer(&self) -> Observer {
         self.observer.clone()
     }
@@ -2759,7 +2954,6 @@ impl Proposer {
             })
             .await
             .map(|_| ())
-            .map_err(Report::new)
     }
 
     /// Commits a barrier after schedule proposals this leader may have inherited, returning the
@@ -2770,7 +2964,9 @@ impl Proposer {
     ) -> Result<u64, Report<ConsensusError>> {
         if authority.coordinator() != &self.inner.local_node_id {
             return Err(Report::new(ConsensusError::Conflict(
-                "ownership handoff reconciliation authority is not the local node".to_string(),
+                ConsensusConflict::Reason(
+                    "ownership handoff reconciliation authority is not the local node".to_string(),
+                ),
             )));
         }
         let response = self
@@ -2838,7 +3034,7 @@ impl Proposer {
         inputs: DomainPlanningInputs,
         schedule: Option<DomainSchedule>,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::ReplaceDomainSchedule {
@@ -2847,11 +3043,7 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
     /// Publish connector-owned Kafka partition metadata against the schedule it was derived from.
@@ -2869,17 +3061,8 @@ impl Proposer {
                 inputs: Box::new(inputs),
                 schedule: Box::new(schedule),
             })
-            .await
-            .map_err(Report::new)?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => {
-                Err(Report::new(ConsensusError::Conflict(reason)))
-            }
-            ConsensusResponse::Transaction(_) => {
-                Err(Report::new(ConsensusError::UnexpectedResponse))
-            }
-        }
+            .await?;
+        Self::applied_response(response.data)
     }
 
     pub async fn apply_automatic_domain_schedule(
@@ -2903,23 +3086,15 @@ impl Proposer {
                 schedule: schedule.map(Box::new),
             })
             .await
-            .map_err(|error| Report::new(ConsensusError::from(error)))?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => {
-                Err(Report::new(ConsensusError::Conflict(reason)))
-            }
-            ConsensusResponse::Transaction(_) => {
-                Err(Report::new(ConsensusError::UnexpectedResponse))
-            }
-        }
+            .map_err(ConsensusError::raft_write_report)?;
+        Self::applied_response(response.data)
     }
 
     pub async fn put_domain(
         &self,
         domain: DomainState,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::PutDomain {
@@ -2927,11 +3102,7 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
     pub async fn put_domain_and_schedule(
@@ -2940,7 +3111,7 @@ impl Proposer {
         domain: DomainState,
         schedule: Option<DomainSchedule>,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::PutDomainAndSchedule {
@@ -2950,11 +3121,7 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
     pub async fn start_domain(
@@ -2964,7 +3131,7 @@ impl Proposer {
         clock: Option<DomainClockState>,
         authority: Option<ClusterNodeIdentity>,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::StartDomain {
@@ -2975,18 +3142,14 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
     pub async fn stop_domain(
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::StopDomain {
@@ -2994,11 +3157,7 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
     pub async fn reconcile_domain_clock_authority(
@@ -3017,25 +3176,14 @@ impl Proposer {
                 owner,
             })
             .await;
-        match written {
-            Ok(response) => match response.data {
-                ConsensusResponse::Applied => Ok(()),
-                ConsensusResponse::Conflict(reason) => {
-                    Err(Report::new(ConsensusError::Conflict(reason)))
-                }
-                ConsensusResponse::Transaction(_) => {
-                    Err(Report::new(ConsensusError::UnexpectedResponse))
-                }
-            },
-            Err(error) => Err(Report::new(error)),
-        }
+        written.and_then(|response| Self::applied_response(response.data))
     }
 
     pub async fn pause_domain(
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::PauseDomain {
@@ -3043,18 +3191,14 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
     pub async fn resume_domain(
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         let response = self
             .inner
             .client_write(ConsensusCommand::ResumeDomain {
@@ -3062,14 +3206,13 @@ impl Proposer {
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
-        match response.data {
-            ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
-        }
+        Self::applied_response(response.data)
     }
 
-    pub async fn create_user(&self, user: UserCredentials) -> Result<(), ConsensusError> {
+    pub async fn create_user(
+        &self,
+        user: UserCredentials,
+    ) -> error_stack::Result<(), ConsensusError> {
         self.inner
             .client_write(ConsensusCommand::CreateUser {
                 user: Box::new(user),
@@ -3106,18 +3249,58 @@ impl Proposer {
         }
     }
 
+    /// Imports a resource version a restore recreates under its archived number, published with
+    /// the leader's ready copy, and returns the upload it is recorded under.
+    pub async fn import_resource_version(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        key: ResourceUploadKey,
+        resource: ResourceVersion,
+        replica: ResourceNodeStatus,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ImportResourceVersion {
+                reference,
+                key: Box::new(key.clone()),
+                resource: Box::new(resource),
+                replica: Box::new(replica),
+            })
+            .await?;
+        self.resource_upload_response(response, &key).await
+    }
+
+    /// Applies one step of an applying restore and records it. A step already recorded is
+    /// accepted and changes nothing.
+    pub async fn apply_restore_step(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        step: nervix_models::RestoreStep,
+        effect: RestoreStepEffect,
+    ) -> Result<(), Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ApplyRestoreStep {
+                reference,
+                step,
+                effect: Box::new(effect),
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
     pub async fn create_resource_catalog(
         &self,
         domain: &DomainName,
         identifier: &ResourceName,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         self.inner
             .client_write(ConsensusCommand::CreateResourceCatalog {
                 domain: domain.clone(),
                 identifier: identifier.clone(),
             })
-            .await
-            .map(|_| ())
+            .await?;
+        Ok(())
     }
 
     pub async fn publish_resource_upload(
@@ -3153,13 +3336,13 @@ impl Proposer {
     pub async fn put_resource_replica(
         &self,
         replica: ResourceNodeStatus,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         self.inner
             .client_write(ConsensusCommand::PutResourceReplica {
                 replica: Box::new(replica),
             })
-            .await
-            .map(|_| ())
+            .await?;
+        Ok(())
     }
 
     pub async fn complete_resource_upload(
@@ -3220,25 +3403,30 @@ impl Proposer {
             .client_write(ConsensusCommand::SetNodeCordoned { node_id, cordoned })
             .await
             .map(|_| ())
-            .map_err(Report::new)
     }
 
     async fn write_transaction(
         &self,
         command: ConsensusCommand,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
-        let response = self.inner.client_write(command).await?;
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
+        let response = self
+            .inner
+            .client_write(command)
+            .await
+            .change_context(ConsensusTransactionError::Consensus)?;
         let ConsensusResponse::Transaction(response) = response.data else {
-            return Err(ConsensusTransactionError::InvalidResponse);
+            return Err(Report::new(ConsensusTransactionError::InvalidResponse));
         };
-        response.result.map_err(Into::into)
+        response
+            .result
+            .map_err(|error| Report::new(ConsensusTransactionError::Mutation(error)))
     }
 
     pub async fn open_transaction(
         &self,
         transaction: ReplicatedTransaction,
         max_open_transactions: usize,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::OpenTransaction {
             transaction: Box::new(transaction),
             max_open_transactions,
@@ -3249,7 +3437,7 @@ impl Proposer {
     pub async fn queue_transaction_statement(
         &self,
         request: TransactionQueueRequest,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         let TransactionQueueRequest {
             id,
             owner,
@@ -3276,7 +3464,7 @@ impl Proposer {
         id: String,
         owner: UserName,
         activity: TransactionActivity,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::TouchTransaction {
             id,
             owner,
@@ -3293,7 +3481,7 @@ impl Proposer {
         expected_preview: nervix_models::TransactionPreviewIdentity,
         report: TransactionReportArchive,
         plan: TransactionCommitAdmissionPlan,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::StartTransactionCommit {
             id,
             owner,
@@ -3313,13 +3501,12 @@ impl Proposer {
             failure: Box::new(failure),
         })
         .await
-        .map_err(Report::new)
     }
 
     pub async fn advance_transaction_commit(
         &self,
         advance: TransactionCommitAdvance,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         let TransactionCommitAdvance {
             id,
             expected_next_statement,
@@ -3348,7 +3535,7 @@ impl Proposer {
         at: nervix_models::Timestamp,
         actual: nervix_models::ActualExecutionStepImpact,
         outcome: TransactionApplicationOutcome,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::CompleteTransactionApplication {
             id,
             expected_next_statement,
@@ -3363,7 +3550,7 @@ impl Proposer {
         &self,
         id: String,
         at: nervix_models::Timestamp,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::FinishEmptyTransactionCommit { id, at })
             .await
     }
@@ -3373,7 +3560,7 @@ impl Proposer {
         id: String,
         owner: UserName,
         activity: TransactionActivity,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::RevertTransaction {
             id,
             owner,
@@ -3386,7 +3573,7 @@ impl Proposer {
         &self,
         id: String,
         at: nervix_models::Timestamp,
-    ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
+    ) -> error_stack::Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::ExpireTransaction { id, at })
             .await
     }
@@ -3399,7 +3586,6 @@ impl Proposer {
             .client_write(ConsensusCommand::RemoveFinishedTransactions { finished_before })
             .await
             .map(|_| ())
-            .map_err(Report::new)
     }
 }
 
@@ -3410,14 +3596,14 @@ impl Administrator {
         }
     }
 
-    pub async fn maybe_initialize(&self) -> Result<bool, ConsensusError> {
+    pub async fn maybe_initialize(&self) -> error_stack::Result<bool, ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
         if self
             .inner
             .store
             .has_raft_state()
             .await
-            .map_err(ConsensusError::Storage)?
+            .map_err(|error| Report::new(error).change_context(ConsensusError::Storage))?
         {
             return Ok(false);
         }
@@ -3432,7 +3618,7 @@ impl Administrator {
             .initialize(nodes)
             .await
             .map(|_| ())
-            .map_err(|_| ConsensusError::Startup)?;
+            .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?;
         self.inner.events.report(format!(
             "raft initialized with single-node membership {}",
             self.inner.local_node_id
@@ -3443,7 +3629,7 @@ impl Administrator {
     pub async fn reconcile_nodes(
         &self,
         gossip: impl Future<Output = GossipState>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
         let leader = self.inner.raft.current_leader().await;
@@ -3456,16 +3642,33 @@ impl Administrator {
         let admission_fences = (&state.node_admission_fences).into();
         let mutations = before.automatic_mutations(&gossip, &admission_fences);
         for mutation in mutations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match mutation {
-                MembershipMutation::AddLearner {
-                    node_id,
-                    endpoint,
-                    refresh,
-                } => {
-                    let operation = if refresh {
-                        format!("refresh learner '{node_id}' at {endpoint}")
-                    } else if before.nodes.contains_key(&node_id) {
+                MembershipMutation::UpdateAddress { node_id, endpoint } => {
+                    let operation = format!("update address of '{node_id}' to {endpoint}");
+                    self.inner.events.report(format!("raft {operation}"));
+                    let update = timeout(
+                        MEMBERSHIP_MUTATION_TIMEOUT,
+                        self.inner.raft.change_membership(
+                            ChangeMembers::SetNodes(BTreeMap::from([(
+                                node_id,
+                                BasicNode::new(endpoint.to_string()),
+                            )])),
+                            true,
+                        ),
+                    )
+                    .await;
+                    let result = match update {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let observed = self.effective_membership();
+                            return Err(Report::new(self.membership_timeout(operation, &observed)));
+                        }
+                    };
+                    result.map_err(ConsensusError::raft_write_report)?;
+                }
+                MembershipMutation::AddLearner { node_id, endpoint } => {
+                    let operation = if before.nodes.contains_key(&node_id) {
                         format!("wait for learner '{node_id}' to catch up at {endpoint}")
                     } else {
                         format!("add learner '{node_id}' at {endpoint}")
@@ -3484,10 +3687,10 @@ impl Administrator {
                         Ok(result) => result,
                         Err(_) => {
                             let observed = self.effective_membership();
-                            return Err(self.membership_timeout(operation, &observed));
+                            return Err(Report::new(self.membership_timeout(operation, &observed)));
                         }
                     };
-                    result.map_err(ConsensusError::from)?;
+                    result.map_err(ConsensusError::raft_write_report)?;
                 }
                 MembershipMutation::ChangeVoters { voters } => {
                     let operation = format!("promote voters {voters:?}");
@@ -3503,10 +3706,10 @@ impl Administrator {
                             if observed.voters == voters {
                                 continue;
                             }
-                            return Err(self.membership_timeout(operation, &observed));
+                            return Err(Report::new(self.membership_timeout(operation, &observed)));
                         }
                     };
-                    result.map_err(ConsensusError::from)?;
+                    result.map_err(ConsensusError::raft_write_report)?;
                 }
             }
         }
@@ -3524,38 +3727,46 @@ impl Administrator {
         &self,
         identity: &ClusterNodeIdentity,
         availability: impl Future<Output = GossipState>,
-    ) -> Result<(), ConsensusError> {
+    ) -> error_stack::Result<(), ConsensusError> {
         let node_id = identity.node_id();
         if *node_id == self.inner.local_node_id {
-            return Err(ConsensusError::RemoveLocalLeader(node_id.to_string()));
+            return Err(Report::new(ConsensusError::RemoveLocalLeader(
+                node_id.to_string(),
+            )));
         }
 
         let _membership_mutation = self.inner.membership_mutation.lock().await;
         let before = self.effective_membership();
         if !before.nodes.contains_key(node_id) {
-            return Err(ConsensusError::NodeNotFound(node_id.to_string()));
+            return Err(Report::new(ConsensusError::NodeNotFound(
+                node_id.to_string(),
+            )));
         }
 
         let mut desired_voters = before.voters;
         let was_voter = desired_voters.remove(node_id);
         if was_voter && desired_voters.is_empty() {
-            return Err(ConsensusError::RemoveLastVoter(node_id.to_string()));
+            return Err(Report::new(ConsensusError::RemoveLastVoter(
+                node_id.to_string(),
+            )));
         }
 
         let availability = availability.await;
         if !availability.dead_node_ids.contains(node_id) {
-            return Err(ConsensusError::RemoveLiveNode(node_id.to_string()));
+            return Err(Report::new(ConsensusError::RemoveLiveNode(
+                node_id.to_string(),
+            )));
         }
-        let mut latest_nodes = availability.latest_nodes_by_id();
-        let Some(node) = latest_nodes.remove(node_id) else {
-            return Err(ConsensusError::NodeIncarnationUnknown(node_id.to_string()));
+        let Some(observed_identity) = availability.latest_observed_identity(node_id) else {
+            return Err(Report::new(ConsensusError::NodeIncarnationUnknown(
+                node_id.to_string(),
+            )));
         };
-        let observed_identity = node.identity();
         if &observed_identity != identity {
-            return Err(ConsensusError::NodeIncarnationChanged {
+            return Err(Report::new(ConsensusError::NodeIncarnationChanged {
                 expected: identity.clone(),
                 observed: observed_identity,
-            });
+            }));
         }
         let response = self
             .inner
@@ -3564,7 +3775,7 @@ impl Administrator {
             })
             .await?;
         if response.data != ConsensusResponse::Applied {
-            return Err(ConsensusError::UnexpectedResponse);
+            return Err(Report::new(ConsensusError::UnexpectedResponse));
         }
 
         let operation = format!("remove node '{node_id}'");
@@ -3585,10 +3796,10 @@ impl Administrator {
                         .report(format!("raft node removed after timed wait: {node_id}"));
                     return Ok(());
                 }
-                return Err(self.membership_timeout(operation, &observed));
+                return Err(Report::new(self.membership_timeout(operation, &observed)));
             }
         };
-        result.map_err(ConsensusError::from)?;
+        result.map_err(ConsensusError::raft_write_report)?;
 
         self.inner
             .events
@@ -3645,14 +3856,14 @@ impl ConsensusState {
     async fn client_write(
         &self,
         command: ConsensusCommand,
-    ) -> Result<openraft::raft::ClientWriteResponse<TypeConfig>, ConsensusError> {
+    ) -> error_stack::Result<openraft::raft::ClientWriteResponse<TypeConfig>, ConsensusError> {
         let cap = self.raft_retention.retained_log_cap_bytes;
         if self.store.retained_log_bytes() > cap {
             let deadline = self.raft_retention.retention_admission_timeout;
             let reclaimed = timeout(deadline, async {
                 loop {
-                    tokio::task::consume_budget().await;
-                    tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
+                    nervix_primitives::task::consume_budget().await;
+                    nervix_primitives::time::sleep(RETENTION_ADMISSION_POLL).await;
                     if self.store.retained_log_bytes() <= cap {
                         return;
                     }
@@ -3660,17 +3871,17 @@ impl ConsensusState {
             })
             .await;
             if reclaimed.is_err() {
-                return Err(ConsensusError::LogRetentionSaturated {
+                return Err(Report::new(ConsensusError::LogRetentionSaturated {
                     retained: self.store.retained_log_bytes(),
                     cap,
                     waited: deadline,
-                });
+                }));
             }
         }
         self.raft
             .client_write(command)
             .await
-            .map_err(ConsensusError::from)
+            .map_err(ConsensusError::raft_write_report)
     }
 }
 
@@ -3823,6 +4034,37 @@ impl ProtocolReceiver {
     }
 }
 
+/// The identities of the snapshot transfers one node sends.
+///
+/// A receiver stages one transfer per sending peer, and a new transfer from that peer supersedes
+/// the one it was staging. The identity tells the receiver which transfer a chunk belongs to, so a
+/// chunk of a superseded transfer is refused instead of being appended to its successor. The
+/// receiver only ever compares identities from one peer, so they have to differ between the
+/// transfers one node sends and nothing more: the node's Raft network factory owns one allocator,
+/// every client it creates draws from it, and it starts again with the node.
+#[derive(Debug)]
+struct SnapshotTransferIds {
+    next: AtomicU64,
+}
+
+impl SnapshotTransferIds {
+    fn new() -> Self {
+        Self {
+            next: AtomicU64::new(1),
+        }
+    }
+
+    /// The identity of the next transfer this node sends.
+    fn allocate(&self) -> io::Result<u64> {
+        #[allow(deprecated)] // until try_update is stabilized
+        self.next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| io::Error::other("snapshot transfer id space is exhausted"))
+    }
+}
+
 #[derive(Clone)]
 struct NetworkFactory<Recorder> {
     local_node_id: ClusterNodeName,
@@ -3830,6 +4072,9 @@ struct NetworkFactory<Recorder> {
     executor: nervix_execution::Executor,
     connectivity: ConnectivityFault,
     append_stream_open_recorder: Recorder,
+    /// Shared with every client the factory creates, so no two transfers the node sends carry
+    /// one identity.
+    snapshot_transfer_ids: Arc<SnapshotTransferIds>,
 }
 
 #[derive(Clone)]
@@ -3841,6 +4086,8 @@ struct NetworkClient<Recorder> {
     append_path: AppendPath,
     connectivity: ConnectivityFault,
     append_stream_open_recorder: Recorder,
+    /// The node's allocator, which the factory and every other client of the node share.
+    snapshot_transfer_ids: Arc<SnapshotTransferIds>,
 }
 
 impl<Recorder> NetworkFactory<Recorder>
@@ -3856,6 +4103,7 @@ where
             append_path,
             connectivity: self.connectivity.clone(),
             append_stream_open_recorder: self.append_stream_open_recorder.clone(),
+            snapshot_transfer_ids: self.snapshot_transfer_ids.clone(),
         }
     }
 }
@@ -3891,14 +4139,6 @@ where
 
 fn io_error(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
-}
-
-fn next_snapshot_transfer_id() -> io::Result<u64> {
-    NEXT_SNAPSHOT_TRANSFER_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .map_err(|_| io::Error::other("snapshot transfer id space is exhausted"))
 }
 
 /// The application body one snapshot chunk submits. A section is carried as more chunks, never as
@@ -4084,7 +4324,9 @@ where
                 "snapshot deadline exceeds the monotonic clock range",
             )))
         })?;
-        let transfer_id = next_snapshot_transfer_id()
+        let transfer_id = self
+            .snapshot_transfer_ids
+            .allocate()
             .map_err(unreachable_err)
             .map_err(StreamingError::from)?;
         let Snapshot { meta, snapshot } = snapshot;
@@ -4110,7 +4352,7 @@ where
                 .map_err(unreachable_err)?;
 
             for section_index in 0..manifest.section_count {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let section = snapshot
                     .section(section_index)
                     .await
@@ -4119,7 +4361,7 @@ where
                     .assured("supported targets have a pointer width no larger than u64");
                 let mut offset = 0_u64;
                 for chunk in section.chunks(chunk_bytes) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     self.interconnect
                         .request_with_timeout(
                             &self.target,
@@ -4160,7 +4402,7 @@ where
         };
         tokio::pin!(transfer);
         tokio::pin!(cancel);
-        tokio::select! {
+        nervix_primitives::select! {
             closed = &mut cancel => Err(StreamingError::Closed(closed)),
             result = &mut transfer => result.map_err(StreamingError::from),
         }
@@ -4223,9 +4465,9 @@ impl AppliedConsensusCommand {
         }
     }
 
-    fn conflict(reason: String) -> Self {
+    fn conflict(reason: impl Into<ConsensusConflict>) -> Self {
         Self {
-            response: ConsensusResponse::Conflict(reason),
+            response: ConsensusResponse::Conflict(reason.into()),
             schedule_changed: false,
             domains_changed: false,
             resources_changed: false,
@@ -4246,6 +4488,18 @@ impl AppliedConsensusCommand {
             resources_changed: changes.resources_changed,
             transactions_changed: changes.transactions_changed,
         }
+    }
+
+    fn transaction_report(
+        result: error_stack::Result<ReplicatedTransaction, TransactionMutationError>,
+        changes: StateMachineChanges,
+    ) -> Self {
+        // Raft serializes the exact typed mutation outcome. Report frames stay local to the
+        // state-machine evaluation and the proposer rebuilds a report on receipt.
+        Self::transaction(
+            result.map_err(|report| report.current_context().clone()),
+            changes,
+        )
     }
 }
 
@@ -4401,10 +4655,11 @@ fn apply_consensus_command_at(
         } => {
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if existing.is_expired() {
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' has expired",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceExpired {
+                            reference: execution.reference.clone(),
+                        },
+                    );
                 }
                 if !existing.same_request(execution) {
                     let conflict = existing
@@ -4419,16 +4674,25 @@ fn apply_consensus_command_at(
                                 .verified("a proposed command execution is applying"),
                         )
                         .unwrap_or(CommandExecutionRequestConflict::Position);
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' conflicts by {conflict}",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceConflict {
+                            reference: execution.reference.clone(),
+                            kind: conflict,
+                        },
+                    );
                 }
             } else {
                 if let Err(reason) = state
                     .command_executions
                     .validate_admission(&execution.reference, policy)
                 {
+                    if let CommandExecutionAdmissionError::Expired = reason.current_context() {
+                        return AppliedConsensusCommand::conflict(
+                            ConsensusConflict::ExecutionReferenceExpired {
+                                reference: execution.reference.clone(),
+                            },
+                        );
+                    }
                     return AppliedConsensusCommand::conflict(format!(
                         "command execution reference '{}' {reason}",
                         execution.reference,
@@ -4740,6 +5004,34 @@ fn apply_consensus_command_at(
             }
             changes.resources_changed = true;
         }
+        ConsensusCommand::ApplyRestoreStep {
+            reference,
+            step,
+            effect,
+        } => {
+            if let Err(error) =
+                restore::apply_restore_step(state, reference, step, effect, &mut changes)
+            {
+                return AppliedConsensusCommand::conflict(format!("{error:#}"));
+            }
+        }
+        ConsensusCommand::ImportResourceVersion {
+            reference,
+            key,
+            resource,
+            replica,
+        } => {
+            if let Err(error) = restore::import_resource_version(
+                state,
+                reference,
+                key,
+                resource,
+                replica,
+                &mut changes,
+            ) {
+                return AppliedConsensusCommand::conflict(format!("{error:#}"));
+            }
+        }
         ConsensusCommand::SetNodeCordoned { node_id, cordoned } => {
             if *cordoned {
                 state.cordoned_node_ids.insert(node_id.clone(), ());
@@ -4829,7 +5121,9 @@ fn apply_consensus_command_at(
                         || identity.position.accepted_operations() != transaction.statements.len()
                     {
                         (
-                            Err(TransactionMutationError::ReportMismatch { id: id.clone() }),
+                            Err(Report::new(TransactionMutationError::ReportMismatch {
+                                id: id.clone(),
+                            })),
                             false,
                         )
                     } else if state
@@ -4838,7 +5132,9 @@ fn apply_consensus_command_at(
                         .is_err()
                     {
                         (
-                            Err(TransactionMutationError::ReportConflict { id: id.clone() }),
+                            Err(Report::new(TransactionMutationError::ReportConflict {
+                                id: id.clone(),
+                            })),
                             false,
                         )
                     } else {
@@ -4849,7 +5145,7 @@ fn apply_consensus_command_at(
                 }
             };
             changes.transactions_changed = transaction_changed;
-            return AppliedConsensusCommand::transaction(result, changes);
+            return AppliedConsensusCommand::transaction_report(result, changes);
         }
         ConsensusCommand::TouchTransaction {
             id,
@@ -4864,7 +5160,7 @@ fn apply_consensus_command_at(
                 transaction.touch(owner, *activity, outcome_revision)
             });
             changes.transactions_changed = result.is_ok();
-            return AppliedConsensusCommand::transaction(result, changes);
+            return AppliedConsensusCommand::transaction_report(result, changes);
         }
         ConsensusCommand::StartTransactionCommit {
             id,
@@ -4885,7 +5181,7 @@ fn apply_consensus_command_at(
                 );
             };
             if let Err(error) = transaction.ensure_owner(owner) {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             match transaction.expire(activity.last_activity_at(), outcome_revision) {
                 Ok(true) => {
@@ -4898,7 +5194,7 @@ fn apply_consensus_command_at(
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                    return AppliedConsensusCommand::transaction_report(Err(error), changes);
                 }
             }
             let current_preview = report.identity();
@@ -5003,7 +5299,7 @@ fn apply_consensus_command_at(
                 domain_mutation.clone(),
                 plan_header,
             ) {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             let mut transaction_reports = state.transaction_reports.clone();
             let mut transaction_commit_plans = state.transaction_commit_plans.clone();
@@ -5041,7 +5337,7 @@ fn apply_consensus_command_at(
                 );
             };
             if let Err(error) = transaction.ensure_owner(&failure.owner) {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             match transaction.expire(failure.activity.last_activity_at(), outcome_revision) {
                 Ok(true) => {
@@ -5056,7 +5352,7 @@ fn apply_consensus_command_at(
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                    return AppliedConsensusCommand::transaction_report(Err(error), changes);
                 }
             }
             let current_preview = failure.report.identity();
@@ -5143,10 +5439,7 @@ fn apply_consensus_command_at(
             ) {
                 Ok(decision) => decision,
                 Err(error) => {
-                    return AppliedConsensusCommand::transaction(
-                        Err(error.current_context().clone()),
-                        changes,
-                    );
+                    return AppliedConsensusCommand::transaction_report(Err(error), changes);
                 }
             };
             match failure_decision {
@@ -5205,10 +5498,7 @@ fn apply_consensus_command_at(
                 }
             };
             if let Err(error) = validate_transaction_domain_mutation(state, &transaction) {
-                return AppliedConsensusCommand::transaction(
-                    Err(error.current_context().clone()),
-                    changes,
-                );
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             let effect_revision = match &state.last_applied_log_id {
                 Some(log_id) => log_id.index,
@@ -5273,7 +5563,7 @@ fn apply_consensus_command_at(
                     effect,
                     completion.as_ref(),
                 ) {
-                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                    return AppliedConsensusCommand::transaction_report(Err(error), changes);
                 }
             } else if let Err(error) = validate_transaction_step_without_effect(
                 state.transactions.get(id).verified(
@@ -5284,12 +5574,12 @@ fn apply_consensus_command_at(
                 result,
                 completion.as_ref(),
             ) {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             if let Err(error) =
                 transaction.begin_application(*expected_next_statement, *at, requested_application)
             {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             let Some(preview) = transaction.latest_preview().cloned() else {
                 return AppliedConsensusCommand::transaction(
@@ -5332,18 +5622,15 @@ fn apply_consensus_command_at(
                 );
             };
             if let Err(error) = validate_transaction_domain_mutation(state, &transaction) {
-                return AppliedConsensusCommand::transaction(
-                    Err(error.current_context().clone()),
-                    changes,
-                );
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             let restored_schedule = match outcome {
                 TransactionApplicationOutcome::RolledBack { inputs, .. } => {
                     match transaction_schedule_rollback(state, &transaction, inputs) {
                         Ok(schedule) => Some(schedule),
                         Err(error) => {
-                            return AppliedConsensusCommand::transaction(
-                                Err(error.current_context().clone()),
+                            return AppliedConsensusCommand::transaction_report(
+                                Err(error),
                                 changes,
                             );
                         }
@@ -5360,7 +5647,7 @@ fn apply_consensus_command_at(
                 actual.as_ref().clone(),
                 outcome.error().map(ToOwned::to_owned),
             ) {
-                return AppliedConsensusCommand::transaction(Err(error), changes);
+                return AppliedConsensusCommand::transaction_report(Err(error), changes);
             }
             let Some(preview) = transaction.latest_preview().cloned() else {
                 return AppliedConsensusCommand::transaction(
@@ -5416,7 +5703,7 @@ fn apply_consensus_command_at(
                 state.transaction_reports.retain_revision(preview);
             }
             changes.transactions_changed = result.is_ok();
-            return AppliedConsensusCommand::transaction(result, changes);
+            return AppliedConsensusCommand::transaction_report(result, changes);
         }
         ConsensusCommand::RevertTransaction {
             id,
@@ -5436,7 +5723,7 @@ fn apply_consensus_command_at(
                 state.transaction_reports.retain_revision(preview);
             }
             changes.transactions_changed = result.is_ok();
-            return AppliedConsensusCommand::transaction(result, changes);
+            return AppliedConsensusCommand::transaction_report(result, changes);
         }
         ConsensusCommand::ExpireTransaction { id, at } => {
             let outcome_revision = match &state.last_applied_log_id {
@@ -5461,7 +5748,7 @@ fn apply_consensus_command_at(
                     return AppliedConsensusCommand::transaction(Ok(transaction), changes);
                 }
                 Err(error) => {
-                    return AppliedConsensusCommand::transaction(Err(error), changes);
+                    return AppliedConsensusCommand::transaction_report(Err(error), changes);
                 }
             }
         }
@@ -5496,10 +5783,14 @@ fn apply_consensus_command_at(
 fn mutate_transaction(
     state: &mut StateMachineData,
     id: &str,
-    mutation: impl FnOnce(&mut ReplicatedTransaction) -> Result<(), TransactionMutationError>,
-) -> Result<ReplicatedTransaction, TransactionMutationError> {
+    mutation: impl FnOnce(
+        &mut ReplicatedTransaction,
+    ) -> error_stack::Result<(), TransactionMutationError>,
+) -> error_stack::Result<ReplicatedTransaction, TransactionMutationError> {
     let Some(transaction) = state.transactions.get_mut(id) else {
-        return Err(TransactionMutationError::Unknown { id: id.to_string() });
+        return Err(Report::new(TransactionMutationError::Unknown {
+            id: id.to_string(),
+        }));
     };
     mutation(transaction)?;
     Ok(transaction.clone())
@@ -5537,12 +5828,14 @@ fn validate_transaction_step_contract<'a>(
     next_statement: usize,
     result: &TransactionStepResult,
     completion: Option<&TransactionOutcome>,
-) -> Result<&'a [TransactionStatement], TransactionMutationError> {
+) -> error_stack::Result<&'a [TransactionStatement], TransactionMutationError> {
     let statements = transaction
         .statements
         .get(first_statement..next_statement)
-        .ok_or_else(|| TransactionMutationError::EffectMismatch {
-            id: transaction.id.clone(),
+        .ok_or_else(|| {
+            Report::new(TransactionMutationError::EffectMismatch {
+                id: transaction.id.clone(),
+            })
         })?;
     let success = result.result.success;
     let completion_matches = match completion {
@@ -5561,9 +5854,9 @@ fn validate_transaction_step_contract<'a>(
         Some(TransactionOutcome::Reverted | TransactionOutcome::Expired) => false,
     };
     if statements.is_empty() || !completion_matches {
-        return Err(TransactionMutationError::EffectMismatch {
+        return Err(Report::new(TransactionMutationError::EffectMismatch {
             id: transaction.id.clone(),
-        });
+        }));
     }
     Ok(statements)
 }
@@ -5574,7 +5867,7 @@ fn validate_transaction_step_without_effect(
     next_statement: usize,
     result: &TransactionStepResult,
     completion: Option<&TransactionOutcome>,
-) -> Result<(), TransactionMutationError> {
+) -> error_stack::Result<(), TransactionMutationError> {
     let statements = validate_transaction_step_contract(
         transaction,
         first_statement,
@@ -5590,9 +5883,9 @@ fn validate_transaction_step_without_effect(
         return Ok(());
     }
     if statements.len() != 1 {
-        return Err(TransactionMutationError::EffectMismatch {
+        return Err(Report::new(TransactionMutationError::EffectMismatch {
             id: transaction.id.clone(),
-        });
+        }));
     }
     let statement = &statements[0];
     let valid_no_effect = match &statement.statement {
@@ -5603,9 +5896,9 @@ fn validate_transaction_step_without_effect(
     if valid_no_effect {
         Ok(())
     } else {
-        Err(TransactionMutationError::EffectMismatch {
+        Err(Report::new(TransactionMutationError::EffectMismatch {
             id: transaction.id.clone(),
-        })
+        }))
     }
 }
 
@@ -5617,7 +5910,7 @@ fn validate_transaction_step_effect(
     result: &TransactionStepResult,
     effect: &TransactionStepEffect,
     completion: Option<&TransactionOutcome>,
-) -> Result<(), TransactionMutationError> {
+) -> error_stack::Result<(), TransactionMutationError> {
     let statements = validate_transaction_step_contract(
         transaction,
         first_statement,
@@ -5626,9 +5919,9 @@ fn validate_transaction_step_effect(
         completion,
     )?;
     if !result.result.success {
-        return Err(TransactionMutationError::EffectMismatch {
+        return Err(Report::new(TransactionMutationError::EffectMismatch {
             id: transaction.id.clone(),
-        });
+        }));
     }
     let effect_matches = transaction.domain == *effect.inputs().domain()
         && match effect {
@@ -5674,16 +5967,16 @@ fn validate_transaction_step_effect(
             }
         };
     if !effect_matches {
-        return Err(TransactionMutationError::EffectMismatch {
+        return Err(Report::new(TransactionMutationError::EffectMismatch {
             id: transaction.id.clone(),
-        });
+        }));
     }
 
     match validate_domain_planning_inputs(state, effect.inputs()) {
-        Err(reason) => Err(TransactionMutationError::StepConflict {
+        Err(reason) => Err(Report::new(TransactionMutationError::StepConflict {
             id: transaction.id.clone(),
             reason: reason.to_string(),
-        }),
+        })),
         Ok(()) => Ok(()),
     }
 }
@@ -5799,6 +6092,50 @@ fn read_key<T: durable_batch::StorageDecode>(
 }
 
 #[cfg(test)]
+fn assert_count_command_archives(count: usize) {
+    use archive_count_tests::assert_round_trip;
+
+    let id = "count-transaction".to_string();
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let owner = UserName::parse("operator").assured("the literal follows the name rule");
+    let at = nervix_models::Timestamp::from_unix_nanos(1);
+    let activity = TransactionActivity::from_timeout(at, std::time::Duration::from_secs(60));
+    let transaction = ReplicatedTransaction::open(id.clone(), domain, owner, activity);
+    assert_round_trip(&ConsensusCommand::OpenTransaction {
+        transaction: Box::new(transaction),
+        max_open_transactions: count,
+    });
+    let result = TransactionStepResult {
+        impact: transaction::test_commit_plan(&id, 1).steps.remove(0).impact,
+        result: TransactionCommandResult {
+            success: true,
+            message: "applied".to_string(),
+            diagnostics: Vec::new(),
+            already_existed: false,
+            admission: None,
+        },
+    };
+    for (expected_next_statement, next_statement) in [(count, 0), (0, count)] {
+        assert_round_trip(&ConsensusCommand::AdvanceTransactionCommit {
+            id: id.clone(),
+            expected_next_statement,
+            next_statement,
+            at,
+            result: Box::new(result.clone()),
+            effect: None,
+            completion: None,
+        });
+    }
+    assert_round_trip(&ConsensusCommand::CompleteTransactionApplication {
+        id,
+        expected_next_statement: count,
+        at,
+        actual: Box::new(nervix_models::ActualExecutionStepImpact::applying()),
+        outcome: TransactionApplicationOutcome::Applied,
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -5806,6 +6143,7 @@ mod tests {
         time::Duration,
     };
 
+    use error_stack::Report;
     use fjall::Database;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
@@ -5816,6 +6154,7 @@ mod tests {
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp, TransactionPosition,
     };
+    use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
         entry::RaftEntry,
         storage::{RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
@@ -5827,10 +6166,12 @@ mod tests {
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
         CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
-        CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusResponse,
-        FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure, MembershipMutation,
-        MembershipSnapshot, ProtocolOriginError, ResourceRecords, StateMachineChanges,
-        StateMachineData, TransactionApplicationOutcome, TransactionCommandResult,
+        CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+        ConsensusCommand, ConsensusConflict, ConsensusResponse, FjallLogReader, FjallStore,
+        GossipNode, GossipState, IncomingSnapshotTransfer, LeaderTenure, MembershipMutation,
+        MembershipSnapshot, ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
+        SnapshotTransferError, SnapshotTransferIds, StateMachineChanges, StateMachineData,
+        StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
         TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
         TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
         TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
@@ -5870,6 +6211,81 @@ mod tests {
     }
 
     #[test]
+    fn every_client_of_a_node_draws_a_distinct_snapshot_transfer_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let node = Arc::new(SnapshotTransferIds::new());
+        let replication_client = node.clone();
+        let snapshot_client = node.clone();
+
+        let identities = [
+            replication_client.allocate()?,
+            snapshot_client.allocate()?,
+            replication_client.allocate()?,
+        ];
+        assert_eq!(identities, [1, 2, 3]);
+
+        let other_node = SnapshotTransferIds::new();
+        assert_eq!(
+            other_node.allocate()?,
+            1,
+            "a receiver compares identities from one peer only, so each node counts its own"
+        );
+        assert_eq!(node.allocate()?, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn a_staged_transfer_refuses_the_chunks_of_the_transfer_it_superseded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sender = ClusterNodeName::parse("node-1")?;
+        let meta = SnapshotMeta {
+            last_log_id: None,
+            last_membership: StoredMembership::default(),
+        };
+        let mut staged = IncomingSnapshotTransfer::new(2, 7, VoteOf::new(1, sender), meta, 1, 4);
+        let chunk = |bytes: &[u8]| SnapshotChunkPart {
+            section_index: 0,
+            section_bytes: 4,
+            offset: 0,
+            bytes: bytes.to_vec(),
+        };
+
+        let Err(late) = staged.append_chunk(1, chunk(b"late"), 4, 64) else {
+            panic!("a chunk of the superseded transfer must not be staged");
+        };
+        assert!(matches!(
+            late.current_context(),
+            SnapshotTransferError::Superseded {
+                expected: 2,
+                actual: 1
+            }
+        ));
+
+        let section = staged
+            .append_chunk(2, chunk(b"next"), 4, 64)?
+            .assured("the chunk completes the transfer's only section");
+        assert_eq!(section.bytes, b"next");
+        Ok(())
+    }
+
+    #[test]
+    fn a_node_refuses_a_transfer_once_its_identities_are_exhausted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ids = SnapshotTransferIds {
+            next: AtomicU64::new(u64::MAX - 1),
+        };
+        assert_eq!(ids.allocate()?, u64::MAX - 1);
+
+        for _ in 0..2 {
+            let error = ids
+                .allocate()
+                .expect_err("an exhausted identity space must not repeat an identity");
+            assert_eq!(error.to_string(), "snapshot transfer id space is exhausted");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn raft_request_origin_must_match_the_authenticated_peer()
     -> Result<(), Box<dyn std::error::Error>> {
         let authenticated = ClusterNodeName::parse("node-1")?;
@@ -5901,48 +6317,131 @@ mod tests {
                         leader_node: None,
                     },
                 ));
-            let mapped = ConsensusError::from(error);
-            let ConsensusError::LeadershipLost { leader_id: actual } = mapped else {
+            let report = ConsensusError::raft_write_report(error);
+            let ConsensusError::LeadershipLost { leader_id: actual } = report.current_context()
+            else {
                 panic!("a proposal rejected by a non-leader must preserve leadership loss");
             };
-            assert_eq!(actual, leader_id);
+            assert_eq!(actual, &leader_id);
+            assert!(report.downcast_ref::<super::RaftError<TypeConfig, openraft::error::ClientWriteError<TypeConfig>>>().is_some());
+            assert_eq!(
+                ConsensusError::report_message(&report),
+                report.current_context().to_string()
+            );
         }
         Ok(())
     }
 
     #[test]
-    fn proposal_runtime_failure_retains_write_diagnostic() {
+    fn proposal_runtime_failure_retains_raft_source() {
         let error = super::RaftError::Fatal(openraft::error::Fatal::<TypeConfig>::Stopped);
-        let mapped = ConsensusError::from(error);
-        let ConsensusError::Write(message) = mapped else {
-            panic!("a stopped Raft runtime must report a write failure");
-        };
-        assert_eq!(message, "raft write failed: raft stopped");
+        let report = ConsensusError::raft_write_report(error);
+        assert!(matches!(
+            report.current_context(),
+            ConsensusError::RaftWrite
+        ));
+        assert!(report.downcast_ref::<super::RaftError<TypeConfig, openraft::error::ClientWriteError<TypeConfig>>>().is_some());
+        assert_eq!(
+            ConsensusError::report_message(&report),
+            "raft write failed: raft stopped"
+        );
+    }
+
+    #[test]
+    fn storage_report_retains_io_cause_and_client_diagnostic() {
+        let report = Report::new(std::io::Error::other("disk unavailable"))
+            .change_context(ConsensusError::Storage);
+        assert!(report.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(
+            ConsensusError::report_message(&report),
+            "consensus storage failed: disk unavailable"
+        );
+    }
+
+    #[test]
+    fn consensus_report_message_handles_context_without_a_source_frame() {
+        for context in [
+            ConsensusError::Storage,
+            ConsensusError::RaftStorage,
+            ConsensusError::RaftWrite,
+        ] {
+            let report = Report::new(context);
+            assert_eq!(ConsensusError::report_message(&report), report.to_string());
+        }
+        let other = Report::new(std::io::Error::other("unclassified failure"));
+        assert_eq!(ConsensusError::report_message(&other), other.to_string());
+    }
+
+    #[test]
+    fn snapshot_storage_failure_retains_raft_source_and_storage_classification() {
+        let storage_error = openraft::StorageError::<TypeConfig>::from_io_error(
+            openraft::ErrorSubject::Snapshot(None),
+            openraft::ErrorVerb::Write,
+            std::io::Error::other("snapshot unavailable"),
+        );
+        let expected = format!("consensus storage failed: {storage_error}");
+        let report = ConsensusError::raft_write_report(super::RaftError::Fatal(
+            openraft::error::Fatal::StorageError(storage_error),
+        ));
+        assert!(matches!(
+            report.current_context(),
+            ConsensusError::RaftStorage
+        ));
+        assert!(report.downcast_ref::<super::RaftError<TypeConfig, openraft::error::ClientWriteError<TypeConfig>>>().is_some());
+        assert_eq!(ConsensusError::report_message(&report), expected);
     }
 
     #[test]
     fn transaction_errors_preserve_consensus_and_mutation_outcomes()
     -> Result<(), Box<dyn std::error::Error>> {
         let leader = ClusterNodeName::parse("node-2")?;
-        let consensus = super::ConsensusTransactionError::from(ConsensusError::LeadershipLost {
+        let consensus = Report::new(ConsensusError::LeadershipLost {
             leader_id: Some(leader.clone()),
-        });
+        })
+        .change_context(super::ConsensusTransactionError::Consensus);
         assert!(matches!(
-            consensus,
-            super::ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
+            consensus.downcast_ref::<ConsensusError>(),
+            Some(ConsensusError::LeadershipLost {
                 leader_id: Some(actual),
-            }) if actual == leader
+            }) if actual == &leader
         ));
 
         let mutation = TransactionMutationError::Unknown {
             id: "tx-1".to_string(),
         };
-        let error = super::ConsensusTransactionError::from(mutation.clone());
+        let error = Report::new(super::ConsensusTransactionError::Mutation(mutation.clone()));
         assert!(matches!(
-            error,
-            super::ConsensusTransactionError::Mutation(actual) if actual == mutation
+            error.current_context(),
+            super::ConsensusTransactionError::Mutation(actual) if actual == &mutation
         ));
         Ok(())
+    }
+
+    #[test]
+    fn proposal_response_preserves_conflict_classification() {
+        let conflict = super::Proposer::applied_response(ConsensusResponse::Conflict(
+            ConsensusConflict::Reason("schedule changed".to_string()),
+        ))
+        .expect_err("a rejected state mutation must remain a conflict");
+        assert!(matches!(
+            conflict.current_context(),
+            ConsensusError::Conflict(ConsensusConflict::Reason(reason))
+                if reason == "schedule changed"
+        ));
+
+        let applied = super::Proposer::applied_response(ConsensusResponse::Applied);
+        assert!(applied.is_ok());
+
+        let unexpected = super::Proposer::applied_response(ConsensusResponse::Transaction(
+            Box::new(super::TransactionMutationResponse {
+                result: Err(TransactionMutationError::Unknown { id: "tx-1".into() }),
+            }),
+        ))
+        .expect_err("a non-transaction proposal cannot accept a transaction response");
+        assert!(matches!(
+            unexpected.current_context(),
+            ConsensusError::UnexpectedResponse
+        ));
     }
 
     /// One discovered node whose endpoints have not been published yet.
@@ -5973,6 +6472,7 @@ mod tests {
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
                 .into_iter()
                 .collect(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -5984,6 +6484,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_removal_identifies_a_dead_process_after_it_leaves_live_gossip() {
+        let stopped = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let newest_dead = node_identity("node-2", 3);
+        let mut state = GossipState {
+            live_nodes: vec![undiscovered_node("node-1", 1)],
+            dead_node_ids: BTreeSet::from([stopped.clone()]),
+            dead_node_identities: BTreeSet::from([node_identity("node-2", 2), newest_dead.clone()]),
+        };
+
+        assert_eq!(state.latest_observed_identity(&stopped), Some(newest_dead));
+        assert!(!state.live_node_ids().contains(&stopped));
+
+        state.live_nodes.push(undiscovered_node("node-2", 4));
+        assert_eq!(
+            state.latest_observed_identity(&stopped),
+            Some(node_identity("node-2", 4))
+        );
+    }
+
     /// A voter gossip has neither heard from nor declared dead is unobserved: it may still be
     /// starting. A live voter and a dead one are both observed.
     #[test]
@@ -5992,6 +6512,7 @@ mod tests {
         let state = GossipState {
             live_nodes: vec![undiscovered_node("node-1", 1)],
             dead_node_ids: BTreeSet::from([node("node-2")]),
+            dead_node_identities: BTreeSet::new(),
         };
         let voters = [node("node-1"), node("node-2"), node("node-3")];
 
@@ -6012,6 +6533,7 @@ mod tests {
             dead_node_ids: BTreeSet::from([
                 ClusterNodeName::parse("node-2").expect("valid node name")
             ]),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -6033,6 +6555,7 @@ mod tests {
                 gossip_node("node-2", 20, false),
             ],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -6070,6 +6593,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6086,7 +6610,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6101,6 +6624,7 @@ mod tests {
         let gossip = GossipState {
             live_nodes: vec![undiscovered_node("node-2", 2)],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6125,6 +6649,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6138,7 +6663,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6148,7 +6672,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_endpoint_is_refreshed_before_membership_promotion() {
+    fn changed_learner_address_is_updated_before_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let current_address = "node-2.test:7443".to_string();
@@ -6159,6 +6683,7 @@ mod tests {
                 ..undiscovered_node("node-2", 3)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6172,15 +6697,56 @@ mod tests {
         assert_eq!(
             membership.automatic_mutations(&gossip, &admission_fences),
             vec![
+                MembershipMutation::UpdateAddress {
+                    node_id: joining.clone(),
+                    endpoint: replacement_endpoint.clone(),
+                },
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: replacement_endpoint,
-                    refresh: true,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_restarted_voter_updates_its_address_once() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let restarted = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let endpoint = node_endpoint("node-2.test:8443");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(endpoint.clone()),
+                ..undiscovered_node("node-2", 3)
+            }],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let mut membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone(), restarted.clone()]),
+            nodes: BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (restarted.clone(), "node-2.test:7443".to_string()),
+            ]),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip, &admission_fences),
+            vec![MembershipMutation::UpdateAddress {
+                node_id: restarted.clone(),
+                endpoint: endpoint.clone(),
+            }]
+        );
+
+        membership.nodes.insert(restarted, endpoint.to_string());
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
         );
     }
 
@@ -6194,6 +6760,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6219,7 +6786,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6639,7 +7205,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' schedule changed".to_string()
+            ))
         );
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&committed));
         assert!(!applied.schedule_changed);
@@ -6655,7 +7223,7 @@ mod tests {
             BTreeMap::from([(node.clone(), crate::Node::new("https://node-1.invalid"))]),
         )?;
         state.last_membership =
-            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+            nervix_primitives::sync::Arc::new(openraft::StoredMembership::new(None, membership));
         let stale = captured_inputs(&state, "tenant");
         apply_consensus_command(
             &mut state,
@@ -6676,7 +7244,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' node eligibility changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' node eligibility changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_none());
         assert!(!applied.schedule_changed);
@@ -6694,7 +7264,7 @@ mod tests {
             BTreeMap::from([(node, crate::Node::new("https://node-1.invalid"))]),
         )?;
         state.last_membership =
-            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+            nervix_primitives::sync::Arc::new(openraft::StoredMembership::new(None, membership));
 
         let applied = apply_consensus_command(
             &mut state,
@@ -6707,7 +7277,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' membership changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' membership changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_none());
         assert!(!applied.schedule_changed);
@@ -6778,7 +7350,9 @@ mod tests {
         );
         assert_eq!(
             broader.response,
-            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' schedule changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_some());
     }
@@ -6806,9 +7380,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict(
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
                 "automatic schedule decision leader tenure changed".to_string()
-            )
+            ))
         );
         assert_eq!(state.schedule.domains.len(), 0);
         assert!(!applied.schedule_changed);
@@ -6948,7 +7522,7 @@ mod tests {
         fn assert_identity_conflict(
             state: &mut StateMachineData,
             execution: CommandExecution,
-            expected_kind: &str,
+            expected_kind: CommandExecutionRequestConflict,
         ) {
             let reference = execution.reference.clone();
             let response = apply_consensus_command(
@@ -6959,12 +7533,13 @@ mod tests {
                     policy: command_policy(10),
                 },
             );
-            let expected =
-                format!("command execution reference '{reference}' conflicts by {expected_kind}");
-            assert!(matches!(
+            assert_eq!(
                 response.response,
-                ConsensusResponse::Conflict(reason) if reason == expected
-            ));
+                ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+                    reference,
+                    kind: expected_kind,
+                })
+            );
         }
 
         let reference = command_reference(1);
@@ -6987,7 +7562,11 @@ mod tests {
         assert_eq!(state.command_executions.len(), 1);
 
         let conflicting = execution(&reference, owner.clone(), domain("tenant"), None, [8; 32]);
-        assert_identity_conflict(&mut state, conflicting, "content");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Content,
+        );
 
         let conflicting = execution(
             &reference,
@@ -6996,7 +7575,11 @@ mod tests {
             None,
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "domain");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Domain,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7006,7 +7589,11 @@ mod tests {
             None,
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "owner");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Owner,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7015,7 +7602,11 @@ mod tests {
             Some(TransactionPosition::new(1)),
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "position");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Position,
+        );
 
         let result = CommandExecutionResult {
             disposition: CommandExecutionDisposition::Completed {
@@ -7026,6 +7617,8 @@ mod tests {
             statements: Vec::new(),
             transaction: None,
             transaction_admission: None,
+            backup: None,
+            restore: None,
         };
         for terminal in [result.clone(), result.clone()] {
             let response = apply_consensus_command(
@@ -7081,6 +7674,35 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReclaimCommandExecutions {
                 finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                retry_fence: Timestamp::from_unix_nanos(1_699_999_999_000_000_000),
+            },
+        );
+        assert!(
+            state
+                .command_executions
+                .get(&reference)
+                .verified("the retry fence has not reached this execution reference")
+                .is_expired()
+        );
+        let retained_retry = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(original.clone()),
+                mutation_domains: BTreeSet::new(),
+                policy: command_policy(10),
+            },
+        );
+        assert_eq!(
+            retained_retry.response,
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+                reference: reference.clone(),
+            })
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReclaimCommandExecutions {
+                finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
                 retry_fence: Timestamp::from_unix_nanos(1_700_000_020_000_000_000),
             },
         );
@@ -7094,10 +7716,12 @@ mod tests {
                 policy: command_policy(10),
             },
         );
-        assert!(matches!(
+        assert_eq!(
             response.response,
-            ConsensusResponse::Conflict(reason) if reason.contains("has expired")
-        ));
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+                reference: reference.clone(),
+            })
+        );
         assert!(state.command_executions.get(&reference).is_none());
     }
 
@@ -7165,7 +7789,7 @@ mod tests {
         );
         assert!(matches!(
             conflict.response,
-            ConsensusResponse::Conflict(reason)
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(reason))
                 if reason.contains(&format!("mutation is owned by command '{}'", first.reference))
         ));
         assert!(!state.command_executions.contains_key(&second.reference));
@@ -7273,6 +7897,8 @@ mod tests {
                     statements: Vec::new(),
                     transaction: None,
                     transaction_admission: None,
+                    backup: None,
+                    restore: None,
                 }),
             },
         );
@@ -7364,14 +7990,17 @@ mod tests {
         let mut changed = first;
         changed.request.source = "STOP;".to_string();
         assert!(matches!(
-            transaction.queue(
-                &owner,
-                &domain_id,
-                transaction_activity(4),
-                4,
-                changed,
-                limits,
-            ),
+            transaction
+                .queue(
+                    &owner,
+                    &domain_id,
+                    transaction_activity(4),
+                    4,
+                    changed,
+                    limits,
+                )
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::RequestConflict { .. })
         ));
         assert_eq!(
@@ -7387,14 +8016,17 @@ mod tests {
             statement: Statement::StopDomain(nervix_models::StopDomain),
         });
         assert!(matches!(
-            transaction.queue(
-                &owner,
-                &domain_id,
-                transaction_activity(5),
-                5,
-                second.clone(),
-                limits,
-            ),
+            transaction
+                .queue(
+                    &owner,
+                    &domain_id,
+                    transaction_activity(5),
+                    5,
+                    second.clone(),
+                    limits,
+                )
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::PositionConflict {
                 expected: 0,
                 actual: 1,
@@ -7597,6 +8229,154 @@ mod tests {
     }
 
     #[test]
+    fn transaction_step_validation_reports_exact_mutation_refusals() {
+        let missing =
+            super::mutate_transaction(&mut StateMachineData::default(), "missing", |_| Ok(()))
+                .expect_err("an unknown transaction cannot be mutated");
+        assert!(matches!(
+            missing.current_context(),
+            TransactionMutationError::Unknown { id } if id == "missing"
+        ));
+
+        let before = vhost_schedule("tenant", 1);
+        let after = vhost_schedule("tenant", 2);
+        let mut state = StateMachineData::default();
+        applying_model_step(&mut state, &before, &after);
+        let transaction = state
+            .transactions
+            .get("tx-1")
+            .expect("transaction remains retained");
+        let TransactionState::Committing(progress) = &transaction.state else {
+            panic!("the transaction must still be committing");
+        };
+        let applying = progress.applying.as_ref().expect("the step is applying");
+        let effect = applying
+            .effect
+            .as_ref()
+            .expect("the model step has an effect");
+        let completion = applying.completion.as_ref();
+
+        let range = super::validate_transaction_step_contract(
+            transaction,
+            2,
+            3,
+            &applying.result,
+            completion,
+        )
+        .expect_err("the step cannot address an unqueued statement");
+        assert!(matches!(
+            range.current_context(),
+            TransactionMutationError::EffectMismatch { .. }
+        ));
+        let completion_mismatch =
+            super::validate_transaction_step_contract(transaction, 0, 1, &applying.result, None)
+                .expect_err("the last successful step must name its completion");
+        assert!(matches!(
+            completion_mismatch.current_context(),
+            TransactionMutationError::EffectMismatch { .. }
+        ));
+
+        let changed_inputs = super::validate_transaction_step_effect(
+            &state,
+            transaction,
+            0,
+            1,
+            &applying.result,
+            effect,
+            completion,
+        )
+        .expect_err("the schedule after applying the step no longer matches its captured inputs");
+        assert!(matches!(
+            changed_inputs.current_context(),
+            TransactionMutationError::StepConflict { .. }
+        ));
+
+        let wrong_domain = TransactionStepEffect::ReplaceDomainSchedule {
+            inputs: captured_inputs(&state, "another"),
+            schedule: Some(Box::new(after)),
+        };
+        let wrong_effect = super::validate_transaction_step_effect(
+            &state,
+            transaction,
+            0,
+            1,
+            &applying.result,
+            &wrong_domain,
+            completion,
+        )
+        .expect_err("a step cannot publish an effect in another domain");
+        assert!(matches!(
+            wrong_effect.current_context(),
+            TransactionMutationError::EffectMismatch { .. }
+        ));
+
+        let owner = UserName::parse("app_user").expect("the test owner is a valid name");
+        let domain_id = domain("tenant");
+        let mut listing = ReplicatedTransaction::open(
+            "listing".to_string(),
+            domain_id.clone(),
+            owner.clone(),
+            transaction_activity(1),
+        );
+        for (position, at, revision) in [(0, 2, 2), (1, 3, 3)] {
+            listing
+                .queue(
+                    &owner,
+                    &domain_id,
+                    transaction_activity(at),
+                    revision,
+                    TransactionStatement::test_admitted(TransactionStatementRequest {
+                        request_reference: nervix_models::CommandExecutionReference::parse(
+                            format!("listing.{position}"),
+                        )
+                        .expect("the test request reference is valid"),
+                        expected_position: position,
+                        source: "SHOW TRANSACTIONS".to_string(),
+                        statement: Statement::ShowTransactions(nervix_models::ShowTransactions),
+                    }),
+                    TransactionQueueLimits {
+                        max_statements: 2,
+                        max_source_bytes: 1024,
+                    },
+                )
+                .expect("the test listing statement fits its queue limits");
+        }
+        let without_effect = super::validate_transaction_step_without_effect(
+            &listing,
+            0,
+            2,
+            &applying.result,
+            Some(&TransactionOutcome::Committed),
+        )
+        .expect_err("two read-only statements cannot complete as one no-effect step");
+        assert!(matches!(
+            without_effect.current_context(),
+            TransactionMutationError::EffectMismatch { .. }
+        ));
+
+        let mut failed_result = applying.result.clone();
+        failed_result.result.success = false;
+        failed_result.result.message = "failed".to_string();
+        let failed = super::validate_transaction_step_effect(
+            &state,
+            transaction,
+            0,
+            1,
+            &failed_result,
+            effect,
+            Some(&TransactionOutcome::Failed {
+                failing_step: 0,
+                error: "failed".to_string(),
+            }),
+        )
+        .expect_err("a failed command cannot publish a committed effect");
+        assert!(matches!(
+            failed.current_context(),
+            TransactionMutationError::EffectMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn a_rolled_back_model_step_restores_the_schedule_it_replaced_with_its_failure() {
         let domain_id = domain("tenant");
         let before = vhost_schedule("tenant", 1);
@@ -7730,6 +8510,28 @@ mod tests {
                 max_source_bytes: 1024,
             },
         };
+        let mut mismatched = command.clone();
+        let ConsensusCommand::QueueTransactionStatement { report, .. } = &mut mismatched else {
+            panic!("the test command queues a statement");
+        };
+        **report = crate::transaction_report::test_report_archive("tx-preview", &domain_id, 2);
+        let rejected = apply_consensus_command(&mut state, &mismatched);
+        let ConsensusResponse::Transaction(rejected) = rejected.response else {
+            panic!("a rejected queue operation keeps the typed transaction response");
+        };
+        assert!(matches!(
+            rejected.result,
+            Err(TransactionMutationError::ReportMismatch { id }) if id == "tx-preview"
+        ));
+        assert!(
+            state
+                .transactions
+                .get("tx-preview")
+                .verified("the rejected queue operation leaves the transaction open")
+                .statements
+                .is_empty()
+        );
+
         let first = apply_consensus_command(&mut state, &command);
         let ConsensusResponse::Transaction(first) = first.response else {
             panic!("transaction append must return its replicated transaction");
@@ -8471,7 +9273,7 @@ mod tests {
             }]
         );
         assert!(
-            !state.resources.is_declared(
+            !state.resources.declares(
                 &domain("other"),
                 &ResourceName::parse("fraud_model").expect("valid resource name")
             ),
@@ -8644,7 +9446,7 @@ mod tests {
         let _ = <FjallLogReader as AmbiguousIfImpl<_>>::probe;
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn log_reader_returns_the_requested_range_in_index_order() {
         let mut store =
             FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
@@ -8694,7 +9496,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn log_reader_observes_writes_the_storage_owner_makes() {
         let mut store =
             FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
@@ -8751,7 +9553,7 @@ mod durability_tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn failed_application_does_not_publish_state_or_applied_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;

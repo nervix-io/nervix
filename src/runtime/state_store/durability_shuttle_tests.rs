@@ -3,22 +3,24 @@
 //! Layer: test harness.
 //! - **Owns.** The coverage, exclusion, liveness and fail-stop invariants the barrier is held to
 //!   while writers that applied writes wait for, share, fail and abandon synchronizations.
-//! - **Depends on.** The production durability barrier and the server Shuttle runner.
+//! - **Depends on.** The production durability barrier and the model harness's Shuttle runner.
 //! - **Must not know.** The database a synchronization flushes, or what the writes hold.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records.
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicBool as StdAtomicBool, AtomicU64 as StdAtomicU64, Ordering as StdOrdering},
-};
-
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records.
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_interleavings;
+use nervix_primitives::{
+    sync::StdArc,
+    unmodeled::sync::atomic::{
+        AtomicBool as StdAtomicBool, AtomicU64 as StdAtomicU64, Ordering as StdOrdering,
+    },
+};
 use nervix_recovery::Discarded as _;
 
 use super::DurabilityBarrier;
-use crate::{runtime::state_store::RuntimePersistenceError, shuttle_test::check_interleavings};
+use crate::runtime::state_store::RuntimePersistenceError;
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";
@@ -72,7 +74,7 @@ impl BarrierRecord {
         let covered_writes = self.applied.load(StdOrdering::SeqCst);
         let running = RunningRound::enter(&self.running);
         let round = self.started.fetch_add(1, StdOrdering::SeqCst);
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         drop(running);
         if round == 0
             && let FailingRound::First = self.failing
@@ -146,7 +148,10 @@ fn writers_share_synchronizations(failing: FailingRound) {
         let record = StdArc::new(BarrierRecord::new(failing));
         let mut writers = Vec::new();
         for _ in 0..WRITERS {
-            writers.push(tokio::spawn(write(barrier.clone(), record.clone())));
+            writers.push(nervix_primitives::task::spawn(write(
+                barrier.clone(),
+                record.clone(),
+            )));
         }
         for writer in writers {
             writer.await.assured(MODEL_TASK_JOINS);
@@ -177,22 +182,22 @@ fn an_abandoned_synchronization_frees_the_barrier() {
     shuttle::future::block_on(async {
         let barrier = StdArc::new(DurabilityBarrier::new());
         let record = StdArc::new(BarrierRecord::new(FailingRound::None));
-        let (abandon, abandoned) = tokio::sync::oneshot::channel::<()>();
-        let abandoning = tokio::spawn({
+        let (abandon, abandoned) = nervix_primitives::sync::oneshot::channel::<()>();
+        let abandoning = nervix_primitives::task::spawn({
             let barrier = barrier.clone();
             let record = record.clone();
             async move {
                 // Shuttle's depth-first search supplies no random data, so the branches are
                 // polled in order rather than in tokio's random order.
-                tokio::select! {
+                nervix_primitives::select! {
                     biased;
                     () = write(barrier, record) => {}
                     _ = abandoned => {}
                 }
             }
         });
-        let waiting = tokio::spawn(write(barrier.clone(), record.clone()));
-        tokio::task::yield_now().await;
+        let waiting = nervix_primitives::task::spawn(write(barrier.clone(), record.clone()));
+        nervix_primitives::task::yield_now().await;
         abandon
             .send(())
             .discarded("the abandoning writer may already have finished on its own");

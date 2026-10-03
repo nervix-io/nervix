@@ -12,12 +12,23 @@ use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError},
     command::{AttachOutcome, CommandOutcome},
     common::RequestId,
+    consumer::{
+        CloseEmitterOutcome, OpenEmitterOutcome, ReadEmitterBatchOutcome, SettleEmitterBatchOutcome,
+    },
     domain::{
         ClusterObserved, DomainList, DomainSelection, DomainSnapshotObserved, DomainsObserved,
+    },
+    domain_clock::{
+        DomainClockAttachOutcome, DomainClockAttachmentEnded, DomainClockDetachOutcome,
+        DomainClockObserved, DomainClockTicked,
     },
     event::{LeadershipObserved, ServerNotice, SessionEnding},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
     limits::SessionLimits,
+    producer::{
+        CloseIngestorOutcome, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
+        SubmissionOutcome,
+    },
     reply::{
         CancelOutcome, InspectionOutcome, RequestCancelled, RequestRejected, SubscribeOutcome,
         SuggestOutcome, UnsubscribeOutcome,
@@ -44,6 +55,15 @@ pub enum ReplyBody {
     Cancel(CancelOutcome),
     Cancelled(RequestCancelled),
     Rejected(RequestRejected),
+    DomainClockAttach(DomainClockAttachOutcome),
+    DomainClockDetach(DomainClockDetachOutcome),
+    OpenIngestor(OpenIngestorOutcome),
+    Submission(SubmissionOutcome),
+    CloseIngestor(CloseIngestorOutcome),
+    OpenEmitter(OpenEmitterOutcome),
+    ReadEmitterBatch(ReadEmitterBatchOutcome),
+    SettleEmitterBatch(SettleEmitterBatchOutcome),
+    CloseEmitter(CloseEmitterOutcome),
 }
 
 /// A complete reply to one request.
@@ -80,6 +100,15 @@ impl Reply {
             ReplyBody::Cancel(outcome) => outcome.encode_body(&mut encoder),
             ReplyBody::Cancelled(cancelled) => cancelled.encode_body(&mut encoder),
             ReplyBody::Rejected(rejected) => rejected.encode_body(&mut encoder)?,
+            ReplyBody::DomainClockAttach(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::DomainClockDetach(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::OpenIngestor(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::Submission(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::CloseIngestor(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::OpenEmitter(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::ReadEmitterBatch(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::SettleEmitterBatch(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::CloseEmitter(outcome) => outcome.encode_body(&mut encoder)?,
         };
         let reply = wire::Reply::create(
             encoder.fbb(),
@@ -102,6 +131,7 @@ impl Reply {
     }
 
     fn decode(
+        frame: &VerifiedFrame<ServerFrame>,
         decoder: Decoder<'_>,
         request_id: RequestId,
         reply: wire::Reply<'_>,
@@ -158,6 +188,59 @@ impl Reply {
                 decoder,
                 reply_member(reply.body_as_request_rejected()),
             )?),
+            wire::ReplyBody::DomainClockAttachOutcome => {
+                ReplyBody::DomainClockAttach(DomainClockAttachOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_domain_clock_attach_outcome()),
+                )?)
+            }
+            wire::ReplyBody::DomainClockDetachOutcome => {
+                ReplyBody::DomainClockDetach(DomainClockDetachOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_domain_clock_detach_outcome()),
+                )?)
+            }
+            wire::ReplyBody::OpenIngestorOutcome => {
+                ReplyBody::OpenIngestor(OpenIngestorOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_open_ingestor_outcome()),
+                )?)
+            }
+            wire::ReplyBody::SubmissionOutcome => ReplyBody::Submission(SubmissionOutcome::decode(
+                decoder,
+                reply_member(reply.body_as_submission_outcome()),
+            )?),
+            wire::ReplyBody::CloseIngestorOutcome => {
+                ReplyBody::CloseIngestor(CloseIngestorOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_close_ingestor_outcome()),
+                )?)
+            }
+            wire::ReplyBody::OpenEmitterOutcome => {
+                ReplyBody::OpenEmitter(OpenEmitterOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_open_emitter_outcome()),
+                )?)
+            }
+            wire::ReplyBody::ReadEmitterBatchOutcome => {
+                ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome::decode(
+                    frame,
+                    decoder,
+                    reply_member(reply.body_as_read_emitter_batch_outcome()),
+                )?)
+            }
+            wire::ReplyBody::SettleEmitterBatchOutcome => {
+                ReplyBody::SettleEmitterBatch(SettleEmitterBatchOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_settle_emitter_batch_outcome()),
+                )?)
+            }
+            wire::ReplyBody::CloseEmitterOutcome => {
+                ReplyBody::CloseEmitter(CloseEmitterOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_close_emitter_outcome()),
+                )?)
+            }
             undeclared => return Err(decoder.unknown_union("Reply.body", undeclared.0)),
         };
         Ok(Self { request_id, body })
@@ -182,6 +265,11 @@ pub enum ServerEvent {
     SubscriptionRowsSkipped(SubscriptionRowsSkipped),
     SubscriptionEnded(SubscriptionEnded),
     SessionEnding(SessionEnding),
+    DomainClockObserved(DomainClockObserved),
+    DomainClockTicked(DomainClockTicked),
+    DomainClockAttachmentEnded(DomainClockAttachmentEnded),
+    ProducerAdmissionChanged(ProducerAdmissionChanged),
+    ProducerEnded(ProducerEnded),
 }
 
 /// Everything a server frame can hold.
@@ -206,7 +294,9 @@ impl ServerMessage {
                     let part = TransferPart::decode(frame, decoder, request_id, part)?;
                     return Ok(Self::TransferPart(part));
                 }
-                return Ok(Self::Reply(Reply::decode(decoder, request_id, reply)?));
+                return Ok(Self::Reply(Reply::decode(
+                    frame, decoder, request_id, reply,
+                )?));
             }
             wire::ServerBody::ServerNotice => ServerEvent::Notice(ServerNotice::decode(
                 decoder,
@@ -260,6 +350,34 @@ impl ServerMessage {
             wire::ServerBody::SessionEnding => ServerEvent::SessionEnding(SessionEnding::decode(
                 decoder,
                 server_member(message.body_as_session_ending()),
+            )?),
+            wire::ServerBody::DomainClockObserved => {
+                ServerEvent::DomainClockObserved(DomainClockObserved::decode(
+                    decoder,
+                    server_member(message.body_as_domain_clock_observed()),
+                )?)
+            }
+            wire::ServerBody::DomainClockTicked => {
+                ServerEvent::DomainClockTicked(DomainClockTicked::decode(
+                    decoder,
+                    server_member(message.body_as_domain_clock_ticked()),
+                )?)
+            }
+            wire::ServerBody::DomainClockAttachmentEnded => {
+                ServerEvent::DomainClockAttachmentEnded(DomainClockAttachmentEnded::decode(
+                    decoder,
+                    server_member(message.body_as_domain_clock_attachment_ended()),
+                )?)
+            }
+            wire::ServerBody::ProducerAdmissionChanged => {
+                ServerEvent::ProducerAdmissionChanged(ProducerAdmissionChanged::decode(
+                    decoder,
+                    server_member(message.body_as_producer_admission_changed()),
+                )?)
+            }
+            wire::ServerBody::ProducerEnded => ServerEvent::ProducerEnded(ProducerEnded::decode(
+                decoder,
+                server_member(message.body_as_producer_ended()),
             )?),
             undeclared => {
                 return Err(decoder.unknown_union("ServerMessage.body", undeclared.0));

@@ -8,6 +8,10 @@ x-nervix-environment: &nervix-environment
   NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
   NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
   NERVIX_REPLICA_COUNT: "0"
+  NERVIX_RAFT_HEARTBEAT_INTERVAL: ${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}
+  NERVIX_RAFT_ELECTION_TIMEOUT_MIN: ${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}
+  NERVIX_RAFT_ELECTION_TIMEOUT_MAX: ${CHAOS_RAFT_ELECTION_TIMEOUT_MAX:-3000ms}
+  NERVIX_NODE_UNAVAILABILITY_TIMEOUT: ${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}
   RUST_LOG: nervix=info
 
 x-nervix-service: &nervix-service
@@ -20,15 +24,13 @@ x-nervix-service: &nervix-service
     options:
       max-file: "2"
       max-size: 2m
-  networks:
-    - chaos
 
 x-run-labels: &run-labels
   io.nervix.chaos.run: ${CHAOS_RUN_ID:?CHAOS_RUN_ID is required}
 
 services:
   broker:
-    image: ${CHAOS_KAFKA_IMAGE:-apache/kafka:3.9.1}
+    image: ${CHAOS_KAFKA_IMAGE:?CHAOS_KAFKA_IMAGE is required}
     hostname: broker
     restart: "no"
     labels:
@@ -59,6 +61,9 @@ services:
   nervix-1:
     <<: *nervix-service
     hostname: nervix-1
+    networks:
+      chaos:
+        ipv4_address: ${CHAOS_NODE_1_ADDRESS:?CHAOS_NODE_1_ADDRESS is required}
     labels:
       <<: *run-labels
       io.nervix.chaos.role: node
@@ -80,6 +85,9 @@ services:
   nervix-2:
     <<: *nervix-service
     hostname: nervix-2
+    networks:
+      chaos:
+        ipv4_address: ${CHAOS_NODE_2_ADDRESS:?CHAOS_NODE_2_ADDRESS is required}
     profiles:
       - three-node
     depends_on:
@@ -104,6 +112,9 @@ services:
   nervix-3:
     <<: *nervix-service
     hostname: nervix-3
+    networks:
+      chaos:
+        ipv4_address: ${CHAOS_NODE_3_ADDRESS:?CHAOS_NODE_3_ADDRESS is required}
     profiles:
       - three-node
     depends_on:
@@ -141,7 +152,7 @@ services:
       - chaos
 
   broker-admin:
-    image: ${CHAOS_KAFKA_IMAGE:-apache/kafka:3.9.1}
+    image: ${CHAOS_KAFKA_IMAGE:?CHAOS_KAFKA_IMAGE is required}
     profiles:
       - tools
     entrypoint: []
@@ -152,7 +163,7 @@ services:
       - chaos
 
   kcat:
-    image: ${CHAOS_KCAT_IMAGE:-edenhill/kcat:1.7.1}
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
     profiles:
       - tools
     entrypoint:
@@ -164,7 +175,7 @@ services:
       - chaos
 
   probe:
-    image: ${CHAOS_PROBE_IMAGE:-alpine:3.22}
+    image: ${CHAOS_PROBE_IMAGE:?CHAOS_PROBE_IMAGE is required}
     profiles:
       - tools
     entrypoint: []
@@ -175,7 +186,7 @@ services:
       - chaos
 
   load:
-    image: ${CHAOS_KCAT_IMAGE:-edenhill/kcat:1.7.1}
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
     profiles:
       - rolling
     entrypoint:
@@ -185,7 +196,7 @@ services:
       <<: *run-labels
       io.nervix.chaos.role: load
     environment:
-      CHAOS_LOAD_INTERVAL: "0.5"
+      CHAOS_LOAD_INTERVAL: ${CHAOS_LOAD_INTERVAL:-0.5}
     volumes:
       - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
       - ${CHAOS_LOAD_FILE:?CHAOS_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
@@ -199,7 +210,7 @@ services:
       - chaos
 
   observer:
-    image: ${CHAOS_PROBE_IMAGE:-alpine:3.22}
+    image: ${CHAOS_PROBE_IMAGE:?CHAOS_PROBE_IMAGE is required}
     profiles:
       - rolling
     entrypoint:
@@ -221,9 +232,15 @@ services:
       - chaos
 
 networks:
+  # Node addresses are fixed per run so peer-side partition rules keep matching a node across its
+  # restart. Dynamic addresses for every other container come from a range that excludes them.
   chaos:
     labels:
       <<: *run-labels
+    ipam:
+      config:
+        - subnet: ${CHAOS_SUBNET:?CHAOS_SUBNET is required}
+          ip_range: ${CHAOS_DYNAMIC_RANGE:?CHAOS_DYNAMIC_RANGE is required}
 
 volumes:
   node-1-data:

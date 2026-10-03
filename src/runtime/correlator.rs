@@ -5,6 +5,7 @@
 //! - **Depends on.** Validated correlator plans, Arrow batches and bound domain execution time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -199,11 +200,15 @@ pub(super) enum CorrelatorSide {
     Right,
 }
 
+// Counted per thread so a test observes only the programs it ran itself, while the rest of the
+// suite correlates in parallel.
 #[cfg(test)]
-pub(super) static CORRELATOR_WHERE_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(super) static CORRELATOR_OUTPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+nervix_primitives::thread_local! {
+    pub(super) static CORRELATOR_WHERE_VM_EXECUTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(super) static CORRELATOR_OUTPUT_VM_EXECUTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct CorrelatorMaterializedState {
@@ -414,13 +419,13 @@ pub(super) fn store_correlator_unmatched_incoming(
 }
 
 pub(super) async fn correlate_incoming_message(
+    run: ProgramRun<'_>,
     processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
     state: &mut CorrelatorBranchState,
     incoming: CorrelatorPendingMessage,
-    execution_now: Timestamp,
 ) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
     let opposite_pending = take_correlator_opposite_pending(state, incoming_side);
     if opposite_pending.is_empty() {
@@ -428,18 +433,19 @@ pub(super) async fn correlate_incoming_message(
         return Ok(None);
     }
     let evaluated = evaluate_correlator_where_matches(
+        run.executor,
         processor,
         program,
         incoming_side,
         &incoming,
         &opposite_pending,
-        execution_now,
+        run.now,
     )
     .await?;
 
     let mut matching = Vec::new();
     let mut remaining = Vec::new();
-    for (pending, matched) in opposite_pending.into_iter().zip(evaluated) {
+    for (pending, matched) in opposite_pending.into_iter().zip(evaluated.iter()) {
         if matched {
             matching.push(pending);
         } else {
@@ -468,14 +474,22 @@ pub(super) async fn correlate_incoming_message(
     }))
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the VM selected-row iterator is the bounded row selection for this admitted \
+                  batch"
+    )
+)]
 pub(super) async fn evaluate_correlator_where_matches(
+    executor: &Executor,
     processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     incoming: &CorrelatorPendingMessage,
     candidates: &[CorrelatorPendingMessage],
     execution_now: Timestamp,
-) -> Result<Vec<bool>, (String, Vec<AckSet>)> {
+) -> Result<BooleanBuffer, (String, Vec<AckSet>)> {
     let error_acks = || {
         vec![AckSet::merged(
             std::iter::once(incoming.message.acks.attached()).chain(
@@ -496,7 +510,7 @@ pub(super) async fn evaluate_correlator_where_matches(
         CorrelatorSide::Right => (&candidate_rows, &incoming_rows),
     };
     let Some(first_left) = left_rows.first() else {
-        return Ok(Vec::new());
+        return Ok(BooleanBuffer::new_unset(0));
     };
     let left =
         RuntimeRecordBatch::from_rows(first_left.batch().schema(), left_rows.iter().copied())
@@ -511,7 +525,7 @@ pub(super) async fn evaluate_correlator_where_matches(
                 )
             })?;
     let Some(first_right) = right_rows.first() else {
-        return Ok(Vec::new());
+        return Ok(BooleanBuffer::new_unset(0));
     };
     let right =
         RuntimeRecordBatch::from_rows(first_right.batch().schema(), right_rows.iter().copied())
@@ -559,8 +573,9 @@ pub(super) async fn evaluate_correlator_where_matches(
         )
     })?;
     #[cfg(test)]
-    CORRELATOR_WHERE_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
+        executor,
         &program.program,
         &input,
         &VmExecutionContext {
@@ -579,9 +594,10 @@ pub(super) async fn evaluate_correlator_where_matches(
             error_acks(),
         )
     })?;
-    let mut matching = vec![false; candidates.len()];
+    let mut matching = BooleanBufferBuilder::new(candidates.len());
+    matching.append_n(candidates.len(), false);
     for row in result.selected_rows.iter() {
-        let Some(matched) = matching.get_mut(row) else {
+        if row >= candidates.len() {
             return Err((
                 format!(
                     "correlator '{}' CORRELATE WHERE selected row {} outside its {} candidate \
@@ -592,10 +608,10 @@ pub(super) async fn evaluate_correlator_where_matches(
                 ),
                 error_acks(),
             ));
-        };
-        *matched = true;
+        }
+        matching.set_bit(row, true);
     }
-    Ok(matching)
+    Ok(matching.finish())
 }
 
 pub(super) fn correlator_input_batch(
@@ -701,7 +717,14 @@ pub(super) fn correlator_output_batch_errors(
         .collect()
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow row selection and the bounded executor own their generic effects"
+    )
+)]
 pub(super) async fn evaluate_correlator_output_batch(
+    executor: &Executor,
     processor: &ModelName,
     program: &CompiledCorrelatorOutputProgram,
     matched: &CorrelatorMatchedBatch,
@@ -728,6 +751,7 @@ pub(super) async fn evaluate_correlator_output_batch(
     }
     let side_inputs = HashMap::default();
     let lookup_columns = match compute_lookup_hash_map_columns(
+        executor,
         &program.program,
         &FilterMapBatchInputs {
             carrier: &matched.carrier,
@@ -793,8 +817,9 @@ pub(super) async fn evaluate_correlator_output_batch(
         }
     };
     #[cfg(test)]
-    CORRELATOR_OUTPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = match execute_program_with_selection_in_context(
+        executor,
         &program.program.compiled,
         &input,
         &VmExecutionContext {
@@ -832,9 +857,10 @@ pub(super) async fn evaluate_correlator_output_batch(
             MessageErrorOperation::Finalize,
         ));
     }
-    let mut seen = vec![false; row_count];
+    let mut seen = BooleanBufferBuilder::new(row_count);
+    seen.append_n(row_count, false);
     for input_row in result.selected_rows.iter() {
-        let Some(selected) = seen.get_mut(input_row) else {
+        if input_row >= row_count {
             return Ok(correlator_output_batch_errors(
                 processor,
                 matched,
@@ -844,8 +870,8 @@ pub(super) async fn evaluate_correlator_output_batch(
                 &format!("TO output selected row {input_row} outside its {row_count} correlations"),
                 MessageErrorOperation::Finalize,
             ));
-        };
-        if *selected {
+        }
+        if seen.get_bit(input_row) {
             return Ok(correlator_output_batch_errors(
                 processor,
                 matched,
@@ -856,7 +882,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 MessageErrorOperation::Finalize,
             ));
         }
-        *selected = true;
+        seen.set_bit(input_row, true);
     }
     let mut pending_acks = acks.into_iter().map(Some).collect::<Vec<_>>();
     let mut outcomes = (0..row_count).map(|_| None).collect::<Vec<_>>();
@@ -868,6 +894,7 @@ pub(super) async fn evaluate_correlator_output_batch(
         source: RelayMessage,
     }
 
+    let invalid_outputs = InvalidOutputRows::new(&result.batch);
     let mut successful = Vec::<SuccessfulCorrelation>::new();
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         let acks = pending_acks[input_row]
@@ -897,7 +924,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             ))));
             continue;
         }
-        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                 source,
@@ -986,7 +1013,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                             ),
                             MessageErrorOperation::Finalize,
                             None,
-                            invalid_output_fields(&result.batch, output_row),
+                            invalid_outputs.fields(output_row),
                         ),
                         captured_partial_output(&result.batch, output_row),
                         matched.materialized_state[input_row].snapshot(),
@@ -1047,6 +1074,7 @@ pub(super) async fn enqueue_correlator_output(
                     .runtime
                     .handle_message_error_with_policy(
                         MessageErrorSourceContext {
+                            routing: branch.routing_snapshot.as_deref(),
                             domain: &branch.domain,
                             node_kind,
                             node: processor,
@@ -1211,13 +1239,11 @@ pub(super) async fn handle_correlator_timeout_action(
                     inherit: Some(nervix_models::Inheritance::All),
                     ..RouteConstruction::default()
                 },
-                branch: None,
                 flush_policy: None,
                 message_error_policy: error_policies.message.clone(),
                 pending: Vec::new(),
                 flush_timer: BranchBufferTimer::default(),
                 compiled_program: None,
-                compiled_branch_program: None,
             };
             let output_schema = match branch.relay_schema(relay) {
                 Ok(schema) => schema,
@@ -1226,6 +1252,7 @@ pub(super) async fn handle_correlator_timeout_action(
                         .runtime
                         .handle_message_error(
                             MessageErrorSourceContext {
+                                routing: branch.routing_snapshot.as_deref(),
                                 domain: &branch.domain,
                                 node_kind,
                                 node: processor,
@@ -1289,11 +1316,9 @@ pub(super) async fn handle_correlator_timeout_action(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use ahash::HashMap;
     use nervix_models::ParseAsType;
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{
@@ -1335,7 +1360,7 @@ mod tests {
         assert_eq!(row_value(&combined, "id"), None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
         let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
         let right_schema = test_schema(&[("id", ParseAsType::U32)]);
@@ -1376,23 +1401,26 @@ mod tests {
             },
             materialized_state: Arc::new(HashMap::default()),
         };
-        CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let (matched_left, _matched_right) = correlate_incoming_message(
+            ProgramRun {
+                executor: &Executor::default(),
+                now,
+            },
             &processor,
             &program,
             CorrelatorSide::Right,
             nervix_models::CorrelatorMatchPolicy::Latest,
             &mut state,
             incoming,
-            now,
         )
         .await
         .expect("batched WHERE evaluation should succeed")
         .expect("matching candidates should produce a correlation");
 
         assert_eq!(
-            CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+            CORRELATOR_WHERE_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,
             "all candidate pairs must share one WHERE VM execution"
         );
@@ -1417,9 +1445,10 @@ mod tests {
             materialized_state: Arc::new(HashMap::default()),
         };
         let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
-        CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let matching = evaluate_correlator_where_matches(
+            &Executor::default(),
             &processor,
             &program,
             CorrelatorSide::Left,
@@ -1430,15 +1459,15 @@ mod tests {
         .await
         .expect("left-side arrival should evaluate its right-side candidates");
 
-        assert_eq!(matching, vec![true, false, true]);
+        assert_eq!(matching.iter().collect::<Vec<_>>(), [true, false, true]);
         assert_eq!(
-            CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+            CORRELATOR_WHERE_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,
             "a left-side arrival must also batch all candidate pairs"
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         let left_schema = test_schema(&[("id", ParseAsType::U32)]);
         let right_schema = test_schema(&[("score", ParseAsType::I64)]);
@@ -1536,9 +1565,10 @@ mod tests {
         let correlations = vec![correlation(0, "active"), correlation(1, "paused")];
         let matched = CorrelatorMatchedBatch::from_correlations(&correlations, &[&program])
             .expect("matched pairs should form one Arrow batch");
-        CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let outcomes = evaluate_correlator_output_batch(
+            &Executor::default(),
             &named("join_profiles"),
             &program,
             &matched,
@@ -1557,7 +1587,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            CORRELATOR_OUTPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+            CORRELATOR_OUTPUT_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,
             "all matched pairs for one route must share one output VM execution"
         );

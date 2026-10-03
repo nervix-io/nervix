@@ -11,20 +11,24 @@
 //! - **Must not know.** What a scenario asserts, or its fixtures' payloads and credentials.
 
 use std::{
-    env::{self, VarError},
-    fmt::{self, Write as _},
-    fs::{self, File},
+    env,
+    env::VarError,
+    fmt,
+    fmt::Write as _,
+    fs,
+    fs::File,
     io,
     ops::Range,
-    panic::{self, AssertUnwindSafe},
+    panic,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::OnceLock,
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::parse_duration_text;
+use nervix_primitives::{sync::blocking::OnceLock, thread, unmodeled::time::Instant};
 use nervix_recovery::Discarded as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -433,7 +437,7 @@ impl InjectedFailure {
         let invalid = || DriverError::InvalidInjection {
             value: value.to_string(),
         };
-        let at = humantime::parse_duration(value).map_err(|_| invalid())?;
+        let at = parse_duration_text(value).map_err(|_| invalid())?;
         if at.is_zero() {
             return Err(invalid());
         }
@@ -442,7 +446,7 @@ impl InjectedFailure {
 
     fn install(self, simulation: &mut turmoil::Sim<'_>) {
         simulation.client(Self::HOST, async move {
-            tokio::time::sleep(self.at).await;
+            nervix_primitives::time::sleep(self.at).await;
             Err(format!("injected harness failure at {:?} simulated time", self.at).into())
         });
     }
@@ -471,7 +475,7 @@ struct ScenarioIdentity {
 
 impl ScenarioIdentity {
     fn of(scenario: &Scenario) -> Self {
-        let test = std::thread::current()
+        let test = nervix_primitives::thread::current()
             .name()
             .assured("libtest runs every test on a thread named after the test")
             .to_string();
@@ -1294,7 +1298,7 @@ mod tests {
                 "{sweep:?}"
             );
         }
-        for injection in ["0s", "soon", ""] {
+        for injection in ["0s", "soon", "", "18446744073709551615s 1000000000ns"] {
             assert!(
                 matches!(
                     mode(&[(INJECT_VARIABLE, injection)]),

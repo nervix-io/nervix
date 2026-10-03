@@ -1,3 +1,10 @@
+//! Layer: language.
+//!
+//! - **Owns.** The one lexer of NSPL: the tokens, keywords and spans every NSPL grammar reads, a
+//!   statement and each expression it embeds alike, and the standalone expression readers.
+//! - **Depends on.** Chumsky's parser primitives.
+//! - **Must not know.** Grammars, Models, registry state or runtime execution.
+
 use std::str::FromStr;
 
 use chumsky::prelude::*;
@@ -28,6 +35,7 @@ pub enum Token {
     DoubleColon,
     Colon,
     Dot,
+    /// `-`: the minus of an expression, and the joint of a hyphenated name such as a hostname.
     Hyphen,
     Eq,
     NotEq,
@@ -48,6 +56,16 @@ impl Token {
             self,
             Self::LParen | Self::RParen | Self::LBracket | Self::RBracket
         )
+    }
+
+    /// Whether an expression may write this token as the name of a call or the scope of a field:
+    /// any word but a keyword an expression follows directly.
+    pub fn may_name_a_term(&self) -> bool {
+        match self {
+            Self::Word(Word::KnownWord { iden, .. }) => !iden.precedes_expression(),
+            Self::Word(Word::UnknownWord(_)) => true,
+            _ => false,
+        }
     }
 }
 
@@ -74,13 +92,21 @@ pub enum Identifier {
     Relocation,
     Use,
     List,
+    Attach,
+    Detach,
     Begin,
     Start,
     Stop,
     Describe,
     Lookup,
     Upload,
+    Backup,
+    Restore,
+    Existing,
+    Dry,
+    Run,
     Resource,
+    Resources,
     Show,
     If,
     Exists,
@@ -92,6 +118,7 @@ pub enum Identifier {
     Unpaced,
     Domain,
     Domains,
+    Clock,
     Transaction,
     Transactions,
     Operation,
@@ -178,6 +205,7 @@ pub enum Identifier {
     Field,
     Codec,
     Ingestor,
+    Ingestors,
     Into,
     Relay,
     Route,
@@ -313,6 +341,18 @@ pub enum Identifier {
     Not,
     True,
     False,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
+    Between,
+    Is,
+    Distinct,
+    TryCast,
+    JsonValue,
+    TryJsonValue,
+    JsonExists,
     Deduplicate,
     Match,
     Correlate,
@@ -395,6 +435,62 @@ pub enum Identifier {
     Roto0_13,
 }
 
+impl Identifier {
+    /// Whether this keyword can begin a clause that goes straight on with an expression, as
+    /// `WHERE <expression>`, a reorderer's `BY <expressions>` and an HTTP sink's `METHOD` and
+    /// `PATH` do.
+    ///
+    /// Where such a keyword ends an expression region, a `(` after it opens that clause, never the
+    /// arguments of a call named like the keyword.
+    pub fn precedes_expression(self) -> bool {
+        matches!(self, Self::Where | Self::By | Self::Method | Self::Path)
+    }
+
+    /// Whether an expression reserves this keyword, which spells one of its operators, literals or
+    /// forms, or a clause of a route construction, and so never names a field, a scope or a
+    /// function there.
+    ///
+    /// Every other keyword is an ordinary name inside an expression: `max(input.readings)`,
+    /// `first(...)`, `output.total` and `input.status` read the statement keywords they spell as
+    /// names.
+    pub fn is_expression_keyword(self) -> bool {
+        matches!(
+            self,
+            Self::Where
+                | Self::Set
+                | Self::Inherit
+                | Self::All
+                | Self::Except
+                | Self::Leak
+                | Self::Sensitive
+                | Self::Invoke
+                | Self::As
+                | Self::TryCast
+                | Self::JsonValue
+                | Self::TryJsonValue
+                | Self::JsonExists
+                | Self::And
+                | Self::Or
+                | Self::Not
+                | Self::True
+                | Self::False
+                | Self::Null
+                | Self::If
+                | Self::Case
+                | Self::When
+                | Self::Then
+                | Self::Else
+                | Self::End
+                | Self::In
+                | Self::Between
+                | Self::Is
+                | Self::Distinct
+                | Self::From
+                | Self::Udf
+        )
+    }
+}
+
 fn classify_word(raw: &str) -> Word {
     match Identifier::from_str(raw).ok() {
         Some(iden) => Word::KnownWord {
@@ -420,20 +516,15 @@ fn ws<'src>() -> impl Parser<'src, &'src str, (), extra::Err<LexError<'src>>> + 
     choice((spaces, line_comment)).repeated().ignored()
 }
 
-fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
-    let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
-
-    let number = text::int(10)
-        .then(just('.').then(text::digits(10)).or_not())
-        .then(
-            one_of("eE")
-                .then(one_of("+-").or_not())
-                .then(text::digits(10))
-                .or_not(),
-        )
-        .to_slice()
-        .map(|n: &str| Token::NumberLiteral(n.to_string()));
-
+/// A string literal, read verbatim: `'text'`, `"text"`, or dollar-quoted `$$text$$` and
+/// `$tag$text$tag$`, whose tag is letters, digits and underscores. A quoted string holds anything
+/// but its own quote and a line break, and a dollar-quoted string anything but its closing
+/// delimiter. No escape sequence is interpreted, so a backslash is an ordinary character.
+///
+/// This is the one reading of a string literal, wherever a statement or a standalone expression
+/// writes one.
+fn string_literal<'src>() -> impl Parser<'src, &'src str, String, extra::Err<LexError<'src>>> + Clone
+{
     let single_string = just('\'')
         .ignore_then(
             any()
@@ -488,8 +579,9 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
             match input.next() {
                 Some(ch) => {
                     value.push(ch);
-                    if value.ends_with(&delimiter) {
-                        value.truncate(value.len() - delimiter.len());
+                    if let Some(body) = value.strip_suffix(delimiter.as_str()) {
+                        let body_length = body.len();
+                        value.truncate(body_length);
                         return Ok(value);
                     }
                 }
@@ -503,11 +595,27 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
         }
     });
 
-    let string = choice((
+    choice((
         dollar_string,
         choice((single_string, double_string)).map(str::to_string),
     ))
-    .map(Token::StringLiteral);
+}
+
+fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
+    let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
+
+    let number = text::int(10)
+        .then(just('.').then(text::digits(10)).or_not())
+        .then(
+            one_of("eE")
+                .then(one_of("+-").or_not())
+                .then(text::digits(10))
+                .or_not(),
+        )
+        .to_slice()
+        .map(|n: &str| Token::NumberLiteral(n.to_string()));
+
+    let string = string_literal().map(Token::StringLiteral);
 
     let punctuation = choice((
         just("!=").to(Token::NotEq),
@@ -564,6 +672,20 @@ pub fn lex(input: &str) -> Result<Vec<SpannedToken>, Vec<LexError<'_>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_word_no_expression_follows_directly_may_name_a_term() {
+        let tokens =
+            lex("max output readings BY path WHERE method ( .").expect("lex should succeed");
+        let may_name = tokens
+            .iter()
+            .map(|spanned| spanned.token.may_name_a_term())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            may_name,
+            vec![true, true, true, false, false, false, false, false, false]
+        );
+    }
 
     #[test]
     fn lexes_known_words_and_unknown_words() {
@@ -661,6 +783,160 @@ mod tests {
     #[test]
     fn rejects_mismatched_dollar_quote_tags() {
         assert!(lex("$roto$body$other$").is_err());
+    }
+
+    fn keywords(source: &str) -> Vec<Option<Identifier>> {
+        lex(source)
+            .unwrap_or_else(|errors| panic!("{source} must lex: {errors:?}"))
+            .into_iter()
+            .map(|spanned| match spanned.token {
+                Token::Word(Word::KnownWord { iden, .. }) => Some(iden),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lexes_the_keywords_of_expression_forms_case_insensitively() {
+        assert_eq!(
+            keywords(
+                "if CASE when Then ELSE end in NOT Between is Distinct fRoM TRY_CAST try_cast \
+                 Json_Value TRY_JSON_VALUE json_exists"
+            ),
+            [
+                Identifier::If,
+                Identifier::Case,
+                Identifier::When,
+                Identifier::Then,
+                Identifier::Else,
+                Identifier::End,
+                Identifier::In,
+                Identifier::Not,
+                Identifier::Between,
+                Identifier::Is,
+                Identifier::Distinct,
+                Identifier::From,
+                Identifier::TryCast,
+                Identifier::TryCast,
+                Identifier::JsonValue,
+                Identifier::TryJsonValue,
+                Identifier::JsonExists,
+            ]
+            .map(Some)
+        );
+        assert_eq!(
+            keywords("try cast json value from_unix input"),
+            [
+                None,
+                None,
+                Some(Identifier::Json),
+                None,
+                None,
+                Some(Identifier::Input)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expression_reserves_only_the_keywords_of_its_own_grammar() {
+        let reserved = "WHERE SET INHERIT ALL EXCEPT LEAK SENSITIVE INVOKE AS TRY_CAST JSON_VALUE \
+                        TRY_JSON_VALUE JSON_EXISTS AND OR NOT TRUE FALSE NULL IF CASE WHEN THEN \
+                        ELSE END IN BETWEEN IS DISTINCT FROM UDF";
+        for keyword in keywords(reserved) {
+            let keyword = keyword.expect("every reserved word is a keyword");
+            assert!(
+                keyword.is_expression_keyword(),
+                "{keyword:?} must be reserved"
+            );
+        }
+        let names = "max min sum first last count input output message branch left right error \
+                     status key time timestamp type value replace filter by method path";
+        for keyword in keywords(names).into_iter().flatten() {
+            assert!(
+                !keyword.is_expression_keyword(),
+                "{keyword:?} must name a term"
+            );
+        }
+    }
+
+    #[test]
+    fn lexes_the_udf_qualifier_as_a_keyword_and_a_double_colon() {
+        let tokens = lex("UdF::mask")
+            .expect("UDF qualifier must lex")
+            .into_iter()
+            .map(|token| token.token)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word(Word::KnownWord {
+                    iden: Identifier::Udf,
+                    raw: "UdF".to_string(),
+                }),
+                Token::DoubleColon,
+                Token::Word(Word::UnknownWord("mask".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_is_one_token_only_without_spaces_around_its_dot() {
+        let numbers = |source: &str| {
+            lex(source)
+                .unwrap_or_else(|errors| panic!("{source} must lex: {errors:?}"))
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>()
+        };
+        let number = |raw: &str| Token::NumberLiteral(raw.to_string());
+        assert_eq!(numbers("1.5"), vec![number("1.5")]);
+        for source in ["1 .5", "1. 5", "1 . 5"] {
+            assert_eq!(
+                numbers(source),
+                vec![number("1"), Token::Dot, number("5")],
+                "{source}"
+            );
+        }
+        assert_eq!(numbers("1."), vec![number("1"), Token::Dot]);
+        assert_eq!(numbers(".5"), vec![Token::Dot, number("5")]);
+    }
+
+    #[test]
+    fn lexes_every_backslash_sequence_verbatim() {
+        let cases = [
+            (r"'a\\b'", r"a\\b"),
+            (r#"'a\"b'"#, r#"a\"b"#),
+            (r#""a\'b""#, r"a\'b"),
+            (r"'a\nb'", r"a\nb"),
+            (r#""a\rb""#, r"a\rb"),
+            (r"'a\tb'", r"a\tb"),
+            (r"'a\0b'", r"a\0b"),
+            (r#""a\x41b""#, r"a\x41b"),
+            (r"'a\u{e9}b'", r"a\u{e9}b"),
+            (r"'a\$b'", r"a\$b"),
+            (r"'a\'", r"a\"),
+            (r#""a\""#, r"a\"),
+            (r"$$a\nb\$$", r"a\nb\"),
+        ];
+        for (source, value) in cases {
+            let tokens =
+                lex(source).unwrap_or_else(|errors| panic!("{source} must lex: {errors:?}"));
+            assert_eq!(
+                tokens
+                    .into_iter()
+                    .map(|token| token.token)
+                    .collect::<Vec<_>>(),
+                vec![Token::StringLiteral(value.to_string())],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backslash_before_the_closing_quote_leaves_it_closing() {
+        for source in [r"'a\'b'", r#""a\"b""#] {
+            assert!(lex(source).is_err(), "{source} must be rejected");
+        }
     }
 
     #[test]

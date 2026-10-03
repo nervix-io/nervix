@@ -6,15 +6,21 @@
 //!   change a session in the order they were written while completion, domain, inspection and
 //!   cancellation requests proceed beside them, deciding each cancellation against its request's
 //!   admission, refusing what a session cannot serve with typed rejections, encoding replies and
-//!   transferring the ones larger than a frame, and the unsolicited events a session receives.
+//!   transferring the ones larger than a frame, the unsolicited events a session receives, the
+//!   domain clocks it follows, the producers it holds open, and the emitter consumers it serves.
 //! - **Depends on.** The client wire contract, the command pipeline and the control-plane use
 //!   cases behind it, and the execution classes large replies are encoded under.
 //! - **Must not know.** How a transport frames, authenticates or closes a session.
 //!
-//! A request is served on one of two lanes. Commands, attachments and subscription changes all
-//! change the session, so they run one at a time in the order the client wrote them. Everything
-//! else only reads it, from the view the ordered lane last published, and runs beside them, so a
-//! long command never delays a completion, an inspection, a domain request or a cancellation.
+//! A request is served on one of two lanes. Commands, transaction and domain clock attachments,
+//! subscription changes, producer opens and consumer opens all change the session, so they run one at a time in
+//! the order the client wrote them. Everything else only reads it, from the view the ordered lane
+//! last published, and runs beside them, so a long command never delays a completion, an
+//! inspection, a domain request or a cancellation. Consumer reads, settlement and close also
+//! run beside the ordered lane, so a command waiting on graph drain cannot delay an application
+//! ACK. A submitted batch and a producer close are
+//! handed to their producer without waiting on either lane: the receive loop never waits for a
+//! batch's outcome.
 //!
 //! Every request has exactly one terminal reply. Whoever takes the request's in-flight entry owes
 //! it: the lane that served it, or a cancellation. A cancellation decides against admission
@@ -23,10 +29,17 @@
 //! request still in flight, and a request not yet admitted never begins.
 
 pub(in crate::application) mod admission;
+mod clock_attachments;
+mod consumers;
+#[cfg(test)]
+pub(crate) use clock_attachments::{ClockDeliveryOrder, NextClockFrame};
+mod download;
 mod events;
 pub(in crate::application) mod grpc;
 pub(in crate::application) mod outbound;
 mod outcome;
+mod producers;
+mod restore;
 mod upload;
 pub(in crate::application) mod websocket;
 
@@ -37,15 +50,19 @@ use std::collections::BTreeMap;
 
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState, CancellationStage,
-    ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest, DomainList,
-    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody,
-    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
-    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
-    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError,
-    WireEncodeError,
+    AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
+    CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
+    CloseEmitterRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
+    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
+    MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest,
+    Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId, RequestRejected,
+    RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding,
+    SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome,
+    SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
+    UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
@@ -54,18 +71,23 @@ use nervix_models::{
 use nervix_nspl::client_statement::{
     ClientStatement, ParsedClientStatement, parse_client_statement_sources,
 };
-use parking_lot::{Mutex, RwLock};
-use tokio::{
-    sync::{mpsc, watch},
+use nervix_primitives::{
+    sync::{
+        Arc,
+        blocking::{Mutex, RwLock},
+        mpsc, watch,
+    },
     task::AbortHandle,
 };
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use self::{
     admission::{CancelledBeforeAdmission, CancelledStage, RequestAdmission},
+    clock_attachments::ClockAttachments,
+    consumers::SessionConsumers,
     outbound::{LaneClosed, SessionOutbound},
     outcome::{attach_outcome, command_outcome, leader_redirect, wire_diagnostics},
+    producers::SessionProducers,
 };
 use super::{
     command_result::CommandResult,
@@ -74,11 +96,6 @@ use super::{
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
-
-/// How many requests one session may have in flight. A request beyond it is refused rather than
-/// queued, so a client flooding one session cannot grow what the server holds for it. It is also
-/// what bounds the queue of ordered requests waiting for the lane.
-const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 /// The transport a session arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +121,17 @@ enum OrderedRequest {
     Attach(AttachTransactionRequest),
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
+    AttachDomainClock(AttachDomainClockRequest),
+    DetachDomainClock(DetachDomainClockRequest),
+    OpenIngestor(OpenIngestorRequest),
+    OpenEmitter(OpenEmitterRequest),
 }
+
+/// Why a session refuses a session-local request while it holds an active transaction. Such a
+/// request belongs to the session rather than to the transaction, so it is sent on its own once
+/// the transaction has finished.
+const SESSION_LOCAL_IN_TRANSACTION: &str =
+    "session-scoped and client-local statements cannot be queued in a transaction";
 
 /// A request that only reads the session, served beside the ordered lane.
 enum ConcurrentRequest {
@@ -113,6 +140,9 @@ enum ConcurrentRequest {
     ListDomains,
     SelectDomain(SelectDomainRequest),
     Inspect(InspectTransactionRequest),
+    ReadEmitterBatch(ReadEmitterBatchRequest),
+    SettleEmitterBatch(SettleEmitterBatchRequest),
+    CloseEmitter(CloseEmitterRequest),
 }
 
 /// The lane a request is served on.
@@ -133,12 +163,46 @@ struct InFlight {
     admission: Arc<RequestAdmission>,
     /// The task serving a request that runs beside the ordered lane. An ordered request has none.
     task: Option<AbortHandle>,
+    kind: InFlightKind,
+}
+
+/// What an in-flight entry answers for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InFlightKind {
+    /// A request the session's in-flight limit bounds, which a cancellation can end.
+    Request,
+    /// A submitted batch. Its producer's granted credit bounds these rather than the in-flight
+    /// limit, and its outcome always follows: nothing a client sends withdraws it.
+    Submission,
+}
+
+/// The requests of a session still owed their terminal reply, and how many of them the in-flight
+/// limit counts.
+#[derive(Default)]
+struct InFlightRequests {
+    entries: BTreeMap<RequestId, InFlight>,
+    /// Entries of kind [`InFlightKind::Request`].
+    requests: usize,
+}
+
+impl InFlightRequests {
+    fn remove(&mut self, request_id: &RequestId) -> Option<InFlight> {
+        let removed = self.entries.remove(request_id)?;
+        if let InFlightKind::Request = removed.kind {
+            self.requests = self
+                .requests
+                .checked_sub(1)
+                .verified("every request entry was counted when it was registered");
+        }
+        Some(removed)
+    }
 }
 
 /// The entry a cancellation reads of the request it targets.
 struct CancelTarget {
     admission: Arc<RequestAdmission>,
     task: Option<AbortHandle>,
+    kind: InFlightKind,
 }
 
 /// What a session queued for a reply it owed.
@@ -196,11 +260,13 @@ pub(super) struct SessionShared {
     service: SessionServiceImpl,
     transport: SessionTransport,
     delivery: SessionDelivery,
-    in_flight: Mutex<BTreeMap<RequestId, InFlight>>,
+    in_flight: Mutex<InFlightRequests>,
     /// The session as the ordered lane last left it, for the requests that run beside it.
     view: RwLock<SessionView>,
     /// The domain whose observations the session receives.
     selection: watch::Sender<Option<DomainName>>,
+    producers: SessionProducers,
+    consumers: SessionConsumers,
 }
 
 impl SessionShared {
@@ -269,7 +335,7 @@ impl SessionShared {
             }
             ReplyDelivery::Transfer(parts) => {
                 for part in parts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     if self.send_frame(part).await.is_err() {
                         debug!(%request_id, "the session ended during a reply transfer");
                         return QueuedReply::Nothing;
@@ -339,33 +405,44 @@ impl SessionShared {
         *self.view.write() = subscriptions.view();
     }
 
-    /// Registers a request that is to be served, unless the session is at its limit or the
-    /// request's identity is already in flight.
-    fn register(&self, request_id: RequestId) -> Result<Arc<RequestAdmission>, RequestRejected> {
+    /// Registers a request that is to be served, unless its identity is already in flight or,
+    /// for a request the in-flight limit counts, the session is at that limit.
+    fn register(
+        &self,
+        request_id: RequestId,
+        kind: InFlightKind,
+    ) -> Result<Arc<RequestAdmission>, RequestRejected> {
         let mut in_flight = self.in_flight.lock();
-        if in_flight.contains_key(&request_id) {
+        if in_flight.entries.contains_key(&request_id) {
             return Err(RequestRejected {
                 rejection: RequestRejection::DuplicateRequestId,
                 field: Some("ClientMessage.request_id".to_string()),
                 message: format!("request {request_id} is already in flight in this session"),
             });
         }
-        if in_flight.len() >= MAX_IN_FLIGHT_REQUESTS {
-            return Err(RequestRejected {
-                rejection: RequestRejection::TooManyRequestsInFlight,
-                field: None,
-                message: format!(
-                    "the session already has {MAX_IN_FLIGHT_REQUESTS} requests in flight; send \
-                     this one again once an earlier one is answered"
-                ),
-            });
+        if let InFlightKind::Request = kind {
+            if in_flight.requests >= MAX_IN_FLIGHT_REQUESTS {
+                return Err(RequestRejected {
+                    rejection: RequestRejection::TooManyRequestsInFlight,
+                    field: None,
+                    message: format!(
+                        "the session already has {MAX_IN_FLIGHT_REQUESTS} requests in flight; \
+                         send this one again once an earlier one is answered"
+                    ),
+                });
+            }
+            in_flight.requests = in_flight
+                .requests
+                .checked_add(1)
+                .verified("the count is below the in-flight limit, checked above");
         }
         let admission = Arc::new(RequestAdmission::default());
-        in_flight.insert(
+        in_flight.entries.insert(
             request_id,
             InFlight {
                 admission: admission.clone(),
                 task: None,
+                kind,
             },
         );
         Ok(admission)
@@ -374,24 +451,25 @@ impl SessionShared {
     /// Records the task serving a request that runs beside the ordered lane, so a cancellation
     /// can stop it. A request answered before this runs has no entry left to record it in.
     fn attach_task(&self, request_id: RequestId, task: AbortHandle) {
-        if let Some(entry) = self.in_flight.lock().get_mut(&request_id) {
+        if let Some(entry) = self.in_flight.lock().entries.get_mut(&request_id) {
             entry.task = Some(task);
         }
     }
 
     fn cancel_target(&self, target: RequestId) -> Option<CancelTarget> {
         let in_flight = self.in_flight.lock();
-        let entry = in_flight.get(&target)?;
+        let entry = in_flight.entries.get(&target)?;
         Some(CancelTarget {
             admission: entry.admission.clone(),
             task: entry.task.clone(),
+            kind: entry.kind,
         })
     }
 
     /// Serves a cancel request. The cancel itself is answered first; the target's own terminal
     /// reply follows it, unless the target was answered in the meantime.
     async fn cancel(&self, request_id: RequestId, cancel: CancelRequest) {
-        if self.in_flight.lock().contains_key(&request_id) {
+        if self.in_flight.lock().entries.contains_key(&request_id) {
             let rejection = RequestRejected {
                 rejection: RequestRejection::DuplicateRequestId,
                 field: Some("ClientMessage.request_id".to_string()),
@@ -409,6 +487,18 @@ impl SessionShared {
             self.reply(request_id, ReplyBody::Cancel(outcome)).await;
             return;
         };
+        if let InFlightKind::Submission = entry.kind {
+            let rejection = RequestRejected {
+                rejection: RequestRejection::InvalidRequest,
+                field: Some("CancelRequest.target_request_id".to_string()),
+                message: format!(
+                    "request {target} submitted a batch, which cannot be withdrawn; its outcome \
+                     always follows"
+                ),
+            };
+            self.reject(request_id, rejection).await;
+            return;
+        }
         let stage = entry.admission.cancel();
         let outcome = CancelOutcome {
             target,
@@ -433,7 +523,7 @@ impl SessionShared {
     /// runs to its end without a reply.
     fn abandon_in_flight(&self) {
         let abandoned = std::mem::take(&mut *self.in_flight.lock());
-        for entry in abandoned.into_values() {
+        for entry in abandoned.entries.into_values() {
             let stage = entry.admission.cancel();
             if let CancelledStage::BeforeAdmission = stage
                 && let Some(task) = entry.task
@@ -501,9 +591,11 @@ impl SessionServiceImpl {
             service: self.clone(),
             transport,
             delivery: SessionDelivery { outbound, limits },
-            in_flight: Mutex::new(BTreeMap::new()),
+            in_flight: Mutex::new(InFlightRequests::default()),
             view: RwLock::new(subscriptions.view()),
             selection,
+            producers: SessionProducers::default(),
+            consumers: SessionConsumers::default(),
         });
         // Every queued request is registered in flight first, so the queue holds at most
         // `MAX_IN_FLIGHT_REQUESTS` requests even though the channel itself is unbounded.
@@ -520,8 +612,8 @@ impl SessionServiceImpl {
 
         let mut closed_cleanly = false;
         loop {
-            tokio::task::consume_budget().await;
-            let item = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let item = nervix_primitives::select! {
                 biased;
                 _ = shared.ended() => break,
                 _ = self.inner.admission_shutdown.cancelled() => {
@@ -535,7 +627,7 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
-                    let accepted = tokio::select! {
+                    let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
                         _ = self.inner.admission_shutdown.cancelled() => {
@@ -549,7 +641,7 @@ impl SessionServiceImpl {
                     }
                 }
                 Some(InboundFrame::Closed) | None => {
-                    closed_cleanly = shared.in_flight.lock().is_empty();
+                    closed_cleanly = shared.in_flight.lock().entries.is_empty();
                     break;
                 }
                 Some(InboundFrame::Failed) => break,
@@ -611,6 +703,29 @@ async fn accept_frame(
             shared.cancel(request_id, cancel).await;
             return true;
         }
+        ClientRequest::SubmitBatch(submit) => {
+            shared.submit_batch(request_id, submit).await;
+            return true;
+        }
+        ClientRequest::CloseIngestor(close) => {
+            shared.close_producer(request_id, close).await;
+            return true;
+        }
+        ClientRequest::OpenIngestor(open) => {
+            RoutedRequest::Ordered(OrderedRequest::OpenIngestor(open))
+        }
+        ClientRequest::OpenEmitter(open) => {
+            RoutedRequest::Ordered(OrderedRequest::OpenEmitter(open))
+        }
+        ClientRequest::ReadEmitterBatch(read) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::ReadEmitterBatch(read))
+        }
+        ClientRequest::SettleEmitterBatch(settle) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::SettleEmitterBatch(settle))
+        }
+        ClientRequest::CloseEmitter(close) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::CloseEmitter(close))
+        }
         ClientRequest::Command(command) => RoutedRequest::Ordered(OrderedRequest::Command(command)),
         ClientRequest::AttachTransaction(attach) => {
             RoutedRequest::Ordered(OrderedRequest::Attach(attach))
@@ -620,6 +735,12 @@ async fn accept_frame(
         }
         ClientRequest::Unsubscribe(unsubscribe) => {
             RoutedRequest::Ordered(OrderedRequest::Unsubscribe(unsubscribe))
+        }
+        ClientRequest::AttachDomainClock(attach) => {
+            RoutedRequest::Ordered(OrderedRequest::AttachDomainClock(attach))
+        }
+        ClientRequest::DetachDomainClock(detach) => {
+            RoutedRequest::Ordered(OrderedRequest::DetachDomainClock(detach))
         }
         ClientRequest::Suggest(suggest) => {
             RoutedRequest::Concurrent(ConcurrentRequest::Suggest(suggest))
@@ -635,7 +756,7 @@ async fn accept_frame(
             RoutedRequest::Concurrent(ConcurrentRequest::Inspect(inspect))
         }
     };
-    let admission = match shared.register(request_id) {
+    let admission = match shared.register(request_id, InFlightKind::Request) {
         Ok(admission) => admission,
         Err(rejection) => {
             shared.reject(request_id, rejection).await;
@@ -660,6 +781,7 @@ async fn accept_frame(
             let task = shared.service.inner.service_tasks.spawn(serve_concurrent(
                 shared.clone(),
                 request_id,
+                admission,
                 request,
             ));
             shared.attach_task(request_id, task.abort_handle());
@@ -672,6 +794,7 @@ async fn accept_frame(
 async fn serve_concurrent(
     shared: Arc<SessionShared>,
     request_id: RequestId,
+    admission: Arc<RequestAdmission>,
     request: ConcurrentRequest,
 ) {
     let service = &shared.service;
@@ -682,7 +805,8 @@ async fn serve_concurrent(
             ReplyBody::Suggest(outcome)
         }
         ConcurrentRequest::Choice(choice) => {
-            ReplyBody::Choice(service.process_choice(choice).await)
+            let view = shared.view.read().clone();
+            ReplyBody::Choice(service.process_choice(choice, &view).await)
         }
         ConcurrentRequest::ListDomains => {
             let domains = service.domain_infos().await;
@@ -695,6 +819,21 @@ async fn serve_concurrent(
         ConcurrentRequest::Inspect(inspect) => {
             let outcome = inspect_transaction(&shared, inspect).await;
             ReplyBody::Inspection(outcome)
+        }
+        ConcurrentRequest::ReadEmitterBatch(read) => {
+            ReplyBody::ReadEmitterBatch(shared.consumers.read(read).await)
+        }
+        ConcurrentRequest::SettleEmitterBatch(settle) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            ReplyBody::SettleEmitterBatch(shared.consumers.settle(settle).await)
+        }
+        ConcurrentRequest::CloseEmitter(close) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            ReplyBody::CloseEmitter(shared.consumers.close(close))
         }
     };
     shared.finish_with(request_id, body).await;
@@ -739,28 +878,32 @@ async fn inspect_transaction(
 }
 
 /// Serves the session's ordered requests one at a time, in the order they were written, and hands
-/// back the session's state once the session stops sending and the last request is served.
+/// back the session's state once the session stops sending and the last request is served. The
+/// domain clocks the session follows belong to the lane, and stop with it.
 async fn run_ordered_lane(
     shared: Arc<SessionShared>,
     mut work: mpsc::UnboundedReceiver<OrderedWork>,
     mut subscriptions: SessionSubscriptions,
 ) -> SessionSubscriptions {
+    let mut clock_attachments = ClockAttachments::default();
     while let Some(item) = work.recv().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // A request cancelled while it waited was already answered by its cancellation.
         if item.admission.is_cancelled() {
             continue;
         }
-        serve_ordered(&shared, item, &mut subscriptions).await;
+        serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
         shared.publish_view(&subscriptions);
     }
+    clock_attachments.stop_all().await;
     subscriptions
 }
 
 async fn serve_ordered(
-    shared: &SessionShared,
+    shared: &Arc<SessionShared>,
     item: OrderedWork,
     subscriptions: &mut SessionSubscriptions,
+    clock_attachments: &mut ClockAttachments,
 ) {
     let OrderedWork {
         request_id,
@@ -819,6 +962,61 @@ async fn serve_ordered(
                 .finish_with(request_id, ReplyBody::Unsubscribe(outcome))
                 .await;
         }
+        OrderedRequest::AttachDomainClock(attach) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            if subscriptions.transaction_active() {
+                let outcome = DomainClockAttachOutcome {
+                    disposition: DomainClockAttachDisposition::Failed,
+                    message: SESSION_LOCAL_IN_TRANSACTION.to_string(),
+                };
+                shared
+                    .finish_with(request_id, ReplyBody::DomainClockAttach(outcome))
+                    .await;
+                return;
+            }
+            clock_attachments
+                .attach(shared, request_id, attach.domain)
+                .await;
+        }
+        OrderedRequest::OpenIngestor(open) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            let in_transaction = subscriptions.transaction_active();
+            shared
+                .producers
+                .open(shared, request_id, open, in_transaction)
+                .await;
+        }
+        OrderedRequest::OpenEmitter(open) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            shared
+                .consumers
+                .open(shared, request_id, open, subscriptions.transaction_active())
+                .await;
+        }
+        OrderedRequest::DetachDomainClock(detach) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            if subscriptions.transaction_active() {
+                let outcome = DomainClockDetachOutcome {
+                    disposition: DomainClockDetachDisposition::Failed,
+                    message: SESSION_LOCAL_IN_TRANSACTION.to_string(),
+                };
+                shared
+                    .finish_with(request_id, ReplyBody::DomainClockDetach(outcome))
+                    .await;
+                return;
+            }
+            clock_attachments
+                .detach(shared, request_id, detach.domain)
+                .await;
+        }
     }
 }
 
@@ -835,7 +1033,7 @@ async fn serve_command(
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
-    let processed = tokio::select! {
+    let processed = nervix_primitives::select! {
         biased;
         processed = processing => processed,
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),
@@ -935,9 +1133,7 @@ async fn open_subscription(
 /// The refusal of a subscription change while the session holds an active transaction. A
 /// subscription belongs to the session, not to the transaction, so it is sent separately.
 fn subscription_in_transaction() -> CommandResult {
-    command_error(
-        "session-scoped and client-local statements cannot be queued in a transaction".to_string(),
-    )
+    command_error(SESSION_LOCAL_IN_TRANSACTION.to_string())
 }
 
 /// The subscription of a statement list that holds exactly one `CREATE SUBSCRIPTION`.

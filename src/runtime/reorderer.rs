@@ -177,16 +177,17 @@ pub(super) async fn flush_branch_reorderer_output(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use arrow_array::BinaryArray;
     use nervix_models::{ParseAsType, Timestamp};
-    use tokio::time::{Duration, timeout};
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::*;
     use crate::{
         runtime::processors::ReordererOutputBatchError,
         runtime_ack::{AckOutcome, AckSet},
-        runtime_schema::{RuntimeRecordMetadata, RuntimeValue, test_runtime_row},
+        runtime_schema::{RuntimeValue, test_runtime_row},
     };
 
     #[test]
@@ -203,7 +204,7 @@ mod tests {
         assert_eq!(reorder_key_part(&values, 2), ReorderKeyPart::Null);
         assert!(reorder_key_part(&values, 0) < reorder_key_part(&values, 1));
     }
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
         /// One row fed into the reorderer buffer: the sequence it carries, the watermark it arrived
         /// with, and the ACKs the reordered output must keep aligned with it.
@@ -299,8 +300,8 @@ mod tests {
             .collect::<Vec<_>>();
         let watermarks = ordered
             .metadata
-            .iter()
-            .map(RuntimeRecordMetadata::ingested_at_low_watermark)
+            .rows()
+            .map(|metadata| metadata.ingested_at_low_watermark())
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -336,7 +337,7 @@ mod tests {
     /// Ordering keys that do not pair with a batch's Arrow rows can only come from a defect above
     /// the buffer. The flush must name the first batch that disagrees and hand every buffered
     /// batch back, because the caller resolves the ACKs those batches carry.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reorderer_buffer_reports_the_first_ordering_key_mismatch_and_returns_every_batch() {
         let schema = test_schema(&[("sequence", ParseAsType::U32)]);
         let batch = |sequence: u32, acks: AckSet| {
@@ -460,7 +461,7 @@ mod tests {
         assert_eq!(buffer.estimated_bytes(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reorderer_key_program_evaluates_direct_u32_field() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -502,6 +503,7 @@ mod tests {
         let input = vm_input_from_test_rows(&records, &program.program.input_schema)
             .expect("VM input batch should build");
         let output = execute_program_with_selection_in_context(
+            &Executor::default(),
             &program.program,
             &input,
             &VmExecutionContext {

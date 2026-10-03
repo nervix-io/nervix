@@ -8,6 +8,14 @@
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "this harness provisions and observes external test services"
+    )
+)]
+
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
@@ -17,22 +25,24 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
     time::Duration,
 };
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::StdArc;
 use nervix_recovery::Discarded as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
     ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
     Image, ImageExt, ReuseDirective, TestcontainersError,
-    bollard::{Docker, query_parameters::RemoveContainerOptionsBuilder},
+    bollard::{
+        Docker, errors::Error as DockerError, query_parameters::RemoveContainerOptionsBuilder,
+    },
     core::{
         BuildImageOptions, CmdWaitFor, ContainerPort, ContainerState, ExecCommand,
-        IntoContainerPort, WaitFor, wait::HttpWaitStrategy,
+        IntoContainerPort, WaitFor, client::ClientError, wait::HttpWaitStrategy,
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
@@ -96,7 +106,9 @@ impl TestParallelismArgs {
 
 impl TestParallelism {
     pub fn detect() -> Self {
-        Self::from_available_cpus(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+        Self::from_available_cpus(
+            nervix_primitives::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
+        )
     }
 
     const fn from_available_cpus(available_cpus: NonZeroUsize) -> Self {
@@ -128,6 +140,7 @@ pub const KAFKA_DOCKER_ADDR: &str = "kafka_docker_addr";
 pub const KAFKA_DOCKER_NETWORK: &str = "kafka_docker_network";
 pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
+pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
 pub const REDIS_ADDR: &str = "redis_addr";
@@ -429,11 +442,14 @@ impl DependencyEnvironment {
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
+        // The broker announces a 1 MiB maxMessageSize instead of Pulsar's 5 MiB default, the limit
+        // the MQTT and NATS test brokers keep too, so one scenario message exceeds each of them.
         let start_script = br#"#!/bin/sh
 set -eu
 config=/tmp/standalone-tls.conf
 cp /pulsar/conf/standalone.conf "$config"
 cat >>"$config" <<'EOF'
+maxMessageSize=1048576
 brokerServicePortTls=6651
 webServicePortTls=8443
 tlsEnabled=true
@@ -468,12 +484,15 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let plaintext_port = mapped_port(&container, 6650, "Pulsar").await?;
         let tls_port = mapped_port(&container, 6651, "Pulsar TLS").await?;
+        let admin_port = mapped_port(&container, 8080, "Pulsar admin").await?;
         self.endpoints
             .insert(PULSAR_ADDR, format!("pulsar://127.0.0.1:{plaintext_port}"));
         self.endpoints.insert(
             PULSAR_TLS_ADDR,
             format!("pulsar+ssl://127.0.0.1:{tls_port}"),
         );
+        self.endpoints
+            .insert(PULSAR_ADMIN_ADDR, format!("http://127.0.0.1:{admin_port}"));
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
@@ -1237,7 +1256,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         Ok(())
     }
 
-    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
+    pub async fn otel_collector_logs(&self) -> io::Result<String> {
         let container = self
             .containers
             .iter()
@@ -1251,8 +1270,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .stderr_to_vec()
             .await
             .map_err(testcontainers_error("OpenTelemetry Collector stderr"))?;
-        Ok(String::from_utf8_lossy(&stdout).contains(needle)
-            || String::from_utf8_lossy(&stderr).contains(needle))
+        let mut logs = String::from_utf8_lossy(&stdout).into_owned();
+        logs.push_str(&String::from_utf8_lossy(&stderr));
+        Ok(logs)
+    }
+
+    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
+        Ok(self.otel_collector_logs().await?.contains(needle))
     }
 
     pub async fn start_jaeger(&mut self) -> io::Result<()> {
@@ -1474,16 +1498,27 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let mut replaced_failed_start = false;
         let mut replaced_unhealthy = false;
         loop {
+            nervix_primitives::task::consume_budget().await;
             let name = self.container_name(role);
             let reusable_was_running =
                 self.mode.is_reusable() && container_is_running_by_name(&name).await?;
             let container = match self.configure_container(role, build()).start().await {
                 Ok(container) => container,
+                Err(error) if !reusable_was_running && host_port_bind_conflict(&error) => {
+                    // Docker created the named container but could not claim its random host port.
+                    // Remove it before another attempt can select a different port.
+                    remove_container_by_name_or_id(&name).await?;
+                    if start_retries < 3 {
+                        start_retries += 1;
+                        continue;
+                    }
+                    return Err(testcontainers_error(operation)(error));
+                }
                 Err(_error)
                     if self.mode.is_reusable() && reusable_was_running && start_retries < 3 =>
                 {
                     start_retries += 1;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
                 Err(error) if self.mode.is_reusable() && reusable_was_running => {
@@ -1515,7 +1550,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     // Another process may have won the deterministic-name race after our
                     // preflight inspect. Let it finish startup, then attach on the next attempt.
                     start_retries += 1;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
                 Err(error) => return Err(testcontainers_error(operation)(error)),
@@ -1661,7 +1696,7 @@ impl TlsDirectory {
 
 #[derive(Clone, Debug)]
 struct TlsMaterials {
-    dir: Arc<TlsDirectory>,
+    dir: StdArc<TlsDirectory>,
     ca_path: PathBuf,
     ca_pem: Vec<u8>,
     node_pem: Vec<u8>,
@@ -1672,7 +1707,7 @@ struct TlsMaterials {
 impl TlsMaterials {
     fn generate(mode: ContainerMode) -> io::Result<Self> {
         if !mode.is_reusable() {
-            let directory = Arc::new(TlsDirectory::temporary(tempdir()?));
+            let directory = StdArc::new(TlsDirectory::temporary(tempdir()?));
             Self::generate_at(directory.path())?;
             return Self::load(directory);
         }
@@ -1684,7 +1719,7 @@ impl TlsMaterials {
         fs::create_dir_all(&cache_root)?;
         let cache_path = cache_root.join(dependency_configuration_hash("tls-materials"));
         if cache_path.exists() {
-            return Self::load(Arc::new(TlsDirectory::persistent(cache_path)));
+            return Self::load(StdArc::new(TlsDirectory::persistent(cache_path)));
         }
 
         let staging = tempdir_in(&cache_root)?;
@@ -1698,7 +1733,7 @@ impl TlsMaterials {
             }
             Err(error) => return Err(error),
         }
-        Self::load(Arc::new(TlsDirectory::persistent(cache_path)))
+        Self::load(StdArc::new(TlsDirectory::persistent(cache_path)))
     }
 
     fn generate_at(directory: &Path) -> io::Result<()> {
@@ -1728,6 +1763,8 @@ keyUsage = critical, keyCertSign, cRLSign
 subjectKeyIdentifier = hash
 "#,
         )?;
+        // `*.nervix.test` is the zone the scenario DNS fixture answers, so a dependency reached
+        // through a fixture name presents a certificate for the name its client dialled.
         fs::write(
             &leaf_config_path,
             r#"[ req ]
@@ -1747,6 +1784,7 @@ subjectAltName = @alt_names
 
 [ alt_names ]
 DNS.1 = localhost
+DNS.2 = *.nervix.test
 IP.1 = 127.0.0.1
 "#,
         )?;
@@ -1830,7 +1868,7 @@ IP.1 = 127.0.0.1
         Ok(())
     }
 
-    fn load(dir: Arc<TlsDirectory>) -> io::Result<Self> {
+    fn load(dir: StdArc<TlsDirectory>) -> io::Result<Self> {
         let ca_path = dir.path().join("ca.pem");
         let ca_pem = fs::read(&ca_path)?;
         let node_pem = fs::read(dir.path().join("node.pem"))?;
@@ -1880,6 +1918,15 @@ fn container_was_created(error: &TestcontainersError) -> bool {
     )
 }
 
+fn host_port_bind_conflict(error: &TestcontainersError) -> bool {
+    matches!(
+        error,
+        TestcontainersError::Client(ClientError::StartContainer(
+            DockerError::DockerResponseServerError { message, .. }
+        )) if message.contains("address already in use")
+    )
+}
+
 struct ReusableStartupLock(fs::File);
 
 impl ReusableStartupLock {
@@ -1894,13 +1941,15 @@ impl ReusableStartupLock {
             .write(true)
             .truncate(false)
             .open(&path)?;
-        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+        let deadline = nervix_primitives::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match file.try_lock() {
                 Ok(()) => return Ok(Self(file)),
-                Err(fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                Err(fs::TryLockError::WouldBlock)
+                    if nervix_primitives::time::Instant::now() < deadline =>
+                {
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(fs::TryLockError::WouldBlock) => {
                     return Err(io::Error::other(format!(
@@ -2099,18 +2148,18 @@ async fn wait_for_container_tcp<I: Image>(
         .get_host_port_ipv4(port)
         .await
         .map_err(testcontainers_error(dependency))?;
-    let deadline = tokio::time::Instant::now() + REUSABLE_READY_TIMEOUT;
+    let deadline = nervix_primitives::time::Instant::now() + REUSABLE_READY_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
-        let connection_error = match tokio::net::TcpStream::connect(("127.0.0.1", host_port)).await
-        {
-            Ok(stream) => {
-                drop(stream);
-                return Ok(());
-            }
-            Err(error) => error,
-        };
-        if tokio::time::Instant::now() >= deadline {
+        nervix_primitives::task::consume_budget().await;
+        let connection_error =
+            match nervix_primitives::net::TcpStream::connect(("127.0.0.1", host_port)).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return Ok(());
+                }
+                Err(error) => error,
+            };
+        if nervix_primitives::time::Instant::now() >= deadline {
             return Err(io::Error::other(format!(
                 "{dependency} container {} did not accept TCP connections on random host port \
                  {host_port} within {} seconds: {}",
@@ -2119,7 +2168,7 @@ async fn wait_for_container_tcp<I: Image>(
                 connection_error
             )));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -2138,9 +2187,9 @@ async fn provision_gcs_bucket(endpoint: &str) -> io::Result<()> {
     let client = reqwest::Client::new();
     let create_url = format!("{endpoint}/storage/v1/b?project=nervix");
     let inspect_url = format!("{endpoint}/storage/v1/b/nervix-iceberg");
-    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    let deadline = nervix_primitives::time::Instant::now() + STARTUP_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let attempt_error = match client
             .post(&create_url)
             .json(&serde_json::json!({ "name": "nervix-iceberg" }))
@@ -2163,13 +2212,13 @@ async fn provision_gcs_bucket(endpoint: &str) -> io::Result<()> {
             }
             Err(error) => error.to_string(),
         };
-        if tokio::time::Instant::now() >= deadline {
+        if nervix_primitives::time::Instant::now() >= deadline {
             return Err(io::Error::other(format!(
                 "fake GCS did not provision bucket 'nervix-iceberg' before timeout: \
                  {attempt_error}"
             )));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -2294,7 +2343,10 @@ mod tests {
 
     use clap::{CommandFactory as _, Parser as _};
 
-    use super::{KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism, TestParallelismArgs};
+    use super::{
+        ClientError, DockerError, KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism,
+        TestParallelismArgs, TestcontainersError, host_port_bind_conflict,
+    };
 
     #[derive(clap::Parser)]
     struct TestCli {
@@ -2353,5 +2405,25 @@ mod tests {
             image.advertised_listeners(32_001, 32_002),
             "PLAINTEXT://127.0.0.1:32001,BROKER://nervix-kafka-run:9093,SSL://localhost:32002"
         );
+    }
+
+    #[test]
+    fn only_a_docker_start_port_conflict_allows_container_replacement() {
+        let docker_error = || DockerError::DockerResponseServerError {
+            status_code: 500,
+            message: "failed to listen on TCP socket: address already in use".to_string(),
+        };
+        assert!(host_port_bind_conflict(&TestcontainersError::Client(
+            ClientError::StartContainer(docker_error())
+        )));
+        assert!(!host_port_bind_conflict(&TestcontainersError::Client(
+            ClientError::CreateContainer(docker_error())
+        )));
+        assert!(!host_port_bind_conflict(&TestcontainersError::Client(
+            ClientError::StartContainer(DockerError::DockerResponseServerError {
+                status_code: 500,
+                message: "image startup failed".to_string(),
+            })
+        )));
     }
 }

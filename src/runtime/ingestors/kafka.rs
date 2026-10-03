@@ -21,11 +21,13 @@ use nervix_connector_kafka::{
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceInstance, SourceCompanion, SourceInstance, SourceStart},
 };
 
 struct RuntimeKafkaDomainOffsets {
     runtime: Runtime,
+    lifecycle: domain_clock::DomainClockLifecycle,
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
@@ -35,18 +37,14 @@ struct RuntimeKafkaDomainOffsets {
 #[async_trait]
 impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     fn generation(&self) -> Option<u64> {
-        self.runtime
-            .inner
-            .domains
-            .get(&self.domain)
-            .map(|state| state.start_version)
+        self.lifecycle.generation()
     }
 
     async fn initialization(
         &self,
         partitions: &[i32],
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
-        let Some(domain_state) = self.runtime.inner.domains.get(&self.domain) else {
+        let Some(domain_state) = self.lifecycle.task_state() else {
             return Err(
                 Report::new(KafkaDomainOffsetError::Read).attach_printable(format!(
                     "domain '{}' is not installed",
@@ -54,11 +52,10 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                 )),
             );
         };
-        let generation = domain_state.start_version;
+        let generation = domain_state.generation;
         let last_start = domain_state.last_start.clone();
-        drop(domain_state);
         let schedule = if let Some(execution) = self.runtime.inner.executions.get(&self.domain)
-            && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
+            && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(&self.ingestor),
             )) {
@@ -129,9 +126,9 @@ impl Runtime {
     /// offset state was placed on.
     fn kafka_offset_originator(
         &self,
-        placement: Option<&KafkaOffsetStatePlacement>,
+        ingestor: &IngestorSpec,
+        placement: &KafkaDomainOffsetPlacement,
     ) -> Option<KafkaOffsetStateOriginator> {
-        let placement = placement?;
         let dispatcher = self.inner.remote_dispatcher.load();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id)?;
         if placement.primary_node.as_ref() != Some(local_node_id) {
@@ -140,8 +137,21 @@ impl Runtime {
         let state = self
             .inner
             .replicated_kafka_offset_states
-            .get(&placement.placement)?;
+            .get(&ingestor.kafka_offset_state_placement())?;
         ReplicatedKafkaOffsetState::current_originator(state.value())
+    }
+}
+
+impl IngestorSpec {
+    /// Where this ingestor's domain offsets live as node-owned state.
+    pub(in crate::runtime) fn kafka_offset_state_placement(&self) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: self.domain.clone(),
+            state: RuntimeState::KafkaOffset,
+            kind: ModelKind::Ingestor,
+            identifier: ModelName::from(&self.name),
+            branch_key: None,
+        }
     }
 }
 
@@ -179,8 +189,8 @@ impl KafkaPartitionWatch {
             }
         };
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
@@ -229,27 +239,24 @@ impl KafkaIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let KafkaIngestorStartPlan {
             client,
             topic,
-            offset_mode,
+            offsets,
             instances,
             mode,
-            offset_state_placement,
         } = self;
         let domain = &ingestor.domain;
         let acknowledgement =
             Runtime::parse_ingest_acknowledgement(domain, &ingestor.name, mode.acknowledgement())?;
-        let kafka_offset_state = runtime.kafka_offset_originator(offset_state_placement.as_ref());
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
 
-        let rebalance_tx = if offset_mode == KafkaOffsetMode::Domain {
-            Some(watch::channel(0_u64).0)
-        } else {
-            None
+        let rebalance_tx = match &offsets {
+            KafkaOffsetPlan::Domain(_) => Some(watch::channel(0_u64).0),
+            KafkaOffsetPlan::ConsumerGroup(_) => None,
         };
         let mut companions: Vec<Box<dyn SourceCompanion>> = Vec::new();
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
@@ -261,7 +268,7 @@ impl KafkaIngestorStartPlan {
                     ingestor.name.as_str(),
                 ),
             )
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
             companions.push(Box::new(KafkaPartitionWatch {
                 inspector,
                 domain: domain.clone(),
@@ -273,17 +280,21 @@ impl KafkaIngestorStartPlan {
         }
 
         let enable_auto_commit = acknowledgement == SourceAckPolicy::None
-            && matches!(offset_mode, KafkaOffsetMode::ConsumerGroup(_));
-        let source_offset_mode = match offset_mode {
-            KafkaOffsetMode::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
+            && matches!(offsets, KafkaOffsetPlan::ConsumerGroup(_));
+        let source_offset_mode = match offsets {
+            KafkaOffsetPlan::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
                 group_id: group.as_str().to_string(),
             },
-            KafkaOffsetMode::Domain => {
-                let Some(state) = kafka_offset_state else {
-                    return Err(ingestor
-                        .start_failure("Kafka DOMAIN offsets are not authoritative on this node"));
+            KafkaOffsetPlan::Domain(placement) => {
+                let Some(state) = runtime.kafka_offset_originator(ingestor, &placement) else {
+                    return Err(ingestor.source_start_failure(
+                        SourceStartError::KafkaDomainOffsetsNotAuthoritative,
+                    ));
                 };
                 let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
+                    lifecycle: runtime
+                        .domain_clock_lifecycle(domain)
+                        .change_context_lazy(|| ingestor.initialize_failure())?,
                     runtime: runtime.clone(),
                     domain: domain.clone(),
                     ingestor: ingestor.name.clone(),
@@ -321,10 +332,10 @@ impl KafkaIngestorStartPlan {
         let mut opened: Vec<Box<dyn SourceInstance>> =
             Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
         for instance_index in 0..source_plan.capabilities.instances().get() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source = KafkaSource::open(&source_plan.connector, instance_index)
                 .await
-                .map_err(|error| ingestor.start_failure(error.to_string()))?;
+                .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
                 acknowledgement,

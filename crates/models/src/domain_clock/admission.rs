@@ -5,9 +5,17 @@
 //! - **Depends on.** Validated clock periods, timestamps and durations.
 //! - **Must not know.** Runtime lifecycle, notification delivery or connector behavior.
 
+#[cfg(target_pointer_width = "64")]
+use std::num::NonZeroU64;
 use std::time::Duration;
 
+#[cfg(target_pointer_width = "64")]
+use arrow_array::{Array, TimestampNanosecondArray};
+#[cfg(target_pointer_width = "64")]
+use arrow_buffer::{BooleanBuffer, Buffer};
 use meticulous::{OptionExt as _, ResultExt as _};
+#[cfg(target_pointer_width = "64")]
+use nervix_simd_kernels::AdmissionKernel;
 
 use super::{DomainClockPeriod, DomainClockSkew};
 use crate::Timestamp;
@@ -65,6 +73,21 @@ impl DomainAdmissionWindow {
         })
     }
 
+    /// The oldest retained tick center.
+    pub const fn earliest_center(&self) -> Timestamp {
+        self.first
+    }
+
+    /// The newest reached tick center: the logical frontier the window was reconstructed at.
+    pub const fn latest_center(&self) -> Timestamp {
+        self.last
+    }
+
+    /// The inclusive distance from a retained center within which an event is admitted.
+    pub const fn skew(&self) -> DomainClockSkew {
+        self.skew
+    }
+
     pub fn contains(&self, event: Timestamp) -> bool {
         if event < self.first {
             return self
@@ -90,12 +113,35 @@ impl DomainAdmissionWindow {
         remainder <= u128::from(self.skew.as_nanos())
             || distance_to_next <= u128::from(self.skew.as_nanos())
     }
+
+    /// Tests a timestamp column against this reached window in one pass. Null timestamps are
+    /// rejected; the caller can classify them separately from timestamps outside the window.
+    #[cfg(target_pointer_width = "64")]
+    pub fn admit_column(&self, events: &TimestampNanosecondArray) -> BooleanBuffer {
+        let period = NonZeroU64::new(self.period.as_nanos())
+            .assured("a validated domain-clock period is positive");
+        let kernel = AdmissionKernel::new(
+            self.first.unix_nanos(),
+            self.last.unix_nanos(),
+            period,
+            self.skew.as_nanos(),
+        );
+        let bits = kernel.admit(events.values());
+        let admitted = BooleanBuffer::new(Buffer::from_vec(bits), 0, events.len());
+        match events.nulls() {
+            Some(nulls) => &admitted & nulls.inner(),
+            None => admitted,
+        }
+    }
 }
 
 const _: () = assert!(DomainAdmissionWindow::RETAINED_POSITION_COUNT > 0);
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_pointer_width = "64")]
+    use arrow_array::{Array, TimestampNanosecondArray};
+
     use super::*;
 
     #[test]
@@ -111,6 +157,9 @@ mod tests {
                 .assured("fixture skew fits the supported range"),
         )
         .assured("now has reached the origin");
+        assert_eq!(window.earliest_center(), Timestamp::from_unix_nanos(1000));
+        assert_eq!(window.latest_center(), Timestamp::from_unix_nanos(1000));
+        assert_eq!(window.skew().as_nanos(), 10);
         for nanos in [990, 1000, 1010] {
             assert!(
                 window.contains(Timestamp::from_unix_nanos(nanos)),
@@ -160,6 +209,15 @@ mod tests {
                 .checked_sub(retained_preceding_position_count)
                 .assured("a nonnegative frontier minus a u32-sized count fits i64")
                 .max(0);
+            assert_eq!(
+                window.earliest_center(),
+                Timestamp::from_unix_nanos(
+                    first
+                        .checked_mul(100)
+                        .assured("fixture first position is bounded")
+                )
+            );
+            assert_eq!(window.latest_center(), Timestamp::from_unix_nanos(reached));
             for position in 0..=frontier
                 .checked_add(1)
                 .assured("fixture frontier is at most 10000")
@@ -233,6 +291,34 @@ mod tests {
                 window.contains(Timestamp::from_unix_nanos(i64::MIN)),
                 nanos == u64::MAX
             );
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn column_admission_matches_every_scalar_decision_and_rejects_nulls() {
+        let period = Duration::from_nanos(100)
+            .try_into()
+            .assured("fixture period is positive");
+        for skew in [0_u64, 10, 50, 100, 1000] {
+            let window = DomainAdmissionWindow::reached(
+                Timestamp::from_unix_nanos(-100),
+                Timestamp::from_unix_nanos(100),
+                period,
+                Duration::from_nanos(skew)
+                    .try_into()
+                    .assured("fixture skew fits the supported range"),
+            )
+            .assured("fixture now follows origin");
+            let events = (-1200_i64..=1200)
+                .map(|event| if event == 0 { None } else { Some(event) })
+                .collect::<TimestampNanosecondArray>();
+            let admitted = window.admit_column(&events);
+            for row in 0..events.len() {
+                let expected = !events.is_null(row)
+                    && window.contains(Timestamp::from_unix_nanos(events.value(row)));
+                assert_eq!(admitted.value(row), expected, "skew={skew}, row={row}");
+            }
         }
     }
 }

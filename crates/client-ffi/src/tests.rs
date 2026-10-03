@@ -7,9 +7,12 @@ use std::{num::NonZeroU64, ptr, slice, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
-    ClientError, CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic,
-    LeaderRedirect, OutcomeOrigin, RowSchema, SourceSpan, SubscriptionEvent, SubscriptionHandle,
-    SubscriptionInterruption, SubscriptionOpened, SubscriptionRowsEvent, UnknownOutcomeCause,
+    ArchiveDigest, BackupArchiveSummary, BackupDownloadError, BackupResources, ClientError,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic, LeaderRedirect,
+    OutcomeOrigin, RestoreArchive, RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome,
+    RestoreStepReport, RestoredDomain, RowSchema, SourceSpan, SubscriptionEvent,
+    SubscriptionHandle, SubscriptionInterruption, SubscriptionOpened,
+    SubscriptionRestorationFailure, SubscriptionRowsEvent, UnknownOutcomeCause,
     wire::{
         CellWriter, RequestRejection, RowBranch, RowsSkippedCause, ServerEvent, ServerMessage,
         SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
@@ -17,7 +20,7 @@ use nervix_client_core::{
     },
 };
 use nervix_models::{ParseAsType, SchemaField, Timestamp};
-use triomphe::Arc;
+use nervix_primitives::{sync::Arc, time::Instant};
 
 use crate::{
     Cancel, CellState, Disposition, Event, EventKind, FailureKind, FieldType, Outcome, Schema,
@@ -25,12 +28,17 @@ use crate::{
     nx_error_execution_reference, nx_error_free, nx_error_kind_of, nx_error_message,
     nx_event_cell_varlen, nx_event_column_fixed, nx_event_column_states, nx_event_column_varlen,
     nx_event_frame, nx_event_kind_of, nx_event_release, nx_event_retain, nx_event_row_count,
-    nx_event_schema, nx_event_subscription, nx_execution_free, nx_outcome_diagnostic,
-    nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_execution_reference,
-    nx_outcome_free, nx_outcome_message, nx_outcome_schema, nx_outcome_subscription,
-    nx_schema_branch, nx_schema_field, nx_schema_field_count, nx_schema_free, nx_session_connect,
-    nx_session_free,
+    nx_event_schema, nx_event_subscription, nx_execution_free, nx_outcome_backup,
+    nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
+    nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_restore,
+    nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
+    nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_free,
 };
+
+mod batches;
+mod clock_events;
+mod domain_clock;
+mod endpoints;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;
@@ -169,16 +177,21 @@ fn write_row(
 }
 
 fn rows_event(schema: RowSchema) -> SubscriptionEvent {
+    rows_event_count(schema, 2)
+}
+
+fn rows_event_count(schema: RowSchema, count: usize) -> SubscriptionEvent {
     let limits = SessionLimits::DEFAULT;
     let mut batch =
         SubscriptionRowsEncoder::branched(handle(), &limits, |key| key.push_string("acme"))
             .assured("the key fits the limits");
-    batch
-        .push_row(|cells| write_row(cells, Some("h\u{e9}\u{0}"), true))
-        .assured("the row fits the limits");
-    batch
-        .push_row(|cells| write_row(cells, None, false))
-        .assured("the row fits the limits");
+    for index in 0..count {
+        let extreme = index.is_multiple_of(2);
+        let text = if extreme { Some("h\u{e9}\u{0}") } else { None };
+        batch
+            .push_row(|cells| write_row(cells, text, extreme))
+            .assured("the row fits the limits");
+    }
     let frame = batch
         .finish()
         .assured("the batch fits the limits")
@@ -194,6 +207,112 @@ fn rows_event(schema: RowSchema) -> SubscriptionEvent {
         schema: Arc::new(schema),
         rows,
     })
+}
+
+#[test]
+fn profiles_bulk_binding_access_and_retain_release() {
+    const COUNT: usize = 100;
+    const SAMPLES: usize = 200;
+
+    fn sample(mut call: impl FnMut()) -> Vec<u64> {
+        for _ in 0..10 {
+            call();
+        }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            call();
+            samples.push(
+                u64::try_from(started.elapsed().as_nanos())
+                    .assured("a binding probe call completes within 584 years"),
+            );
+        }
+        samples
+    }
+
+    let event = Shared::new(rows_event_count(schema(), COUNT));
+    assert_eq!(
+        unsafe { nx_event_row_count(event.0) },
+        u64::try_from(COUNT).assured("100 fits u64")
+    );
+    let mut states = vec![0_u8; COUNT];
+    let mut fixed = vec![0_u8; COUNT * std::mem::size_of::<i64>()];
+    let mut offsets = vec![0_u64; COUNT + 1];
+    let mut text = vec![0_u8; COUNT * 4 / 2];
+    let mut text_len = 0;
+    let mut frame = ptr::null();
+    let mut frame_len = 0;
+
+    let retain_release = sample(|| {
+        // SAFETY: the original event is live and this reference is released exactly once.
+        let retained = unsafe { nx_event_retain(event.0) };
+        assert!(!retained.is_null());
+        unsafe { nx_event_release(retained) };
+    });
+    let frame_borrow = sample(|| {
+        // SAFETY: the event is live and both outputs are writable.
+        succeeded(unsafe { nx_event_frame(event.0, &mut frame, &mut frame_len) });
+    });
+    let column_states = sample(|| {
+        // SAFETY: the event is live and states has one byte per row.
+        succeeded(unsafe {
+            nx_event_column_states(event.0, ROWS, 7, states.as_mut_ptr(), states.len())
+        });
+    });
+    let column_fixed = sample(|| {
+        // SAFETY: the event is live and fixed has eight bytes per row.
+        succeeded(unsafe {
+            nx_event_column_fixed(event.0, ROWS, 7, fixed.as_mut_ptr().cast(), fixed.len())
+        });
+    });
+    let column_varlen = sample(|| {
+        // SAFETY: the event is live, offsets has one entry per row plus an end, and text has the
+        // exact total capacity for the alternating four-byte strings.
+        succeeded(unsafe {
+            nx_event_column_varlen(
+                event.0,
+                ROWS,
+                12,
+                offsets.as_mut_ptr(),
+                offsets.len(),
+                text.as_mut_ptr(),
+                text.len(),
+                &mut text_len,
+            )
+        });
+    });
+    assert_eq!(text_len, text.len());
+    assert_eq!(
+        offsets[COUNT],
+        u64::try_from(text.len()).assured("the text buffer fits u64")
+    );
+    assert!(frame_len > 0);
+    assert_eq!(states, vec![u8::from(CellState::Value); COUNT]);
+
+    if let Some(output) = std::env::var_os("NERVIX_CLIENT_WIRE_BINDING_COST_OUTPUT") {
+        let output = std::path::PathBuf::from(output);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).assured("the binding report directory is writable");
+        }
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "rows": COUNT,
+            "frame_bytes": frame_len,
+            "samples_per_stage": SAMPLES,
+            "samples_nanoseconds": {
+                "retain_release": retain_release,
+                "borrowed_frame": frame_borrow,
+                "column_states": column_states,
+                "column_fixed": column_fixed,
+                "column_varlen": column_varlen,
+            },
+        });
+        std::fs::write(
+            output,
+            serde_json::to_vec_pretty(&report).assured("the report serializes"),
+        )
+        .assured("the binding report is writable");
+    }
 }
 
 /// An event handed out as a host's first reference, released when dropped.
@@ -530,7 +649,7 @@ fn retained_references_keep_the_frame_until_the_last_one_is_released() {
         "a retained reference addresses the same event"
     );
     let second = Shared(second);
-    std::thread::spawn(move || drop(second))
+    nervix_primitives::thread::spawn(move || drop(second))
         .join()
         .assured("releasing on another thread does not panic");
     let mut again = ptr::null();
@@ -595,6 +714,15 @@ fn every_event_kind_reports_its_subscription_and_count() {
             0,
         ),
         (
+            SubscriptionEvent::RestorationFailed(SubscriptionRestorationFailure {
+                subscription: handle(),
+                message: "stream 'orders' does not exist".to_string(),
+                retry_after: Duration::from_secs(2),
+            }),
+            EventKind::RestorationFailed,
+            0,
+        ),
+        (
             SubscriptionEvent::ConsumerOverflow(handle()),
             EventKind::ConsumerOverflow,
             0,
@@ -628,6 +756,10 @@ fn every_event_kind_reports_its_subscription_and_count() {
 }
 
 fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
+    Outcome::new(command_outcome(disposition, subscription))
+}
+
+fn command_outcome(disposition: CommandDisposition, subscription: bool) -> CommandOutcome {
     let opened = SubscriptionOpened {
         subscription: handle(),
         domain: name("tenant"),
@@ -635,7 +767,7 @@ fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
         subscription_type: SubscriptionType::Row,
         schema: schema(),
     };
-    Outcome::new(CommandOutcome {
+    CommandOutcome {
         execution_reference: Some(
             CommandExecutionReference::parse("reference-1").assured("a valid reference"),
         ),
@@ -660,7 +792,9 @@ fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
         resource: None,
         subscription: subscription.then(|| Box::new(opened)),
         resource_upload: None,
-    })
+        backup: None,
+        restore: None,
+    }
 }
 
 #[test]
@@ -809,6 +943,141 @@ unsafe fn read_schema(schema: *mut Schema) {
 }
 
 #[test]
+fn a_backup_outcome_reports_its_archive() {
+    let mut backup = command_outcome(
+        CommandDisposition::Completed {
+            already_existed: false,
+        },
+        false,
+    );
+    backup.backup = Some(Box::new(BackupArchiveSummary {
+        total_bytes: NonZeroU64::new(4096).assured("a non-zero size"),
+        digest: ArchiveDigest::from_bytes([9; 32]),
+        captured_at: Timestamp::from_unix_nanos(1),
+        retained_until: Timestamp::from_unix_nanos(2),
+        resources: BackupResources::Included,
+        users: Some(1),
+        domains: Vec::new(),
+    }));
+    let backup = Box::into_raw(Box::new(Outcome::new(backup)));
+    let without = Box::into_raw(Box::new(outcome(CommandDisposition::Failed, false)));
+    let mut total_bytes = 0;
+    let mut digest = ptr::null();
+    let mut digest_len = 0;
+    // SAFETY: both outcomes are live until they are freed, and every out-parameter is writable.
+    unsafe {
+        assert!(nx_outcome_backup(
+            backup,
+            &mut total_bytes,
+            &mut digest,
+            &mut digest_len
+        ));
+        assert_eq!(total_bytes, 4096);
+        assert_eq!(slice::from_raw_parts(digest, digest_len), &[9; 32]);
+        assert!(!nx_outcome_backup(
+            without,
+            &mut total_bytes,
+            &mut digest,
+            &mut digest_len
+        ));
+        nx_outcome_free(backup);
+        nx_outcome_free(without);
+    }
+}
+
+#[test]
+fn a_restore_outcome_reports_its_steps() {
+    let domain = |name: &str| {
+        nervix_models::DomainName::parse(name).assured("the test domain is a valid literal name")
+    };
+    let restored = |source: &str, versions: u64, models: u64| RestoredDomain {
+        source: domain(source),
+        domain: domain(source),
+        resource_versions: versions,
+        models,
+        planned_models: None,
+    };
+    let report = |mode: RestoreMode, outcome: RestoreStepOutcome| RestoreReport {
+        mode,
+        archive: RestoreArchive {
+            total_bytes: NonZeroU64::new(4096).assured("a non-zero size"),
+            digest: ArchiveDigest::from_bytes([9; 32]),
+        },
+        captured_at: Timestamp::from_unix_nanos(1),
+        users: None,
+        domains: vec![restored("payments", 3, 5), restored("ledger", 1, 2)],
+        steps: vec![
+            RestoreStepReport {
+                step: RestoreStep::CreateDomain(domain("payments")),
+                outcome: RestoreStepOutcome::Applied,
+            },
+            RestoreStepReport {
+                step: RestoreStep::ApplyModels(domain("payments")),
+                outcome,
+            },
+        ],
+    };
+    let mut failed = command_outcome(CommandDisposition::Failed, false);
+    failed.restore = Some(Box::new(report(
+        RestoreMode::Apply,
+        RestoreStepOutcome::Failed,
+    )));
+    let mut planned = command_outcome(
+        CommandDisposition::Completed {
+            already_existed: false,
+        },
+        false,
+    );
+    planned.restore = Some(Box::new(report(
+        RestoreMode::DryRun,
+        RestoreStepOutcome::Planned,
+    )));
+    let failed = Box::into_raw(Box::new(Outcome::new(failed)));
+    let planned = Box::into_raw(Box::new(Outcome::new(planned)));
+    let without = Box::into_raw(Box::new(outcome(CommandDisposition::Failed, false)));
+    let mut dry_run = true;
+    let mut domains = 0;
+    let mut resource_versions = 0;
+    let mut models = 0;
+    let mut step_failed = false;
+    // SAFETY: every outcome is live until it is freed, and every out-parameter is writable.
+    unsafe {
+        assert!(nx_outcome_restore(
+            failed,
+            &mut dry_run,
+            &mut domains,
+            &mut resource_versions,
+            &mut models,
+            &mut step_failed
+        ));
+        assert!(!dry_run);
+        assert_eq!((domains, resource_versions, models), (2, 4, 7));
+        assert!(step_failed);
+        assert!(nx_outcome_restore(
+            planned,
+            &mut dry_run,
+            &mut domains,
+            &mut resource_versions,
+            &mut models,
+            &mut step_failed
+        ));
+        assert!(dry_run);
+        assert!(!step_failed);
+        assert!(!nx_outcome_restore(
+            without,
+            &mut dry_run,
+            &mut domains,
+            &mut resource_versions,
+            &mut models,
+            &mut step_failed
+        ));
+        nx_outcome_free(failed);
+        nx_outcome_free(planned);
+        nx_outcome_free(without);
+    }
+}
+
+#[test]
 fn an_outcome_without_a_subscription_has_no_schema() {
     let outcome = Box::into_raw(Box::new(outcome(CommandDisposition::Failed, false)));
     let mut name = ptr::null();
@@ -939,6 +1208,46 @@ fn client_errors_are_classified_and_keep_their_causes() {
         assert_eq!(failure.kind(), kind);
         assert_eq!(failure.execution_reference(), None);
     }
+    let layered = crate::Failure::from(
+        error_stack::Report::new(ClientError::RetryDeadline)
+            .change_context(ClientError::SessionClosed),
+    );
+    assert_eq!(
+        layered.kind(),
+        FailureKind::Closed,
+        "a report is classified by its current context"
+    );
+    assert!(
+        layered.message().contains("session retry deadline expired"),
+        "every context beneath the current one stays in the message: {}",
+        layered.message()
+    );
+    let downloads = [
+        (
+            BackupDownloadError::Refused {
+                failure: nervix_client_core::wire::BackupDownloadFailure::Expired,
+                message: "expired".to_string(),
+            },
+            FailureKind::Rejected,
+        ),
+        (BackupDownloadError::Stalled, FailureKind::Transport),
+        (BackupDownloadError::Mismatch, FailureKind::Protocol),
+        (
+            BackupDownloadError::Write {
+                path: "archive.nvxb".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+            },
+            FailureKind::InvalidArgument,
+        ),
+    ];
+    for (source, kind) in downloads {
+        let failure = crate::Failure::from(ClientError::BackupDownload {
+            reference: reference.clone(),
+            source,
+        });
+        assert_eq!(failure.kind(), kind);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+    }
     let handed_out = Box::into_raw(Box::new(uncertain));
     let mut text = ptr::null();
     let mut text_len = 0;
@@ -967,7 +1276,7 @@ fn client_errors_are_classified_and_keep_their_causes() {
 
 #[test]
 fn a_token_bounds_a_call_by_cancellation_and_by_deadline() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .assured("a test runtime starts");

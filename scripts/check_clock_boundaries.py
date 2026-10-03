@@ -18,9 +18,16 @@ PHYSICAL_TIME_OWNER = Path("crates/connector/src/physical_time.rs")
 PHYSICAL_DEADLINE_CONSTRUCTION = "PhysicalDeadlineCapability::operational"
 ACTUAL_UTC_READ = "actual_utc_now"
 
-# The data plane the physical-time rules govern: the server's runtime, the connector contract crate,
+# The data plane the physical-time rules govern: the server's runtime, the branch instance lifetimes
+# its tasks own, the checkpoint replication its replicated states own, the connector contract crate,
 # and every integration crate under `crates/connectors`.
-PHYSICAL_TIME_ROOTS = ("src/runtime", "crates/connector/src", "crates/connectors/*/src")
+PHYSICAL_TIME_ROOTS = (
+    "src/runtime",
+    "crates/branch-instances/src",
+    "crates/checkpoint-replication/src",
+    "crates/connector/src",
+    "crates/connectors/*/src",
+)
 
 
 def physical_time_sources() -> list[Path]:
@@ -76,6 +83,7 @@ def main() -> int:
         ROOT / "src/metrics.rs",
         ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",
+        ROOT / "crates/web-console/src/clock_display.rs",
     }
     wall_time_needles = (
         "Timestamp::now(",
@@ -117,10 +125,12 @@ def main() -> int:
     actual_utc_owner = ROOT / PHYSICAL_TIME_OWNER
     actual_utc_consumers = {
         ROOT / "crates/connectors/http/src/lib.rs",
+        ROOT / "crates/connectors/http/src/sink.rs",
         ROOT / "crates/connectors/iceberg/src/lib.rs",
         ROOT / "crates/connectors/otel/src/lib.rs",
         ROOT / "crates/connectors/prometheus/src/lib.rs",
         ROOT / "crates/connectors/sentry/src/lib.rs",
+        runtime_root / "client_ingestor.rs",
         runtime_root / "domain_clock.rs",
         runtime_root / "emitter_task.rs",
         runtime_root / "endpoint.rs",
@@ -154,6 +164,7 @@ def main() -> int:
         actual_utc_owner,
         ROOT / "src/runtime/relay_interaction.rs",
         ROOT / "src/runtime_schema/syslog.rs",
+        ROOT / "crates/web-console/src/clock_display.rs",
         *actual_utc_consumers,
     }
     for path in sorted(ownership_contract_sources):

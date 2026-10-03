@@ -13,16 +13,14 @@ default = []
 shuttle = [
   "dep:shuttle",
   "nervix-execution/shuttle",
-  "dep:shuttle-dashmap",
-  "dep:shuttle-parking-lot",
-  "dep:shuttle-tokio",
-  "dep:shuttle-tokio-util",
-  "shuttle-dashmap/shuttle",
-  "shuttle-parking-lot/shuttle",
-  "shuttle-tokio/shuttle",
-  "shuttle-tokio-util/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
 ]
-turmoil = ["dep:turmoil", "nervix-execution/turmoil"]
+turmoil = [
+  "dep:turmoil",
+  "nervix-execution/turmoil",
+  "nervix-primitives/turmoil",
+]
 
 [[test]]
 name = "simulation"
@@ -33,7 +31,6 @@ required-features = ["turmoil"]
 ahash = { workspace = true }
 arch-into = { workspace = true }
 bytes = { workspace = true }
-dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 futures-util = { workspace = true }
@@ -43,25 +40,19 @@ meticulous = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
-parking_lot = { workspace = true }
 percent-encoding = { workspace = true }
 rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 shuttle = { workspace = true, optional = true }
-shuttle-dashmap = { workspace = true, optional = true }
-shuttle-parking-lot = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = ["full"], optional = true }
-shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 turmoil = { workspace = true, optional = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
@@ -71,7 +62,7 @@ alloc_count = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
-humantime = { workspace = true }
+nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

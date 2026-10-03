@@ -7,20 +7,19 @@
 //! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
 //! - **Must not know.** The runtime meaning of a request or response.
 
-use std::{
-    collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, sync::Arc as StdArc,
-    time::Duration,
-};
+use std::{collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, time::Duration};
 
 use ahash::HashMap;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, Executor, Reservation,
-    sync::{ArcSwap, ArcSwapOption},
-};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
+use nervix_primitives::{
+    publication::{ArcSwap, ArcSwapOption},
+    sync::{Arc, Notify, OwnedSemaphorePermit, Semaphore, StdArc},
+    time::{Instant, timeout},
+};
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::high::{HighDeserializer, HighSerializer},
@@ -29,11 +28,6 @@ use rkyv::{
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
-use tokio::{
-    sync::{Notify, OwnedSemaphorePermit, Semaphore},
-    time::{Instant, timeout},
-};
-use triomphe::Arc;
 
 use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,
@@ -157,7 +151,6 @@ where
         )
         .await
         .map(wire::EncodedPayload::into_parts)
-        .map_err(Report::new)
     }
 
     async fn decode_rkyv(
@@ -173,7 +166,6 @@ where
         )
         .await
         .map(wire::Decoded::into_parts)
-        .map_err(Report::new)
     }
 }
 
@@ -276,6 +268,28 @@ impl InterconnectRequest for ApplicationRevisionRequest {
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
+/// The live process incarnations a leader currently requires for command completion.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationCompletionPeersResponse {
+    pub leader: ClusterNodeIdentity,
+    pub term: u64,
+    pub peers: Vec<ClusterNodeIdentity>,
+}
+
+/// Requests the current leader's effective application-health view. A follower must fence the
+/// response against its Raft leader and term before using it for a completion barrier.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationCompletionPeersRequest;
+
+impl InterconnectRequest for ApplicationCompletionPeersRequest {
+    type Response = Option<ApplicationCompletionPeersResponse>;
+
+    const NAME: &'static str = "application_completion_peers";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
 /// Where one process incarnation's HTTPS listener stands against a requested runtime revision.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HttpsListenerInstallation {
@@ -371,10 +385,16 @@ impl StreamHandlerError {
             message: message.into(),
         }
     }
+
+    /// Keep the producer's typed failure beneath the handler context sent over the stream.
+    pub fn with_cause<C: error_stack::Context>(cause: Report<C>) -> Report<Self> {
+        let message = cause.to_string();
+        cause.change_context(Self::new(message))
+    }
 }
 
 pub type OutgoingByteStream =
-    Pin<Box<dyn Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<ChargedBytes, Report<StreamHandlerError>>> + Send + 'static>>;
 
 pub(crate) type OutgoingFrameStream =
     Pin<Box<dyn Stream<Item = Result<ChargedBytes, Report<StreamHandlerError>>> + Send + 'static>>;
@@ -388,7 +408,7 @@ pub struct StreamingResponse {
 impl StreamingResponse {
     pub fn new<S>(content_length: u64, chunks: S) -> Self
     where
-        S: Stream<Item = Result<ChargedBytes, StreamHandlerError>> + Send + 'static,
+        S: Stream<Item = Result<ChargedBytes, Report<StreamHandlerError>>> + Send + 'static,
     {
         Self {
             content_length,
@@ -465,6 +485,19 @@ pub enum RequestError {
 }
 
 impl RequestError {
+    pub(crate) fn stream_with_cause<C: error_stack::Context>(
+        cause: Report<C>,
+        node: ClusterNodeName,
+        request: &'static str,
+    ) -> Report<Self> {
+        let reason = cause.to_string();
+        cause.change_context(Self::Stream {
+            node,
+            request,
+            reason,
+        })
+    }
+
     /// Whether this request was refused solely because a local or remote admission quota was full.
     pub fn is_capacity_exhaustion(&self) -> bool {
         match self {
@@ -882,7 +915,7 @@ where
                     let (payload, reservation) = response
                         .encode_rkyv(executor, M::CLASS, limit)
                         .await
-                        .map_err(|error| Report::new(StreamHandlerError::new(error.to_string())))?;
+                        .map_err(StreamHandlerError::with_cause)?;
                     Ok(ChargedBytes::from_owned(payload, reservation))
                 }
             });
@@ -896,7 +929,7 @@ impl<M, H, F> ErasedStreamHandler for TypedStreamHandler<M, H>
 where
     M: InterconnectStreamRequest,
     H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
-    F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
+    F: Future<Output = Result<StreamingResponse, Report<StreamHandlerError>>> + Send + 'static,
 {
     fn class(&self) -> PoolClass {
         M::CLASS
@@ -1019,7 +1052,7 @@ impl RequestState {
     where
         M: InterconnectStreamRequest,
         H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
-        F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
+        F: Future<Output = Result<StreamingResponse, Report<StreamHandlerError>>> + Send + 'static,
     {
         if !subquota_belongs_to_class(M::SUBQUOTA, M::CLASS) {
             return Err(Report::new(
@@ -1273,7 +1306,7 @@ impl RequestState {
 
     async fn target_left(&self, node: &ClusterNodeName) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let changed = self.membership_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -1310,7 +1343,7 @@ impl Transport {
     where
         M: InterconnectStreamRequest,
         H: Fn(RequestContext, M) -> F + Send + Sync + 'static,
-        F: Future<Output = Result<StreamingResponse, StreamHandlerError>> + Send + 'static,
+        F: Future<Output = Result<StreamingResponse, Report<StreamHandlerError>>> + Send + 'static,
     {
         self.inner.requests().register_stream::<M, H, F>(handler)
     }
@@ -1372,9 +1405,7 @@ impl Transport {
                 M::CLASS.payload_limit(self.inner.executor()),
             )
             .await
-            .map_err(|error| {
-                Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-            })?;
+            .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let opening = RequestEnvelope {
             class: M::CLASS,
             request: M::NAME.to_string(),
@@ -1388,9 +1419,7 @@ impl Transport {
             opening,
         )
         .await
-        .map_err(|error| {
-            Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-        })?;
+        .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         self.inner
             .open_duplex_stream::<M>(
                 node,
@@ -1403,13 +1432,7 @@ impl Transport {
                 },
             )
             .await
-            .map_err(|error| {
-                Report::new(RequestError::Stream {
-                    node: node.clone(),
-                    request: M::NAME,
-                    reason: error.to_string(),
-                })
-            })
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))
     }
 
     pub fn replace_live_nodes(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
@@ -1465,9 +1488,7 @@ impl Transport {
                 M::CLASS.payload_limit(self.inner.executor()),
             )
             .await
-            .map_err(|error| {
-                Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-            })?;
+            .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let request = RequestEnvelope {
             class: M::CLASS,
             request: M::NAME.to_string(),
@@ -1481,9 +1502,7 @@ impl Transport {
             request,
         )
         .await
-        .map_err(|error| {
-            Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-        })?;
+        .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         self.inner
             .open_byte_stream(
                 node,
@@ -1497,13 +1516,7 @@ impl Transport {
                 },
             )
             .await
-            .map_err(|error| {
-                Report::new(RequestError::Stream {
-                    node: node.clone(),
-                    request: M::NAME,
-                    reason: error.to_string(),
-                })
-            })
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))
     }
 
     /// Send one typed request with a caller-owned end-to-end deadline.
@@ -1546,9 +1559,7 @@ impl Transport {
                     M::CLASS.payload_limit(self.inner.executor()),
                 )
                 .await
-                .map_err(|error| {
-                    Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-                })?;
+                .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
             let request = ControlEnvelope::Request(RequestEnvelope {
                 class: M::CLASS,
                 request: M::NAME.to_string(),
@@ -1558,32 +1569,31 @@ impl Transport {
                 .inner
                 .round_trip_control(node, request, M::SUBQUOTA, timeout_duration)
                 .await
-                .map_err(|error| match error {
-                    super::TransportError::ShuttingDown => {
-                        Report::new(RequestError::ShuttingDown {
+                .map_err(|error| {
+                    let request_error = match error.current_context() {
+                        super::TransportError::ShuttingDown => RequestError::ShuttingDown {
                             node: node.clone(),
                             request: M::NAME,
-                        })
-                    }
-                    super::TransportError::RequestTimeout { .. }
-                    | super::TransportError::ProgressTimeout { .. } => {
-                        Report::new(RequestError::Timeout {
+                        },
+                        super::TransportError::RequestTimeout { .. }
+                        | super::TransportError::ProgressTimeout { .. } => RequestError::Timeout {
                             node: node.clone(),
                             request: M::NAME,
                             timeout: timeout_duration,
-                        })
-                    }
-                    super::TransportError::PoolExhausted => {
-                        Report::new(RequestError::ConnectionCapacityExhausted {
+                        },
+                        super::TransportError::PoolExhausted => {
+                            RequestError::ConnectionCapacityExhausted {
+                                node: node.clone(),
+                                request: M::NAME,
+                            }
+                        }
+                        cause => RequestError::Transport {
                             node: node.clone(),
                             request: M::NAME,
-                        })
-                    }
-                    error => Report::new(RequestError::Transport {
-                        node: node.clone(),
-                        request: M::NAME,
-                        reason: error.to_string(),
-                    }),
+                            reason: cause.to_string(),
+                        },
+                    };
+                    error.change_context(request_error)
                 })?;
             let (response, _response_reservation) = response.into_parts();
             let ControlEnvelope::Response(response) = response else {
@@ -1604,8 +1614,7 @@ impl Transport {
                         .await
                         .map(|(response, _response_payload_reservation)| response)
                         .map_err(|error| {
-                            Report::new(RequestError::Decode { request: M::NAME })
-                                .attach_printable(error)
+                            error.change_context(RequestError::Decode { request: M::NAME })
                         })
                 }
                 Err(failure) => Err(Report::new(RequestError::RemoteRejected {
@@ -1617,7 +1626,7 @@ impl Transport {
         };
         let shutdown = self.inner.shutdown_token();
         let submitted_at = Instant::now();
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             _ = shutdown.cancelled() => Err(Report::new(RequestError::ShuttingDown {
                 node: node.clone(),

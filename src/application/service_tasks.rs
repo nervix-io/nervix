@@ -7,31 +7,13 @@
 //! - **Depends on.** Tokio task tracking and cancellation, and the shutdown deadline.
 //! - **Must not know.** What any service task does.
 
-use tokio::task::JoinHandle;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use nervix_primitives::{
+    sync::{Arc, CancellationToken},
+    task::{JoinHandle, TaskTracker},
+};
 use tracing::warn;
-use triomphe::Arc;
 
 use super::shutdown::{BeforeDeadline, ShutdownDeadline, ShutdownPhaseOutcome};
-
-#[cfg(not(feature = "shuttle"))]
-fn run_until_cancelled_owned<F>(
-    cancellation: CancellationToken,
-    task: F,
-) -> impl Future<Output = Option<F::Output>>
-where
-    F: Future,
-{
-    cancellation.run_until_cancelled_owned(task)
-}
-
-#[cfg(feature = "shuttle")]
-async fn run_until_cancelled_owned<F>(cancellation: CancellationToken, task: F) -> Option<F::Output>
-where
-    F: Future,
-{
-    cancellation.run_until_cancelled(task).await
-}
 
 /// The tracker and the cancellation every service task shares.
 struct ServiceTasksInner {
@@ -68,7 +50,7 @@ impl ServiceTasks {
         let cancellation = self.inner.deadline_cancellation.clone();
         self.inner
             .tracker
-            .spawn(run_until_cancelled_owned(cancellation, task))
+            .spawn(cancellation.run_until_cancelled_owned(task))
     }
 
     /// Waits for every service task until the shutdown deadline, then cancels the ones still
@@ -99,7 +81,9 @@ impl ServiceTasks {
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use nervix_primitives::time::Instant;
 
     use super::*;
     use crate::application::ShutdownCoordinator;
@@ -113,12 +97,12 @@ mod tests {
             .deadline()
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn service_tasks_that_finish_before_the_deadline_complete_their_shutdown() {
         let tasks = ServiceTasks::default();
         let deadline = deadline_after(Duration::from_secs(5));
         let task = tasks.spawn(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            nervix_primitives::time::sleep(Duration::from_secs(1)).await;
             7
         });
 
@@ -128,7 +112,7 @@ mod tests {
         assert_eq!(task.await.expect("the task must not panic"), Some(7));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_service_task_still_running_at_the_deadline_is_cancelled_and_joined() {
         let tasks = ServiceTasks::default();
         let deadline = deadline_after(Duration::from_secs(5));

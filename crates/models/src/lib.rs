@@ -5,7 +5,8 @@
 //! - **Owns.** Every NSPL Model, validated name and HTTP request-field types, `Timestamp`, branch
 //!   and node references, the index that keys a domain's Models by the node each one configures,
 //!   structured message errors, and the canonical NSPL rendering of a Model.
-//! - **Depends on.** Serialization and primitive crates.
+//! - **Depends on.** Serialization and primitive crates, and Arrow's schema types behind the
+//!   `arrow` feature for the one Arrow data type each schema type is represented as.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
 //!   no registry state, no Arrow array and no Tokio type belongs here.
 //!
@@ -14,14 +15,22 @@
 //! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
 //! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
 
+mod archived_count;
+#[cfg(feature = "arrow")]
+mod arrow_types;
+mod backup;
 mod canonical;
+mod client_consumer;
+mod client_producer;
 mod cluster_node;
 mod command;
 mod completion;
 mod domain_clock;
+mod duration_text;
 mod emitter_batch;
 mod expression;
 mod http_request;
+mod ingestor_input;
 mod json_path;
 mod message_error;
 mod model_index;
@@ -34,6 +43,7 @@ mod remote;
 mod reset_wasm_state;
 mod resource;
 mod resource_binding;
+mod restore;
 mod schema;
 mod schema_fingerprint;
 mod statement;
@@ -42,10 +52,27 @@ mod udf;
 mod wasm_state_generation;
 mod wasm_state_inspection;
 
+pub use archived_count::{ArchivedCountError, CountAsU64};
+pub use backup::{
+    ArchiveDigest, Backup, BackupArchiveSummary, BackupDomainSummary, BackupResources, BackupScope,
+    DescribeBackup,
+};
 pub use canonical::{
-    CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
+    CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
-    expression_to_nspl, ingest_quiesce_to_nspl,
+    canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl, string_literal,
+};
+pub use client_consumer::{
+    CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,
+    MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
+};
+pub use client_producer::{
+    CLIENT_PRODUCER_NODE_BYTES, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId,
+    ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, MAX_CLIENT_BATCH_ROWS,
+    MAX_CLIENT_PRODUCER_BATCHES, MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
 pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation, CoordinationIdentity};
 pub use command::{
@@ -55,9 +82,11 @@ pub use command::{
 pub use completion::{BuiltinFunctionScope, SemanticReference};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
-    DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
-    DomainClockProgress, DomainClockSkew, DomainClockState, DomainTimeRate,
+    DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockObservation,
+    DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
+    DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
+pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter_batch::{
     BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
     EmitterBatchRequirement, PayloadSizeLimit,
@@ -71,6 +100,9 @@ pub use expression::{
 pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
     HttpRequestFieldError, HttpTarget,
+};
+pub use ingestor_input::{
+    ClientIngestMode, ClientIngestSource, IngestorInput, IngestorInputKind, TransportIngestorInput,
 };
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
@@ -129,6 +161,10 @@ pub use resource::{
     ResourceVersionResolutionError, ResourceVersionStatus,
 };
 pub use resource_binding::ResourceRebinding;
+pub use restore::{
+    ExistingUserPolicy, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
+};
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
     AlterWireSchemaOperation, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
@@ -137,10 +173,10 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{
-    AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterDomain,
-    AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator, AlterGeneratorError,
-    AlterGeneratorOperation, AlterIngestor, AlterIngestorError, AlterIngestorOperation,
-    AlterJunction, AlterJunctionError, AlterPlacement, AlterPlacementError,
+    AckMode, AckWindow, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
+    AlterDomain, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
+    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
+    AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterPlacement, AlterPlacementError,
     AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
     AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
     AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry, BranchEviction,
@@ -164,20 +200,19 @@ pub use statement::{
     DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
     DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitSinkKind,
-    EmitterAckWindow, EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry,
-    GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
-    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestSourceKind, IngestTimestampSource, InputCollectPolicy, InspectionFormat,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
-    MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping, NatsConfigEntry,
-    NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind,
-    OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
+    EmitterBatchContractError, EmitterBody, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestSourceKind, IngestTimestampSource,
+    InputCollectPolicy, InspectionFormat, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model,
+    ModelKind, MongoDbConfigEntry, MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping,
+    NatsConfigEntry, NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
     OwnershipTransition, PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry,
     PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
@@ -186,8 +221,8 @@ pub use statement::{
     RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
-    ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
-    ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
     SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,

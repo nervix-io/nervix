@@ -8,8 +8,14 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The Arrow data type each schema type is represented as.
+arrow = ["dep:arrow-schema"]
+default = []
+
 [dependencies]
 ahash-compile-time = { workspace = true }
+arrow-schema = { workspace = true, optional = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
@@ -17,6 +23,7 @@ humantime = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-primitives = { workspace = true }
 nonzero_ext = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
@@ -24,9 +31,15 @@ serde_json = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 
+[target.'cfg(target_pointer_width = "64")'.dependencies]
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+nervix-simd-kernels = { workspace = true }
+
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 rstest = { workspace = true }

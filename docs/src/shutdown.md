@@ -98,8 +98,10 @@ the drain timeout makes the shutdown deadline the effective bound.
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
 because stopping them is what releases the node's tasks, connections, and storage. The interconnect
-applies its own ten-second transport drain. The deadline supervisor, not those bounds, is what
-guarantees the process ends.
+applies its own ten-second transport drain. Closing the node's databases flushes and joins their
+background work synchronously, so the services that own them are dropped last, as one job on the
+node's filesystem storage workers; a node that cannot take that job reports teardown `Abandoned`.
+The deadline supervisor, not those bounds, is what guarantees the process ends.
 
 ### Exit Status
 
@@ -110,6 +112,7 @@ guarantees the process ends.
 | Shutdown deadline expired | `1` |
 | A public listener, cluster shutdown, or storage release reported an error | `1` |
 | Termination signal handlers could not be registered at startup | `1` |
+| A command-line option or its environment variable holds a value the node cannot read, such as duration text that names no duration | `2` |
 | Repeated `SIGINT` | `130` |
 | Repeated `SIGTERM` | `143` |
 | `SIGKILL` | Terminated by signal, no exit status |
@@ -168,16 +171,19 @@ nothing was cordoned and nothing is cleared.
 Stop admission closes the node's public surface. It stops accepting on the session gRPC, connector,
 observability, and console listeners and closes the client connections those listeners had accepted.
 
-Closing a connection cancels the requests it carries. A session first tells its client that the
-server is shutting down, then ends. The ending follows the replies already queued for the client
-and is the last frame of the session, but the session does not wait for the client to read it:
-a session whose client reads nothing ends just as promptly, and its subscriptions stop and release
+Closing a connection cancels the requests it carries. A console session is told that the server
+is shutting down, after the replies already queued for its client, and that ending is its last
+frame. A native gRPC session's connection is cut when admission closes, so its client sees the
+stream fail as it would after any transport loss. Neither waits for the client to read anything: a
+session whose client reads nothing ends just as promptly, and its subscriptions stop and release
 the relays they held. Every request the session had not yet admitted is cancelled before admission
 and never begins an effect, so the client can send it again, with the same execution reference, to
 another node. A session stream or a resource upload waiting on its client ends at once, so no
 client can hold the drain or the process open. An authenticated upload held open
 at any point of its progress — before its first message, between chunks, or trickling chunks
-indefinitely — is cancelled this way and does not delay the exit.
+indefinitely — is cancelled this way and does not delay the exit. [Node Stop And Restart As A
+Client Observes Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them)
+describes what a client sees at each ending and what it recovers.
 
 Work that a session command had already admitted is not cancelled here. Its session stops waiting
 for it, and no reply follows for it, but its effect keeps running. A transaction commit in progress
@@ -189,22 +195,41 @@ the node restarts.
 The terminating node then stops new intake on **every** one of its ingestors, including endpoint and
 Syslog ingestors that serve on every node and ingestors whose scheduled owner did not move. Its
 generators stop producing. Intake never reopens: there is no resume path out of a shutdown drain.
+If a broker-style source is still resuming, the host cancels that pending resume when shutdown
+arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
+change also cancels an in-progress resume so the next loop turn observes the new intake state.
 
 This intake stop ignores `ON QUIESCE`. That clause governs what an external source experiences
 during a resumable hold — a model alteration, a domain pause, or memory-pressure shedding — where
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
+
+Endpoint source close and terminal table clearing end each exact intake lifetime before withdrawing
+its binding. HTTP requests and WebSocket sessions that retained a route then see absent intake on
+later admission; a replacement source does not reopen that retained lifetime. A request already
+holding an intake lease may finish within the existing shutdown deadline. Endpoint definitions and
+intake leases are volatile publications and are reconstructed from the installed revision on startup.
+
 Payloads already admitted continue through their routes.
 Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
 change wait compares against that publication after registering the waiter, so a shutdown or
 ownership-handoff engagement during dispatch is observed on the next loop turn even when the
 notification arrived before the wait began.
 
+A [client ingestor](./ingestors.md#client-ingestors) stops intake the same way: from the moment
+intake stops, a batch that arrives or waits unadmitted is refused as `draining`, which its producer
+must not send again to this execution, while admitted batches continue through their routes. Closing
+the node's sessions detaches the producers they held; their admitted batches still drain. Producers
+another node forwards here stay attached through the drain and learn every outcome it decides.
+Terminal teardown then ends every producer still attached with `shutting down`, reporting each batch
+whose acknowledgement is still unresolved as of unknown outcome with cause `interrupted`.
+
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
-and counted as dropped when the ingestor stops. Only work already admitted into the graph is
-drained.
+and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
+for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
+with the rest. Only work already admitted into the graph is drained.
 
 ## Draining Admitted Work
 
@@ -398,6 +423,13 @@ Unexpected owner loss is not a handoff. The failed tasks and their volatile buff
 immediately, attached work is negatively acknowledged, and the scheduler promotes a live replica or
 chooses a fresh owner without waiting for a gate.
 
+The scheduler acts on what application health and gossip report, so a forced recovery can also move
+work off a node that is still running. That node stops the moved runtime when it applies the
+published schedule. A batch a relay owner routed to it for a moved consumer, and that reaches its
+runtime afterwards, finds no attached consumer and fails its attached acknowledgements, so the
+source redelivers the record to the new owner rather than committing it; see
+[Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
+
 Forced recovery is the path that publishes a schedule when the source cannot participate. It stages
 the destination's checkpoint inventory under the destination's process incarnation and the complete
 target-schedule fingerprint, and applying staged checkpoints accepts only that exact preparation. A
@@ -434,6 +466,10 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
 admitted work completes in place`.
+When a follower contacts the leader's session service to request or clear a drain, a named leader
+endpoint resolves through the follower node's loaded resolver, described in
+[Name Resolution](./name-resolution.md). DNS and connection attempts remain within the existing
+drain and shutdown deadlines.
 
 ## Connector Contracts
 
@@ -459,6 +495,7 @@ What that contract is depends on the source, and three groups differ sharply:
 | Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
 | HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
 | NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, HTTP endpoints, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
 The last row is the one to plan around. Those sources have no acknowledged delivery mode at all, so
 a record admitted from them and not yet emitted is lost both by a drain that runs out of time and by
@@ -474,8 +511,28 @@ acknowledged source redelivers the record after the restart.
 An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
 emitter that cannot finish reports `emitter '<name>' did not drain before its configured deadline`
 and holds the drain until the timeout. A batching emitter's drain also writes every batch payload an
-earlier attempt left unanswered, with the bytes and members it was first written with, and the
+earlier attempt left unanswered, with the bytes and members it was first written with, as an OTEL
+emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
+
+A native client emitter reaches its success boundary only on application ACK. Force flush prepares
+its bounded Arrow IPC batches, but a waiting consumer read or a batch already sent to a session
+does not drain them. Closing public sessions during intake stop detaches their consumers and
+revokes attempts; remaining prepared batches wait for another consumer within the physical drain
+deadline. On deadline expiry terminal teardown cancels the emitter task and discards volatile
+attempt history. An attached upstream source may replay after restart, including a batch whose
+application effect happened but whose ACK was lost. No durable consumer cursor is restored.
+
+An HTTP emitter force-flushes its collected records into one request per eligible record, then
+waits for complete successful final response headers. Each attempt and retry wait remains bounded
+by the remaining physical drain deadline, even in a paced domain. A request still unanswered at
+that deadline is not marked delivered. Its prepared bytes, selected destination, headers, and
+retry state are volatile and disappear when the process ends. An attached acknowledged source can
+redeliver the record after restart; an unacknowledged endpoint source cannot. A destination that
+applied a request whose successful response was lost can receive it again after that redelivery.
+Once the graph drain budget ends, terminal teardown cancels an emitter task waiting in an HTTP
+attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
+a record-specific success or rejection.
 
 Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
 batches are published, the emitter host calls the sink contract's finish hook with the remaining
@@ -536,6 +593,14 @@ serving their streams, so a peer's request the node has not answered fails inste
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
 
+The node's own OTLP trace exporter is a process service. After the application returns, its tracing
+guard closes resolver installation and asks the SDK to flush before the process drops its Tokio
+runtime. An installed resolver remains available to queued exports. If startup failed before DNS
+installation, closing the publication ends a pending collector connection. Export failures remain
+telemetry diagnostics with no data-plane acknowledgement consequence, and a forced process ending
+does not guarantee a final export. [Node Trace Export](./name-resolution.md#node-trace-export) owns
+the resolver lifetime and export budgets.
+
 ### Consensus Work At The Ending Boundary
 
 Consensus remains live through stop admission and drain support. A terminating node can still append
@@ -570,6 +635,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
+| Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 
@@ -605,12 +671,28 @@ committed log boundary. The node applies through exactly that boundary before it
 clock-authority, and schedule state it installs, and it retries every half second until that read
 succeeds.
 
-Until it succeeds, the node is live but inert with respect to ownership. Its public listeners and
+After admission, the control plane converts the committed schedule into a complete typed execution
+revision before runtime installation. Running and stopped domains use that same revision for local
+placement, state identities, passive recovery, and ownership handoff. The handoff fingerprint keeps
+the committed schedule's exact bytes. If an installation fails, the next attempt is planned from
+the last successfully applied schedule; the failed revision is not recorded as applied.
+
+Until admission succeeds, the node is live but inert with respect to ownership. Its public listeners and
 its interconnect answer requests, which keeps configured listening entities available on every live
 node, but no runtime routes exist, so a payload it accepts cannot reach recovered graph execution.
+A client producer or consumer open is refused as temporarily unavailable until the node has passed
+the catch-up barrier; the node does not report a stale local missing or stopped domain as a terminal
+endpoint refusal during that interval. The client can retry the open on its restored session.
 A former owner restarted while cut off from consensus therefore produces no output, and once
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.
+
+At startup the node offers the peer endpoints retained in its Raft membership as gossip seeds. A
+former bootstrap node therefore has a path back to surviving peers even if it was originally
+configured without a bootstrap host. The endpoints only initiate authenticated contact; gossip
+establishes each peer's current incarnation and endpoint before normal peer routing and runtime
+admission proceed. A recovered endpoint that does not resolve is skipped while other seeds and
+incoming gossip remain available.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
@@ -640,6 +722,14 @@ committed schedule of a running domain removes it. Until the node has applied a 
 an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
 
+Recovery also validates the current representation before decoding its counts. Registry Model
+frames and the dedicated consensus database identify their fixed-width 64-bit count shape;
+unrecognized stored state fails with an instruction to recreate it. Window checkpoints use the
+current runtime-state kind and `NVXWIN64` frame signature. Native decoding of an archived count is
+checked and cannot truncate it to fit the target. See
+[Archived Counts](./typed-states.md#archived-counts) and
+[Storage Layout And Compatibility](./consensus-storage-and-replication.md#storage-layout-and-compatibility).
+
 ### Interrupted Snapshot Installation
 
 Installing a consensus snapshot publishes the manifest and a marker naming the generation whose
@@ -666,6 +756,11 @@ and starts no further lifetime.
 A new leader reconciles durable handoff preparations after a coordinator or participant is lost, as
 described above. Resource uploads that were staged but never promoted are removed at startup, so an
 upload interrupted by a forced ending leaves no partial version behind.
+
+A backup archive a node retains for download is a temporary file in its staging area and is never
+durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the
+backup's recorded outcome stays retained under its execution reference. See
+[Backup And Restore](./backup-and-restore.md#downloading-the-archive).
 
 ### Domain Time
 
@@ -704,7 +799,11 @@ outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
 Existing metric families move during shutdown without naming it. Interconnect stream resets count
 `reason="shutdown"`. The ingestor quiesce families change as intake stops, but they carry no cause
 label, so a shutdown hold is not distinguishable there from another hold. Live branch instances fall
-without incrementing the eviction counter, because a stopping node is not evicting branches. See
+without incrementing the eviction counter, because a stopping node is not evicting branches. A
+client ingestor's endpoint logs `ended the producers of a client ingestor` at `info` with the count
+and reason `shutting down`, its gauges fall to zero, and the batches it answered while draining are
+counted under `nervix_client_ingestor_submissions_total` as `draining` refusals or as the outcomes
+their roots resolved to. See
 [Metrics And Observability](./metrics-and-observability.md).
 
 The health endpoints do not describe shutdown. `/livez` answers while the process is alive, and
@@ -754,3 +853,14 @@ not yet completed.
 
 Raising `--drain-timeout` above `--shutdown-timeout` does not extend the drain, because every drain
 step is also bounded by the shutdown deadline. Raise both together.
+
+## Retained Drain Dependencies
+
+Running source, generator and sink tasks retain their acknowledgement trackers and confirmation
+counters. A drain observes those same registrations. Emitter retry state remains publishing work
+even when its buffer is empty. Idle and already-claimed force-flush participants use a retained
+readiness hint; only an available obligation enters the coordinator to claim its generation. A
+released claim becomes available again. Task teardown removes its confirmation/status registration,
+and pooled sink teardown removes its wait registration; cancellation clears a pending borrow's
+wait through its guard. Handoff watches register before reading their retained entity publication,
+and release publishes thaw before waking them.

@@ -1,11 +1,14 @@
-use std::sync::Arc;
-
+use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
     Int32Array, Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray,
     UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
+use arrow_buffer::BooleanBuffer;
 use arrow_schema::{DataType, Schema, TimeUnit};
+use error_stack::Report;
+use meticulous::OptionExt as _;
+use nervix_primitives::sync::StdArc;
 
 use crate::{RowErrors, RuntimeError};
 
@@ -60,11 +63,21 @@ macro_rules! declare_typed_arrays {
 
             pub fn to_array_ref(&self) -> ArrayRef {
                 match self {
-                    $(Self::$Variant(array) => Arc::new(array.clone()),)+
-                    Self::Datetime(array) => Arc::new(array.clone()),
+                    $(Self::$Variant(array) => StdArc::new(array.clone()),)+
+                    Self::Datetime(array) => StdArc::new(array.clone()),
                     Self::Generic(array) => array.clone(),
                     Self::Uninitialized { data_type, len } => new_null_array(data_type, *len),
                 }
+            }
+
+            /// The bytes the array's values and validity hold, not the capacity its buffers were
+            /// allocated with, or `None` when Arrow cannot measure its layout. An uninitialized
+            /// column holds nothing yet.
+            pub fn payload_bytes(&self) -> Option<usize> {
+                if let Self::Uninitialized { .. } = self {
+                    return Some(0);
+                }
+                self.as_array().to_data().get_slice_memory_size().ok()
             }
 
             pub(crate) fn as_array(&self) -> &dyn Array {
@@ -82,14 +95,14 @@ macro_rules! declare_typed_arrays {
 
             pub(crate) fn into_array_ref(self) -> ArrayRef {
                 match self {
-                    $(Self::$Variant(array) => Arc::new(array),)+
-                    Self::Datetime(array) => Arc::new(array),
+                    $(Self::$Variant(array) => StdArc::new(array),)+
+                    Self::Datetime(array) => StdArc::new(array),
                     Self::Generic(array) => array,
                     Self::Uninitialized { data_type, len } => new_null_array(&data_type, len),
                 }
             }
 
-            pub fn try_from_array_ref(array: ArrayRef) -> Result<Self, RuntimeError> {
+            pub fn try_from_array_ref(array: ArrayRef) -> error_stack::Result<Self, RuntimeError> {
                 let converted = match array.data_type() {
                     $($data_type => array
                         .as_any()
@@ -104,9 +117,9 @@ macro_rules! declare_typed_arrays {
                     }
                     _ => None,
                 };
-                converted.ok_or_else(|| RuntimeError::UnsupportedColumnType {
+                converted.ok_or_else(|| Report::new(RuntimeError::UnsupportedColumnType {
                     data_type: array.data_type().clone(),
-                })
+                }))
             }
 
             pub fn uninitialized(data_type: DataType, len: usize) -> Self {
@@ -155,14 +168,17 @@ with_typed_registers!(declare_typed_array_conversions);
 /// descriptions agree once, when the batch is built.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedBatch {
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     columns: Vec<TypedArray>,
     errors: RowErrors,
     row_count: usize,
 }
 
 impl TypedBatch {
-    pub fn try_new(schema: Arc<Schema>, columns: Vec<TypedArray>) -> Result<Self, RuntimeError> {
+    pub fn try_new(
+        schema: StdArc<Schema>,
+        columns: Vec<TypedArray>,
+    ) -> error_stack::Result<Self, RuntimeError> {
         let row_count = validate_batch(&schema, &columns)?;
         Ok(Self {
             schema,
@@ -177,18 +193,18 @@ impl TypedBatch {
     /// Arrow permits zero-column batches with a non-zero row count. The VM needs the
     /// same representation for programs made entirely from constants.
     pub fn try_new_with_row_count(
-        schema: Arc<Schema>,
+        schema: StdArc<Schema>,
         columns: Vec<TypedArray>,
         row_count: usize,
-    ) -> Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, RuntimeError> {
         let inferred_row_count = validate_batch(&schema, &columns)?;
         if !columns.is_empty() && inferred_row_count != row_count {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "provided row count {row_count} does not match column row count \
                      {inferred_row_count}"
                 ),
-            });
+            }));
         }
         Ok(Self {
             schema,
@@ -199,19 +215,19 @@ impl TypedBatch {
     }
 
     pub fn with_errors(
-        schema: Arc<Schema>,
+        schema: StdArc<Schema>,
         columns: Vec<TypedArray>,
         errors: RowErrors,
-    ) -> Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, RuntimeError> {
         let row_count = validate_batch(&schema, &columns)?;
         if errors.row_count() != row_count {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "error row count {} does not match batch row count {}",
                     errors.row_count(),
                     row_count
                 ),
-            });
+            }));
         }
         Ok(Self {
             schema,
@@ -221,7 +237,7 @@ impl TypedBatch {
         })
     }
 
-    pub fn schema(&self) -> &Arc<Schema> {
+    pub fn schema(&self) -> &StdArc<Schema> {
         &self.schema
     }
 
@@ -241,25 +257,70 @@ impl TypedBatch {
         self.row_count
     }
 
+    /// The bytes the batch's columns hold, which is also the usual order of what a program builds
+    /// from them, or `None` when Arrow cannot measure one of them.
+    pub fn payload_bytes(&self) -> Option<u64> {
+        let mut total = 0_u64;
+        for column in &self.columns {
+            let column_bytes: u64 = column.payload_bytes()?.arch_into();
+            total = total
+                .checked_add(column_bytes)
+                .assured("the columns of one batch hold far less than u64::MAX bytes");
+        }
+        Some(total)
+    }
+
+    /// The rows on which some required field holds no value, because no route initialized it or
+    /// it holds a null, as a bitmap over the batch, or `None` when every required field holds a
+    /// value on every row.
+    ///
+    /// It is the OR of the inverted validity bitmaps of the required columns. A required column
+    /// without nulls is skipped on its null count, so a batch whose required columns all hold
+    /// values answers without reading a bitmap.
+    pub fn rows_missing_required_values(&self) -> Option<BooleanBuffer> {
+        let mut missing: Option<BooleanBuffer> = None;
+        for (column, field) in self.columns.iter().zip(self.schema.fields()) {
+            if field.is_nullable() || column.null_count() == 0 {
+                continue;
+            }
+            if column.is_uninitialized() {
+                return Some(BooleanBuffer::new_set(self.row_count));
+            }
+            // Arrow counts a column's nulls from its null buffer, and a row is null exactly where
+            // that buffer says so, which is also what `Array::is_null` reads.
+            let nulls = column
+                .as_array()
+                .nulls()
+                .verified("the null count checked above is read from the column's null buffer");
+            let column_missing = !nulls.inner();
+            if let Some(rows) = missing.as_mut() {
+                *rows |= &column_missing;
+            } else {
+                missing = Some(column_missing);
+            }
+        }
+        missing
+    }
+
     /// Exports the batch at a node boundary, where every required field must finally hold a value.
     ///
     /// Fields are checked in schema order and the first failing one ends the export: a required
     /// field no route ever wrote reports that it is uninitialized, and a required field written
     /// with a null reports the null. Optional fields materialize their nulls, uninitialized
     /// included.
-    pub fn to_record_batch(&self) -> Result<RecordBatch, RuntimeError> {
+    pub fn to_record_batch(&self) -> error_stack::Result<RecordBatch, RuntimeError> {
         let mut arrays = Vec::with_capacity(self.columns.len());
         for (column, field) in self.columns.iter().zip(self.schema.fields()) {
             let field_is_required = !field.is_nullable();
             if field_is_required && column.is_uninitialized() {
-                return Err(RuntimeError::UninitializedRequiredColumn {
+                return Err(Report::new(RuntimeError::UninitializedRequiredColumn {
                     column: field.name().clone(),
-                });
+                }));
             }
             if field_is_required && column.null_count() > 0 {
-                return Err(RuntimeError::NullForRequiredColumn {
+                return Err(Report::new(RuntimeError::NullForRequiredColumn {
                     column: field.name().clone(),
-                });
+                }));
             }
             arrays.push(column.to_array_ref());
         }
@@ -272,21 +333,26 @@ impl TypedBatch {
         } else {
             RecordBatch::try_new(self.schema.clone(), arrays)
         };
-        exported.map_err(|error| RuntimeError::InvalidBatch {
-            message: error.to_string(),
+        exported.map_err(|error| {
+            Report::new(RuntimeError::InvalidBatch {
+                message: error.to_string(),
+            })
         })
     }
 }
 
-fn validate_batch(schema: &Schema, columns: &[TypedArray]) -> Result<usize, RuntimeError> {
+fn validate_batch(
+    schema: &Schema,
+    columns: &[TypedArray],
+) -> error_stack::Result<usize, RuntimeError> {
     if schema.fields().len() != columns.len() {
-        return Err(RuntimeError::InvalidBatch {
+        return Err(Report::new(RuntimeError::InvalidBatch {
             message: format!(
                 "column count {} does not match schema field count {}",
                 columns.len(),
                 schema.fields().len()
             ),
-        });
+        }));
     }
 
     let row_count = match columns.first() {
@@ -295,24 +361,24 @@ fn validate_batch(schema: &Schema, columns: &[TypedArray]) -> Result<usize, Runt
     };
     for (field, column) in schema.fields().iter().zip(columns) {
         if field.data_type() != &column.data_type() {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "column '{}' has type {:?}, expected {:?}",
                     field.name(),
                     column.data_type(),
                     field.data_type()
                 ),
-            });
+            }));
         }
         if column.len() != row_count {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "column '{}' has row count {}, expected {}",
                     field.name(),
                     column.len(),
                     row_count
                 ),
-            });
+            }));
         }
     }
 
@@ -321,15 +387,14 @@ fn validate_batch(schema: &Schema, columns: &[TypedArray]) -> Result<usize, Runt
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 
-    fn sample_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
+    fn sample_schema() -> StdArc<Schema> {
+        StdArc::new(Schema::new(vec![
             Field::new("ints", DataType::Int64, true),
             Field::new("floats", DataType::Float64, true),
             Field::new("flags", DataType::Boolean, true),
@@ -368,6 +433,91 @@ mod tests {
     }
 
     #[test]
+    fn required_rows_without_values_are_the_or_of_the_required_columns_nulls() {
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("optional", DataType::Int64, true),
+            Field::new("first", DataType::Int64, false),
+            Field::new("second", DataType::Utf8, false),
+            Field::new("unset_optional", DataType::Float64, true),
+        ]));
+        let rows = 130;
+        let optional = Int64Array::from_iter((0..rows).map(|row| (row % 2 == 0).then_some(1)));
+        // A sliced column reads its nulls from its own offset.
+        let first = Int64Array::from_iter((0..rows + 3).map(|row| (row % 64 != 6).then_some(2)))
+            .slice(3, rows);
+        let second = StringArray::from_iter((0..rows).map(|row| (row != 129).then_some("x")));
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(optional),
+                TypedArray::Int64(first),
+                TypedArray::Utf8(second),
+                TypedArray::uninitialized(DataType::Float64, rows),
+            ],
+        )
+        .expect("batch must build");
+
+        let missing = batch
+            .rows_missing_required_values()
+            .expect("two required columns hold nulls");
+
+        assert_eq!(missing.len(), rows);
+        assert_eq!(missing.set_indices().collect::<Vec<_>>(), [3, 67, 129]);
+    }
+
+    #[test]
+    fn required_columns_that_hold_every_value_need_no_bitmap() {
+        let batch =
+            TypedBatch::try_new(sample_schema(), sample_columns()).expect("batch must build");
+        assert!(batch.rows_missing_required_values().is_none());
+
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("ints", DataType::Int64, false),
+            Field::new("names", DataType::Utf8, true),
+        ]));
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(Int64Array::from(vec![1, 2])),
+                TypedArray::Utf8(StringArray::from(vec![None::<&str>, None])),
+            ],
+        )
+        .expect("batch must build");
+        assert!(batch.rows_missing_required_values().is_none());
+    }
+
+    #[test]
+    fn an_uninitialized_required_column_misses_every_row() {
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("ints", DataType::Int64, false),
+            Field::new("unset", DataType::Utf8, false),
+        ]));
+        let batch = TypedBatch::try_new(
+            schema.clone(),
+            vec![
+                TypedArray::Int64(Int64Array::from(vec![Some(1), None, Some(3)])),
+                TypedArray::uninitialized(DataType::Utf8, 3),
+            ],
+        )
+        .expect("batch must build");
+
+        let missing = batch
+            .rows_missing_required_values()
+            .expect("an uninitialized required column holds no value");
+        assert_eq!(missing.set_indices().collect::<Vec<_>>(), [0, 1, 2]);
+
+        let empty = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(Int64Array::from(Vec::<i64>::new())),
+                TypedArray::uninitialized(DataType::Utf8, 0),
+            ],
+        )
+        .expect("an empty batch must build");
+        assert!(empty.rows_missing_required_values().is_none());
+    }
+
+    #[test]
     fn typed_batch_exposes_row_count_and_columns() {
         let batch =
             TypedBatch::try_new(sample_schema(), sample_columns()).expect("batch must build");
@@ -381,7 +531,7 @@ mod tests {
 
     #[test]
     fn typed_batch_preserves_explicit_row_count_without_columns() {
-        let batch = TypedBatch::try_new_with_row_count(Arc::new(Schema::empty()), Vec::new(), 3)
+        let batch = TypedBatch::try_new_with_row_count(StdArc::new(Schema::empty()), Vec::new(), 3)
             .expect("zero-column batch must build");
 
         assert_eq!(batch.row_count(), 3);
@@ -399,7 +549,7 @@ mod tests {
         let error = TypedBatch::with_errors(sample_schema(), sample_columns(), RowErrors::new(1))
             .expect_err("batch must reject mismatched error rows");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("error row count 1"));
                 assert!(message.contains("batch row count 2"));
@@ -410,12 +560,12 @@ mod tests {
 
     #[test]
     fn typed_batch_rejects_wrong_column_type() {
-        let schema = Arc::new(Schema::new(vec![Field::new("ints", DataType::Int64, true)]));
+        let schema = StdArc::new(Schema::new(vec![Field::new("ints", DataType::Int64, true)]));
         let columns = vec![TypedArray::Boolean(BooleanArray::from(vec![Some(true)]))];
 
         let error = TypedBatch::try_new(schema, columns).expect_err("batch must reject wrong type");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("column 'ints'"));
                 assert!(message.contains("Boolean"));
@@ -427,7 +577,7 @@ mod tests {
 
     #[test]
     fn optional_uninitialized_column_materializes_as_typed_nulls() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             true,
@@ -446,7 +596,7 @@ mod tests {
 
     #[test]
     fn required_uninitialized_column_fails_materialization() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             false,
@@ -459,7 +609,7 @@ mod tests {
             .to_record_batch()
             .expect_err("required uninitialized output must fail");
 
-        if let RuntimeError::UninitializedRequiredColumn { column } = error {
+        if let RuntimeError::UninitializedRequiredColumn { column } = error.current_context() {
             assert_eq!(column, "value");
         } else {
             panic!("expected required uninitialized column error, got {error:?}");
@@ -468,7 +618,7 @@ mod tests {
 
     #[test]
     fn written_null_in_required_column_fails_materialization() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             false,
@@ -481,7 +631,7 @@ mod tests {
             .to_record_batch()
             .expect_err("a null written into a required output must fail");
 
-        if let RuntimeError::NullForRequiredColumn { column } = error {
+        if let RuntimeError::NullForRequiredColumn { column } = error.current_context() {
             assert_eq!(column, "value");
         } else {
             panic!("expected null for required column error, got {error:?}");
@@ -490,7 +640,7 @@ mod tests {
 
     #[test]
     fn typed_batch_rejects_wrong_column_length() {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = StdArc::new(Schema::new(vec![
             Field::new("ints", DataType::Int64, true),
             Field::new("names", DataType::Utf8, true),
         ]));
@@ -502,7 +652,7 @@ mod tests {
         let error =
             TypedBatch::try_new(schema, columns).expect_err("batch must reject wrong row count");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("column 'names'"));
                 assert!(message.contains("row count 1"));

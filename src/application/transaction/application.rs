@@ -6,7 +6,9 @@
 //! - **Depends on.** Transaction consensus state, runtime revision application and impact Models.
 //! - **Must not know.** Session protocol presentation or transaction planning.
 
-use error_stack::Report;
+use std::time::Duration;
+
+use error_stack::{Report, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction,
     TransactionApplicationOutcome, TransactionApplyingStep, TransactionState,
@@ -17,7 +19,7 @@ use nervix_models::{
     ModelKind, PauseRequirement, QuiesceLevel, RebuildImpact, RebuildReason,
     TransactionOperationRange,
 };
-use tokio::time::{Duration, sleep};
+use nervix_primitives::time::sleep;
 use tracing::warn;
 
 use super::{TransactionApplicationAttempt, TransactionCommitError, TransactionStepImpactRecorder};
@@ -211,7 +213,7 @@ impl SessionServiceImpl {
     ) {
         let attribution = ImpactAttribution::for_range(operations);
         for expansion in self.inner.runtime.recovery_expansions(revision) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let rebuilds = expansion.scope.into_iter().map(|node| RebuildImpact {
                 node: ImpactNodeCoverage::all_executions(node),
                 reason: RebuildReason::Recovery,
@@ -353,14 +355,14 @@ impl SessionServiceImpl {
                 outcome,
             )
             .await
-            .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))?;
+            .change_context(TransactionCommitError::Proposal)?;
         if rolls_back {
             Box::pin(self.apply_rolled_back_transaction_step(&transaction.domain)).await;
         }
 
         if let TransactionState::Finished(finished) = &completed.state {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if self
                     .wait_for_authoritative_revision(finished.outcome_revision)
                     .await
@@ -371,11 +373,11 @@ impl SessionServiceImpl {
                 if self.inner.consensus.current_leader().await.as_ref()
                     != Some(self.inner.consensus.local_node_id())
                 {
-                    return Err(Report::new(TransactionCommitError::Proposal(
-                        ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
-                            leader_id: self.inner.consensus.current_leader().await,
-                        }),
-                    )));
+                    return Err(Report::new(ConsensusError::LeadershipLost {
+                        leader_id: self.inner.consensus.current_leader().await,
+                    })
+                    .change_context(ConsensusTransactionError::Consensus)
+                    .change_context(TransactionCommitError::Proposal));
                 }
                 sleep(Duration::from_millis(100)).await;
             }

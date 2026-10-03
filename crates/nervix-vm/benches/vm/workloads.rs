@@ -5,7 +5,7 @@
 
 use super::*;
 
-const INLINE_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+const INLINE_ROWS: usize = INLINE_ROW_LIMIT;
 
 fn sliced_batch(batch: &TypedBatch, offset: usize, rows: usize) -> TypedBatch {
     let columns = batch
@@ -71,14 +71,14 @@ fn repeat_program() -> Arc<CompiledProgram> {
 
 fn measure_batch(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &tokio::runtime::Runtime,
+    runtime: &BenchmarkRuntime,
     name: &str,
     shape: &str,
     program: &Arc<CompiledProgram>,
     batch: &TypedBatch,
 ) {
     runtime
-        .block_on(execute_benchmark_program(program, batch))
+        .execute(program, batch)
         .assured("the benchmark fixture and compiled output schema agree");
     #[cfg(feature = "benchmark-allocations")]
     allocation_probe::measure(runtime, name, shape, program, batch);
@@ -87,10 +87,7 @@ fn measure_batch(
         bencher.iter(|| {
             black_box(
                 runtime
-                    .block_on(execute_benchmark_program(
-                        black_box(program),
-                        black_box(input),
-                    ))
+                    .execute(black_box(program), black_box(input))
                     .assured("the validated benchmark fixture executes successfully"),
             )
         });
@@ -106,7 +103,7 @@ pub(super) fn workload_shape_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("vm_workload_shape");
 
     // The existing 64–65,536 sweep remains the main throughput curve. These three points expose
-    // fixed per-batch cost and the exact transition from inline execution to the blocking pool.
+    // fixed per-batch cost and the exact transition from inline execution to the data workers.
     for rows in [1, 8, INLINE_ROWS + 1] {
         let batch = arithmetic_batch(rows);
         measure_batch(

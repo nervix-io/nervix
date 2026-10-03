@@ -343,15 +343,19 @@ mod tests {
                             message_error_policy: nervix_models::MessageErrorPolicy::Log,
                             branch: Some(OutputBranch::Unbranched),
                         }]),
-                        decode_using_codec: named("event_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::Endpoint {
-                            endpoint: named(endpoint),
-                            mode: EndpointIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Endpoint {
+                                    endpoint: named(endpoint),
+                                    mode: EndpointIngestMode::NoAckSequential,
+                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                        max_size: "1MiB".to_string(),
+                                    },
+                                },
+                                codec: named("event_codec"),
                             },
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     }),

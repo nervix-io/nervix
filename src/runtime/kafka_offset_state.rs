@@ -1,26 +1,24 @@
-use std::{
-    collections::BTreeMap,
-    num::NonZeroU64,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicI64, AtomicU64, Ordering},
-    },
-};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
-use ahash::{HashMap, RandomState};
+use ahash::HashMap;
 #[cfg(test)]
 use arch_into::ArchInto as _;
 use error_stack::Report;
-#[cfg(test)]
 use meticulous::OptionExt as _;
+use nervix_checkpoint_replication::{CheckpointReplication, ReplicaProgress};
 use nervix_connector_kafka::KafkaOffsetPosition;
-use nervix_execution::sync::{ArcSwap, DashMap};
 use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;
+use nervix_primitives::{
+    publication::ArcSwap,
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    },
+    time::{Instant, timeout_at},
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
-use triomphe::Arc;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
@@ -30,7 +28,12 @@ use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateOperationError,
     RuntimeStatePlacement, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
     StateCapability, StateReplicationRoles, lsm_sequence::LsmSequence,
+    state_replication::StateReplicationError,
 };
+
+/// How long a committed or replaced offset waits for the replicas the offsets are assigned to hold
+/// it.
+const REPLICA_QUORUM_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaOffsetEntrySnapshot {
@@ -88,8 +91,9 @@ pub(super) struct ReplicatedKafkaOffsetState {
     offsets: ArcSwap<KafkaOffsetTable>,
     current_lsm: LsmSequence,
     last_persisted_lsm: AtomicU64,
-    replica_progress: DashMap<String, u64, RandomState>,
-    replication_notify: Notify,
+    /// What each replica reported holding and the offer of the newest offsets to them while this
+    /// node originates the offsets, and the owner's announcements while it replicates them.
+    replication: CheckpointReplication,
 }
 
 /// Read-only access to one Kafka offset state. The handle exposes snapshots and offset lookup but
@@ -144,8 +148,7 @@ impl ReplicatedKafkaOffsetState {
             offsets: ArcSwap::from_pointee(offsets),
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(current_lsm),
-            replica_progress: DashMap::default(),
-            replication_notify: Notify::new(),
+            replication: CheckpointReplication::new(),
         })
     }
 
@@ -192,9 +195,8 @@ impl ReplicatedKafkaOffsetState {
         })
     }
 
-    pub(super) fn mark_replica_progress(&self, node_id: &ClusterNodeName, lsm: u64) {
-        self.replica_progress.insert(node_id.to_string(), lsm);
-        self.replication_notify.notify_waiters();
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     /// Move the offset of a partition this state already records and stamp the change with the
@@ -257,23 +259,49 @@ impl KafkaOffsetStateRead {
         self.state.assignment.roles().required_replica_acks
     }
 
-    pub(super) fn replica_quorum_satisfied(&self, lsm: u64) -> bool {
-        let roles = self.state.assignment.roles();
-        roles
-            .replica_nodes
-            .iter()
-            .filter(|node_id| {
-                self.state
-                    .replica_progress
-                    .get(node_id.as_str())
-                    .is_some_and(|observed| *observed >= lsm)
-            })
-            .count()
-            >= roles.required_replica_acks
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.state.replication
     }
 
-    pub(super) async fn wait_for_replication_progress(&self) {
-        self.state.replication_notify.notified().await;
+    /// Whether enough of the assigned replicas reported holding revision `lsm`.
+    pub(super) fn replica_quorum_holds(&self, lsm: u64) -> bool {
+        self.state
+            .replication
+            .with_progress(|progress| self.quorum_holds(progress, lsm))
+    }
+
+    /// Whether `progress` has at least the required number of the replicas assigned now holding
+    /// revision `lsm`.
+    fn quorum_holds(&self, progress: &ReplicaProgress, lsm: u64) -> bool {
+        let roles = self.state.assignment.roles();
+        progress.holding(&roles.replica_nodes, lsm) >= roles.required_replica_acks
+    }
+
+    /// Wait until enough of the assigned replicas report holding revision `lsm`, for at most
+    /// [`REPLICA_QUORUM_WAIT`].
+    ///
+    /// The wait registers for the next replica report before it reads what the replicas hold, so a
+    /// report that lands in between wakes it instead of leaving the commit to its deadline. The
+    /// replicas are the ones assigned when each report arrives.
+    pub(super) async fn wait_for_replica_quorum(
+        &self,
+        lsm: u64,
+    ) -> error_stack::Result<(), StateReplicationError> {
+        let deadline = Instant::now()
+            .checked_add(REPLICA_QUORUM_WAIT)
+            .assured("a wait of a few seconds stays within Instant");
+        let quorum = self
+            .state
+            .replication
+            .wait_until(|progress| self.quorum_holds(progress, lsm));
+        if timeout_at(deadline, quorum).await.is_ok() || self.replica_quorum_holds(lsm) {
+            return Ok(());
+        }
+        Err(Report::new(StateReplicationError::ReplicaQuorum {
+            placement: self.placement().clone(),
+            lsm,
+            required_acks: self.required_replica_acks(),
+        }))
     }
 
     #[cfg(test)]
@@ -437,7 +465,6 @@ impl KafkaOffsetSnapshotInstaller {
             || {
                 state.offsets.store(StdArc::new(table));
                 state.current_lsm.adopt(lsm);
-                state.replication_notify.notify_waiters();
             },
         )?;
         Ok(())
@@ -590,13 +617,12 @@ mod tests {
     use ahash::HashMap;
     use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
-    use tokio::sync::oneshot;
-    use triomphe::Arc;
+    use nervix_primitives::sync::{Arc, oneshot};
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn delayed_replica_snapshot_cannot_overwrite_promoted_state() {
         let topic = "events";
         let partition = 0;
@@ -637,7 +663,7 @@ mod tests {
         let delayed_payload = payload(3);
         let (response_received_tx, response_received_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        let delayed_install = tokio::spawn(async move {
+        let delayed_install = nervix_primitives::task::spawn(async move {
             let _ = response_received_tx.send(());
             release_rx
                 .await
@@ -690,10 +716,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
-        use shuttle::{sync::mpsc, thread};
+        use nervix_model_harness::shuttle::check_interleavings;
+        use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// The owner commits a recorded partition's offset and checks its replica quorum while
         /// another thread holds the assignment barrier, which that thread releases only after both
@@ -752,7 +778,7 @@ mod tests {
                 partition: 0,
                 offset: 2,
             });
-            let quorum_satisfied = originator.read().replica_quorum_satisfied(1);
+            let quorum_satisfied = originator.read().replica_quorum_holds(1);
             release_tx
                 .send(())
                 .assured("the barrier thread waits for its release");
@@ -777,6 +803,64 @@ mod tests {
         #[test]
         fn shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held() {
             check_interleavings(commit_under_a_held_barrier);
+        }
+
+        const MODEL_TASK_JOINS: &str =
+            "Shuttle fails the whole execution when a model task panics, so no join observes one";
+
+        /// The owner waits for its one replica to hold a committed revision while that replica
+        /// reports holding it. Shuttle never lets the wait's deadline pass unless a check triggers
+        /// it, so the wait completes only by learning of the report: a report that lands between
+        /// the wait's read of the replicas' progress and its registration for the next report
+        /// leaves every task blocked, which Shuttle reports as a deadlock.
+        fn quorum_wait_racing_its_replica_acknowledgement() {
+            shuttle::future::block_on(async {
+                let node_1 = ClusterNodeName::parse("node-1")
+                    .assured("the test node name satisfies the cluster-node grammar");
+                let node_2 = ClusterNodeName::parse("node-2")
+                    .assured("the test node name satisfies the cluster-node grammar");
+                let state = Arc::new(
+                    ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                        .assured("the empty Kafka offset state is valid"),
+                );
+                let mut assignment = ReplicatedKafkaOffsetState::bind(
+                    &state,
+                    StateReplicationRoles::new(Some(node_1.clone()), vec![node_2.clone()], 1),
+                    Some(&node_1),
+                );
+                let originator = assignment
+                    .originator
+                    .take()
+                    .assured("node-1 is assigned as the owner");
+                let lsm = originator
+                    .apply_committed_offset(&KafkaOffsetPosition {
+                        topic: "events".to_string(),
+                        partition: 0,
+                        offset: 1,
+                    })
+                    .assured("the owner assignment is current");
+                let read = originator.read().clone();
+                let waiting = nervix_primitives::task::spawn(async move {
+                    read.wait_for_replica_quorum(lsm).await
+                });
+                let reporting = nervix_primitives::task::spawn(async move {
+                    state.replication().record(&node_2, lsm);
+                });
+                reporting.await.assured(MODEL_TASK_JOINS);
+                let waited = waiting.await.assured(MODEL_TASK_JOINS);
+                assert!(
+                    waited.is_ok(),
+                    "the quorum wait ended at its deadline although its replica reported holding \
+                     the revision"
+                );
+            });
+        }
+
+        /// A replica acknowledgement is never lost to a quorum wait, however it interleaves with
+        /// the wait's read and registration.
+        #[test]
+        fn shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed() {
+            check_interleavings(quorum_wait_racing_its_replica_acknowledgement);
         }
     }
 }

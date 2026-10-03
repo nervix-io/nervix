@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     hash::Hash,
-    sync::Arc,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -9,10 +8,11 @@ use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::StdArc;
 
 use crate::{
     batch::TypedArray,
-    error::{CompileError, SideErrorReason},
+    error::{CompileError, CompileErrorCode, SideErrorReason},
     ip_address::{self, IpNetwork, NetworkSource},
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
@@ -82,7 +82,7 @@ enum BoundFieldRef {
 #[derive(Debug, Clone)]
 pub struct CompileBinding {
     pub namespace: CompileNamespace,
-    pub schema: Arc<Schema>,
+    pub schema: StdArc<Schema>,
     pub sensitivity: SchemaSensitivity,
     pub readable: bool,
     pub writable: bool,
@@ -112,16 +112,20 @@ impl SchemaSensitivity {
         self.sensitive_fields.iter().map(String::as_str)
     }
 
-    fn validate_against_schema(&self, schema: &Schema, role: &str) -> Result<(), CompileError> {
+    fn validate_against_schema(
+        &self,
+        schema: &Schema,
+        role: &str,
+    ) -> error_stack::Result<(), CompileError> {
         for field_name in self.field_names() {
             if schema.field_with_name(field_name).is_err() {
-                return Err(CompileError {
-                    code: "unknown_sensitive_field",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnknownSensitiveField,
                     message: format!(
                         "{role} sensitivity marks unknown field '{field_name}' as sensitive"
                     ),
                     span: (0..0).into(),
-                });
+                }));
             }
         }
         Ok(())
@@ -129,7 +133,7 @@ impl SchemaSensitivity {
 }
 
 impl CompileBinding {
-    pub fn writable(namespace: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn writable(namespace: impl Into<String>, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::User(namespace.into()),
             schema,
@@ -139,7 +143,7 @@ impl CompileBinding {
         }
     }
 
-    pub fn writeonly(namespace: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn writeonly(namespace: impl Into<String>, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::User(namespace.into()),
             schema,
@@ -149,7 +153,7 @@ impl CompileBinding {
         }
     }
 
-    pub fn readonly(namespace: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn readonly(namespace: impl Into<String>, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::User(namespace.into()),
             schema,
@@ -159,7 +163,7 @@ impl CompileBinding {
         }
     }
 
-    pub fn internal_readonly(namespace: InternalFieldNamespace, schema: Arc<Schema>) -> Self {
+    pub fn internal_readonly(namespace: InternalFieldNamespace, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::Internal(namespace),
             schema,
@@ -193,7 +197,7 @@ struct Compiler {
     allow_header_reads: bool,
     allow_header_writes: bool,
     udf_signatures: UdfSignatures,
-    injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -338,7 +342,7 @@ pub struct CompileOptions {
     pub allow_header_reads: bool,
     pub allow_header_writes: bool,
     pub udf_signatures: UdfSignatures,
-    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 impl Default for CompileOptions {
@@ -364,7 +368,7 @@ pub struct PredicateCompileOptions {
     pub optimize_temp_registers: bool,
     pub allow_header_reads: bool,
     pub udf_signatures: UdfSignatures,
-    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 impl Default for PredicateCompileOptions {
@@ -418,28 +422,30 @@ impl Compiler {
         name: &str,
         args: &[SpannedExpr],
         span: Span,
-    ) -> Result<DataType, CompileError> {
-        let signature = self.udf_signatures.get(name).ok_or_else(|| CompileError {
-            code: "unknown_function",
-            message: format!("unknown function '{name}' with arity {}", args.len()),
-            span,
+    ) -> error_stack::Result<DataType, CompileError> {
+        let signature = self.udf_signatures.get(name).ok_or_else(|| {
+            Report::new(CompileError {
+                code: CompileErrorCode::UnknownFunction,
+                message: format!("unknown function '{name}' with arity {}", args.len()),
+                span,
+            })
         })?;
         if signature.arguments.len() != args.len() {
-            return Err(CompileError {
-                code: "invalid_function_arity",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::InvalidFunctionArity,
                 message: format!(
                     "UDF '{name}' expects exactly {} arguments, found {}",
                     signature.arguments.len(),
                     args.len()
                 ),
                 span,
-            });
+            }));
         }
         for (index, (argument, parameter)) in args.iter().zip(&signature.arguments).enumerate() {
             let actual = self.infer_expr_type(argument)?;
             if actual != parameter.data_type {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!(
                         "UDF '{name}' argument {} requires {:?}, found {:?}; cast explicitly",
                         index + 1,
@@ -447,14 +453,14 @@ impl Compiler {
                         actual
                     ),
                     span: argument.span,
-                });
+                }));
             }
         }
         Ok(signature.return_type.clone())
     }
 
     fn header_values_type() -> DataType {
-        DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
+        DataType::List(StdArc::new(Field::new("item", DataType::Utf8, false)))
     }
 
     fn injected_header_call_type(
@@ -462,38 +468,38 @@ impl Compiler {
         function: &FunctionName,
         args: &[SpannedExpr],
         span: Span,
-    ) -> Result<DataType, CompileError> {
+    ) -> error_stack::Result<DataType, CompileError> {
         if !self.allow_header_reads {
-            return Err(CompileError {
-                code: "unsupported_function_context",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedFunctionContext,
                 message: format!(
                     "function '{}' is only available to ingestors whose connector supports headers",
                     function.as_str()
                 ),
                 span,
-            });
+            }));
         }
         let [name] = args else {
-            return Err(CompileError {
-                code: "invalid_function_arity",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::InvalidFunctionArity,
                 message: format!(
                     "function '{}' expects exactly 1 argument, found {}",
                     function.as_str(),
                     args.len()
                 ),
                 span,
-            });
+            }));
         };
         let name_type = self.infer_expr_type(name)?;
         if name_type != DataType::Utf8 {
-            return Err(CompileError {
-                code: "type_mismatch",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
                 message: format!(
                     "function '{}' requires a STRING header name, found {name_type:?}",
                     function.as_str()
                 ),
                 span: name.span,
-            });
+            }));
         }
         if let FunctionName::ReadHeader = function {
             Ok(DataType::Utf8)
@@ -507,10 +513,10 @@ impl Compiler {
         function: WindowAggregateFunction,
         args: &[SpannedExpr],
         span: Span,
-    ) -> Result<DataType, CompileError> {
+    ) -> error_stack::Result<DataType, CompileError> {
         if args.len() != function.expected_arity() {
-            return Err(CompileError {
-                code: "invalid_function_arity",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::InvalidFunctionArity,
                 message: format!(
                     "function '{}' expects exactly {} argument(s), found {}",
                     function.nspl_name(),
@@ -518,37 +524,37 @@ impl Compiler {
                     args.len()
                 ),
                 span,
-            });
+            }));
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
             WindowAggregateFunction::ApproxCountDistinct => {
                 if !Self::is_window_orderable(&first_type) {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
                              argument, found {first_type:?}",
                             function.nspl_name()
                         ),
                         span: args[0].span,
-                    });
+                    }));
                 }
                 Ok(DataType::Int64)
             }
             WindowAggregateFunction::ApproxTopK => {
                 if !Self::is_window_orderable(&first_type) {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
                              argument, found {first_type:?}",
                             function.nspl_name()
                         ),
                         span: args[0].span,
-                    });
+                    }));
                 }
-                Ok(DataType::List(Arc::new(Field::new(
+                Ok(DataType::List(StdArc::new(Field::new(
                     "item", first_type, false,
                 ))))
             }
@@ -610,30 +616,30 @@ impl Compiler {
             WindowAggregateFunction::First | WindowAggregateFunction::Last => Ok(first_type),
             WindowAggregateFunction::Max | WindowAggregateFunction::Min => {
                 if !Self::is_window_orderable(&first_type) {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires an orderable argument (numeric, BOOL, STRING \
                              or DATETIME), found {first_type:?}",
                             function.nspl_name()
                         ),
                         span: args[0].span,
-                    });
+                    }));
                 }
                 Ok(first_type)
             }
             WindowAggregateFunction::ArgMax | WindowAggregateFunction::ArgMin => {
                 let key_type = self.infer_expr_type(&args[1])?;
                 if !Self::is_window_orderable(&key_type) {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires an orderable key (numeric, BOOL, STRING or \
                              DATETIME), found {key_type:?}",
                             function.nspl_name()
                         ),
                         span: args[1].span,
-                    });
+                    }));
                 }
                 Ok(first_type)
             }
@@ -645,18 +651,18 @@ impl Compiler {
         function: WindowAggregateFunction,
         argument_type: &DataType,
         span: Span,
-    ) -> Option<CompileError> {
+    ) -> Option<Report<CompileError>> {
         if argument_type.is_numeric() {
             return None;
         }
-        Some(CompileError {
-            code: "type_mismatch",
+        Some(Report::new(CompileError {
+            code: CompileErrorCode::TypeMismatch,
             message: format!(
                 "function '{}' requires a numeric argument, found {argument_type:?}",
                 function.nspl_name()
             ),
             span,
-        })
+        }))
     }
 
     /// The error for a window aggregate argument that is not `BOOL`, if it is not.
@@ -664,18 +670,18 @@ impl Compiler {
         function: WindowAggregateFunction,
         argument_type: &DataType,
         span: Span,
-    ) -> Option<CompileError> {
+    ) -> Option<Report<CompileError>> {
         if argument_type == &DataType::Boolean {
             return None;
         }
-        Some(CompileError {
-            code: "type_mismatch",
+        Some(Report::new(CompileError {
+            code: CompileErrorCode::TypeMismatch,
             message: format!(
                 "function '{}' requires a BOOL argument, found {argument_type:?}",
                 function.nspl_name()
             ),
             span,
-        })
+        }))
     }
 
     /// The types a window orders values or keys by: numbers, booleans, strings and datetimes.
@@ -687,7 +693,9 @@ impl Compiler {
             )
     }
 
-    fn new(bindings: &[CompileBinding]) -> Result<(Self, Arc<Schema>), CompileError> {
+    fn new(
+        bindings: &[CompileBinding],
+    ) -> error_stack::Result<(Self, StdArc<Schema>), CompileError> {
         let mut layouts = RegisterLayouts::default();
         let mut inputs = Vec::new();
         let mut columns = HashMap::new();
@@ -704,14 +712,14 @@ impl Compiler {
                 .sensitivity
                 .validate_against_schema(&binding.schema, "input")?;
             if binding.readable && !readable_namespaces.insert(binding.namespace.clone()) {
-                return Err(CompileError {
-                    code: "duplicate_namespace",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::DuplicateNamespace,
                     message: format!(
                         "input namespace '{}' is bound more than once",
                         binding.namespace.label()
                     ),
                     span: (0..0).into(),
-                });
+                }));
             }
             if binding.readable
                 && default_passthrough_namespace.is_none()
@@ -721,14 +729,14 @@ impl Compiler {
             }
             if binding.writable {
                 let CompileNamespace::User(namespace) = &binding.namespace else {
-                    return Err(CompileError {
-                        code: "internal_namespace_not_writable",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::InternalNamespaceNotWritable,
                         message: format!(
                             "internal namespace '{}' cannot be writable",
                             binding.namespace.label()
                         ),
                         span: (0..0).into(),
-                    });
+                    }));
                 };
                 if default_output_namespace.is_none() {
                     default_output_namespace = Some(namespace.clone());
@@ -784,10 +792,12 @@ impl Compiler {
             }
         }
 
-        let default_output_namespace = default_output_namespace.ok_or_else(|| CompileError {
-            code: "missing_output_namespace",
-            message: "at least one writable input namespace is required".to_string(),
-            span: (0..0).into(),
+        let default_output_namespace = default_output_namespace.ok_or_else(|| {
+            Report::new(CompileError {
+                code: CompileErrorCode::MissingOutputNamespace,
+                message: "at least one writable input namespace is required".to_string(),
+                span: (0..0).into(),
+            })
         })?;
         let default_passthrough_namespace = default_passthrough_namespace
             .clone()
@@ -811,7 +821,7 @@ impl Compiler {
                 udf_signatures: UdfSignatures::default(),
                 injector: None,
             },
-            Arc::new(Schema::new(input_fields)),
+            StdArc::new(Schema::new(input_fields)),
         ))
     }
 
@@ -857,8 +867,8 @@ impl Compiler {
     fn with_selection<T>(
         &mut self,
         selection: Option<RegisterRef>,
-        compile: impl FnOnce(&mut Self) -> Result<T, CompileError>,
-    ) -> Result<T, CompileError> {
+        compile: impl FnOnce(&mut Self) -> error_stack::Result<T, CompileError>,
+    ) -> error_stack::Result<T, CompileError> {
         let previous = self.current_selection;
         self.current_selection = selection;
         let result = compile(self);
@@ -1003,7 +1013,7 @@ impl Compiler {
         field_ref: BoundFieldRef,
         binding: ColumnBinding,
         span: Span,
-    ) -> Result<RegisterRef, CompileError> {
+    ) -> error_stack::Result<RegisterRef, CompileError> {
         let ty =
             Self::register_type_for_data_type(&binding.data_type, span, "uninitialized column")?;
         let dst = self.alloc_temp(ty);
@@ -1034,11 +1044,11 @@ impl Compiler {
         &'a self,
         field_ref: &'a FieldRef,
         span: Span,
-    ) -> Result<&'a ColumnBinding, CompileError> {
+    ) -> error_stack::Result<&'a ColumnBinding, CompileError> {
         let namespace = CompileNamespace::User(field_ref.relay.clone());
         if !self.readable_namespaces.contains(&namespace) {
-            return Err(CompileError {
-                code: "wrong_stream",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::WrongStream,
                 message: format!(
                     "field reference '{}.{}' targets namespace '{}', expected one of [{}]",
                     field_ref.relay,
@@ -1047,18 +1057,20 @@ impl Compiler {
                     self.expected_readable_namespaces()
                 ),
                 span,
-            });
+            }));
         }
 
         self.columns
             .get(&BoundFieldRef::User(field_ref.clone()))
-            .ok_or_else(|| CompileError {
-                code: "unknown_identifier",
-                message: format!(
-                    "unknown input column '{}.{}'",
-                    field_ref.relay, field_ref.field
-                ),
-                span,
+            .ok_or_else(|| {
+                Report::new(CompileError {
+                    code: CompileErrorCode::UnknownIdentifier,
+                    message: format!(
+                        "unknown input column '{}.{}'",
+                        field_ref.relay, field_ref.field
+                    ),
+                    span,
+                })
             })
     }
 
@@ -1066,11 +1078,11 @@ impl Compiler {
         &'a self,
         field_ref: &'a InternalFieldRef,
         span: Span,
-    ) -> Result<&'a ColumnBinding, CompileError> {
+    ) -> error_stack::Result<&'a ColumnBinding, CompileError> {
         let namespace = CompileNamespace::Internal(field_ref.namespace);
         if !self.readable_namespaces.contains(&namespace) {
-            return Err(CompileError {
-                code: "wrong_stream",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::WrongStream,
                 message: format!(
                     "field reference '{}.{}' targets namespace '{}', expected one of [{}]",
                     namespace.label(),
@@ -1079,19 +1091,21 @@ impl Compiler {
                     self.expected_readable_namespaces()
                 ),
                 span,
-            });
+            }));
         }
 
         self.columns
             .get(&BoundFieldRef::Internal(field_ref.clone()))
-            .ok_or_else(|| CompileError {
-                code: "unknown_identifier",
-                message: format!(
-                    "unknown input column '{}.{}'",
-                    namespace.label(),
-                    field_ref.field
-                ),
-                span,
+            .ok_or_else(|| {
+                Report::new(CompileError {
+                    code: CompileErrorCode::UnknownIdentifier,
+                    message: format!(
+                        "unknown input column '{}.{}'",
+                        namespace.label(),
+                        field_ref.field
+                    ),
+                    span,
+                })
             })
     }
 
@@ -1099,10 +1113,10 @@ impl Compiler {
         &'a self,
         field_ref: &'a FieldRef,
         span: Span,
-    ) -> Result<&'a str, CompileError> {
+    ) -> error_stack::Result<&'a str, CompileError> {
         if !self.writable_namespaces.contains(&field_ref.relay) {
-            return Err(CompileError {
-                code: "wrong_stream",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::WrongStream,
                 message: format!(
                     "field reference '{}.{}' targets namespace '{}', expected one of [{}]",
                     field_ref.relay,
@@ -1111,7 +1125,7 @@ impl Compiler {
                     self.expected_writable_namespaces()
                 ),
                 span,
-            });
+            }));
         }
         Ok(field_ref.field.as_str())
     }
@@ -1120,20 +1134,22 @@ impl Compiler {
         &self,
         field_name: &str,
         span: Span,
-    ) -> Result<&ColumnBinding, CompileError> {
+    ) -> error_stack::Result<&ColumnBinding, CompileError> {
         self.columns
             .get(&BoundFieldRef::User(FieldRef {
                 relay: self.default_passthrough_namespace.clone(),
                 field: field_name.to_string(),
             }))
-            .ok_or_else(|| CompileError {
-                code: "missing_set",
-                message: format!(
-                    "declared output field '{field_name}' is not present in source namespace '{}' \
-                     and must be assigned with SET",
-                    self.default_passthrough_namespace
-                ),
-                span,
+            .ok_or_else(|| {
+                Report::new(CompileError {
+                    code: CompileErrorCode::MissingSet,
+                    message: format!(
+                        "declared output field '{field_name}' is not present in source namespace \
+                         '{}' and must be assigned with SET",
+                        self.default_passthrough_namespace
+                    ),
+                    span,
+                })
             })
     }
 
@@ -1141,15 +1157,19 @@ impl Compiler {
         data_type: &DataType,
         span: Span,
         role: &str,
-    ) -> Result<RegisterType, CompileError> {
-        RegisterType::from_data_type(data_type).ok_or_else(|| CompileError {
-            code: "unsupported_type",
-            message: format!("{role} type {data_type:?} is not supported by FILTER-MAP execution"),
-            span,
+    ) -> error_stack::Result<RegisterType, CompileError> {
+        RegisterType::from_data_type(data_type).ok_or_else(|| {
+            Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedType,
+                message: format!(
+                    "{role} type {data_type:?} is not supported by FILTER-MAP execution"
+                ),
+                span,
+            })
         })
     }
 
-    fn infer_expr_type(&self, expr: &SpannedExpr) -> Result<DataType, CompileError> {
+    fn infer_expr_type(&self, expr: &SpannedExpr) -> error_stack::Result<DataType, CompileError> {
         match &expr.inner {
             Expr::Literal(literal) => Ok(match literal {
                 Literal::Int64(_) => DataType::Int64,
@@ -1157,11 +1177,11 @@ impl Compiler {
                 Literal::Bool(_) => DataType::Boolean,
                 Literal::String(_) => DataType::Utf8,
                 Literal::Null => {
-                    return Err(CompileError {
-                        code: "untyped_null",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::UntypedNull,
                         message: "NULL requires a declared optional assignment target".to_string(),
                         span: expr.span,
-                    });
+                    }));
                 }
             }),
             Expr::FieldRef(field_ref) => {
@@ -1176,10 +1196,12 @@ impl Compiler {
                 let input_type = self.infer_expr_type(inner)?;
                 unary_descriptor(*op)
                     .output_type(&input_type)
-                    .ok_or_else(|| CompileError {
-                        code: "unsupported_unary",
-                        message: format!("operator {op:?} is not valid for {:?}", input_type),
-                        span: expr.span,
+                    .ok_or_else(|| {
+                        Report::new(CompileError {
+                            code: CompileErrorCode::UnsupportedUnary,
+                            message: format!("operator {op:?} is not valid for {:?}", input_type),
+                            span: expr.span,
+                        })
                     })
             }
             Expr::Binary { op, left, right } => {
@@ -1189,7 +1211,7 @@ impl Compiler {
                 let Some(output_type) = binary_output_type(*op, &left_type, &right_type) else {
                     let (code, message) = if left_type != right_type {
                         (
-                            "type_mismatch",
+                            CompileErrorCode::TypeMismatch,
                             format!(
                                 "binary operator {op:?} requires matching operand types, found \
                                  {:?} and {:?}",
@@ -1198,15 +1220,15 @@ impl Compiler {
                         )
                     } else {
                         (
-                            "unsupported_binary",
+                            CompileErrorCode::UnsupportedBinary,
                             format!("operator {op:?} is not valid for {:?}", left_type),
                         )
                     };
-                    return Err(CompileError {
+                    return Err(Report::new(CompileError {
                         code,
                         message,
                         span: expr.span,
-                    });
+                    }));
                 };
                 Ok(output_type)
             }
@@ -1235,12 +1257,12 @@ impl Compiler {
                     return self.injected_header_call_type(function, args, expr.span);
                 }
                 if let FunctionName::WriteHeader = function {
-                    return Err(CompileError {
-                        code: "invalid_side_effect_call",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::InvalidSideEffectCall,
                         message: "write_header must be a top-level call in an INVOKE clause"
                             .to_string(),
                         span: expr.span,
-                    });
+                    }));
                 }
                 if let FunctionName::Udf(name) = function {
                     return self.udf_call_type(name, args, expr.span);
@@ -1257,11 +1279,11 @@ impl Compiler {
                 else_result,
             } => {
                 if branches.is_empty() {
-                    return Err(CompileError {
-                        code: "invalid_case",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::InvalidCase,
                         message: "CASE requires at least one WHEN branch".to_string(),
                         span: expr.span,
-                    });
+                    }));
                 }
                 let operand_type = operand
                     .as_ref()
@@ -1271,34 +1293,34 @@ impl Compiler {
                 for branch in branches {
                     if let Some(operand_type) = &operand_type {
                         if matches!(branch.when.inner, Expr::Literal(Literal::Null)) {
-                            return Err(CompileError {
-                                code: "untyped_null",
+                            return Err(Report::new(CompileError {
+                                code: CompileErrorCode::UntypedNull,
                                 message: "simple CASE WHEN values cannot be bare NULL".to_string(),
                                 span: branch.when.span,
-                            });
+                            }));
                         }
                         let when_type = self.infer_expr_type(&branch.when)?;
                         if &when_type != operand_type {
-                            return Err(CompileError {
-                                code: "type_mismatch",
+                            return Err(Report::new(CompileError {
+                                code: CompileErrorCode::TypeMismatch,
                                 message: format!(
                                     "simple CASE operand has type {operand_type:?}, but WHEN \
                                      value has type {when_type:?}"
                                 ),
                                 span: branch.when.span,
-                            });
+                            }));
                         }
                     } else {
                         let condition_type = self.infer_expr_type(&branch.when)?;
                         if condition_type != DataType::Boolean {
-                            return Err(CompileError {
-                                code: "invalid_condition",
+                            return Err(Report::new(CompileError {
+                                code: CompileErrorCode::InvalidCondition,
                                 message: format!(
                                     "CASE WHEN condition must evaluate to Boolean, found \
                                      {condition_type:?}"
                                 ),
                                 span: branch.when.span,
-                            });
+                            }));
                         }
                     }
                     if !matches!(branch.result.inner, Expr::Literal(Literal::Null)) {
@@ -1306,14 +1328,14 @@ impl Compiler {
                         if let Some(expected) = &result_type
                             && expected != &branch_type
                         {
-                            return Err(CompileError {
-                                code: "type_mismatch",
+                            return Err(Report::new(CompileError {
+                                code: CompileErrorCode::TypeMismatch,
                                 message: format!(
                                     "CASE results must have one exact type, found {expected:?} \
                                      and {branch_type:?}"
                                 ),
                                 span: branch.result.span,
-                            });
+                            }));
                         }
                         result_type.get_or_insert(branch_type);
                     }
@@ -1325,31 +1347,33 @@ impl Compiler {
                     if let Some(expected) = &result_type
                         && expected != &else_type
                     {
-                        return Err(CompileError {
-                            code: "type_mismatch",
+                        return Err(Report::new(CompileError {
+                            code: CompileErrorCode::TypeMismatch,
                             message: format!(
                                 "CASE results must have one exact type, found {expected:?} and \
                                  {else_type:?}"
                             ),
                             span: else_result.span,
-                        });
+                        }));
                     }
                     result_type.get_or_insert(else_type);
                 }
-                let result_type = result_type.ok_or_else(|| CompileError {
-                    code: "untyped_null",
-                    message: "CASE with only NULL results has no inferable type".to_string(),
-                    span: expr.span,
+                let result_type = result_type.ok_or_else(|| {
+                    Report::new(CompileError {
+                        code: CompileErrorCode::UntypedNull,
+                        message: "CASE with only NULL results has no inferable type".to_string(),
+                        span: expr.span,
+                    })
                 })?;
                 if RegisterType::from_data_type(&result_type) == Some(RegisterType::Generic) {
-                    return Err(CompileError {
-                        code: "unsupported_type",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::UnsupportedType,
                         message: format!(
                             "CASE result type {result_type:?} is not supported by conditional \
                              selection"
                         ),
                         span: expr.span,
-                    });
+                    }));
                 }
                 Ok(result_type)
             }
@@ -1360,11 +1384,11 @@ impl Compiler {
                     None => false,
                 };
                 if !operand_is_scalar || operand_type == DataType::Binary {
-                    return Err(CompileError {
-                        code: "unsupported_membership",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::UnsupportedMembership,
                         message: format!("IN is not valid for {operand_type:?}"),
                         span: expr.span,
-                    });
+                    }));
                 }
                 for (index, element) in set.iter().enumerate() {
                     if let Some(defect) = SetElementDefect::of_shape(element) {
@@ -1373,14 +1397,14 @@ impl Compiler {
                     let element_type = self.infer_expr_type(element)?;
                     if element_type != operand_type {
                         let position = SetElementDefect::position(index);
-                        return Err(CompileError {
-                            code: "type_mismatch",
+                        return Err(Report::new(CompileError {
+                            code: CompileErrorCode::TypeMismatch,
                             message: format!(
                                 "IN set element {position} has type {element_type:?}, but the \
                                  operand has type {operand_type:?}"
                             ),
                             span: element.span,
-                        });
+                        }));
                     }
                 }
                 Ok(DataType::Boolean)
@@ -1390,23 +1414,23 @@ impl Compiler {
                 let low_type = self.infer_expr_type(low)?;
                 let high_type = self.infer_expr_type(high)?;
                 if low_type != operand_type || high_type != operand_type {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "BETWEEN requires the operand and both bounds to have one exact type, \
                              found {operand_type:?}, {low_type:?} and {high_type:?}"
                         ),
                         span: expr.span,
-                    });
+                    }));
                 }
                 // The range is the conjunction of `>=` and `<=`, so it accepts exactly the types
                 // those comparisons order.
                 if binary_output_type(BinaryOp::GtEq, &operand_type, &operand_type).is_none() {
-                    return Err(CompileError {
-                        code: "unsupported_range",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::UnsupportedRange,
                         message: format!("BETWEEN is not valid for {operand_type:?}"),
                         span: expr.span,
-                    });
+                    }));
                 }
                 Ok(DataType::Boolean)
             }
@@ -1416,14 +1440,14 @@ impl Compiler {
             } => {
                 let document_type = self.infer_expr_type(document)?;
                 if document_type != DataType::Utf8 {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "{} document must be STRING, found {document_type:?}",
                             extraction.output.operation()
                         ),
                         span: expr.span,
-                    });
+                    }));
                 }
                 Ok(extraction.output.data_type())
             }
@@ -1434,16 +1458,16 @@ impl Compiler {
         &self,
         args: &'a [SpannedExpr],
         span: Span,
-    ) -> Result<&'a SpannedExpr, CompileError> {
+    ) -> error_stack::Result<&'a SpannedExpr, CompileError> {
         let [arg] = args else {
-            return Err(CompileError {
-                code: "invalid_function_arity",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::InvalidFunctionArity,
                 message: format!(
                     "function 'leak_sensitive' expects exactly 1 argument, found {}",
                     args.len()
                 ),
                 span,
-            });
+            }));
         };
         self.infer_expr_type(arg)?;
         Ok(arg)
@@ -1453,7 +1477,7 @@ impl Compiler {
         &self,
         expr: &SpannedExpr,
         target_type: &DataType,
-    ) -> Result<DataType, CompileError> {
+    ) -> error_stack::Result<DataType, CompileError> {
         if let Expr::Literal(Literal::Null) = expr.inner {
             return Ok(target_type.clone());
         }
@@ -1467,17 +1491,17 @@ impl Compiler {
             if let DataType::List(_) = target_type {
                 return Ok(target_type.clone());
             }
-            return Err(CompileError {
-                code: "type_mismatch",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
                 message: "vec() requires a declared VEC assignment target".to_string(),
                 span: expr.span,
-            });
+            }));
         }
 
         self.infer_expr_type(expr)
     }
 
-    fn expr_may_be_null(&self, expr: &SpannedExpr) -> Result<bool, CompileError> {
+    fn expr_may_be_null(&self, expr: &SpannedExpr) -> error_stack::Result<bool, CompileError> {
         match &expr.inner {
             Expr::Literal(literal) => Ok(matches!(literal, Literal::Null)),
             Expr::FieldRef(field_ref) => {
@@ -1604,10 +1628,12 @@ impl Compiler {
                     return Ok(all_nullable);
                 }
                 if let FunctionName::Udf(name) = function {
-                    let signature = self.udf_signatures.get(name).ok_or_else(|| CompileError {
-                        code: "unknown_function",
-                        message: format!("unknown function '{name}' with arity {}", args.len()),
-                        span: expr.span,
+                    let signature = self.udf_signatures.get(name).ok_or_else(|| {
+                        Report::new(CompileError {
+                            code: CompileErrorCode::UnknownFunction,
+                            message: format!("unknown function '{name}' with arity {}", args.len()),
+                            span: expr.span,
+                        })
                     })?;
                     if signature.return_optional {
                         return Ok(true);
@@ -1648,7 +1674,7 @@ impl Compiler {
         }
     }
 
-    fn expr_is_sensitive(&self, expr: &SpannedExpr) -> Result<bool, CompileError> {
+    fn expr_is_sensitive(&self, expr: &SpannedExpr) -> error_stack::Result<bool, CompileError> {
         match &expr.inner {
             Expr::Literal(_) => Ok(false),
             Expr::FieldRef(field_ref) => {
@@ -1725,50 +1751,55 @@ impl Compiler {
         target_nullable: bool,
         target_sensitive: bool,
         allow_sensitive_output: bool,
-    ) -> Result<(), CompileError> {
+    ) -> error_stack::Result<(), CompileError> {
         let expr_type = self.infer_assignment_expr_type(expr, target_type)?;
         if &expr_type != target_type {
-            return Err(CompileError {
-                code: "type_mismatch",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
                 message: format!(
                     "SET field '{field_name}' has expression type {expr_type:?}, expected \
                      declared output type {target_type:?}"
                 ),
                 span: expr.span,
-            });
+            }));
         }
         if !target_nullable && self.expr_may_be_null(expr)? {
-            return Err(CompileError {
-                code: "null_for_required_field",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::NullForRequiredField,
                 message: format!(
                     "SET field '{field_name}' may be null but the output field is required"
                 ),
                 span: expr.span,
-            });
+            }));
         }
         if !target_sensitive && !allow_sensitive_output && self.expr_is_sensitive(expr)? {
-            return Err(CompileError {
-                code: "sensitive_leak",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::SensitiveLeak,
                 message: format!(
                     "SET field '{field_name}' would store sensitive data in a non-sensitive \
                      output field; use leak_sensitive(...) to explicitly remove sensitivity"
                 ),
                 span: expr.span,
-            });
+            }));
         }
         Ok(())
     }
 
-    fn compile_expr(&mut self, expr: &SpannedExpr) -> Result<RegisterRef, CompileError> {
+    fn compile_expr(
+        &mut self,
+        expr: &SpannedExpr,
+    ) -> error_stack::Result<RegisterRef, CompileError> {
         if let Expr::Call {
             function: FunctionName::Udf(name),
             args,
         } = &expr.inner
         {
-            let signature = self.udf_signatures.get(name).ok_or_else(|| CompileError {
-                code: "unknown_function",
-                message: format!("unknown function '{name}'"),
-                span: expr.span,
+            let signature = self.udf_signatures.get(name).ok_or_else(|| {
+                Report::new(CompileError {
+                    code: CompileErrorCode::UnknownFunction,
+                    message: format!("unknown function '{name}'"),
+                    span: expr.span,
+                })
             })?;
             if !signature.volatile
                 && !args.iter().any(|argument| {
@@ -1833,7 +1864,7 @@ impl Compiler {
         &mut self,
         expr: &SpannedExpr,
         target_type: &DataType,
-    ) -> Result<RegisterRef, CompileError> {
+    ) -> error_stack::Result<RegisterRef, CompileError> {
         if let Expr::Literal(Literal::Null) = expr.inner {
             let ty = Self::register_type_for_data_type(target_type, expr.span, "NULL target")?;
             let dst = self.alloc_temp(ty);
@@ -1869,7 +1900,10 @@ impl Compiler {
         self.compile_expr(expr)
     }
 
-    fn compile_expr_uncached(&mut self, expr: &SpannedExpr) -> Result<RegisterRef, CompileError> {
+    fn compile_expr_uncached(
+        &mut self,
+        expr: &SpannedExpr,
+    ) -> error_stack::Result<RegisterRef, CompileError> {
         match &expr.inner {
             Expr::Literal(literal) => {
                 let (ty, value) = match literal {
@@ -1882,12 +1916,12 @@ impl Compiler {
                         (RegisterType::Utf8, ScalarValue::Utf8(value.clone()))
                     }
                     Literal::Null => {
-                        return Err(CompileError {
-                            code: "untyped_null",
+                        return Err(Report::new(CompileError {
+                            code: CompileErrorCode::UntypedNull,
                             message: "NULL requires a declared optional assignment target"
                                 .to_string(),
                             span: expr.span,
-                        });
+                        }));
                     }
                 };
                 let dst = self.alloc_temp(ty);
@@ -1903,14 +1937,14 @@ impl Compiler {
                         binding,
                         expr.span,
                     ),
-                    ColumnValue::Unsupported => Err(CompileError {
-                        code: "unsupported_identifier",
+                    ColumnValue::Unsupported => Err(Report::new(CompileError {
+                        code: CompileErrorCode::UnsupportedIdentifier,
                         message: format!(
                             "input column '{}.{}' has unsupported type {:?}",
                             field_ref.relay, field_ref.field, binding.data_type
                         ),
                         span: expr.span,
-                    }),
+                    })),
                 }
             }
             Expr::InternalFieldRef(field_ref) => {
@@ -1924,8 +1958,8 @@ impl Compiler {
                         binding,
                         expr.span,
                     ),
-                    ColumnValue::Unsupported => Err(CompileError {
-                        code: "unsupported_identifier",
+                    ColumnValue::Unsupported => Err(Report::new(CompileError {
+                        code: CompileErrorCode::UnsupportedIdentifier,
                         message: format!(
                             "input column '{}.{}' has unsupported type {:?}",
                             CompileNamespace::Internal(field_ref.namespace).label(),
@@ -1933,7 +1967,7 @@ impl Compiler {
                             binding.data_type
                         ),
                         span: expr.span,
-                    }),
+                    })),
                 }
             }
             Expr::Unary { op, expr: inner } => {
@@ -2213,7 +2247,7 @@ impl Compiler {
         else_result: Option<&SpannedExpr>,
         result_type: &DataType,
         span: Span,
-    ) -> Result<RegisterRef, CompileError> {
+    ) -> error_stack::Result<RegisterRef, CompileError> {
         let outer_selection = self.current_selection;
         let folded_operand = match operand {
             Some(operand) => fold_constant_expr(operand)?,
@@ -2341,7 +2375,7 @@ impl Compiler {
         result_type: &DataType,
         selection: Option<RegisterRef>,
         span: Span,
-    ) -> Result<RegisterRef, CompileError> {
+    ) -> error_stack::Result<RegisterRef, CompileError> {
         self.with_selection(selection, |compiler| {
             if let Some(result) = result
                 && !matches!(result.inner, Expr::Literal(Literal::Null))
@@ -2380,17 +2414,17 @@ impl Compiler {
         function: &FunctionName,
         args: &[SpannedExpr],
         span: Span,
-    ) -> Result<BuiltinPlan, CompileError> {
+    ) -> error_stack::Result<BuiltinPlan, CompileError> {
         let Some(descriptor) = builtin_descriptor(function) else {
-            return Err(CompileError {
-                code: "unknown_function",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnknownFunction,
                 message: format!(
                     "unknown function '{}' with arity {}",
                     function.as_str(),
                     args.len()
                 ),
                 span,
-            });
+            }));
         };
         let arg_types = args
             .iter()
@@ -2440,14 +2474,14 @@ impl Compiler {
             let network = match text.parse::<IpNetwork>() {
                 Ok(network) => network,
                 Err(defect) => {
-                    return Err(CompileError {
-                        code: "invalid_ip_network",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::InvalidIpNetwork,
                         message: format!(
                             "function '{}' network '{text}' {defect}",
                             function.as_str()
                         ),
                         span,
-                    });
+                    }));
                 }
             };
             let address = self.compile_expr(address)?;
@@ -2481,7 +2515,7 @@ impl Compiler {
         function: RegexpFunction,
         args: &[SpannedExpr],
         output_type: RegisterType,
-    ) -> Result<BuiltinPlan, CompileError> {
+    ) -> error_stack::Result<BuiltinPlan, CompileError> {
         let text = args
             .first()
             .verified("the signature check above accepted only calls with a text argument");
@@ -2515,59 +2549,59 @@ impl Compiler {
     fn compile_invocation(
         &mut self,
         invocation: &crate::program::SpannedInvocation,
-    ) -> Result<InvocationBinding, CompileError> {
+    ) -> error_stack::Result<InvocationBinding, CompileError> {
         if !self.allow_header_writes {
-            return Err(CompileError {
-                code: "unsupported_invoke_context",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedInvokeContext,
                 message: "INVOKE is only available to emitters".to_string(),
                 span: invocation.span,
-            });
+            }));
         }
         if invocation.inner.function != FunctionName::WriteHeader {
-            return Err(CompileError {
-                code: "unsupported_invocation",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedInvocation,
                 message: format!(
                     "function '{}' cannot be used in INVOKE; expected write_header",
                     invocation.inner.function.as_str()
                 ),
                 span: invocation.span,
-            });
+            }));
         }
         let [name, value] = invocation.inner.args.as_slice() else {
-            return Err(CompileError {
-                code: "invalid_function_arity",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::InvalidFunctionArity,
                 message: format!(
                     "function 'write_header' expects exactly 2 arguments, found {}",
                     invocation.inner.args.len()
                 ),
                 span: invocation.span,
-            });
+            }));
         };
         let mut inputs = Vec::with_capacity(2);
         for (label, arg) in [("name", name), ("value", value)] {
             let data_type = self.infer_expr_type(arg)?;
             if data_type != DataType::Utf8 {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!("write_header {label} must be STRING, found {data_type:?}"),
                     span: arg.span,
-                });
+                }));
             }
             if self.expr_may_be_null(arg)? {
-                return Err(CompileError {
-                    code: "nullable_header_argument",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::NullableHeaderArgument,
                     message: format!("write_header {label} must not be nullable"),
                     span: arg.span,
-                });
+                }));
             }
             if self.expr_is_sensitive(arg)? {
-                return Err(CompileError {
-                    code: "sensitive_leak",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::SensitiveLeak,
                     message: format!(
                         "write_header {label} requires leak_sensitive(...) for sensitive data"
                     ),
                     span: arg.span,
-                });
+                }));
             }
             let compiled = self.compile_expr(arg)?;
             let input = self.alloc_condition(RegisterType::Utf8);
@@ -2755,30 +2789,30 @@ impl SetElementDefect {
             .assured("a set held in memory has fewer than usize::MAX elements")
     }
 
-    fn into_compile_error(self, index: usize, span: Span) -> CompileError {
+    fn into_compile_error(self, index: usize, span: Span) -> Report<CompileError> {
         let position = Self::position(index);
         match self {
-            Self::NotConstant => CompileError {
-                code: "non_constant_set_element",
+            Self::NotConstant => Report::new(CompileError {
+                code: CompileErrorCode::NonConstantSetElement,
                 message: format!(
                     "IN set element {position} is not a constant; write a literal, optionally \
                      negated with '-' or NOT and cast with AS"
                 ),
                 span,
-            },
-            Self::Null => CompileError {
-                code: "null_set_element",
+            }),
+            Self::Null => Report::new(CompileError {
+                code: CompileErrorCode::NullSetElement,
                 message: format!(
                     "IN set element {position} is NULL, which no value equals; test for null with \
                      is_null(...)"
                 ),
                 span,
-            },
-            Self::Unevaluable(reason) => CompileError {
-                code: "invalid_set_element",
+            }),
+            Self::Unevaluable(reason) => Report::new(CompileError {
+                code: CompileErrorCode::InvalidSetElement,
                 message: format!("IN set element {position} cannot be evaluated: {reason}"),
                 span,
-            },
+            }),
         }
     }
 }
@@ -2840,7 +2874,9 @@ fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementD
     }
 }
 
-fn fold_constant_expr(expr: &SpannedExpr) -> Result<Option<FoldedValue>, CompileError> {
+fn fold_constant_expr(
+    expr: &SpannedExpr,
+) -> error_stack::Result<Option<FoldedValue>, CompileError> {
     match &expr.inner {
         Expr::Literal(literal) => Ok(match literal {
             Literal::Int64(value) => Some(FoldedValue::NonNull(ScalarValue::Int64(*value))),
@@ -3358,16 +3394,16 @@ fn fold_bitwise(operation: BitwiseOperation, args: &[FoldedValue]) -> Option<Fol
 
 pub fn compile_program(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
-) -> Result<CompiledProgram, CompileError> {
+    schema: StdArc<Schema>,
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_for_relay(program, schema, "input")
 }
 
 pub fn compile_program_for_relay(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_name: &str,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_for_bindings(
         program,
         schema.clone(),
@@ -3377,26 +3413,26 @@ pub fn compile_program_for_relay(
 
 pub fn compile_program_for_relays<'a>(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_names: impl IntoIterator<Item = &'a str>,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_relays(program, schema, relay_names, CompileOptions::default())
 }
 
 pub fn compile_program_with_options(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     options: CompileOptions,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_relay(program, schema, "input", options)
 }
 
 pub fn compile_program_with_options_for_relay(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_name: &str,
     options: CompileOptions,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_bindings(
         program,
         schema.clone(),
@@ -3407,10 +3443,10 @@ pub fn compile_program_with_options_for_relay(
 
 pub fn compile_program_with_options_for_relays<'a>(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_names: impl IntoIterator<Item = &'a str>,
     options: CompileOptions,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let bindings = relay_names
         .into_iter()
         .map(|relay_name| CompileBinding::writable(relay_name, schema.clone()))
@@ -3420,9 +3456,9 @@ pub fn compile_program_with_options_for_relays<'a>(
 
 pub fn compile_program_for_bindings(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     bindings: impl IntoIterator<Item = CompileBinding>,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_bindings_with_sensitivity(
         program,
         output_schema,
@@ -3434,10 +3470,10 @@ pub fn compile_program_for_bindings(
 
 pub fn compile_program_for_bindings_with_sensitivity(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     output_sensitivity: SchemaSensitivity,
     bindings: impl IntoIterator<Item = CompileBinding>,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_bindings_with_sensitivity(
         program,
         output_schema,
@@ -3456,11 +3492,11 @@ pub fn compile_predicate_with_options_for_bindings(
     predicate: &SpannedExpr,
     bindings: impl IntoIterator<Item = CompileBinding>,
     options: PredicateCompileOptions,
-) -> Result<CompiledPredicate, Report<CompileError>> {
+) -> error_stack::Result<CompiledPredicate, CompileError> {
     let mut bindings = bindings.into_iter().collect::<Vec<_>>();
     if bindings.is_empty() {
         return Err(Report::new(CompileError {
-            code: "missing_predicate_binding",
+            code: CompileErrorCode::MissingPredicateBinding,
             message: "at least one read-only predicate input namespace is required".to_string(),
             span: predicate.span,
         }));
@@ -3468,7 +3504,7 @@ pub fn compile_predicate_with_options_for_bindings(
     for binding in &bindings {
         if !binding.readable || binding.writable {
             return Err(Report::new(CompileError {
-                code: "invalid_predicate_binding",
+                code: CompileErrorCode::InvalidPredicateBinding,
                 message: format!(
                     "predicate namespace '{}' must be read-only",
                     binding.namespace.label()
@@ -3483,7 +3519,7 @@ pub fn compile_predicate_with_options_for_bindings(
         .find(|binding| matches!(binding.namespace, CompileNamespace::User(_)))
     else {
         return Err(Report::new(CompileError {
-            code: "missing_predicate_input_namespace",
+            code: CompileErrorCode::MissingPredicateInputNamespace,
             message: "a predicate requires a user input namespace".to_string(),
             span: predicate.span,
         }));
@@ -3519,7 +3555,9 @@ pub fn compile_predicate_with_options_for_bindings(
             injector: options.injector,
         },
     )?;
-    Ok(CompiledPredicate::new(triomphe::Arc::new(compiled)))
+    Ok(CompiledPredicate::new(nervix_primitives::sync::Arc::new(
+        compiled,
+    )))
 }
 
 /// One field a program's `SET` list writes, as inferred without compiling the program: the field
@@ -3536,7 +3574,7 @@ pub struct InferredSetField {
 pub fn infer_set_expr_types_for_bindings(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
-) -> Result<Vec<InferredSetField>, CompileError> {
+) -> error_stack::Result<Vec<InferredSetField>, CompileError> {
     infer_set_expr_types_for_bindings_with_udfs(program, bindings, UdfSignatures::default())
 }
 
@@ -3544,7 +3582,7 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
     udf_signatures: UdfSignatures,
-) -> Result<Vec<InferredSetField>, CompileError> {
+) -> error_stack::Result<Vec<InferredSetField>, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, _input_schema) = Compiler::new(&bindings)?;
     compiler.udf_signatures = udf_signatures;
@@ -3589,10 +3627,10 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
 
 pub fn compile_program_with_options_for_bindings(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     bindings: impl IntoIterator<Item = CompileBinding>,
     options: CompileOptions,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_bindings_with_sensitivity(
         program,
         output_schema,
@@ -3604,11 +3642,11 @@ pub fn compile_program_with_options_for_bindings(
 
 pub fn compile_program_with_options_for_bindings_with_sensitivity(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     output_sensitivity: SchemaSensitivity,
     bindings: impl IntoIterator<Item = CompileBinding>,
     options: CompileOptions,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, input_schema) = Compiler::new(&bindings)?;
     compiler.apply_options(&options);
@@ -3622,11 +3660,11 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
     for (field_ref, expr) in &program.inner.set {
         let name = compiler.validate_target_field_ref(field_ref, expr.span)?;
         if !output_field_names.contains(name) {
-            return Err(CompileError {
-                code: "unknown_set",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnknownSet,
                 message: format!("SET field '{name}' is not declared in the output schema"),
                 span: expr.span,
-            });
+            }));
         }
     }
 
@@ -3663,14 +3701,14 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                 AssignmentFallback::Uninitialized(previous_binding.data_type.clone())
             }
             ColumnValue::Unsupported => {
-                return Err(CompileError {
-                    code: "unsupported_assignment_target",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnsupportedAssignmentTarget,
                     message: format!(
                         "SET target '{}.{}' has unsupported type {:?}",
                         field_ref.relay, field_ref.field, previous_binding.data_type
                     ),
                     span: expr.span,
-                });
+                }));
             }
         };
         let compiled = compiler.compile_assignment_expr(expr, field.data_type())?;
@@ -3696,11 +3734,11 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
     let filter = if let Some(filter_expr) = &program.inner.filter {
         let filter_type = compiler.infer_expr_type(filter_expr)?;
         if filter_type != DataType::Boolean {
-            return Err(CompileError {
-                code: "invalid_filter",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::InvalidFilter,
                 message: "WHERE expression must evaluate to Boolean".to_string(),
                 span: filter_expr.span,
-            });
+            }));
         }
         let filter_reg = compiler.alloc_condition(RegisterType::Boolean);
         let compiled = compiler.compile_expr(filter_expr)?;
@@ -3736,8 +3774,8 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
             .verified("every output-schema field was installed as a column in the SET scope above")
             .clone();
         if binding.data_type != *field.data_type() {
-            return Err(CompileError {
-                code: "type_mismatch",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
                 message: format!(
                     "output field '{}' has expression type {:?}, expected declared output type \
                      {:?}",
@@ -3746,12 +3784,12 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                     field.data_type()
                 ),
                 span: program.span,
-            });
+            }));
         }
         if binding.nullable && !field.is_nullable() {
             let (code, message) = if let ColumnValue::Uninitialized = binding.value {
                 (
-                    "uninitialized_required_field",
+                    CompileErrorCode::UninitializedRequiredField,
                     format!(
                         "required output field '{}' remains uninitialized",
                         field.name()
@@ -3759,32 +3797,32 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                 )
             } else {
                 (
-                    "null_for_required_field",
+                    CompileErrorCode::NullForRequiredField,
                     format!(
                         "output field '{}' may be null but the output field is required",
                         field.name()
                     ),
                 )
             };
-            return Err(CompileError {
+            return Err(Report::new(CompileError {
                 code,
                 message,
                 span: program.span,
-            });
+            }));
         }
         if binding.sensitive
             && !output_sensitivity.is_sensitive(field.name())
             && !options.allow_sensitive_output
         {
-            return Err(CompileError {
-                code: "sensitive_leak",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::SensitiveLeak,
                 message: format!(
                     "output field '{}' would store sensitive data in a non-sensitive output \
                      field; use SET with leak_sensitive(...) to explicitly remove sensitivity",
                     field.name()
                 ),
                 span: program.span,
-            });
+            }));
         }
         let reg = match binding.value {
             ColumnValue::Initialized(reg) => reg,
@@ -3805,14 +3843,14 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                 reg
             }
             ColumnValue::Unsupported => {
-                return Err(CompileError {
-                    code: "unsupported_passthrough",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnsupportedPassthrough,
                     message: format!(
                         "output field '{}' has unsupported type for FILTER-MAP execution",
                         field.name()
                     ),
                     span: program.span,
-                });
+                }));
             }
         };
         outputs.push(OutputBinding {
@@ -4269,9 +4307,8 @@ impl FreeTempSlots {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_schema::{DataType, Field, Schema};
+    use nervix_primitives::sync::StdArc;
     use rstest::{fixture, rstest};
 
     use super::*;
@@ -4302,8 +4339,8 @@ mod tests {
         arm_count
     }
 
-    fn schema(fields: Vec<Field>) -> Arc<Schema> {
-        Arc::new(Schema::new(fields))
+    fn schema(fields: Vec<Field>) -> StdArc<Schema> {
+        StdArc::new(Schema::new(fields))
     }
 
     #[test]
@@ -4330,7 +4367,7 @@ mod tests {
             PredicateCompileOptions::default(),
         )
         .expect_err("predicate callers must not supply a writable input");
-        assert_eq!(error.current_context().code, "invalid_predicate_binding");
+        assert_eq!(error.current_context().code(), "invalid_predicate_binding");
     }
 
     #[test]
@@ -4348,7 +4385,99 @@ mod tests {
             PredicateCompileOptions::default(),
         )
         .expect_err("a predicate must evaluate to Boolean");
-        assert_eq!(error.current_context().code, "invalid_filter");
+        assert_eq!(error.current_context().code(), "invalid_filter");
+    }
+
+    #[test]
+    fn binding_failures_keep_specific_diagnostics_at_the_compile_boundary() {
+        let input = schema(vec![Field::new("value", DataType::Int64, false)]);
+        let program = parse_program("SET value = input.value")
+            .assured("the fixed assignment has valid NSPL syntax");
+        let duplicate = compile_program_for_bindings(
+            &program,
+            input.clone(),
+            [
+                CompileBinding::writable("input", input.clone()),
+                CompileBinding::readonly("input", input.clone()),
+            ],
+        )
+        .expect_err("the same readable namespace cannot be bound twice");
+        assert_eq!(duplicate.current_context().code(), "duplicate_namespace");
+        assert!(duplicate.current_context().message.contains("input"));
+        assert_eq!(duplicate.current_context().span, (0..0).into());
+
+        let missing_output = compile_program_for_bindings(
+            &program,
+            input.clone(),
+            [CompileBinding::readonly("input", input.clone())],
+        )
+        .expect_err("a program needs a writable output namespace");
+        assert_eq!(
+            missing_output.current_context().code(),
+            "missing_output_namespace"
+        );
+
+        let mut internal =
+            CompileBinding::internal_readonly(InternalFieldNamespace::LookupHashMap, input.clone());
+        internal.writable = true;
+        let invalid_internal = compile_program_for_bindings(&program, input.clone(), [internal])
+            .expect_err("internal execution state cannot be written by a program");
+        assert_eq!(
+            invalid_internal.current_context().code(),
+            "internal_namespace_not_writable"
+        );
+
+        let unknown_sensitivity =
+            compile_program_for_bindings(
+                &program,
+                input.clone(),
+                [CompileBinding::writable("input", input)
+                    .with_sensitivity(sensitivity(&["missing"]))],
+            )
+            .expect_err("a sensitivity declaration must name an input field");
+        assert_eq!(
+            unknown_sensitivity.current_context().code(),
+            "unknown_sensitive_field"
+        );
+    }
+
+    #[test]
+    fn predicate_binding_errors_preserve_the_input_expression_span() {
+        let input = schema(vec![Field::new("active", DataType::Boolean, false)]);
+        let program = parse_program("WHERE input.active")
+            .assured("the fixed predicate has valid NSPL syntax");
+        let predicate = program
+            .inner
+            .filter
+            .as_ref()
+            .assured("the parsed WHERE clause contains a predicate");
+
+        let missing = compile_predicate_with_options_for_bindings(
+            predicate,
+            [],
+            PredicateCompileOptions::default(),
+        )
+        .expect_err("the predicate needs an input namespace");
+        assert_eq!(
+            missing.current_context().code(),
+            "missing_predicate_binding"
+        );
+        assert_eq!(missing.current_context().span, predicate.span);
+
+        let internal = compile_predicate_with_options_for_bindings(
+            predicate,
+            [CompileBinding::internal_readonly(
+                InternalFieldNamespace::LookupHashMap,
+                input,
+            )],
+            PredicateCompileOptions::default(),
+        )
+        .expect_err("a predicate needs a user input namespace");
+        assert_eq!(
+            internal.current_context().code(),
+            "missing_predicate_input_namespace"
+        );
+        assert_eq!(internal.current_context().span, predicate.span);
     }
 
     fn sensitivity(fields: &[&str]) -> SchemaSensitivity {
@@ -4356,11 +4485,11 @@ mod tests {
     }
 
     #[fixture]
-    fn sensitive_string_input_schema() -> Arc<Schema> {
+    fn sensitive_string_input_schema() -> StdArc<Schema> {
         schema(vec![Field::new("secret", DataType::Utf8, true)])
     }
 
-    fn with_output_fields(input_schema: &Arc<Schema>, fields: Vec<Field>) -> Arc<Schema> {
+    fn with_output_fields(input_schema: &StdArc<Schema>, fields: Vec<Field>) -> StdArc<Schema> {
         let mut output_fields = input_schema
             .fields()
             .iter()
@@ -4372,9 +4501,9 @@ mod tests {
 
     fn compile_program_with_output(
         program: &SpannedNode<Program>,
-        input_schema: Arc<Schema>,
-        output_schema: Arc<Schema>,
-    ) -> Result<CompiledProgram, CompileError> {
+        input_schema: StdArc<Schema>,
+        output_schema: StdArc<Schema>,
+    ) -> error_stack::Result<CompiledProgram, CompileError> {
         compile_program_with_sensitive_output(
             program,
             input_schema,
@@ -4386,11 +4515,11 @@ mod tests {
 
     fn compile_program_with_sensitive_output(
         program: &SpannedNode<Program>,
-        input_schema: Arc<Schema>,
+        input_schema: StdArc<Schema>,
         input_sensitivity: SchemaSensitivity,
-        output_schema: Arc<Schema>,
+        output_schema: StdArc<Schema>,
         output_sensitivity: SchemaSensitivity,
-    ) -> Result<CompiledProgram, CompileError> {
+    ) -> error_stack::Result<CompiledProgram, CompileError> {
         compile_program_for_bindings_with_sensitivity(
             program,
             output_schema,
@@ -4401,9 +4530,9 @@ mod tests {
 
     fn compile_program_with_output_fields(
         program: &SpannedNode<Program>,
-        input_schema: Arc<Schema>,
+        input_schema: StdArc<Schema>,
         fields: Vec<Field>,
-    ) -> Result<CompiledProgram, CompileError> {
+    ) -> error_stack::Result<CompiledProgram, CompileError> {
         let output_schema = with_output_fields(&input_schema, fields);
         compile_program_with_output(program, input_schema, output_schema)
     }
@@ -4437,7 +4566,99 @@ mod tests {
             .expect("bare call remains syntactically valid");
         let error = compile_program_with_options(&bare, schema, options)
             .expect_err("bare call must not resolve against the UDF catalog");
-        assert_eq!(error.code, "unknown_function");
+        assert_eq!(error.current_context().code(), "unknown_function");
+    }
+
+    #[test]
+    fn udf_call_failures_keep_function_name_and_argument_span() {
+        let input = schema(vec![Field::new("value", DataType::Int64, false)]);
+        let mut signatures = UdfSignatures::default();
+        signatures.insert(
+            "add_one",
+            UdfSignature {
+                arguments: vec![UdfParameter {
+                    data_type: DataType::Int64,
+                    optional: false,
+                }],
+                return_type: DataType::Int64,
+                return_optional: false,
+                volatile: false,
+            },
+        );
+        let options = CompileOptions {
+            udf_signatures: signatures,
+            ..CompileOptions::default()
+        };
+        for (source, code, detail) in [
+            (
+                "SET result = udf::missing(input.value)",
+                "unknown_function",
+                "missing",
+            ),
+            (
+                "SET result = udf::add_one()",
+                "invalid_function_arity",
+                "add_one",
+            ),
+            (
+                "SET result = udf::add_one('forty-two')",
+                "type_mismatch",
+                "add_one",
+            ),
+        ] {
+            let program = parse_program(source).assured("each fixed UDF call has valid syntax");
+            let report = compile_program_with_options_for_bindings(
+                &program,
+                schema(vec![Field::new("result", DataType::Int64, false)]),
+                [CompileBinding::writable("input", input.clone())],
+                options.clone(),
+            )
+            .expect_err("the UDF call violates its declared signature");
+            assert_eq!(report.current_context().code(), code);
+            assert!(report.current_context().message.contains(detail));
+            assert!(report.current_context().span.start < report.current_context().span.end);
+        }
+    }
+
+    #[test]
+    fn header_read_failures_preserve_context_and_argument_detail() {
+        let input = schema(vec![Field::new("value", DataType::Int64, false)]);
+        let output = schema(vec![Field::new("result", DataType::Utf8, true)]);
+        for (source, allow_header_reads, code, detail) in [
+            (
+                "SET result = read_header('tag')",
+                false,
+                "unsupported_function_context",
+                "read_header",
+            ),
+            (
+                "SET result = read_header()",
+                true,
+                "invalid_function_arity",
+                "read_header",
+            ),
+            (
+                "SET result = read_header(input.value)",
+                true,
+                "type_mismatch",
+                "STRING header name",
+            ),
+        ] {
+            let program = parse_program(source).assured("each fixed header call has valid syntax");
+            let report = compile_program_with_options_for_bindings(
+                &program,
+                output.clone(),
+                [CompileBinding::writable("input", input.clone())],
+                CompileOptions {
+                    allow_header_reads,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect_err("the header call violates its connector context or signature");
+            assert_eq!(report.current_context().code(), code);
+            assert!(report.current_context().message.contains(detail));
+            assert!(report.current_context().span.start < report.current_context().span.end);
+        }
     }
 
     #[test]
@@ -4455,7 +4676,7 @@ mod tests {
             vec![Field::new("total", DataType::Int64, true)],
         )
         .expect_err("must fail");
-        assert_eq!(error.code, "type_mismatch");
+        assert_eq!(error.current_context().code(), "type_mismatch");
     }
 
     #[test]
@@ -4473,7 +4694,7 @@ mod tests {
             vec![Field::new("result", DataType::Int64, true)],
         )
         .expect_err("non-Boolean condition must fail");
-        assert_eq!(error.code, "invalid_condition");
+        assert_eq!(error.current_context().code(), "invalid_condition");
 
         let mismatched_results =
             parse_program("SET result = CASE input.kind WHEN \"number\" THEN 1 ELSE \"text\" END")
@@ -4484,7 +4705,7 @@ mod tests {
             vec![Field::new("result", DataType::Int64, true)],
         )
         .expect_err("mixed CASE results must fail");
-        assert_eq!(error.code, "type_mismatch");
+        assert_eq!(error.current_context().code(), "type_mismatch");
 
         let untyped =
             parse_program("SET result = CASE WHEN input.number = 0 THEN NULL ELSE NULL END")
@@ -4495,7 +4716,7 @@ mod tests {
             vec![Field::new("result", DataType::Int64, true)],
         )
         .expect_err("all-NULL CASE must fail");
-        assert_eq!(error.code, "untyped_null");
+        assert_eq!(error.current_context().code(), "untyped_null");
 
         let omitted_else = parse_program("SET result = CASE WHEN input.number = 0 THEN 1 END")
             .expect("program must parse");
@@ -4505,7 +4726,7 @@ mod tests {
             vec![Field::new("result", DataType::Int64, false)],
         )
         .expect_err("omitted CASE ELSE must require an optional output");
-        assert_eq!(error.code, "null_for_required_field");
+        assert_eq!(error.current_context().code(), "null_for_required_field");
     }
 
     #[test]
@@ -4603,7 +4824,7 @@ mod tests {
         )
         .expect_err("sensitive condition must taint the CASE result");
 
-        assert_eq!(error.code, "sensitive_leak");
+        assert_eq!(error.current_context().code(), "sensitive_leak");
     }
 
     #[test]
@@ -4643,12 +4864,12 @@ mod tests {
             },
             span: (0..0).into(),
         };
-        let input_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let output_schema = Arc::new(Schema::new(vec![
+        let input_schema = StdArc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let output_schema = StdArc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("enriched", DataType::Utf8, true),
         ]));
-        let lookup_schema = Arc::new(Schema::new(vec![Field::new(
+        let lookup_schema = StdArc::new(Schema::new(vec![Field::new(
             "value_0",
             DataType::Utf8,
             true,
@@ -4680,7 +4901,7 @@ mod tests {
         let parsed = parse_program("SET headers = read_headers(lower(input.name))")
             .expect("program must parse");
         let input_schema = schema(vec![Field::new("name", DataType::Utf8, false)]);
-        let headers_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
+        let headers_type = DataType::List(StdArc::new(Field::new("item", DataType::Utf8, false)));
         let output_schema = with_output_fields(
             &input_schema,
             vec![Field::new("headers", headers_type.clone(), false)],
@@ -4692,7 +4913,10 @@ mod tests {
             [CompileBinding::writable("input", input_schema.clone())],
         )
         .expect_err("header reads must be rejected outside an ingestor context");
-        assert_eq!(error.code, "unsupported_function_context");
+        assert_eq!(
+            error.current_context().code(),
+            "unsupported_function_context"
+        );
 
         let compiled = compile_program_with_options_for_bindings(
             &parsed,
@@ -4729,7 +4953,7 @@ mod tests {
             },
         )
         .expect_err("write_header must not be an expression");
-        assert_eq!(error.code, "invalid_side_effect_call");
+        assert_eq!(error.current_context().code(), "invalid_side_effect_call");
 
         let invocation = parse_program("INVOKE write_header(\"name\", input.value)")
             .expect("program must parse");
@@ -4738,7 +4962,7 @@ mod tests {
             schema,
             [CompileBinding::writable(
                 "input",
-                Arc::new(Schema::new(vec![Field::new(
+                StdArc::new(Schema::new(vec![Field::new(
                     "value",
                     DataType::Utf8,
                     false,
@@ -4746,7 +4970,7 @@ mod tests {
             )],
         )
         .expect_err("INVOKE must be rejected outside an emitter context");
-        assert_eq!(error.code, "unsupported_invoke_context");
+        assert_eq!(error.current_context().code(), "unsupported_invoke_context");
     }
 
     #[test]
@@ -4774,7 +4998,7 @@ mod tests {
                 },
             )
             .expect_err("an implicit sensitive header leak must fail");
-            assert_eq!(error.code, "sensitive_leak");
+            assert_eq!(error.current_context().code(), "sensitive_leak");
         }
 
         let program = parse_program(
@@ -4801,12 +5025,12 @@ mod tests {
     #[test]
     fn rejects_set_target_missing_from_declared_output_schema() {
         let program = parse_program("SET extra = input.value").expect("must parse");
-        let input_schema = Arc::new(Schema::new(vec![Field::new(
+        let input_schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             true,
         )]));
-        let output_schema = Arc::new(Schema::new(vec![Field::new(
+        let output_schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             true,
@@ -4819,17 +5043,17 @@ mod tests {
         )
         .expect_err("SET target outside declared output schema must fail");
 
-        assert_eq!(error.code, "unknown_set");
+        assert_eq!(error.current_context().code(), "unknown_set");
     }
 
     #[test]
     fn allows_declared_target_only_field() {
         let program = parse_program("SET total = input.value").expect("must parse");
-        let input_schema = Arc::new(Schema::new(vec![
+        let input_schema = StdArc::new(Schema::new(vec![
             Field::new("value", DataType::Int64, true),
             Field::new("unused_input", DataType::Utf8, true),
         ]));
-        let output_schema = Arc::new(Schema::new(vec![Field::new(
+        let output_schema = StdArc::new(Schema::new(vec![Field::new(
             "total",
             DataType::Int64,
             true,
@@ -4888,7 +5112,7 @@ mod tests {
         SensitivityExpectation::Accepted
     )]
     fn validates_assignment_sensitivity_policy(
-        sensitive_string_input_schema: Arc<Schema>,
+        sensitive_string_input_schema: StdArc<Schema>,
         #[case] source: &str,
         #[case] output_field: &str,
         #[case] output_sensitive: bool,
@@ -4920,7 +5144,7 @@ mod tests {
         match (expected, result) {
             (SensitivityExpectation::Accepted, Ok(_)) => {}
             (SensitivityExpectation::Rejected, Err(error)) => {
-                assert_eq!(error.code, "sensitive_leak");
+                assert_eq!(error.current_context().code(), "sensitive_leak");
             }
             (SensitivityExpectation::Accepted, Err(error)) => {
                 panic!("sensitivity case should compile: {error:#}");
@@ -4953,7 +5177,7 @@ mod tests {
         )
         .expect_err("automatic sensitive passthrough into normal output must fail");
 
-        assert_eq!(error.code, "sensitive_leak");
+        assert_eq!(error.current_context().code(), "sensitive_leak");
     }
 
     #[test]
@@ -4985,7 +5209,7 @@ mod tests {
         let error = compile_program_with_output(&program, input_schema, output_schema)
             .expect_err("NULL cannot assign required output field");
 
-        assert_eq!(error.code, "null_for_required_field");
+        assert_eq!(error.current_context().code(), "null_for_required_field");
     }
 
     #[test]
@@ -4995,7 +5219,7 @@ mod tests {
 
         let error = compile_program(&program, schema).expect_err("untyped NULL must fail");
 
-        assert_eq!(error.code, "untyped_null");
+        assert_eq!(error.current_context().code(), "untyped_null");
     }
 
     #[test]
@@ -5197,7 +5421,10 @@ mod tests {
         )
         .expect_err("required uninitialized output must fail validation");
 
-        assert_eq!(error.code, "uninitialized_required_field");
+        assert_eq!(
+            error.current_context().code(),
+            "uninitialized_required_field"
+        );
     }
 
     #[test]
@@ -5526,14 +5753,14 @@ mod tests {
     #[test]
     fn rejects_unsupported_cast_source_type() {
         let program = parse_program("SET created = input.created AS INT64").expect("must parse");
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "created",
             DataType::Date32,
             true,
         )]));
 
         let error = compile_program(&program, schema).expect_err("must fail");
-        assert_eq!(error.code, "unsupported_cast");
+        assert_eq!(error.current_context().code(), "unsupported_cast");
     }
 
     #[test]
@@ -5549,7 +5776,7 @@ mod tests {
         let Err(error) = result else {
             panic!("implicit text to BYTES conversion must fail");
         };
-        assert_eq!(error.code, "unsupported_cast");
+        assert_eq!(error.current_context().code(), "unsupported_cast");
     }
 
     #[test]
@@ -5564,7 +5791,7 @@ mod tests {
             vec![Field::new("value", DataType::Int64, true)],
         )
         .expect_err("must fail");
-        assert_eq!(error.code, "invalid_filter");
+        assert_eq!(error.current_context().code(), "invalid_filter");
     }
 
     #[test]
@@ -5578,8 +5805,13 @@ mod tests {
             vec![Field::new("bad", DataType::Utf8, true)],
         )
         .expect_err("must fail");
-        assert_eq!(error.code, "unsupported_function");
-        assert!(error.message.contains("requires Utf8 input"));
+        assert_eq!(error.current_context().code(), "unsupported_function");
+        assert!(
+            error
+                .current_context()
+                .message
+                .contains("requires Utf8 input")
+        );
     }
 
     #[test]
@@ -5596,7 +5828,7 @@ mod tests {
             vec![Field::new("bad", DataType::Utf8, true)],
         )
         .expect_err("must fail");
-        assert_eq!(mixed_error.code, "type_mismatch");
+        assert_eq!(mixed_error.current_context().code(), "type_mismatch");
 
         let abs = parse_program("SET bad = abs(input.name)").expect("must parse");
         let abs_schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
@@ -5606,8 +5838,13 @@ mod tests {
             vec![Field::new("bad", DataType::Int64, true)],
         )
         .expect_err("must fail");
-        assert_eq!(abs_error.code, "unsupported_function");
-        assert!(abs_error.message.contains("requires numeric input"));
+        assert_eq!(abs_error.current_context().code(), "unsupported_function");
+        assert!(
+            abs_error
+                .current_context()
+                .message
+                .contains("requires numeric input")
+        );
 
         let unknown = parse_program("SET bad = mystery(input.name)").expect("must parse");
         let unknown_schema = schema(vec![Field::new("name", DataType::Utf8, true)]);
@@ -5617,8 +5854,8 @@ mod tests {
             vec![Field::new("bad", DataType::Utf8, true)],
         )
         .expect_err("must fail");
-        assert_eq!(unknown_error.code, "unknown_function");
-        assert!(unknown_error.message.contains("mystery"));
+        assert_eq!(unknown_error.current_context().code(), "unknown_function");
+        assert!(unknown_error.current_context().message.contains("mystery"));
     }
 
     #[test]
@@ -5634,7 +5871,7 @@ mod tests {
             vec![Field::new("bad", DataType::Boolean, true)],
         )
         .expect_err("must fail");
-        assert_eq!(bool_error.code, "unsupported_binary");
+        assert_eq!(bool_error.current_context().code(), "unsupported_binary");
 
         let numeric_program =
             parse_program("SET bad = input.left AND input.right").expect("must parse");
@@ -5648,7 +5885,7 @@ mod tests {
             vec![Field::new("bad", DataType::Boolean, true)],
         )
         .expect_err("must fail");
-        assert_eq!(numeric_error.code, "unsupported_binary");
+        assert_eq!(numeric_error.current_context().code(), "unsupported_binary");
     }
 
     #[test]

@@ -5,19 +5,25 @@
 //! - **Owns.** The REPL: key bindings, the completion menu, rendered diagnostics, output formatting
 //!   and the shell-facing command surface.
 //! - **Depends on.** `nervix-client-core`, the language layer for completion and local statement
-//!   parsing, and the vocabulary.
+//!   parsing, the archive format's reader for describing a local backup, and the vocabulary.
 //! - **Must not know.** The server. It speaks the session API through the client core and nothing
 //!   else.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "CLI session and terminal coordination belong to the client edge"
+    )
+)]
+
 use std::{
     collections::BTreeSet,
-    io::{self, Write},
+    io,
+    io::Write,
+    net::SocketAddr,
     ops::Range,
     path::{Path, PathBuf},
-    sync::{
-        Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
 };
 
 use arch_into::ArchInto as _;
@@ -28,16 +34,27 @@ use clap_complete::{Shell, generate};
 use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
-    CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic,
-    DomainName, LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition,
-    StatementOutcome, SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectDns, ConnectOptions,
+    Diagnostic, DomainClockAttachDisposition, DomainClockAttachOutcome,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockEvent, DomainName,
+    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
+    SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
 };
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
-    ClientStatement, parse_client_statements, parse_upload_resource_query,
-    upload_resource_path_fragment, upload_resource_path_range,
+    ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
+};
+use nervix_primitives::{
+    runtime::Handle,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        blocking::Mutex,
+    },
+    task::block_in_place,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
@@ -46,8 +63,17 @@ use reedline::{
     Suggestion,
 };
 use thiserror::Error;
-use tokio::{runtime::Handle, signal, task::block_in_place};
-use triomphe::Arc;
+use tokio::signal;
+
+mod backup;
+mod restore;
+
+use self::{
+    backup::{BackupRequest, CliBackupScope, CliReportFormat},
+    restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
+};
+
+nervix_primitives::product_binary!("nervix-cli");
 
 const HISTORY_FILE: &str = ".nervix_client_history";
 const EVENT_BUFFER_RECORDS: usize = 128;
@@ -71,6 +97,19 @@ struct Args {
     /// PEM certificate authority used to verify the server certificate
     #[arg(long)]
     tls_ca_cert: Option<PathBuf>,
+    /// Resolv.conf-format file used by native session hostname resolution
+    #[arg(long, env = "NERVIX_DNS_RESOLVER_CONFIG", default_value = nervix_dns::SYSTEM_RESOLVER_CONFIGURATION)]
+    dns_resolver_config: PathBuf,
+    /// Hosts-format file consulted before DNS
+    #[arg(long, env = "NERVIX_DNS_HOSTS_FILE", default_value = nervix_dns::SYSTEM_HOSTS_FILE)]
+    dns_hosts_file: PathBuf,
+    /// Name server addresses with ports, replacing those in the resolver configuration
+    #[arg(
+        long = "dns-name-server",
+        env = "NERVIX_DNS_NAME_SERVERS",
+        value_delimiter = ','
+    )]
+    dns_name_servers: Vec<SocketAddr>,
     /// Domain the session starts in
     #[arg(long, default_value = "default")]
     domain: DomainName,
@@ -119,6 +158,8 @@ enum Command {
         #[arg(long = "where")]
         where_clause: Option<String>,
     },
+    /// Follow the selected domain's clock until interrupted
+    DomainClock,
     /// Remove a node from the cluster membership
     RemoveNode {
         /// Node id to remove
@@ -139,6 +180,48 @@ enum Command {
         /// Node id to drain
         node_id: ClusterNodeName,
     },
+    /// Back up configuration, users and resources into an archive file
+    Backup {
+        /// What the archive covers: `cluster` for every domain and user, `domain` for one domain
+        #[arg(value_enum)]
+        scope: CliBackupScope,
+        /// The domain a `domain` backup covers; the session's `--domain` when omitted
+        name: Option<DomainName>,
+        /// Where the archive is written; `-` writes it to standard output
+        #[arg(long, short = 'o')]
+        output: String,
+        /// Record every resource version and its digests without the version's bytes
+        #[arg(long)]
+        without_resources: bool,
+        /// How the backup's report is printed
+        #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
+        format: CliReportFormat,
+    },
+    /// Restore configuration, users and resources from an archive file
+    Restore {
+        /// What to restore: `cluster` for every domain and user of a cluster archive, `domain`
+        /// for one domain of an archive
+        #[arg(value_enum)]
+        scope: CliRestoreScope,
+        /// The archived domain a `domain` restore recreates
+        name: Option<DomainName>,
+        /// The archive file to restore from
+        #[arg(long, short = 'i')]
+        input: String,
+        /// Restore the domain under this name instead of its archived one
+        #[arg(long = "as")]
+        target: Option<DomainName>,
+        /// What a cluster restore does with an archived user the cluster already has; `fail`
+        /// when omitted
+        #[arg(long, value_enum)]
+        on_existing_user: Option<CliExistingUsers>,
+        /// Verify the archive and plan the restore, changing nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// How the restore's report is printed
+        #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
+        format: CliReportFormat,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -152,7 +235,7 @@ enum CliTlsRequirement {
 struct GrpcCompleter {
     runtime: Handle,
     client: Client,
-    buffer_prefix: Arc<StdMutex<String>>,
+    buffer_prefix: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Error)]
@@ -171,6 +254,32 @@ enum ClientError {
     InspectionFailed { message: String },
     #[error("completion pagination repeated a continuation")]
     RepeatedSuggestionPage,
+    #[error("domain '{domain}' does not exist")]
+    ClockDomainNotFound { domain: DomainName },
+    #[error("the session already follows the clock of domain '{domain}'")]
+    ClockAlreadyAttached { domain: DomainName },
+    #[error("domain clock attachment was refused")]
+    ClockAttachRefused,
+    #[error("domain clock detachment was refused")]
+    ClockDetachRefused,
+    #[error("failed to attach to the domain clock")]
+    ClockAttachRequest,
+    #[error("failed to read the domain clock")]
+    ClockEventRead,
+    #[error("failed to detach from the domain clock")]
+    ClockDetachRequest,
+    #[error("invalid backup arguments: {reason}")]
+    BackupArguments { reason: &'static str },
+    #[error("the backup failed: {message}")]
+    BackupFailed { message: String },
+    #[error("the backup archive could not be written")]
+    WriteArchive,
+    #[error("the backup archive could not be described")]
+    DescribeBackup,
+    #[error("invalid restore arguments: {reason}")]
+    RestoreArguments { reason: &'static str },
+    #[error("the restore did not complete: {message}")]
+    RestoreFailed { message: String },
 }
 
 async fn collect_suggestions(
@@ -182,7 +291,7 @@ async fn collect_suggestions(
     let mut seen = BTreeSet::new();
     let mut suggestions = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let page = client
             .suggest(input.clone(), cursor, 100, continuation.take())
             .await
@@ -207,10 +316,7 @@ async fn collect_suggestions(
 
 impl Completer for GrpcCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let prefix = match self.buffer_prefix.lock() {
-            Ok(prefix) => prefix.clone(),
-            Err(_) => String::new(),
-        };
+        let prefix = self.buffer_prefix.lock().clone();
         let pos = line.floor_char_boundary(pos.min(line.len()));
         let Some(cursor) = prefix.len().checked_add(pos) else {
             return Vec::new();
@@ -236,7 +342,7 @@ impl Completer for GrpcCompleter {
             let lookup_hint = suggestions
                 .iter()
                 .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
-            if let Some(local) = complete_local_upload_paths(line, pos, prefix.len(), lookup_hint) {
+            if let Some(local) = complete_local_paths(line, pos, prefix.len(), lookup_hint) {
                 return local;
             }
         }
@@ -294,7 +400,7 @@ impl GrpcCompleter {
     }
 }
 
-#[tokio::main]
+#[nervix_primitives::main]
 async fn main() -> Result<(), StackReport<ClientError>> {
     let args = Args::parse();
     match args.subcommand.clone() {
@@ -327,6 +433,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             })
             .await;
         }
+        Some(Command::DomainClock) => return run_domain_clock_mode(&args).await,
         Some(Command::RemoveNode { node_id }) => {
             let connect_options = connect_options_from_args(&args)?;
             let client = Client::connect_with_options(
@@ -375,9 +482,58 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             execute_and_print(&client, format!("DRAIN NODE {node_id};")).await?;
             return Ok(());
         }
+        Some(Command::Backup {
+            scope,
+            name,
+            output,
+            without_resources,
+            format,
+        }) => {
+            let connect_options = connect_options_from_args(&args)?;
+            return backup::run_backup(BackupRequest {
+                server: args.server,
+                connect_options,
+                session_domain: args.domain,
+                scope,
+                domain: name,
+                output,
+                without_resources,
+                format,
+            })
+            .await;
+        }
+        Some(Command::Restore {
+            scope,
+            name,
+            input,
+            target,
+            on_existing_user,
+            dry_run,
+            format,
+        }) => {
+            let connect_options = connect_options_from_args(&args)?;
+            return restore::run_restore(RestoreRequest {
+                server: args.server,
+                connect_options,
+                session_domain: args.domain,
+                scope,
+                domain: name,
+                target,
+                input,
+                existing_users: on_existing_user,
+                dry_run,
+                format,
+            })
+            .await;
+        }
         None => {}
     }
 
+    if let Some(command) = args.command.as_deref()
+        && let Some(describe) = backup::describe_backup_statement(command)
+    {
+        return backup::run_describe_backup(&describe);
+    }
     if let Some(command) = args.command.as_deref()
         && is_json_inspection_command(command)
     {
@@ -397,7 +553,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             .iter()
             .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
         let suggestions = if let Some(hint) = local_hint {
-            complete_local_upload_paths(input, cursor, 0, Some(hint))
+            complete_local_paths(input, cursor, 0, Some(hint))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|suggestion| {
@@ -438,7 +594,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         );
         return Ok(());
     }
-    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let (event_sender, mut event_receiver) =
+        nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
     spawn_event_collectors(client.clone(), event_sender.clone());
     if let Some(command) = args.command {
@@ -446,7 +603,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         return Ok(());
     }
 
-    let buffer_prefix = Arc::new(StdMutex::new(String::new()));
+    let buffer_prefix = Arc::new(Mutex::new(String::new()));
 
     let completer = GrpcCompleter {
         runtime: Handle::current(),
@@ -477,9 +634,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             )
         };
 
-        if let Ok(mut guard) = buffer_prefix.lock() {
-            *guard = buffer.clone();
-        }
+        *buffer_prefix.lock() = buffer.clone();
 
         let mut line_editor = create_line_editor(completer.clone())?;
 
@@ -612,28 +767,45 @@ fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<
         .with_edit_mode(edit_mode))
 }
 
-fn complete_local_upload_paths(
+/// The local path being completed at `pos` and the range of `line` a completion replaces. The
+/// server's lookup hint names the path when it names one; the line itself places it otherwise, and
+/// supplies the range when the hint's range does not fall within this line.
+fn local_path_at(
+    line: &str,
+    pos: usize,
+    buffer_prefix_len: usize,
+    lookup_hint: Option<&AutocompleteSuggestion>,
+) -> Option<(String, Range<usize>)> {
+    let local = local_path_fragment(line, pos);
+    let Some(hint) = lookup_hint else {
+        let local = local?;
+        return Some((local.fragment.to_string(), local.range));
+    };
+    // An empty hint names no path of its own, so the line has to place one.
+    if hint.value.is_empty() && local.is_none() {
+        return None;
+    }
+    let range = match GrpcCompleter::local_path_range(line, pos, buffer_prefix_len, hint) {
+        Some(range) => range,
+        None => match &local {
+            Some(local) => local.range.clone(),
+            None => 0..pos,
+        },
+    };
+    Some((hint.value.clone(), range))
+}
+
+/// Completes the local file or directory path a statement expects at `pos`: an upload's resource
+/// directory, a backup's archive destination, or the archive `DESCRIBE BACKUP` reads.
+fn complete_local_paths(
     line: &str,
     pos: usize,
     buffer_prefix_len: usize,
     lookup_hint: Option<&AutocompleteSuggestion>,
 ) -> Option<Vec<Suggestion>> {
-    let hinted = match lookup_hint {
-        Some(hint) if !hint.value.is_empty() || line.get(..pos)?.contains(" VERSION '") => {
-            Some(hint.value.as_str())
-        }
-        _ => None,
-    };
-    let path_fragment = match hinted {
-        Some(path_fragment) => path_fragment,
-        None => upload_resource_path_fragment(line, pos)?,
-    };
-    let hinted_range = match lookup_hint {
-        Some(hint) => GrpcCompleter::local_path_range(line, pos, buffer_prefix_len, hint),
-        None => None,
-    };
-    let local_range = upload_resource_path_range(line, pos);
-    let replacement_range = hinted_range.or(local_range).unwrap_or(0..pos);
+    let (path_fragment, replacement_range) =
+        local_path_at(line, pos, buffer_prefix_len, lookup_hint)?;
+    let path_fragment = path_fragment.as_str();
     let path = Path::new(path_fragment);
     let (base_dir, partial_name) = if path_fragment.is_empty() {
         (PathBuf::from("."), String::new())
@@ -777,6 +949,76 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     Ok(())
 }
 
+async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientError>> {
+    let connect_options = connect_options_from_args(args)?;
+    let client =
+        Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
+            .await
+            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+    let outcome = client
+        .attach_domain_clock(args.domain.clone())
+        .await
+        .change_context(ClientError::ClockAttachRequest)?;
+    println!("{}", clock_attach_message(outcome)?);
+
+    let interrupt = signal::ctrl_c();
+    tokio::pin!(interrupt);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
+            event = client.next_domain_clock_event() => {
+                let event = event.change_context(ClientError::ClockEventRead)?;
+                println!("{}", format_domain_clock_event(&event));
+                if let DomainClockEvent::Ended(_) = event {
+                    return Ok(());
+                }
+            }
+            interrupted = &mut interrupt => {
+                interrupted.map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
+                let outcome = client
+                    .detach_domain_clock(args.domain.clone())
+                    .await
+                    .change_context(ClientError::ClockDetachRequest)?;
+                clock_detach_completed(outcome)?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn clock_attach_message(
+    outcome: DomainClockAttachOutcome,
+) -> Result<String, StackReport<ClientError>> {
+    match outcome.disposition {
+        DomainClockAttachDisposition::Attached { .. } => Ok(outcome.message),
+        DomainClockAttachDisposition::DomainNotFound(domain) => {
+            Err(StackReport::new(ClientError::ClockDomainNotFound {
+                domain,
+            }))
+        }
+        DomainClockAttachDisposition::AlreadyAttached(domain) => {
+            Err(StackReport::new(ClientError::ClockAlreadyAttached {
+                domain,
+            }))
+        }
+        DomainClockAttachDisposition::Failed => {
+            Err(StackReport::new(ClientError::ClockAttachRefused).attach_printable(outcome.message))
+        }
+    }
+}
+
+fn clock_detach_completed(
+    outcome: DomainClockDetachOutcome,
+) -> Result<(), StackReport<ClientError>> {
+    match outcome.disposition {
+        DomainClockDetachDisposition::Detached(_)
+        | DomainClockDetachDisposition::NotAttached(_) => Ok(()),
+        DomainClockDetachDisposition::Failed => {
+            Err(StackReport::new(ClientError::ClockDetachRefused).attach_printable(outcome.message))
+        }
+    }
+}
+
 fn command_buffer_is_complete(buffer: &str) -> bool {
     if parse_client_statements(buffer).is_ok() {
         return true;
@@ -806,6 +1048,15 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
             .map_err(|_| StackReport::new(ClientError::ReadPassword))?,
     };
     Ok(ConnectOptions {
+        dns: ConnectDns::Configuration(DnsConfiguration {
+            resolver_configuration: args.dns_resolver_config.clone(),
+            hosts_file: args.dns_hosts_file.clone(),
+            name_servers: if args.dns_name_servers.is_empty() {
+                NameServers::ResolverConfiguration
+            } else {
+                NameServers::Explicit(args.dns_name_servers.clone())
+            },
+        }),
         tls_requirement: Some(match args.tls {
             CliTlsRequirement::Preferred => TlsRequirement::Preferred,
             CliTlsRequirement::Required => TlsRequirement::Required,
@@ -818,6 +1069,14 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
 }
 
 async fn execute_and_print(client: &Client, query: String) -> Result<(), StackReport<ClientError>> {
+    if let Some(describe) = backup::describe_backup_statement(&query) {
+        backup::run_describe_backup(&describe)
+            .discarded("describing an archive already printed why it failed");
+        return Ok(());
+    }
+    if let Some(restore) = restore::restore_statement(&query) {
+        return restore::execute_restore_and_print(client, &restore).await;
+    }
     if let Ok(upload) = parse_upload_resource_query(&query) {
         return execute_upload_and_print(
             client,
@@ -966,8 +1225,8 @@ async fn execute_upload_and_print(
     let progress_uploaded = Arc::clone(&uploaded);
     let progress_finished = Arc::clone(&finished);
     let progress_identifier = identifier.clone();
-    let progress_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
+    let progress_task = nervix_primitives::task::spawn(async move {
+        let mut interval = nervix_primitives::time::interval(std::time::Duration::from_millis(120));
         let frames = ["|", "/", "-", "\\"];
         let mut frame_index = 0_usize;
         loop {
@@ -1058,12 +1317,12 @@ fn human_bytes(bytes: u64) -> String {
 
 #[derive(Clone)]
 struct EventLineSender {
-    sender: tokio::sync::mpsc::Sender<String>,
+    sender: nervix_primitives::sync::mpsc::Sender<String>,
     dropped: Arc<AtomicU64>,
 }
 
 impl EventLineSender {
-    fn new(sender: tokio::sync::mpsc::Sender<String>) -> Self {
+    fn new(sender: nervix_primitives::sync::mpsc::Sender<String>) -> Self {
         Self {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
@@ -1072,15 +1331,17 @@ impl EventLineSender {
 
     /// Event readers never wait for a terminal. A full queue drops the new line and records the
     /// gap for the printer; every retained line has a fixed maximum byte length.
+    #[allow(deprecated)] // until try_update is stabilized
     fn push(&self, mut line: String) {
         if line.len() > EVENT_LINE_BYTES {
             let boundary = line.floor_char_boundary(EVENT_LINE_PREFIX_BYTES);
             line.truncate(boundary);
             line.push_str(EVENT_LINE_SUFFIX);
         }
+        #[allow(deprecated)] // until try_update is stabilized
         match self.sender.try_send(line) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(nervix_primitives::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.dropped
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                         // The displayed gap count clamps once it reaches its representable limit.
@@ -1091,7 +1352,7 @@ impl EventLineSender {
                     })
                     .discarded("the updated drop count is read when the terminal next drains");
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+            Err(nervix_primitives::sync::mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 
@@ -1125,31 +1386,114 @@ fn print_event_gap(dropped: u64, output: EventOutput) {
 }
 
 fn spawn_event_collectors(client: Client, sender: EventLineSender) {
-    let subscription_client = client.clone();
-    let subscription_sender = sender.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = subscription_client.next_subscription().await {
-            tokio::task::consume_budget().await;
-            for line in format_subscription_event(&event) {
-                subscription_sender.push(line);
+    for stream in EventStream::ALL {
+        nervix_primitives::task::spawn(stream.collect(client.clone(), sender.clone()));
+    }
+}
+
+/// An asynchronous stream of session output the terminal prints, named the way its notices name
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
+enum EventStream {
+    #[strum(serialize = "subscription events")]
+    Subscriptions,
+    #[strum(serialize = "domain clock events")]
+    DomainClocks,
+    #[strum(serialize = "server notices")]
+    ServerNotices,
+}
+
+/// What the terminal prints about a failed read of an event stream, and whether the stream is
+/// over.
+#[derive(Debug, PartialEq, Eq)]
+struct StreamFailure {
+    line: String,
+    ended: bool,
+}
+
+impl EventStream {
+    const ALL: [Self; 3] = [Self::Subscriptions, Self::DomainClocks, Self::ServerNotices];
+
+    /// Prints the stream's events for as long as the client can open a session. The client
+    /// restores subscriptions and clocks on its next session and notices continue there, so every
+    /// other failure is printed and reading goes on.
+    async fn collect(self, client: Client, sender: EventLineSender) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.next_lines(&client).await {
+                Ok(lines) => {
+                    for line in lines {
+                        sender.push(line);
+                    }
+                }
+                Err(error) => {
+                    let failure = self.failure(error.current_context());
+                    sender.push(failure.line);
+                    if failure.ended {
+                        return;
+                    }
+                }
             }
         }
-    });
+    }
 
-    tokio::spawn(async move {
-        while let Ok(event) = client.next_server_event().await {
-            tokio::task::consume_budget().await;
-            sender.push(format_server_event(&event));
+    /// The terminal lines of the stream's next event.
+    async fn next_lines(
+        self,
+        client: &Client,
+    ) -> Result<Vec<String>, StackReport<CoreClientError>> {
+        match self {
+            Self::Subscriptions => {
+                let event = client.next_subscription().await.map_err(StackReport::new)?;
+                Ok(format_subscription_event(&event))
+            }
+            Self::DomainClocks => {
+                let event = client.next_domain_clock_event().await?;
+                Ok(vec![format_domain_clock_event(&event)])
+            }
+            Self::ServerNotices => {
+                let event = client.next_server_event().await.map_err(StackReport::new)?;
+                Ok(vec![format_server_event(&event)])
+            }
         }
-    });
+    }
+
+    /// What the terminal prints when a read of the stream fails. Only a session that no known
+    /// server can reopen ends the stream.
+    fn failure(self, error: &CoreClientError) -> StreamFailure {
+        let stream = self.as_ref();
+        match error {
+            CoreClientError::SessionClosed => StreamFailure {
+                line: format!(
+                    "[events] notice: {stream} stopped because the session closed and no known \
+                     server can reopen it"
+                ),
+                ended: true,
+            },
+            CoreClientError::EventOverflow { .. } => StreamFailure {
+                line: format!(
+                    "[events] notice: {stream} were dropped because they arrived faster than they \
+                     were read"
+                ),
+                ended: false,
+            },
+            other => StreamFailure {
+                line: format!(
+                    "[events] notice: {stream} could not resume yet: {other}; the client keeps \
+                     trying"
+                ),
+                ended: false,
+            },
+        }
+    }
 }
 
 fn spawn_event_loggers(client: Client, output: EventOutput) {
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let sender = EventLineSender::new(sender);
     let dropped = sender.dropped.clone();
     spawn_event_collectors(client, sender);
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         while let Some(line) = receiver.blocking_recv() {
             print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
             output.print(&line);
@@ -1158,7 +1502,10 @@ fn spawn_event_loggers(client: Client, output: EventOutput) {
     });
 }
 
-fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>, sender: &EventLineSender) {
+fn drain_event_queue(
+    receiver: &mut nervix_primitives::sync::mpsc::Receiver<String>,
+    sender: &EventLineSender,
+) {
     for _ in 0..EVENT_BUFFER_RECORDS {
         let Ok(line) = receiver.try_recv() else {
             break;
@@ -1205,10 +1552,49 @@ fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
             "[events] subscription [{subscription}] notice: delivery was interrupted; rows may be \
              missing before restoration"
         )],
+        SubscriptionEvent::RestorationFailed(failure) => vec![format!(
+            "[events] subscription [{subscription}] notice: opening the subscription again \
+             failed: {}; the next attempt follows in {:?}",
+            failure.message, failure.retry_after
+        )],
         SubscriptionEvent::ConsumerOverflow(_) => vec![format!(
             "[events] subscription [{subscription}] notice: the client event buffer filled; \
              delivery ended with a gap"
         )],
+    }
+}
+
+/// The terminal line of one event about a domain clock the session follows.
+fn format_domain_clock_event(event: &DomainClockEvent) -> String {
+    match event {
+        DomainClockEvent::Observed(observed) => format!(
+            "[events] domain clock [{}]: {}",
+            observed.domain, observed.clock
+        ),
+        DomainClockEvent::Ticked(ticked) => format!(
+            "[events] domain clock [{}] tick: generation {}, id {}, boundary {}, authority UTC \
+             {}, node logical {}",
+            ticked.domain,
+            ticked.tick.generation,
+            ticked.tick.tick_id,
+            ticked.tick.logical_boundary.to_rfc3339(),
+            ticked.tick.authority_utc.to_rfc3339(),
+            ticked.tick.serving_logical.to_rfc3339(),
+        ),
+        DomainClockEvent::Ended(ended) => format!(
+            "[events] domain clock [{}] notice: the attachment ended because {}",
+            ended.domain, ended.reason
+        ),
+        DomainClockEvent::Interrupted(interrupted) => format!(
+            "[events] domain clock [{}] notice: the session was interrupted; the clock is \
+             attached again on the next session",
+            interrupted.domain
+        ),
+        DomainClockEvent::RestorationFailed(failure) => format!(
+            "[events] domain clock [{}] notice: attaching the clock again failed: {}; the next \
+             attempt follows in {:?}",
+            failure.domain, failure.message, failure.retry_after
+        ),
     }
 }
 
@@ -1323,7 +1709,7 @@ mod tests {
 
     #[test]
     fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+        let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
         let sink = EventLineSender::new(sender);
         for _ in 0..EVENT_BUFFER_RECORDS {
             sink.push("é".repeat(EVENT_LINE_BYTES));
@@ -1344,7 +1730,7 @@ mod tests {
 
     #[test]
     fn draining_events_resets_the_visible_gap_after_a_full_queue() {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(2);
         let sink = EventLineSender::new(sender);
         sink.push("first".to_string());
         sink.push("second".to_string());
@@ -1362,7 +1748,7 @@ mod tests {
 
     #[test]
     fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (sender, receiver) = nervix_primitives::sync::mpsc::channel(1);
         let sink = EventLineSender::new(sender);
         sink.push("retained".to_string());
         sink.dropped.store(u64::MAX, Ordering::Relaxed);
@@ -1454,6 +1840,65 @@ mod tests {
     }
 
     #[test]
+    fn domain_clock_command_is_parsed() {
+        let args = Args::parse_from(["nervix-cli", "--domain", "sim", "domain-clock"]);
+        assert_eq!(args.domain.as_str(), "sim");
+        assert!(matches!(args.subcommand, Some(Command::DomainClock)));
+    }
+
+    #[test]
+    fn domain_clock_attach_refusals_keep_typed_errors_and_server_detail() {
+        let domain = DomainName::parse("sim").assured("a valid domain name");
+        let already_attached = DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::AlreadyAttached(domain.clone()),
+            message: "already attached".to_string(),
+        };
+        let Err(error) = clock_attach_message(already_attached) else {
+            panic!("an already attached clock must be refused");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::ClockAlreadyAttached { domain: attached } if attached == &domain
+        ));
+
+        let refused = DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::Failed,
+            message: "the server refused the attachment".to_string(),
+        };
+        let Err(error) = clock_attach_message(refused) else {
+            panic!("a refused clock attachment must fail");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::ClockAttachRefused
+        ));
+        assert!(format!("{error:?}").contains("the server refused the attachment"));
+    }
+
+    #[test]
+    fn domain_clock_detach_accepts_absence_and_reports_refusal() {
+        let domain = DomainName::parse("sim").assured("a valid domain name");
+        let not_attached = DomainClockDetachOutcome {
+            disposition: DomainClockDetachDisposition::NotAttached(domain),
+            message: "not attached".to_string(),
+        };
+        assert!(clock_detach_completed(not_attached).is_ok());
+
+        let refused = DomainClockDetachOutcome {
+            disposition: DomainClockDetachDisposition::Failed,
+            message: "the server refused the detachment".to_string(),
+        };
+        let Err(error) = clock_detach_completed(refused) else {
+            panic!("a refused clock detachment must fail");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::ClockDetachRefused
+        ));
+        assert!(format!("{error:?}").contains("the server refused the detachment"));
+    }
+
+    #[test]
     fn remove_node_command_is_parsed() {
         let args = Args::parse_from(["nervix-cli", "remove-node", "node-2"]);
         match args.subcommand {
@@ -1539,6 +1984,22 @@ mod tests {
             .to_query(),
             "CREATE SUBSCRIPTION sampled_myss TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE \
              input.tenant = 'acme';"
+        );
+    }
+
+    #[test]
+    fn subscribe_query_reads_a_backslash_in_a_string_literal_as_a_typed_statement_does() {
+        assert_eq!(
+            subscribe_request(
+                "live_myss",
+                "myss",
+                SubscriptionDeliveryBehavior::Blocking,
+                None,
+                Some(r#"input.tenant = 'a\nb' OR input.tenant = "c\'d""#)
+            )
+            .expect("subscription request should build")
+            .to_query(),
+            r#"CREATE SUBSCRIPTION live_myss TO myss WHERE input.tenant = 'a\nb' OR input.tenant = "c\'d";"#
         );
     }
 
@@ -1654,7 +2115,7 @@ mod tests {
         std::fs::create_dir_all(temp.join("proto-dir")).expect("fixture dir");
         std::fs::create_dir_all(temp.join("other-dir")).expect("fixture dir");
         let line = format!("UPLOAD RESOURCE proto VERSION '{}/pro", temp.display());
-        let suggestions = complete_local_upload_paths(
+        let suggestions = complete_local_paths(
             &line,
             line.len(),
             0,
@@ -1681,7 +2142,7 @@ mod tests {
         let source_start = "UPLOAD RESOURCE proto VERSION '".len();
         let cursor = source_start + path_prefix.len();
         let mid_line = format!("UPLOAD RESOURCE proto VERSION '{path_prefix}to';");
-        let mid_suggestions = complete_local_upload_paths(
+        let mid_suggestions = complete_local_paths(
             &mid_line,
             cursor,
             0,
@@ -1704,10 +2165,33 @@ mod tests {
     }
 
     #[test]
+    fn local_path_completion_serves_backup_destinations_and_described_archives() {
+        for line in [
+            "BACKUP CLUSTER TO 'Cargo.tml'",
+            "BACKUP DOMAIN tenant TO 'Cargo.tml' WITHOUT RESOURCES;",
+            "DESCRIBE BACKUP 'Cargo.tml' FORMAT JSON;",
+        ] {
+            let cursor = line.find("ml'").assured("the test input marks its cursor");
+            let suggestions = complete_local_paths(line, cursor, 0, None)
+                .assured("the package directory can be read for local completion");
+            let start = line.find('\'').assured("the path is quoted") + 1;
+            assert!(
+                suggestions
+                    .iter()
+                    .any(|suggestion| suggestion.value == "Cargo.toml"
+                        && suggestion.span
+                            == reedline::Span::new(start, start + "Cargo.tml".len())),
+                "{line} completes its path"
+            );
+        }
+        assert!(complete_local_paths("BACKUP CLUSTER ", 15, 0, None).is_none());
+    }
+
+    #[test]
     fn local_upload_path_completion_reads_a_bare_relative_filename() {
         let line = "UPLOAD RESOURCE bundle VERSION 'Cargo.tml'";
         let cursor = line.find("ml'").assured("the test input marks its cursor");
-        let suggestions = complete_local_upload_paths(line, cursor, 0, None)
+        let suggestions = complete_local_paths(line, cursor, 0, None)
             .assured("the package directory can be read for local completion");
         assert!(
             suggestions
@@ -1726,7 +2210,7 @@ mod tests {
             std::fs::remove_dir_all(&temp).expect("old temp dir should be removed");
         }
         std::fs::create_dir_all(temp.join("proto-dir")).expect("fixture dir");
-        let suggestions = complete_local_upload_paths(
+        let suggestions = complete_local_paths(
             "",
             0,
             0,
@@ -1764,7 +2248,7 @@ mod tests {
             .expect("basename should exist")
             .to_string_lossy()
             .to_string();
-        let suggestions = complete_local_upload_paths(
+        let suggestions = complete_local_paths(
             "",
             0,
             0,
@@ -1784,7 +2268,7 @@ mod tests {
                 .iter()
                 .any(|suggestion| suggestion.value == format!("~/{basename}/"))
         );
-        let nested_suggestions = complete_local_upload_paths(
+        let nested_suggestions = complete_local_paths(
             "",
             0,
             0,
@@ -2208,6 +2692,114 @@ mod tests {
                 "[events] subscription [live] notice: 3 rows were dropped because the session \
                  could not take them in time"
             ]
+        );
+
+        let refused = SubscriptionEvent::RestorationFailed(
+            nervix_client_core::SubscriptionRestorationFailure {
+                subscription: live_subscription(),
+                message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
+                retry_after: std::time::Duration::from_secs(2),
+            },
+        );
+        assert_eq!(
+            format_subscription_event(&refused),
+            [
+                "[events] subscription [live] notice: opening the subscription again failed: \
+                 stream 'orders' does not exist in domain 'tenant'; the next attempt follows in 2s"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_event_read_is_printed_and_only_an_unrecoverable_session_ends_the_stream() {
+        assert_eq!(
+            EventStream::DomainClocks.failure(&CoreClientError::RetryDeadline),
+            StreamFailure {
+                line: "[events] notice: domain clock events could not resume yet: session retry \
+                       deadline expired; the client keeps trying"
+                    .to_string(),
+                ended: false,
+            }
+        );
+        assert_eq!(
+            EventStream::ServerNotices.failure(&CoreClientError::EventOverflow {
+                stream: nervix_client_core::EventStreamKind::ServerNotice,
+            }),
+            StreamFailure {
+                line: "[events] notice: server notices were dropped because they arrived faster \
+                       than they were read"
+                    .to_string(),
+                ended: false,
+            }
+        );
+        assert_eq!(
+            EventStream::Subscriptions.failure(&CoreClientError::SessionClosed),
+            StreamFailure {
+                line: "[events] notice: subscription events stopped because the session closed \
+                       and no known server can reopen it"
+                    .to_string(),
+                ended: true,
+            }
+        );
+    }
+
+    #[test]
+    fn domain_clock_events_print_one_line_each() {
+        let domain = DomainName::parse("sim").assured("a valid domain name");
+        let observed = DomainClockEvent::Observed(nervix_client_core::DomainClockObserved {
+            domain: domain.clone(),
+            clock: nervix_client_core::DomainClockObservation {
+                generation: 4,
+                state: nervix_client_core::DomainClockObservedState::Unpaced,
+            },
+        });
+        assert_eq!(
+            format_domain_clock_event(&observed),
+            "[events] domain clock [sim]: generation 4, unpaced"
+        );
+        let ticked = DomainClockEvent::Ticked(nervix_client_core::DomainClockTicked {
+            domain: domain.clone(),
+            tick: nervix_client_core::DomainClockTickObservation {
+                generation: 5,
+                tick_id: 12,
+                logical_boundary: nervix_client_core::Timestamp::from_unix_nanos(1_000),
+                authority_utc: nervix_client_core::Timestamp::from_unix_nanos(2_000),
+                serving_logical: nervix_client_core::Timestamp::from_unix_nanos(3_000),
+            },
+        });
+        assert_eq!(
+            format_domain_clock_event(&ticked),
+            "[events] domain clock [sim] tick: generation 5, id 12, boundary \
+             1970-01-01T00:00:00.000001Z, authority UTC 1970-01-01T00:00:00.000002Z, node logical \
+             1970-01-01T00:00:00.000003Z"
+        );
+        let ended = DomainClockEvent::Ended(nervix_client_core::DomainClockAttachmentEnded {
+            domain: domain.clone(),
+            reason: nervix_client_core::DomainClockAttachmentEndReason::DomainRemoved,
+        });
+        assert_eq!(
+            format_domain_clock_event(&ended),
+            "[events] domain clock [sim] notice: the attachment ended because the domain no \
+             longer exists on the serving node"
+        );
+        let refused = DomainClockEvent::RestorationFailed(
+            nervix_client_core::DomainClockRestorationFailure {
+                domain: domain.clone(),
+                message: "the session holds a transaction".to_string(),
+                retry_after: std::time::Duration::from_secs(4),
+            },
+        );
+        assert_eq!(
+            format_domain_clock_event(&refused),
+            "[events] domain clock [sim] notice: attaching the clock again failed: the session \
+             holds a transaction; the next attempt follows in 4s"
+        );
+        let interrupted =
+            DomainClockEvent::Interrupted(nervix_client_core::DomainClockInterruption { domain });
+        assert_eq!(
+            format_domain_clock_event(&interrupted),
+            "[events] domain clock [sim] notice: the session was interrupted; the clock is \
+             attached again on the next session"
         );
     }
 

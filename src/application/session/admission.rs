@@ -7,9 +7,10 @@
 //! - **Depends on.** Tokio's notification primitive.
 //! - **Must not know.** What a request does once admitted, or how its replies travel.
 
-use std::sync::atomic::{AtomicU8, Ordering};
-
-use tokio::sync::Notify;
+use nervix_primitives::sync::{
+    Notify,
+    atomic::{AtomicU8, Ordering},
+};
 
 /// The stage a request was cancelled at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +80,7 @@ impl RequestAdmission {
     /// Resolves once a cancellation wins the decision. It never resolves for an admitted request.
     pub(in crate::application) async fn cancelled_before_admission(&self) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let notified = self.cancelled.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -114,14 +115,17 @@ mod tests {
         assert!(cancelled.is_cancelled());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_cancellation_before_admission_wakes_its_waiter() {
-        let admission = triomphe::Arc::new(RequestAdmission::default());
+        let admission = nervix_primitives::sync::Arc::new(RequestAdmission::default());
         let waiter = admission.clone();
-        let waiting = tokio::spawn(async move { waiter.cancelled_before_admission().await });
-        tokio::task::yield_now().await;
+        let waiting =
+            nervix_primitives::task::spawn(
+                async move { waiter.cancelled_before_admission().await },
+            );
+        nervix_primitives::task::yield_now().await;
         assert_eq!(admission.cancel(), CancelledStage::BeforeAdmission);
-        tokio::time::timeout(Duration::from_secs(5), waiting)
+        nervix_primitives::time::timeout(Duration::from_secs(5), waiting)
             .await
             .assured("a cancellation wakes the waiter within the deadline")
             .assured("the waiter does not panic");

@@ -122,6 +122,16 @@ CREATE CLIENT <name>
 One client may be referenced by both ingestors and emitters. An ingestor binds `addr`; an emitter
 connects or sends to it.
 
+An emitter resolves the host in `addr` through the node's asynchronous resolver each time it
+opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file names and DNS
+answers follow the node's configured resolver and TTL policy. UDP tries answers in order, binding
+each socket to the answer's IP family, and sends to the first address whose setup succeeds. TCP
+and TLS try the answers in order, giving each an equal share of the time left in one 30-second
+connection budget. DNS, address attempts and the TLS
+handshake all spend that same budget. TLS verifies the original host from `addr`, whichever address
+accepted the connection. A new sender after a failure resolves again, so an expired answer can be
+replaced without restarting the node.
+
 | Config key | Required | Meaning |
 | --- | --- | --- |
 | `protocol` | Yes | `udp`, `tcp`, or `tls` |
@@ -157,6 +167,8 @@ absent. TLS verifies the server name derived from `addr`.
 Configuration fails with a key-specific error for an unknown protocol, malformed address,
 `framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, or only one half
 of an emitter client identity. TLS keys are invalid with UDP or plain TCP.
+Startup diagnostics retain the failed TLS file, certificate, or key cause beneath the Syslog
+configuration error, with the setting or path that failed. They do not include TLS file contents.
 
 ## Ingestor
 
@@ -231,6 +243,8 @@ Bind and listener-level socket failures appear as that node's ingestor transient
 with the standard reconnect backoff. A failure on one node does not stop listeners on other nodes.
 Recovery clears the error and resets the backoff. A malformed message body is a codec decode
 failure and skips only that frame.
+For a malformed stream frame, the connection closes and its debug diagnostic retains the framing
+cause without quoting the frame's payload.
 
 ## Emitter
 
@@ -249,23 +263,32 @@ external emission.
 ### UDP
 
 Each encoded record is one datagram. An encoded payload above 65,507 bytes is a message error.
+With an emitter `BATCH` clause and a `SYSLOG` codec, the codec writes one RFC 5424 message per
+batch. Its `MSG` is a JSON array of the members' complete RFC 5424 messages, and the outer header
+contains the fields every member shares. Each complete batch frame is one datagram and is checked
+against the same UDP limit.
 
 ### TCP
 
 The emitter keeps one persistent connection. `octet-counting` writes the decimal byte length, one
-space, and the payload. `non-transparent` writes the payload followed by LF; an encoded payload
+space, and the payload. It rejects a payload whose count needs more than ten digits before writing.
+`non-transparent` writes the payload followed by LF; an encoded payload
 that already contains LF is a message error in this mode.
 
 ### TLS
 
 The emitter uses octet-counted framing over one verified TLS connection. RFC 5425 does not permit
-non-transparent TLS framing.
+non-transparent TLS framing. The same ten-digit count limit applies.
 
 For every transport, success means the local socket accepted and flushed the complete frame. No
 remote delivery acknowledgment exists. Connection establishment and write failures are
 infrastructure errors: the current batch is retained, the connection is rebuilt, and delivery is
 retried on the declared backoff. Records accepted before a later failure in the same batch may be
 delivered more than once.
+
+A missing name, silent DNS server, or unreachable answer is a connection failure. Resolving an
+address does not report record delivery. Shutdown or cancelled startup drops pending DNS and
+connection work; the physical connection budget also bounds an attempt if no cancellation occurs.
 
 ## Observability and limits
 

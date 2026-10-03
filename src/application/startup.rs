@@ -10,7 +10,6 @@
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
 };
 
 use error_stack::{Report, ResultExt};
@@ -20,9 +19,9 @@ use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::NodeEndpoint;
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{Application, Args, error, error::AppError, shutdown::ShutdownCoordinator};
 use crate::{
@@ -35,7 +34,9 @@ use crate::{
 
 const CONSENSUS_DATABASE_DIRECTORY: &str = "consensus";
 const CONSENSUS_KEYSPACE_PREFIX: &str = "raft_";
-const DATABASE_OPEN_RESERVATION_BYTES: u64 = 4096;
+/// What opening or closing the node's stores is charged. The databases allocate their own caches,
+/// so the charge only admits the storage job that opens or closes them.
+const DATABASE_RESERVATION_BYTES: u64 = 4096;
 
 #[derive(Debug, Error)]
 enum NodeDatabaseOpenError {
@@ -66,7 +67,7 @@ impl ApplicationStartup {
         executor: &Executor,
     ) -> Result<Database, Report<AppError>> {
         let reservation = executor
-            .reserve(MemoryClass::Management, DATABASE_OPEN_RESERVATION_BYTES)
+            .reserve(MemoryClass::Management, DATABASE_RESERVATION_BYTES)
             .await
             .change_context(AppError::OpenRegistry)?;
         let opened_path = path.clone();
@@ -131,9 +132,26 @@ impl ApplicationStartup {
         if let Some(interconnect) = &self.interconnect {
             interconnect.shutdown().await;
         }
-        if let Err(error) = tokio::task::spawn_blocking(move || drop(self)).await {
-            error!(error = %error, "failed to join application startup cleanup task");
+        let executor = self.runtime.executor().clone();
+        if let Err(error) = Self::close_stores(&executor, move || drop(self)).await {
+            error!(error = ?error, "failed to close the stores of a node that did not start");
         }
+    }
+
+    /// Drop `stores`, which own the node's databases, on a filesystem storage worker: closing a
+    /// database flushes its journal and joins its background work synchronously.
+    pub(in crate::application) async fn close_stores(
+        executor: &Executor,
+        stores: impl FnOnce() + Send + 'static,
+    ) -> Result<(), Report<AppError>> {
+        let reservation = executor
+            .reserve(MemoryClass::Management, DATABASE_RESERVATION_BYTES)
+            .await
+            .change_context(AppError::CloseStores)?;
+        executor
+            .run_storage(StorageClass::Filesystem, reservation, move |_, _| stores())
+            .await
+            .change_context(AppError::CloseStores)
     }
 
     pub(in crate::application) async fn require_handler_registration(
@@ -334,12 +352,15 @@ mod tests {
     use std::time::Duration;
 
     use fjall::Database;
+    use nervix_execution::{Executor, MemoryClass, StorageClass};
     use nervix_models::ClusterNodeName;
 
-    use super::{Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX};
+    use super::{
+        Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX, DATABASE_RESERVATION_BYTES,
+    };
     use crate::application::test_fixtures::{test_addr, test_tls_files};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn startup_failure_releases_the_split_databases_before_returning() {
         let root = tempfile::tempdir().expect("temporary root should be created");
         let db_path = root.path().join("db");
@@ -379,19 +400,24 @@ mod tests {
             "unexpected startup error: {error:?}"
         );
 
-        let (node_keyspaces, consensus_keyspaces) = tokio::task::spawn_blocking(move || {
-            let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
-            let db = Database::builder(db_path).open()?;
-            let consensus_db = Database::builder(consensus_path).open()?;
-            let node_keyspaces = db.list_keyspace_names();
-            let consensus_keyspaces = consensus_db.list_keyspace_names();
-            drop(consensus_db);
-            drop(db);
-            Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
-        })
-        .await
-        .expect("database open task should join")
-        .expect("application startup failure must release both database locks");
+        let executor = Executor::default();
+        let reservation = executor
+            .try_reserve(MemoryClass::Management, DATABASE_RESERVATION_BYTES)
+            .expect("the test's own executor has management room");
+        let (node_keyspaces, consensus_keyspaces) = executor
+            .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
+                let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
+                let db = Database::builder(db_path).open()?;
+                let consensus_db = Database::builder(consensus_path).open()?;
+                let node_keyspaces = db.list_keyspace_names();
+                let consensus_keyspaces = consensus_db.list_keyspace_names();
+                drop(consensus_db);
+                drop(db);
+                Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
+            })
+            .await
+            .expect("the database inspection job should run")
+            .expect("application startup failure must release both database locks");
         assert!(
             node_keyspaces
                 .iter()
@@ -405,5 +431,26 @@ mod tests {
                 .all(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX)),
             "the consensus database must contain only consensus keyspaces"
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn stores_are_closed_on_the_filesystem_storage_workers() {
+        let executor = Executor::default();
+        let closed = nervix_primitives::sync::StdArc::new(
+            nervix_primitives::sync::atomic::AtomicBool::new(false),
+        );
+        let closing = nervix_primitives::sync::StdArc::clone(&closed);
+
+        ApplicationStartup::close_stores(&executor, move || {
+            closing.store(true, nervix_primitives::sync::atomic::Ordering::Release);
+        })
+        .await
+        .expect("the filesystem workers close the stores");
+
+        assert!(closed.load(nervix_primitives::sync::atomic::Ordering::Acquire));
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.filesystem_storage.admitted, 1);
+        assert_eq!(snapshot.filesystem_storage.completed, 1);
+        assert_eq!(snapshot.management_memory.reserved_bytes, 0);
     }
 }

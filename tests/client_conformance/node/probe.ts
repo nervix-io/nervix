@@ -637,12 +637,26 @@ function choiceValue(source: wire.Choice | wire.ChoiceSelection): string {
       );
       return `resource:${value.resource()}`;
     }
+    case wire.ChoiceValue.ResourceVersionNumber: {
+      const value = member(
+        source.value(new wire.ResourceVersionNumber()) as wire.ResourceVersionNumber | null,
+      );
+      return `resource-version:${value.version().toString()}`;
+    }
+    case wire.ChoiceValue.LatestResourceVersion:
+      return 'resource-version:LATEST';
     case wire.ChoiceValue.ModelChoiceReference: {
       const value = member(
         source.value(new wire.ModelChoiceReference()) as wire.ModelChoiceReference | null,
       );
       const node = member(value.node());
       return `model:${wire.ModelKind[member(node.kind())].toLowerCase()}/${node.name()}`;
+    }
+    case wire.ChoiceValue.FieldChoiceReference: {
+      const value = member(
+        source.value(new wire.FieldChoiceReference()) as wire.FieldChoiceReference | null,
+      );
+      return `field:${value.field()}`;
     }
     default:
       throw new Error(`undeclared choice value ${source.valueType()}`);
@@ -691,14 +705,15 @@ function openedSchema(reply: wire.Reply): OpenedSchema {
   return { opened, fields, keys, lines };
 }
 
-function commandLines(id: bigint, outcome: wire.CommandOutcome): string[] {
+/** Renders one command outcome, its first line after `head`. */
+function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
   const name = DISPOSITIONS.get(outcome.dispositionType());
   const origin = outcome.origin();
   if (name === undefined || origin === null) {
     throw new Error('a command outcome lacks a declared disposition or its origin');
   }
   const lines = [
-    `REPLY ${id} COMMAND ${name} reference=${outcome.executionReference()} origin=${wire.OutcomeOrigin[origin]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
+    `${head} ${name} reference=${outcome.executionReference()} origin=${wire.OutcomeOrigin[origin]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
   ];
   for (let index = 0; index < outcome.diagnosticsLength(); index += 1) {
     const diagnostic = member(outcome.diagnostics(index));
@@ -719,7 +734,255 @@ function commandLines(id: bigint, outcome: wire.CommandOutcome): string[] {
     const unknown = member(outcome.disposition(new wire.OutcomeUnknown()) as wire.OutcomeUnknown | null);
     lines.push(`UNKNOWN cause=${wire.UnknownOutcomeCause[member(unknown.cause())]}`);
   }
+  const archive = outcome.backup();
+  if (archive !== null) {
+    lines.push(...backupLines(archive));
+  }
+  const restore = outcome.restore();
+  if (restore !== null) {
+    lines.push(...restoreReportLines(restore));
+  }
   return lines;
+}
+
+/** Renders what a restore applied, or for a dry run would apply. */
+function restoreReportLines(report: wire.RestoreReport): string[] {
+  const mode = report.mode();
+  const digest = member(report.digest()).bytesArray();
+  if (mode === null || report.totalBytes() === 0n || digest === null || digest.length !== 32) {
+    throw new Error('a restore report lacks its mode, size or digest');
+  }
+  const restored = report.users();
+  const users =
+    restored === null
+      ? 'none'
+      : `created:${restored.created()},skipped:${restored.skipped()},replaced:${restored.replaced()}`;
+  const lines = [
+    `RESTORE mode=${wire.RestoreMode[mode]} total_bytes=${report.totalBytes()} digest=${hex(digest)} captured_at=${report.capturedAt()} users=${users}`,
+  ];
+  for (let index = 0; index < report.domainsLength(); index += 1) {
+    const domain = member(report.domains(index));
+    const planned = domain.plannedModels() === null ? 'none' : 'present';
+    lines.push(
+      `RESTORE_DOMAIN source=${domain.source()} domain=${domain.domain()} resource_versions=${domain.resourceVersions()} models=${domain.models()} planned_models=${planned}`,
+    );
+  }
+  for (let index = 0; index < report.stepsLength(); index += 1) {
+    const step = member(report.steps(index));
+    const kind = step.kind();
+    const outcome = step.outcome();
+    if (kind === null || outcome === null) {
+      throw new Error('a restore step lacks its kind or outcome');
+    }
+    const domain = step.domain();
+    if ((kind === wire.RestoreStepKind.Users) !== (domain === null)) {
+      throw new Error('a restore step names a domain exactly when it changes one');
+    }
+    lines.push(
+      `RESTORE_STEP kind=${wire.RestoreStepKind[kind]} domain=${domain ?? 'none'} outcome=${wire.RestoreStepOutcome[outcome]}`,
+    );
+  }
+  return lines;
+}
+
+/** Renders one frame of a restore stream. */
+function restoreLines(frame: Uint8Array): string[] {
+  const message = wire.RestoreMessage.getRootAsRestoreMessage(frameBuffer(frame, 'NXRM'));
+  switch (message.partType()) {
+    case wire.RestorePart.RestoreStart: {
+      const start = member(message.part(new wire.RestoreStart()) as wire.RestoreStart | null);
+      const digest = member(start.digest()).bytesArray();
+      if (start.requestId() === 0n || start.totalBytes() === 0n || digest === null || digest.length !== 32) {
+        throw new Error('a restore start lacks its request, size or digest');
+      }
+      return [
+        `RESTORE_START request=${start.requestId()} reference=${start.executionReference()} statement=${text(bytesOf((encoding) => start.statement(encoding)))} total_bytes=${start.totalBytes()} digest=${hex(digest)}`,
+      ];
+    }
+    case wire.RestorePart.RestoreChunk: {
+      const chunk = member(message.part(new wire.RestoreChunk()) as wire.RestoreChunk | null);
+      const bytes = chunk.bytesArray();
+      if (bytes === null || bytes.length === 0) {
+        throw new Error('a restore chunk is empty');
+      }
+      return [`RESTORE_CHUNK bytes=${hex(bytes)}`];
+    }
+    default:
+      throw new Error(`undeclared restore part ${message.partType()}`);
+  }
+}
+
+/** Renders the frame that answers a restore stream. */
+function restoreReplyLines(frame: Uint8Array): string[] {
+  const reply = wire.RestoreReply.getRootAsRestoreReply(frameBuffer(frame, 'NXRR'));
+  const request = reply.requestId() ?? 'none';
+  switch (reply.dispositionType()) {
+    case wire.RestoreDisposition.CommandOutcome:
+      return commandLines(
+        `RESTORE_REPLY ${request} COMMAND`,
+        member(reply.disposition(new wire.CommandOutcome()) as wire.CommandOutcome | null),
+      );
+    case wire.RestoreDisposition.RestoreUploadFailed: {
+      const failed = member(reply.disposition(new wire.RestoreUploadFailed()) as wire.RestoreUploadFailed | null);
+      return [
+        `RESTORE_REPLY ${request} FAILED failure=${wire.RestoreUploadFailure[member(failed.failure())]} message=${text(bytesOf((encoding) => failed.message(encoding)))}`,
+      ];
+    }
+    default:
+      throw new Error(`undeclared restore disposition ${reply.dispositionType()}`);
+  }
+}
+
+/** Renders the archive a completed backup reports. */
+function backupLines(archive: wire.BackupArchiveSummary): string[] {
+  const digest = member(archive.digest()).bytesArray();
+  const resources = archive.resources();
+  if (archive.totalBytes() === 0n || digest === null || digest.length !== 32 || resources === null) {
+    throw new Error('a backup archive lacks its size, digest or resources');
+  }
+  const users = archive.users();
+  const lines = [
+    `BACKUP total_bytes=${archive.totalBytes()} digest=${hex(digest)} captured_at=${archive.capturedAt()} retained_until=${archive.retainedUntil()} resources=${wire.BackupResources[resources]} users=${users ?? 'none'}`,
+  ];
+  for (let index = 0; index < archive.domainsLength(); index += 1) {
+    const domain = member(archive.domains(index));
+    lines.push(
+      `BACKUP_DOMAIN domain=${domain.domain()} revision=${domain.revision()} sections=${domain.sections()} section_bytes=${domain.sectionBytes()}`,
+    );
+  }
+  return lines;
+}
+
+/** Renders the request of a backup download. */
+function downloadRequestLines(frame: Uint8Array): string[] {
+  const request = wire.BackupDownloadRequest.getRootAsBackupDownloadRequest(frameBuffer(frame, 'NXBQ'));
+  return [`REQUEST DOWNLOAD_BACKUP reference=${request.executionReference()}`];
+}
+
+/** Renders one frame of a backup download stream. */
+function downloadLines(frame: Uint8Array): string[] {
+  const message = wire.BackupDownloadMessage.getRootAsBackupDownloadMessage(frameBuffer(frame, 'NXBD'));
+  switch (message.partType()) {
+    case wire.BackupDownloadPart.BackupArchiveStart: {
+      const start = member(message.part(new wire.BackupArchiveStart()) as wire.BackupArchiveStart | null);
+      const digest = member(start.digest()).bytesArray();
+      if (start.totalBytes() === 0n || digest === null || digest.length !== 32) {
+        throw new Error('a download start lacks its size or digest');
+      }
+      return [`DOWNLOAD START total_bytes=${start.totalBytes()} digest=${hex(digest)}`];
+    }
+    case wire.BackupDownloadPart.BackupArchiveChunk: {
+      const chunk = member(message.part(new wire.BackupArchiveChunk()) as wire.BackupArchiveChunk | null);
+      const bytes = chunk.bytesArray();
+      if (bytes === null || bytes.length === 0) {
+        throw new Error('a download chunk is empty');
+      }
+      return [`DOWNLOAD CHUNK bytes=${hex(bytes)}`];
+    }
+    case wire.BackupDownloadPart.BackupArchiveComplete:
+      return ['DOWNLOAD COMPLETE'];
+    case wire.BackupDownloadPart.BackupDownloadFailed: {
+      const failed = member(message.part(new wire.BackupDownloadFailed()) as wire.BackupDownloadFailed | null);
+      return [
+        `DOWNLOAD FAILED failure=${wire.BackupDownloadFailure[member(failed.failure())]} message=${text(bytesOf((encoding) => failed.message(encoding)))}`,
+      ];
+    }
+    case wire.BackupDownloadPart.LeaderRedirect: {
+      const redirect = member(message.part(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
+      const leader = redirect.leader();
+      return [
+        leader === null
+          ? 'DOWNLOAD LEADER none'
+          : `DOWNLOAD LEADER node=${leader.node()} grpc=${leader.grpcUri() ?? 'none'} console=${leader.webConsoleUri() ?? 'none'}`,
+      ];
+    }
+    default:
+      throw new Error(`undeclared download part ${message.partType()}`);
+  }
+}
+
+/** Renders a domain clock as the serving node has it installed. */
+function clockLine(clock: wire.DomainClockObservation): string {
+  const generation = clock.generation();
+  switch (clock.stateType()) {
+    case wire.DomainClockObservedState.StoppedDomainClock:
+      return `CLOCK generation=${generation} state=stopped`;
+    case wire.DomainClockObservedState.UninstalledDomainClock:
+      return `CLOCK generation=${generation} state=uninstalled`;
+    case wire.DomainClockObservedState.UnpacedDomainClock:
+      return `CLOCK generation=${generation} state=unpaced`;
+    case wire.DomainClockObservedState.PacedDomainClock: {
+      const paced = member(clock.state(new wire.PacedDomainClock()) as wire.PacedDomainClock | null);
+      // A rate is positive and finite, so no engine rewrites its bits when it becomes a Number.
+      const bits = new DataView(new ArrayBuffer(8));
+      bits.setFloat64(0, member(paced.timeRate()));
+      const rate = bits.getBigUint64(0).toString(16).padStart(16, '0');
+      return `CLOCK generation=${generation} state=paced period=${paced.periodNanos()} skew=${paced.skewNanos()} origin=${paced.logicalOriginUnixNanos()} anchor=${paced.utcAnchorUnixNanos()} rate=f64:${rate}`;
+    }
+    default:
+      throw new Error(`undeclared domain clock state ${clock.stateType()}`);
+  }
+}
+
+/** Renders an opened producer and the input schema its batches carry. */
+function producerLines(id: bigint, opened: wire.ProducerOpened, message: string): string[] {
+  const contract = member(opened.contract()).bytesArray();
+  if (contract === null || contract.length !== 32) {
+    throw new Error("an opened producer's contract is not a 32-byte fingerprint");
+  }
+  const attachment = opened.attachmentArray();
+  if (attachment === null || attachment.length !== 16) {
+    throw new Error("an opened producer's attachment is not 16 bytes");
+  }
+  let window: string;
+  switch (opened.windowType()) {
+    case wire.ProducerWindow.SequentialProducerWindow:
+      window = 'sequential';
+      break;
+    case wire.ProducerWindow.ParallelProducerWindow: {
+      const parallel = member(
+        opened.window(new wire.ParallelProducerWindow()) as wire.ParallelProducerWindow | null,
+      );
+      window = `parallel:${parallel.max()}`;
+      break;
+    }
+    default:
+      throw new Error(`undeclared producer window ${opened.windowType()}`);
+  }
+  const lines = [
+    `REPLY ${id} INGESTOR_OPENED domain=${opened.domain()} ingestor=${opened.ingestor()} generation=${opened.generation()} contract=${hex(contract)} attachment=${hex(attachment)} window=${window} ack_timeout=${opened.ackTimeoutNanos()} retry=${opened.retryBackoffNanos()}/${opened.retryMaxBackoffNanos()} granted=${opened.grantedBatches()}/${opened.grantedBytes()} max_batch=${opened.maxBatchBytes()}/${opened.maxBatchRows()} admission=${wire.ProducerAdmission[member(opened.admission())]} message=${message}`,
+  ];
+  for (let index = 0; index < opened.fieldsLength(); index += 1) {
+    lines.push(fieldLine('FIELD', readField(member(opened.fields(index)))));
+  }
+  return lines;
+}
+
+/** Renders the terminal outcome of one submitted batch. */
+function submissionLine(id: bigint, outcome: wire.SubmissionOutcome): string {
+  const message = text(bytesOf((encoding) => outcome.message(encoding)));
+  switch (outcome.dispositionType()) {
+    case wire.SubmissionDisposition.SubmissionCompleted:
+      return `REPLY ${id} SUBMISSION completed message=${message}`;
+    case wire.SubmissionDisposition.SubmissionNotAdmitted: {
+      const notAdmitted = member(
+        outcome.disposition(new wire.SubmissionNotAdmitted()) as wire.SubmissionNotAdmitted | null,
+      );
+      return `REPLY ${id} SUBMISSION not_admitted refusal=${wire.SubmissionRefusal[member(notAdmitted.refusal())]} message=${message}`;
+    }
+    case wire.SubmissionDisposition.SubmissionFailed: {
+      const failed = member(outcome.disposition(new wire.SubmissionFailed()) as wire.SubmissionFailed | null);
+      return `REPLY ${id} SUBMISSION failed failure=${wire.ProcessingFailure[member(failed.failure())]} message=${message}`;
+    }
+    case wire.SubmissionDisposition.SubmissionOutcomeUnknown: {
+      const unknown = member(
+        outcome.disposition(new wire.SubmissionOutcomeUnknown()) as wire.SubmissionOutcomeUnknown | null,
+      );
+      return `REPLY ${id} SUBMISSION unknown cause=${wire.OutcomeUncertainty[member(unknown.cause())]} message=${message}`;
+    }
+    default:
+      throw new Error(`undeclared submission disposition ${outcome.dispositionType()}`);
+  }
 }
 
 function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
@@ -730,7 +993,7 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       const id = reply.requestId();
       switch (reply.bodyType()) {
         case wire.ReplyBody.CommandOutcome:
-          return commandLines(id, member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null));
+          return commandLines(`REPLY ${id} COMMAND`, member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null));
         case wire.ReplyBody.RequestRejected: {
           const rejected = member(reply.body(new wire.RequestRejected()) as wire.RequestRejected | null);
           return [
@@ -773,6 +1036,144 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           }
           return lines;
         }
+        case wire.ReplyBody.DomainClockAttachOutcome: {
+          const outcome = member(
+            reply.body(new wire.DomainClockAttachOutcome()) as wire.DomainClockAttachOutcome | null,
+          );
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.DomainClockAttachDisposition.DomainClockAttached: {
+              const attached = member(
+                outcome.disposition(new wire.DomainClockAttached()) as wire.DomainClockAttached | null,
+              );
+              return [
+                `REPLY ${id} DOMAIN_CLOCK_ATTACH attached domain=${attached.domain()} message=${message}`,
+                clockLine(member(attached.clock())),
+              ];
+            }
+            case wire.DomainClockAttachDisposition.DomainClockAlreadyAttached: {
+              const already = member(
+                outcome.disposition(new wire.DomainClockAlreadyAttached()) as wire.DomainClockAlreadyAttached | null,
+              );
+              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH already_attached domain=${already.domain()} message=${message}`];
+            }
+            case wire.DomainClockAttachDisposition.DomainNotFound: {
+              const notFound = member(outcome.disposition(new wire.DomainNotFound()) as wire.DomainNotFound | null);
+              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH domain_not_found domain=${notFound.domain()} message=${message}`];
+            }
+            case wire.DomainClockAttachDisposition.RequestFailed:
+              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH failed message=${message}`];
+            default:
+              throw new Error(`undeclared attach disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.DomainClockDetachOutcome: {
+          const outcome = member(
+            reply.body(new wire.DomainClockDetachOutcome()) as wire.DomainClockDetachOutcome | null,
+          );
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.DomainClockDetachDisposition.DomainClockDetached: {
+              const detached = member(
+                outcome.disposition(new wire.DomainClockDetached()) as wire.DomainClockDetached | null,
+              );
+              return [`REPLY ${id} DOMAIN_CLOCK_DETACH detached domain=${detached.domain()} message=${message}`];
+            }
+            case wire.DomainClockDetachDisposition.DomainClockNotAttached: {
+              const notAttached = member(
+                outcome.disposition(new wire.DomainClockNotAttached()) as wire.DomainClockNotAttached | null,
+              );
+              return [`REPLY ${id} DOMAIN_CLOCK_DETACH not_attached domain=${notAttached.domain()} message=${message}`];
+            }
+            default:
+              throw new Error(`the corpus holds no ${outcome.dispositionType()} detach disposition`);
+          }
+        }
+        case wire.ReplyBody.OpenIngestorOutcome: {
+          const outcome = member(reply.body(new wire.OpenIngestorOutcome()) as wire.OpenIngestorOutcome | null);
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.OpenIngestorDisposition.ProducerOpened:
+              return producerLines(
+                id,
+                member(outcome.disposition(new wire.ProducerOpened()) as wire.ProducerOpened | null),
+                message,
+              );
+            case wire.OpenIngestorDisposition.ProducerRefused: {
+              const refused = member(outcome.disposition(new wire.ProducerRefused()) as wire.ProducerRefused | null);
+              return [
+                `REPLY ${id} INGESTOR_REFUSED refusal=${wire.ProducerRefusal[member(refused.refusal())]} message=${message}`,
+              ];
+            }
+            default:
+              throw new Error(`undeclared open disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.SubmissionOutcome:
+          return [
+            submissionLine(id, member(reply.body(new wire.SubmissionOutcome()) as wire.SubmissionOutcome | null)),
+          ];
+        case wire.ReplyBody.CloseIngestorOutcome: {
+          const outcome = member(reply.body(new wire.CloseIngestorOutcome()) as wire.CloseIngestorOutcome | null);
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.CloseIngestorDisposition.ProducerClosed:
+              return [`REPLY ${id} INGESTOR_CLOSE closed message=${message}`];
+            case wire.CloseIngestorDisposition.ProducerNotOpen:
+              return [`REPLY ${id} INGESTOR_CLOSE not_open message=${message}`];
+            default:
+              throw new Error(`undeclared close disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.OpenEmitterOutcome: {
+          const outcome = member(reply.body(new wire.OpenEmitterOutcome()) as wire.OpenEmitterOutcome | null);
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.OpenEmitterDisposition.EmitterOpened: {
+              const opened = member(outcome.disposition(new wire.EmitterOpened()) as wire.EmitterOpened | null);
+              const contract = member(opened.contract()).bytesArray();
+              if (contract === null || contract.length !== 32) {
+                throw new Error("an opened consumer's contract is not a 32-byte fingerprint");
+              }
+              const window = opened.windowType() === wire.ConsumerWindow.ParallelConsumerWindow
+                ? `parallel:${member(opened.window(new wire.ParallelConsumerWindow()) as wire.ParallelConsumerWindow | null).max()}`
+                : 'sequential';
+              const lines = [`REPLY ${id} EMITTER_OPENED domain=${opened.domain()} emitter=${opened.emitter()} generation=${opened.generation()} contract=${hex(contract)} window=${window} ack_timeout=${opened.ackTimeoutNanos()} retry=${opened.retryBackoffNanos()}/${opened.retryMaxBackoffNanos()} granted=${opened.grantedBatches()}/${opened.grantedBytes()} max_batch=${opened.maxBatchBytes()}/${opened.maxBatchRows()} message=${message}`];
+              for (let index = 0; index < opened.fieldsLength(); index += 1) {
+                lines.push(fieldLine('FIELD', readField(member(opened.fields(index)))));
+              }
+              return lines;
+            }
+            case wire.OpenEmitterDisposition.EmitterRefused: {
+              const refused = member(outcome.disposition(new wire.EmitterRefused()) as wire.EmitterRefused | null);
+              return [`REPLY ${id} EMITTER_REFUSED refusal=${wire.EmitterOpenRefusal[member(refused.refusal())]} message=${message}`];
+            }
+            default:
+              throw new Error(`undeclared emitter open disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.ReadEmitterBatchOutcome: {
+          const outcome = member(reply.body(new wire.ReadEmitterBatchOutcome()) as wire.ReadEmitterBatchOutcome | null);
+          switch (outcome.dispositionType()) {
+            case wire.ReadEmitterDisposition.EmitterBatchReceived: {
+              const batch = member(outcome.disposition(new wire.EmitterBatchReceived()) as wire.EmitterBatchReceived | null);
+              const branch = batch.branchFingerprintArray();
+              return [`REPLY ${id} EMITTER_BATCH identity=${hex(member(batch.identityArray()))} reference=${hex(member(batch.referenceArray()))} source=${batch.sourceRelay()} branch=${branch === null ? 'none' : hex(branch)} body=${hex(member(batch.batchArray()))} members=${batch.members()} now=${batch.executionNowUnixNanos()}`];
+            }
+            case wire.ReadEmitterDisposition.EmitterConsumerEnded:
+              return [`REPLY ${id} EMITTER_ENDED message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
+            default:
+              throw new Error(`undeclared emitter read disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.SettleEmitterBatchOutcome: {
+          const outcome = member(reply.body(new wire.SettleEmitterBatchOutcome()) as wire.SettleEmitterBatchOutcome | null);
+          return [`REPLY ${id} EMITTER_SETTLED disposition=${wire.EmitterSettlement[member(outcome.disposition())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
+        }
+        case wire.ReplyBody.CloseEmitterOutcome: {
+          const outcome = member(reply.body(new wire.CloseEmitterOutcome()) as wire.CloseEmitterOutcome | null);
+          return [`REPLY ${id} EMITTER_CLOSE disposition=${wire.EmitterCloseDisposition[member(outcome.disposition())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
+        }
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -798,6 +1199,36 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       const handle = member(ended.subscription());
       return [
         `EVENT ENDED name=${handle.name()} generation=${handle.generation()} reason=${wire.SubscriptionEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
+      ];
+    }
+    case wire.ServerBody.DomainClockObserved: {
+      const observed = member(message.body(new wire.DomainClockObserved()) as wire.DomainClockObserved | null);
+      return [`EVENT DOMAIN_CLOCK domain=${observed.domain()}`, clockLine(member(observed.clock()))];
+    }
+    case wire.ServerBody.DomainClockTicked: {
+      const ticked = member(message.body(new wire.DomainClockTicked()) as wire.DomainClockTicked | null);
+      return [`EVENT DOMAIN_CLOCK_TICK domain=${ticked.domain()} generation=${ticked.generation()} id=${ticked.tickId()} boundary=${ticked.logicalBoundaryUnixNanos()} authority_utc=${ticked.authorityUtcUnixNanos()} serving_logical=${ticked.servingLogicalUnixNanos()}`];
+    }
+    case wire.ServerBody.DomainClockAttachmentEnded: {
+      const ended = member(
+        message.body(new wire.DomainClockAttachmentEnded()) as wire.DomainClockAttachmentEnded | null,
+      );
+      return [
+        `EVENT DOMAIN_CLOCK_ENDED domain=${ended.domain()} reason=${wire.DomainClockAttachmentEndReason[member(ended.reason())]}`,
+      ];
+    }
+    case wire.ServerBody.ProducerAdmissionChanged: {
+      const changed = member(
+        message.body(new wire.ProducerAdmissionChanged()) as wire.ProducerAdmissionChanged | null,
+      );
+      return [
+        `EVENT PRODUCER_ADMISSION producer=${changed.producer()} admission=${wire.ProducerAdmission[member(changed.admission())]}`,
+      ];
+    }
+    case wire.ServerBody.ProducerEnded: {
+      const ended = member(message.body(new wire.ProducerEnded()) as wire.ProducerEnded | null);
+      return [
+        `EVENT PRODUCER_ENDED producer=${ended.producer()} reason=${wire.ProducerEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
       ];
     }
     default:
@@ -853,6 +1284,60 @@ function clientLines(frame: Uint8Array): string[] {
       const cancel = member(message.request(new wire.CancelRequest()) as wire.CancelRequest | null);
       return [`REQUEST ${id} CANCEL target=${cancel.targetRequestId()}`];
     }
+    case wire.ClientRequest.AttachDomainClockRequest: {
+      const attach = member(
+        message.request(new wire.AttachDomainClockRequest()) as wire.AttachDomainClockRequest | null,
+      );
+      return [`REQUEST ${id} ATTACH_DOMAIN_CLOCK domain=${attach.domain()}`];
+    }
+    case wire.ClientRequest.DetachDomainClockRequest: {
+      const detach = member(
+        message.request(new wire.DetachDomainClockRequest()) as wire.DetachDomainClockRequest | null,
+      );
+      return [`REQUEST ${id} DETACH_DOMAIN_CLOCK domain=${detach.domain()}`];
+    }
+    case wire.ClientRequest.OpenIngestorRequest: {
+      const open = member(message.request(new wire.OpenIngestorRequest()) as wire.OpenIngestorRequest | null);
+      const lines = [
+        `REQUEST ${id} OPEN_INGESTOR domain=${open.domain()} ingestor=${open.ingestor()} batches=${open.maxOutstandingBatches()} bytes=${open.maxOutstandingBytes()}`,
+      ];
+      for (let index = 0; index < open.expectedFieldsLength(); index += 1) {
+        lines.push(fieldLine('FIELD', readField(member(open.expectedFields(index)))));
+      }
+      return lines;
+    }
+    case wire.ClientRequest.SubmitBatchRequest: {
+      const submit = member(message.request(new wire.SubmitBatchRequest()) as wire.SubmitBatchRequest | null);
+      return [`REQUEST ${id} SUBMIT_BATCH producer=${submit.producer()} batch=${hex(member(submit.batchArray()))}`];
+    }
+    case wire.ClientRequest.CloseIngestorRequest: {
+      const close = member(message.request(new wire.CloseIngestorRequest()) as wire.CloseIngestorRequest | null);
+      return [`REQUEST ${id} CLOSE_INGESTOR producer=${close.producer()}`];
+    }
+    case wire.ClientRequest.OpenEmitterRequest: {
+      const open = member(message.request(new wire.OpenEmitterRequest()) as wire.OpenEmitterRequest | null);
+      const lines = [`REQUEST ${id} OPEN_EMITTER domain=${open.domain()} emitter=${open.emitter()} batches=${open.maxOutstandingBatches()} bytes=${open.maxOutstandingBytes()}`];
+      for (let index = 0; index < open.expectedFieldsLength(); index += 1) {
+        lines.push(fieldLine('FIELD', readField(member(open.expectedFields(index)))));
+      }
+      return lines;
+    }
+    case wire.ClientRequest.ReadEmitterBatchRequest: {
+      const read = member(message.request(new wire.ReadEmitterBatchRequest()) as wire.ReadEmitterBatchRequest | null);
+      return [`REQUEST ${id} READ_EMITTER_BATCH consumer=${read.consumer()}`];
+    }
+    case wire.ClientRequest.SettleEmitterBatchRequest: {
+      const settle = member(message.request(new wire.SettleEmitterBatchRequest()) as wire.SettleEmitterBatchRequest | null);
+      const selected = member(settle.decision());
+      const decision = selected === wire.EmitterBatchDecision.Retry ? 'retry'
+        : selected === wire.EmitterBatchDecision.Reject ? `reject:${text(bytesOf((encoding) => settle.reason(encoding)))}`
+          : 'ack';
+      return [`REQUEST ${id} SETTLE_EMITTER_BATCH consumer=${settle.consumer()} reference=${hex(member(settle.referenceArray()))} decision=${decision}`];
+    }
+    case wire.ClientRequest.CloseEmitterRequest: {
+      const close = member(message.request(new wire.CloseEmitterRequest()) as wire.CloseEmitterRequest | null);
+      return [`REQUEST ${id} CLOSE_EMITTER consumer=${close.consumer()}`];
+    }
     default:
       throw new Error(`the corpus holds no ${wire.ClientRequest[message.requestType()]} request`);
   }
@@ -861,14 +1346,29 @@ function clientLines(frame: Uint8Array): string[] {
 /** Decodes every frame of the checked-in corpus and prints its report. */
 function corpus(directory: string): void {
   const files = readdirSync(directory)
-    .filter((file) => file.endsWith('.nxcm') || file.endsWith('.nxsm'))
+    .filter((file) =>
+      ['.nxcm', '.nxsm', '.nxbq', '.nxbd', '.nxrm', '.nxrr'].some((extension) => file.endsWith(extension)),
+    )
     .sort();
   const opened = new Uint8Array(readFileSync(join(directory, 'server_subscription_opened.nxsm')));
   const openedMessage = wire.ServerMessage.getRootAsServerMessage(frameBuffer(opened, 'NXSM'));
   const schema = openedSchema(member(openedMessage.body(new wire.Reply()) as wire.Reply | null));
   for (const file of files) {
     const frame = new Uint8Array(readFileSync(join(directory, file)));
-    const lines = file.endsWith('.nxcm') ? clientLines(frame) : serverLines(frame, schema);
+    let lines: string[];
+    if (file.endsWith('.nxcm')) {
+      lines = clientLines(frame);
+    } else if (file.endsWith('.nxbq')) {
+      lines = downloadRequestLines(frame);
+    } else if (file.endsWith('.nxbd')) {
+      lines = downloadLines(frame);
+    } else if (file.endsWith('.nxrm')) {
+      lines = restoreLines(frame);
+    } else if (file.endsWith('.nxrr')) {
+      lines = restoreReplyLines(frame);
+    } else {
+      lines = serverLines(frame, schema);
+    }
     report(`FRAME ${file}`);
     lines.forEach(report);
   }

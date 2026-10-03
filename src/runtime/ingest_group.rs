@@ -6,10 +6,12 @@
 //! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
 
 use ahash::RandomState;
+use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
 use nervix_connector::IngestMetadataRow;
+use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
 
 use super::*;
 
@@ -54,13 +56,56 @@ pub(in crate::runtime) enum IngestMetadataOperation {
     Select,
 }
 
+/// The work an ingest group admits through the node's bounded executor.
 #[derive(Debug, Clone, Copy, strum::Display)]
-pub(in crate::runtime) enum IngestGroupBlockingOperation {
-    #[strum(serialize = "build a branch input batch")]
-    BuildBranchInput,
-    #[strum(serialize = "filter a branch input batch")]
-    FilterBranchInput,
+pub(in crate::runtime) enum IngestGroupAdmittedOperation {
+    #[strum(serialize = "prepare a branch input")]
+    PrepareBranchInput,
+    #[strum(serialize = "unfold an ingested payload")]
+    UnfoldPayload,
 }
+
+/// Why one ingested payload did not decode into its group's builder.
+#[derive(Debug)]
+pub(in crate::runtime) enum PayloadDecodeFailure {
+    /// The payload is not what the codec accepts. The codec's report is kept unchanged, so every
+    /// diagnostic built from it reads the codec's own chain.
+    Codec(Report<CodecError>),
+    /// The node's bounded execution did not take the payload's unfolding, so nothing judged the
+    /// payload and its sender may present it again.
+    NotAdmitted(Report<UnfoldingNotAdmitted>),
+}
+
+impl PayloadDecodeFailure {
+    /// What an unfolding job through `codec` that the executor did not complete means for its
+    /// payload. A panic is the unfolding's own defect, which presenting the payload again would
+    /// repeat, so it fails the payload's decode; every other outcome judged nothing.
+    fn from_unfolding_execution(codec: &CompiledCodec, error: Report<ExecutionError>) -> Self {
+        if let ExecutionError::JobPanicked { .. } = error.current_context() {
+            return Self::Codec(codec.unfolding_panicked(error));
+        }
+        Self::NotAdmitted(error.change_context(UnfoldingNotAdmitted))
+    }
+
+    /// The failure `ingestor`'s group reports for a payload that did not decode: the codec's
+    /// report beneath the payload's decode failure, or the refusal beneath the unfolding the node
+    /// did not admit.
+    pub(super) fn into_group_error(self, ingestor: &IngestorName) -> Report<IngestGroupError> {
+        match self {
+            Self::Codec(report) => report.change_context(IngestGroupError::DecodePayload {
+                ingestor: ingestor.clone(),
+            }),
+            Self::NotAdmitted(report) => report.change_context(IngestGroupError::Execution {
+                operation: IngestGroupAdmittedOperation::UnfoldPayload,
+            }),
+        }
+    }
+}
+
+/// The node's bounded execution did not take a payload's unfolding now.
+#[derive(Debug, Error)]
+#[error("the node's bounded execution did not unfold the payload")]
+pub(in crate::runtime) struct UnfoldingNotAdmitted;
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum IngestGroupError {
@@ -143,9 +188,9 @@ pub(in crate::runtime) enum IngestGroupError {
     BranchSelectionRowOutOfBounds { row: usize, batch_rows: usize },
     #[error("failed to construct a filtered relay batch")]
     FilteredRelayBatch,
-    #[error("failed to {operation} in a blocking task")]
-    BlockingTask {
-        operation: IngestGroupBlockingOperation,
+    #[error("the node's bounded execution did not {operation}")]
+    Execution {
+        operation: IngestGroupAdmittedOperation,
     },
     #[error("failed to load routing for domain '{domain}'")]
     Routing { domain: DomainName },
@@ -204,21 +249,11 @@ pub(in crate::runtime) enum IngestGroupError {
         ingestor: IngestorName,
         relay: RelayName,
     },
-    #[error("ingestor '{ingestor}' route '{relay}' has no compiled branch program")]
-    MissingBranchProgram {
-        ingestor: IngestorName,
-        relay: RelayName,
-    },
     #[error("ingestor '{ingestor}' route '{relay}' has no branch result for row {row}")]
     MissingBranchResult {
         ingestor: IngestorName,
         relay: RelayName,
         row: usize,
-    },
-    #[error("ingestor '{ingestor}' route '{relay}' has no branch declaration")]
-    MissingBranchDeclaration {
-        ingestor: IngestorName,
-        relay: RelayName,
     },
     #[error("failed to decode a payload for ingestor '{ingestor}'")]
     DecodePayload { ingestor: IngestorName },
@@ -236,19 +271,53 @@ impl<T> IngestGroupFailure<T> {
     }
 }
 
+/// One ingestor's input as this node binds it, and what every execution of the ingestor dispatches
+/// through.
+pub(super) struct BoundIngestor {
+    pub(super) input: BoundIngestorInput,
+    pub(super) dependencies: IngestorDependencies,
+}
+
+/// What an ingestor reads, bound on this node.
+pub(super) enum BoundIngestorInput {
+    /// A transport: the codec that decodes its payloads, and the plan of its source.
+    Transport {
+        codec: Arc<CompiledCodec>,
+        source: SourceStartPlan,
+    },
+    /// Batches producers submit, which already carry the plan's schema, and the `START`
+    /// generation of the execution the ingestor was bound in.
+    Client {
+        plan: ClientIngestorStartPlan,
+        generation: u64,
+    },
+}
+
+impl BoundIngestorInput {
+    /// The schema the ingestor's filter and routes read.
+    pub(super) fn schema(&self) -> Arc<CompiledSchema> {
+        match self {
+            Self::Transport { codec, .. } => codec.schema(),
+            Self::Client { plan, .. } => plan.schema.clone(),
+        }
+    }
+}
+
+/// What every execution of one ingestor dispatches through, whatever input it reads.
 pub(super) struct IngestorDependencies {
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) handles: IngestTaskHandles,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
-    pub(super) codec: Arc<CompiledCodec>,
     pub(super) branched_templates: HashMap<RelayName, IngestorRouteTemplate>,
     pub(super) metrics: MessageMetricsHandle,
 }
 
 pub(super) struct IngestGroupContext {
+    pub(super) handles: IngestTaskHandles,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) timestamp_source: Option<IngestTimestampSource>,
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
 }
 
@@ -261,10 +330,11 @@ pub(super) struct IngestGroupContext {
 /// collector owns the actual group boundary: request-scoped sources flush at the end of the
 /// request, while streaming sources flush at the message or idle-time bound.
 pub(super) struct IngestGroupDispatch<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     /// One entry per decoded payload, read from the borrowed source messages and appended into the
     /// group's own metadata builders once for every message the payload unfolded into.
@@ -279,27 +349,60 @@ pub(super) struct IngestGroupDispatch<'a> {
 }
 
 pub(super) struct IngestGroupContribution<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
     pub(super) acks: Vec<AckSet>,
     pub(super) ingested_at: Timestamp,
 }
 
-pub(super) struct RawIngestDispatch<'a> {
+/// One validated client batch entering its ingestor's filter and routes as one ingest group.
+///
+/// Every row shares the batch's ACK set, so the batch resolves once each of its rows has.
+pub(super) struct ClientBatchDispatch<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
+    pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    pub(super) metrics: &'a MessageMetricsHandle,
+    pub(super) batch: RuntimeRecordBatch,
+    pub(super) acks: AckSet,
+    pub(super) ingested_at: Timestamp,
+}
+
+pub(super) struct RawIngestDispatch<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
+    pub(super) domain: &'a DomainName,
+    pub(super) ingestor: &'a IngestorName,
+    pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) payload: &'a BufferedIngestPayload,
     pub(super) collector: &'a mut IngestRouteCollector,
     pub(super) flush: bool,
+}
+
+/// The payloads of one [`BufferedIngestPayload`] that decoded into their ingest group, which the
+/// group now accepts. None of them carries an acknowledgement of its own: each message takes a
+/// share of a root the group tracks.
+pub(super) struct RawIngestAcceptance<'a> {
+    pub(super) handles: &'a IngestTaskHandles,
+    pub(super) domain: &'a DomainName,
+    pub(super) ingestor: &'a IngestorName,
+    pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
+    pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    pub(super) payload: &'a BufferedIngestPayload,
+    pub(super) collector: &'a mut IngestRouteCollector,
 }
 
 /// Columnar ingest group state.
@@ -309,7 +412,7 @@ pub(super) struct RawIngestDispatch<'a> {
 /// to the record that produced them after filtering.
 pub(super) struct IngestGroupRows {
     pub(super) batch: Arc<RuntimeRecordBatch>,
-    pub(super) record_metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) record_metadata: RecordMetadataColumns,
     pub(super) ingest_metadata: IngestFilterMapMetadata,
     pub(super) acks: Vec<AckSet>,
 }
@@ -358,20 +461,32 @@ impl PendingIngestGroup {
 
     /// Decodes one payload into the group's record builder, opened for the codec's schema on the
     /// first payload the group decodes, and holds its messages until the source accepts it.
+    /// `admission` says what an unfolding does when the node's extension workers have no room.
     ///
     /// A payload that fails to decode leaves the group's rows exactly as they were. When the group
     /// then holds no row at all, its builder is dropped, so the rows a rejected payload abandoned do
     /// not stay allocated while the group waits for a message it keeps.
     pub(super) async fn decode_payload(
         &mut self,
+        executor: &Executor,
+        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> Result<(), CodecError> {
+    ) -> Result<(), PayloadDecodeFailure> {
         let row_bound = self.row_bound;
         let records = self
             .records
             .get_or_insert_with(|| codec.schema().batch_builder(row_bound));
-        match decode_ingested_payload(codec, payload, &mut self.decoder, records).await {
+        let decoded = decode_ingested_payload(
+            executor,
+            admission,
+            codec,
+            payload,
+            &mut self.decoder,
+            records,
+        )
+        .await;
+        match decoded {
             Ok(messages) => {
                 self.undispatched_payloads.push_back(messages);
                 Ok(())
@@ -504,13 +619,12 @@ impl PendingIngestGroup {
         }
         Ok(IngestGroupRows {
             batch: Arc::new(batch),
-            record_metadata: self
-                .ingested_at
-                .into_iter()
-                .map(|ingested_at| {
-                    RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
-                })
-                .collect(),
+            record_metadata: RecordMetadataColumns::from_ingestion_nanos(
+                self.ingested_at
+                    .into_iter()
+                    .map(Timestamp::unix_nanos)
+                    .collect(),
+            ),
             ingest_metadata,
             acks: self.acks,
         })
@@ -535,7 +649,7 @@ impl IngestGroupRows {
     }
 
     pub(super) fn row(&self, row: usize) -> error_stack::Result<RuntimeRow, IngestGroupError> {
-        let metadata = self.record_metadata.get(row).cloned().ok_or_else(|| {
+        let metadata = self.record_metadata.row(row).ok_or_else(|| {
             Report::new(IngestGroupError::RecordMetadataRowOutOfBounds {
                 row,
                 record_metadata_rows: self.record_metadata.len(),
@@ -550,7 +664,10 @@ impl IngestGroupRows {
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
     /// together so the three stay row-aligned.
-    pub(super) fn select(self, keep: &[bool]) -> error_stack::Result<Self, IngestGroupError> {
+    pub(super) fn select(
+        self,
+        keep: &BooleanBuffer,
+    ) -> error_stack::Result<Self, IngestGroupError> {
         let row_count = self.len();
         if self.record_metadata.len() != row_count
             || self.ingest_metadata.len() != row_count
@@ -569,8 +686,17 @@ impl IngestGroupRows {
                 found: keep.len(),
             }));
         }
-        let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
-        let predicate = BooleanArray::from_iter((0..row_count).map(|row| Some(selected(row))));
+        if keep.count_set_bits() == row_count {
+            return Ok(self);
+        }
+        let selected_rows = keep.set_indices().collect::<Vec<_>>();
+        let predicate = BooleanArray::new(keep.clone(), None);
+        let mut acks = Vec::with_capacity(selected_rows.len());
+        for (row_acks, kept) in self.acks.into_iter().zip(keep.iter()) {
+            if kept {
+                acks.push(row_acks);
+            }
+        }
         Ok(Self {
             batch: Arc::new(self.batch.filter(&predicate).change_context(
                 IngestGroupError::RuntimeSchema {
@@ -579,30 +705,24 @@ impl IngestGroupRows {
             )?),
             record_metadata: self
                 .record_metadata
-                .into_iter()
-                .enumerate()
-                .filter_map(|(row, metadata)| selected(row).then_some(metadata))
-                .collect(),
+                .take(&selected_rows)
+                .verified("the selected rows are within the metadata length checked above"),
             ingest_metadata: self.ingest_metadata.select(keep).change_context(
                 IngestGroupError::Metadata {
                     operation: IngestMetadataOperation::Select,
                 },
             )?,
-            acks: self
-                .acks
-                .into_iter()
-                .enumerate()
-                .filter_map(|(row, acks)| selected(row).then_some(acks))
-                .collect(),
+            acks,
         })
     }
 }
 
-/// An ingestor `FILTER WHERE` message error, with the row it came from.
-pub(super) struct IngestorFilterWhereError<'a> {
+/// An ingestor-wide message error, with the row it came from.
+pub(super) struct IngestorMessageError<'a> {
+    pub(super) routing: &'a DomainRoutingSnapshot,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) record: &'a RuntimeRow,
     pub(super) ingest_metadata: Option<IngestFilterMapMetadata>,
     pub(super) acks: AckSet,
@@ -652,17 +772,22 @@ impl IngestRouteCollector {
         }
     }
 
-    /// Decodes one source payload into the group's record builder.
+    /// Decodes one source payload into the group's record builder, its unfolding admitted to the
+    /// node's extension workers as `admission` says.
     ///
     /// The builder belongs to the group, so consecutive payloads share one set of Arrow columns,
     /// and every message a payload unfolds into is appended there. A payload that fails to decode
     /// leaves the group exactly as it was, and the error names that payload alone.
     pub(super) async fn decode_payload(
         &mut self,
+        executor: &Executor,
+        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> Result<(), CodecError> {
-        self.pending.decode_payload(codec, payload).await
+    ) -> Result<(), PayloadDecodeFailure> {
+        self.pending
+            .decode_payload(executor, admission, codec, payload)
+            .await
     }
 
     /// Drops decoded payloads a caller could not accept, so a failed dispatch leaves no stray row.
@@ -675,6 +800,7 @@ impl IngestRouteCollector {
         contribution: IngestGroupContribution<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let IngestGroupContribution {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -710,6 +836,7 @@ impl IngestRouteCollector {
         }
         if self.context.is_none() {
             self.context = Some(IngestGroupContext {
+                handles: handles.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.clone(),
                 timestamp_source: timestamp_source.cloned(),
@@ -754,7 +881,12 @@ impl IngestRouteCollector {
         domain: &DomainName,
     ) -> Result<StdArc<DomainRoutingSnapshot>, Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = runtime.domain_routing_cache(domain);
+            self.routing = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
+                 revision refresh instead of repeating its installation lookup",
+                runtime.domain_routing_cache(domain)
+            );
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -850,7 +982,7 @@ pub(super) type BranchedEntrypointInput = RelayRecordBatch;
 
 pub(super) struct BranchedEntrypointBatch {
     pub(super) batch: RuntimeRecordBatch,
-    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) metadata: RecordMetadataColumns,
     pub(super) keys: Vec<Option<BranchKey>>,
     pub(super) acks: Vec<AckSet>,
 }
@@ -872,17 +1004,18 @@ impl BranchedEntrypointBatch {
             ));
         }
         let mut batches = Vec::<Arc<RuntimeRecordBatch>>::new();
-        let mut metadata = Vec::<RuntimeRecordMetadata>::new();
+        let mut metadata_parts = Vec::<RecordMetadataColumns>::new();
         let mut keys = Vec::<Option<BranchKey>>::new();
         let mut acks = Vec::<AckSet>::new();
 
         for input in inputs {
             let parts = input.into_unkeyed_parts();
             batches.push(parts.batch);
-            metadata.extend(parts.metadata);
+            metadata_parts.push(parts.metadata);
             keys.extend(parts.keys);
             acks.extend(parts.acks);
         }
+        let metadata = RecordMetadataColumns::concat(&metadata_parts);
         let batch_refs = batches.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let batch = match RuntimeRecordBatch::concat(&batch_refs) {
             Ok(batch) => batch,
@@ -960,7 +1093,9 @@ impl BranchedEntrypointBatch {
                 return Err(IngestGroupFailure::new(error, self.acks.clone()));
             }
         };
-        let selected_rows = selected_rows(&predicate);
+        // The filter keeps rows in batch order, so the metadata and ACKs follow the predicate's set
+        // bits rather than the order the selection lists its rows in.
+        let selected_rows = predicate.values().set_indices().collect::<Vec<_>>();
         let filtered_batch = match self.batch.filter(&predicate) {
             Ok(batch) => batch,
             Err(error) => {
@@ -972,10 +1107,12 @@ impl BranchedEntrypointBatch {
                 ));
             }
         };
-        let mut metadata = Vec::with_capacity(selected_rows.len());
+        let metadata = self.metadata.take(&selected_rows).verified(
+            "the selection predicate spans this batch's rows, and its metadata has one entry for \
+             every row",
+        );
         let mut acks = Vec::with_capacity(selected_rows.len());
         for row in selected_rows {
-            metadata.push(self.metadata[row].clone());
             acks.push(match ack_boundary {
                 BranchInstanceAckBoundary::Preserve => self.acks[row].clone(),
                 BranchInstanceAckBoundary::Reingestor(AckMode::Attached) => {
@@ -998,82 +1135,94 @@ impl BranchedEntrypointBatch {
         }
     }
 
+    /// The branch's rows as a predicate over the batch, with each row's bit set directly from the
+    /// selection rather than from a mask of the batch's length.
     pub(super) fn branch_predicate(
         &self,
         selection: &BranchedBranchSelection,
     ) -> error_stack::Result<BooleanArray, IngestGroupError> {
         let row_count = self.batch.batch().num_rows();
-        let mut selected = vec![false; row_count];
-        for row in &selection.rows {
-            let Some(value) = selected.get_mut(*row) else {
+        let mut selected = BooleanBufferBuilder::new(row_count);
+        selected.append_n(row_count, false);
+        for &row in &selection.rows {
+            if row >= row_count {
                 return Err(Report::new(
                     IngestGroupError::BranchSelectionRowOutOfBounds {
-                        row: *row,
+                        row,
                         batch_rows: row_count,
                     },
                 ));
-            };
-            *value = true;
+            }
+            selected.set_bit(row, true);
         }
-        Ok(BooleanArray::from(selected))
+        Ok(BooleanArray::new(selected.finish(), None))
     }
 }
 
-pub(super) fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
-    (0..predicate.len())
-        .filter(|row| predicate.is_valid(*row) && predicate.value(*row))
-        .collect()
-}
+/// One output branch of a prepared input: its batch, or why it could not be filtered, with the
+/// acknowledgements the failure preserves.
+pub(super) type PreparedBranch = Result<RelayRecordBatch, IngestGroupFailure<Vec<AckSet>>>;
 
-pub(super) fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
-    inputs
-        .iter()
-        .flat_map(|input| input.acks.iter().cloned())
-        .collect()
-}
-
-pub(super) async fn branched_entrypoint_batch_from_inputs_blocking(
-    inputs: Vec<BranchedEntrypointInput>,
-) -> Result<Arc<BranchedEntrypointBatch>, IngestGroupFailure<Vec<AckSet>>> {
-    let acks = branched_entrypoint_inputs_acks(&inputs);
-    match tokio::task::spawn_blocking(move || BranchedEntrypointBatch::from_inputs(inputs)).await {
-        Ok(Ok(batch)) => Ok(Arc::new(batch)),
-        Ok(Err(error)) => Err(error),
+/// Builds one input's route batch, plans its output branches, and filters a batch for each, as one
+/// job on the node's data workers.
+///
+/// One job per input, not one per branch, keeps an input that fans out to many branches from
+/// taking more than one place in the data workers' finite queue. The job is charged twice the
+/// input's bytes, for the concatenated input and for the branch batches filtered from it, whose
+/// rows together are the input's rows, and never more than one relay batch may decode into. It
+/// checks for cancellation before each branch it filters. A failure that stops the whole input
+/// preserves every acknowledgement it carried; a branch that fails preserves the input's.
+pub(super) async fn prepare_branched_entrypoint_input(
+    executor: &Executor,
+    input: BranchedEntrypointInput,
+    ack_boundary: BranchInstanceAckBoundary,
+) -> Result<Vec<PreparedBranch>, IngestGroupFailure<Vec<AckSet>>> {
+    let acks = input.acks.clone();
+    let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
+    let charge = match input.batch.estimated_bytes().checked_mul(2) {
+        Some(bytes) => bytes.min(decoded_limit),
+        None => decoded_limit,
+    };
+    let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            return Err(IngestGroupFailure::new(
+                error.change_context(IngestGroupError::Execution {
+                    operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                }),
+                acks,
+            ));
+        }
+    };
+    let prepared = executor
+        .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
+            let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
+            let selections = match batch.branch_selections() {
+                Ok(selections) => selections,
+                Err(error) => return Err(IngestGroupFailure::new(error, batch.acks.clone())),
+            };
+            let mut branches = Vec::with_capacity(selections.len());
+            for selection in selections {
+                if let Err(cancelled) = cancellation.check() {
+                    return Err(IngestGroupFailure::new(
+                        Report::new(cancelled).change_context(IngestGroupError::Execution {
+                            operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                        }),
+                        batch.acks.clone(),
+                    ));
+                }
+                branches.push(batch.filter_branch(selection, ack_boundary));
+            }
+            Ok(branches)
+        })
+        .await;
+    match prepared {
+        Ok(prepared) => prepared,
         Err(error) => Err(IngestGroupFailure::new(
-            Report::new(error).change_context(IngestGroupError::BlockingTask {
-                operation: IngestGroupBlockingOperation::BuildBranchInput,
+            error.change_context(IngestGroupError::Execution {
+                operation: IngestGroupAdmittedOperation::PrepareBranchInput,
             }),
             acks,
-        )),
-    }
-}
-
-pub(super) async fn branched_branch_plan_blocking(
-    input: Arc<BranchedEntrypointBatch>,
-) -> error_stack::Result<Vec<BranchedBranchSelection>, IngestGroupError> {
-    input.branch_selections()
-}
-
-pub(super) async fn branched_branch_filter_blocking(
-    input: Arc<BranchedEntrypointBatch>,
-    selection: BranchedBranchSelection,
-    ack_boundary: BranchInstanceAckBoundary,
-) -> Result<(Option<BranchKey>, RelayRecordBatch), IngestGroupFailure<Vec<AckSet>>> {
-    let failure_input = input.clone();
-    let key = selection.key.clone();
-    match tokio::task::spawn_blocking(move || {
-        input
-            .filter_branch(selection, ack_boundary)
-            .map(|batch| (key, batch))
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => Err(IngestGroupFailure::new(
-            Report::new(error).change_context(IngestGroupError::BlockingTask {
-                operation: IngestGroupBlockingOperation::FilterBranchInput,
-            }),
-            failure_input.acks.clone(),
         )),
     }
 }
@@ -1081,32 +1230,70 @@ pub(super) async fn branched_branch_filter_blocking(
 /// Decodes one payload into `builder` and answers how many messages it decoded into.
 ///
 /// A schemaful codec decodes a payload into exactly one message, and a JAQ-backed codec unfolds it
-/// into zero or more. jaq and protobuf decoding is CPU-bound, so the unfolding half runs off the
-/// reactor and hands back the messages the append consumes. The append itself always runs here,
-/// which keeps the builder on the task that owns it, and it keeps all of a payload's messages or
-/// none of them.
+/// into zero or more. A JAQ program is operator-supplied code the node cannot bound, so the
+/// unfolding runs on the node's extension workers and hands back the messages the append consumes,
+/// charged twice the payload's bytes for the parsed document and the messages it unfolds into. The
+/// append itself always runs here, which keeps the builder on the task that owns it, and it keeps
+/// all of a payload's messages or none of them. When the extension workers have no room,
+/// `admission` decides: a payload whose sender can present it again is refused without being
+/// judged, and one the node keeps waits for a place.
 pub(super) async fn decode_ingested_payload(
+    executor: &Executor,
+    admission: QueueAdmission,
     codec: &Arc<CompiledCodec>,
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<usize, CodecError> {
-    if !codec.requires_blocking_decode() {
-        return decode_with_codec(codec, payload, decoder, builder);
+) -> Result<usize, PayloadDecodeFailure> {
+    if !codec.transforms_on_ingestion() {
+        return decode_with_codec(codec, payload, decoder, builder)
+            .map_err(PayloadDecodeFailure::Codec);
     }
 
-    // Only the unfolding leaves the reactor. The Arrow append that consumes its result stays here,
+    // Only the unfolding leaves the task. The Arrow append that consumes its result stays here,
     // with the batch builder the decoded rows join.
-    let codec_name = codec.name.as_str().to_string();
-    let blocking_codec = codec.clone();
+    let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
+    let payload_bytes: u64 = payload.len().arch_into();
+    let charge = match payload_bytes.checked_mul(2) {
+        Some(bytes) => bytes.min(decoded_limit),
+        None => decoded_limit,
+    };
+    let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            return Err(PayloadDecodeFailure::NotAdmitted(
+                error.change_context(UnfoldingNotAdmitted),
+            ));
+        }
+    };
+    let unfolding_codec = codec.clone();
     let payload = Bytes::copy_from_slice(payload);
-    let unfolded = tokio::task::spawn_blocking(move || blocking_codec.unfold_on_ingestion(payload))
-        .await
-        .map_err(|error| CodecError::InvalidCodec {
-            codec: codec_name,
-            reason: format!("blocking decode task failed: {error}"),
-        })??;
-    unfolded.append_to(codec, builder)
+    let unfolded = executor
+        .run_cpu_with(
+            CpuClass::Extension,
+            admission,
+            reservation,
+            move |_charge, cancellation| {
+                if let Err(cancelled) = cancellation.check() {
+                    return Err(PayloadDecodeFailure::NotAdmitted(
+                        Report::new(cancelled).change_context(UnfoldingNotAdmitted),
+                    ));
+                }
+                unfolding_codec
+                    .unfold_on_ingestion(payload)
+                    .map_err(PayloadDecodeFailure::Codec)
+            },
+        )
+        .await;
+    let unfolded = match unfolded {
+        Ok(unfolded) => unfolded?,
+        Err(error) => {
+            return Err(PayloadDecodeFailure::from_unfolding_execution(codec, error));
+        }
+    };
+    unfolded
+        .append_to(codec, builder)
+        .map_err(PayloadDecodeFailure::Codec)
 }
 
 impl Runtime {
@@ -1114,7 +1301,6 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        _registry: &RelayRegistry,
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
@@ -1128,8 +1314,8 @@ impl Runtime {
     /// branch key) and forwards each batch to its branch entrypoint.
     ///
     /// This is the counterpart to `IngestGroupDispatch::collector`. Building the batch once per
-    /// group replaces N single-row batch constructions, N channel sends, and the
-    /// `spawn_blocking` hop the route task pays per message.
+    /// group replaces N single-row batch constructions, N channel sends, and the hop onto the
+    /// node's data workers the route task would pay per message.
     ///
     /// Every failure below is handled before it is returned: the affected acknowledgements go to
     /// the ingestor's general error policy, which is what decides whether the messages are logged,
@@ -1189,7 +1375,7 @@ impl Runtime {
 
         let mut first_error = None;
         for RoutedGroup { relay, messages } in groups {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let acks = messages
                 .iter()
                 .map(|message| message.acks.clone())
@@ -1281,6 +1467,7 @@ impl Runtime {
         dispatch: IngestGroupDispatch<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let IngestGroupDispatch {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -1298,6 +1485,7 @@ impl Runtime {
             .await;
         collector
             .collect(IngestGroupContribution {
+                handles,
                 domain,
                 ingestor,
                 timestamp_source,
@@ -1334,27 +1522,20 @@ impl Runtime {
         // Sources that do not track acks themselves still need a root for downstream
         // resolution to land on. Those completions are deliberately never observed.
         let mut _unobserved_completions = Vec::new();
-        let ack_root_trackers = if rows.acks.iter().any(AckSet::is_empty) {
-            Some(self.ingestor_ack_root_trackers(domain, ingestor))
-        } else {
-            None
-        };
         for slot in rows.acks.iter_mut().filter(|slot| slot.is_empty()) {
-            let trackers = ack_root_trackers
-                .as_ref()
-                .verified("the tracker handle was acquired because this ACK set is empty");
-            let (tracked, completion) = trackers.tracked_root();
+            let (tracked, completion) = context.handles.tracked_root();
             *slot = tracked;
             _unobserved_completions.push(completion);
         }
         // One execution clock for the whole group: a batch is evaluated against the
         // state it was admitted with.
-        let ingestion_time = self.ingestion_time(domain, ingestor).change_context(
-            IngestGroupError::IngestionTime {
+        let ingestion_time = context
+            .handles
+            .ingestion_time(domain, ingestor)
+            .change_context(IngestGroupError::IngestionTime {
                 domain: domain.clone(),
                 ingestor: ingestor.clone(),
-            },
-        )?;
+            })?;
         let execution_now = ingestion_time.now();
 
         if let Some(filter_where) = filter_where {
@@ -1371,6 +1552,7 @@ impl Runtime {
                 })?;
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
+                self.executor(),
                 ModelKind::Ingestor.as_str(),
                 ingestor,
                 filter_where,
@@ -1387,14 +1569,17 @@ impl Runtime {
             .change_context(IngestGroupError::FilterWhere {
                 ingestor: ingestor.clone(),
             })?;
-            let mut keep = vec![false; rows.len()];
+            let mut keep = BooleanBufferBuilder::new(rows.len());
             let mut transformed = Vec::new();
             for (row, outcome) in outcomes.into_iter().enumerate() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match outcome {
-                    SingleRecordFilterMapOutcome::Filtered => rows.acks[row].ack_success(),
+                    SingleRecordFilterMapOutcome::Filtered => {
+                        keep.append(false);
+                        rows.acks[row].ack_success();
+                    }
                     SingleRecordFilterMapOutcome::Output(record) => {
-                        keep[row] = true;
+                        keep.append(true);
                         transformed.push((row, record));
                     }
                     SingleRecordFilterMapOutcome::MessageError {
@@ -1402,8 +1587,10 @@ impl Runtime {
                         materialized_state,
                         ..
                     } => {
+                        keep.append(false);
                         let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
-                        self.handle_ingestor_filter_where_error(IngestorFilterWhereError {
+                        self.handle_ingestor_message_error(IngestorMessageError {
+                            routing,
                             domain,
                             ingestor,
                             output_routes,
@@ -1418,7 +1605,7 @@ impl Runtime {
                     }
                 }
             }
-            rows = rows.select(&keep)?;
+            rows = rows.select(&keep.finish())?;
             if !transformed.is_empty() {
                 transformed.sort_unstable_by_key(|(row, _)| *row);
                 let batches = transformed
@@ -1437,39 +1624,66 @@ impl Runtime {
             return Ok(());
         }
 
-        // Timestamp resolution and admission stay per record: `TIMESTAMP AT` reads a
-        // field of the record itself, and a paced domain admits each event on its own
-        // merits. Either rejection fails the group, exactly as the per-record path did.
-        let mut event_timestamps = Vec::with_capacity(rows.len());
-        for row in 0..rows.len() {
-            let record = rows.row(row)?;
-            let event_timestamp = ingestion_time
-                .select(timestamp_source, &record)
-                .change_context(IngestGroupError::IngestionTime {
-                    domain: domain.clone(),
-                    ingestor: ingestor.clone(),
-                })?;
-            event_timestamps.push(event_timestamp);
+        // Resolve the event timestamp once from the decoded Arrow batch. The window kernel
+        // produces one bit per row, so a rejected event does not discard its admitted neighbors.
+        let event_timestamps = ingestion_time
+            .select_column(timestamp_source, &rows.batch, &rows.record_metadata)
+            .change_context(IngestGroupError::IngestionTime {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            })?;
+        let admitted = ingestion_time.admit_column(&event_timestamps);
+        let error_fields = match timestamp_source {
+            Some(IngestTimestampSource::At(field)) => vec![FieldPath::new(field.as_str())],
+            _ => Vec::new(),
+        };
+        if admitted.count_set_bits() != rows.len() {
+            for row in 0..rows.len() {
+                nervix_primitives::task::consume_budget().await;
+                if admitted.value(row) {
+                    continue;
+                }
+                let missing = event_timestamps.is_null(row);
+                let error = structured_message_error(
+                    execution_now,
+                    MessageErrorCode::Validation,
+                    ingestion_time
+                        .rejection(timestamp_source, missing)
+                        .to_string(),
+                    MessageErrorOperation::Admit,
+                    None,
+                    error_fields.clone(),
+                );
+                let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
+                self.handle_ingestor_message_error(IngestorMessageError {
+                    routing,
+                    domain,
+                    ingestor,
+                    output_routes,
+                    record: &rows.row(row)?,
+                    ingest_metadata: rows.metadata_row(row),
+                    acks,
+                    error,
+                    materialized_state: HashMap::default(),
+                    execution_now,
+                })
+                .await;
+            }
         }
-        rows.record_metadata = std::mem::take(&mut rows.record_metadata)
-            .into_iter()
-            .zip(&event_timestamps)
-            .map(|(_, event_timestamp)| {
-                RuntimeRecordMetadata::from_ingested_at_watermarks(
-                    *event_timestamp,
-                    *event_timestamp,
-                )
-            })
-            .collect();
+        rows.record_metadata = RecordMetadataColumns::from_timestamp_column(&event_timestamps);
+        rows = rows.select(&admitted)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
         let estimated_bytes = rows.batch.estimated_bytes();
         let row_count: u64 = rows.len().arch_into();
         // One decoded group is one metrics recording unit. Its latest event time gives the
         // rolling domain rate the group's high-water mark.
-        let domain_timestamp = event_timestamps.iter().copied().max();
+        let domain_timestamp = rows.record_metadata.latest_high_watermark();
         collector
             .metrics
             .observe(row_count, estimated_bytes, domain_timestamp);
-        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Ingestor, ingestor);
+        context.handles.mark_metrics();
 
         // Every route filters the same surviving group in one VM execution. Outcomes are
         // transposed back onto their originating row so each record's ack split still
@@ -1501,50 +1715,42 @@ impl Runtime {
             .map(|_| Vec::<RoutedOutcome>::new())
             .collect::<Vec<_>>();
         for (output_index, output) in output_routes.routes.iter().enumerate() {
-            tokio::task::consume_budget().await;
-            let outcomes = if let Some(filter_map) = output.compiled_program.as_ref() {
-                let side_inputs = self
-                    .load_materialized_side_inputs(
-                        routing,
-                        domain,
-                        &None,
-                        &filter_map.materialized_interest,
-                    )
-                    .await
-                    .change_context(IngestGroupError::RouteMaterializedState {
-                        ingestor: ingestor.clone(),
-                        relay: output.relay.clone(),
-                    })?;
-                let keys = vec![None; rows.len()];
-                evaluate_filter_map_on_batch(
-                    ModelKind::Ingestor.as_str(),
-                    ingestor,
-                    filter_map,
-                    FilterMapOutcomeInputs {
-                        carrier: &rows.batch,
-                        record_metadata: &rows.record_metadata,
-                        keys: &keys,
-                        filter_map_metadata: rows.metadata_rows(),
-                        side_inputs: &side_inputs,
-                    },
-                    execution_now,
+            nervix_primitives::task::consume_budget().await;
+            let side_inputs = self
+                .load_materialized_side_inputs(
+                    routing,
+                    domain,
+                    &None,
+                    &output.program.materialized_interest,
                 )
                 .await
-                .change_context(IngestGroupError::RouteProgram {
+                .change_context(IngestGroupError::RouteMaterializedState {
                     ingestor: ingestor.clone(),
                     relay: output.relay.clone(),
-                })?
-            } else {
-                (0..rows.len())
-                    .map(|row| rows.row(row))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .map(SingleRecordFilterMapOutcome::Output)
-                    .collect()
-            };
+                })?;
+            let keys = vec![None; rows.len()];
+            let outcomes = evaluate_filter_map_on_batch(
+                self.executor(),
+                ModelKind::Ingestor.as_str(),
+                ingestor,
+                &output.program,
+                FilterMapOutcomeInputs {
+                    carrier: &rows.batch,
+                    record_metadata: &rows.record_metadata,
+                    keys: &keys,
+                    filter_map_metadata: rows.metadata_rows(),
+                    side_inputs: &side_inputs,
+                },
+                execution_now,
+            )
+            .await
+            .change_context(IngestGroupError::RouteProgram {
+                ingestor: ingestor.clone(),
+                relay: output.relay.clone(),
+            })?;
             let mut route_keys = (0..rows.len()).map(|_| None).collect::<Vec<_>>();
             let mut branch_state_snapshot = HashMap::default();
-            if let Some(branch_program) = output.compiled_branch_program.as_ref() {
+            if let BoundRouteBranch::Constructed(branch_program) = &output.branch {
                 let successful = outcomes
                     .iter()
                     .enumerate()
@@ -1587,13 +1793,16 @@ impl Runtime {
                         })?;
                     branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
                     let evaluated = evaluate_output_branch_program(
+                        ProgramRun {
+                            executor: self.executor(),
+                            now: execution_now,
+                        },
                         ingestor,
                         branch_program,
                         &input_batch,
                         &output_batch,
                         &input_keys,
                         &side_inputs,
-                        execution_now,
                     )
                     .await
                     .change_context(IngestGroupError::BranchProgram {
@@ -1605,23 +1814,11 @@ impl Runtime {
                     }
                 }
             } else {
-                let key = match output.branch.as_ref() {
-                    Some(OutputBranch::Unbranched) | None => None,
-                    Some(OutputBranch::BranchedBy { assignments, .. })
-                        if assignments.is_empty() =>
-                    {
-                        None
-                    }
-                    Some(OutputBranch::BranchedBy { .. }) => {
-                        return Err(Report::new(IngestGroupError::MissingBranchProgram {
-                            ingestor: ingestor.clone(),
-                            relay: output.relay.clone(),
-                        }));
-                    }
-                };
+                // An ingestor's input is unbranched, so a route that preserves the incoming
+                // branch leaves its records unbranched as well.
                 for (row, outcome) in outcomes.iter().enumerate() {
                     if let SingleRecordFilterMapOutcome::Output(_) = outcome {
-                        route_keys[row] = Some(Ok(key.clone()));
+                        route_keys[row] = Some(Ok(None));
                     }
                 }
             }
@@ -1672,7 +1869,7 @@ impl Runtime {
         }
 
         for (row, outcomes) in routed.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
             if outcomes.is_empty() {
                 acks.ack_success();
@@ -1714,6 +1911,7 @@ impl Runtime {
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_error.output_index];
                 self.handle_structured_message_error(MessageErrorHandling {
+                    routing: Some(routing),
                     domain,
                     node_kind: ModelKind::Ingestor,
                     node: &ModelName::from(ingestor),
@@ -1737,12 +1935,6 @@ impl Runtime {
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_output.output_index];
-                output.branch.as_ref().ok_or_else(|| {
-                    Report::new(IngestGroupError::MissingBranchDeclaration {
-                        ingestor: ingestor.clone(),
-                        relay: output.relay.clone(),
-                    })
-                })?;
                 collector.push(
                     &output.relay,
                     RelayMessage {
@@ -1756,13 +1948,11 @@ impl Runtime {
         Ok(())
     }
 
-    /// Fans an ingestor `FILTER WHERE` message error out to every output route's error
-    /// policy, splitting acks the same way a routed message would have.
-    pub(super) async fn handle_ingestor_filter_where_error(
-        &self,
-        handling: IngestorFilterWhereError<'_>,
-    ) {
-        let IngestorFilterWhereError {
+    /// Fans an ingestor-wide message error out to every output route's error policy, splitting
+    /// ACKs the same way a routed message would have.
+    pub(super) async fn handle_ingestor_message_error(&self, handling: IngestorMessageError<'_>) {
+        let IngestorMessageError {
+            routing,
             domain,
             ingestor,
             output_routes,
@@ -1788,6 +1978,7 @@ impl Runtime {
                 .pop_front()
                 .verified("the queue above was filled with one ACK entry per route");
             self.handle_structured_message_error(MessageErrorHandling {
+                routing: Some(routing),
                 domain,
                 node_kind: ModelKind::Ingestor,
                 node: &ModelName::from(ingestor),
@@ -1808,11 +1999,144 @@ impl Runtime {
         }
     }
 
+    /// Runs one validated client batch through its ingestor as one ingest group, then forwards
+    /// the routed rows to their branch entrypoints.
+    ///
+    /// Like [`Self::flush_ingest_collector`], every failure after the rows entered the group is
+    /// handled by the ingestor's error policies before it is returned.
+    pub(super) async fn dispatch_client_batch(
+        &self,
+        dispatch: ClientBatchDispatch<'_>,
+    ) -> error_stack::Result<(), IngestGroupError> {
+        let ClientBatchDispatch {
+            handles,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            branched_senders,
+            metrics,
+            batch,
+            acks,
+            ingested_at,
+        } = dispatch;
+        let row_count = batch.batch().num_rows();
+        if row_count == 0 {
+            // An empty batch carries nothing to route, so it is complete once it is admitted.
+            acks.ack_success();
+            return Ok(());
+        }
+        let ingest_metadata = IngestFilterMapMetadata::headerless(row_count).change_context(
+            IngestGroupError::Metadata {
+                operation: IngestMetadataOperation::Finish,
+            },
+        )?;
+        let mut row_acks = Vec::with_capacity(row_count);
+        acks.split_into(row_count, &mut row_acks);
+        // Every row of the batch was received at the one instant the batch was admitted.
+        let record_metadata =
+            RecordMetadataColumns::from_ingestion_nanos(vec![ingested_at.unix_nanos(); row_count]);
+        let rows = IngestGroupRows {
+            batch: Arc::new(batch),
+            record_metadata,
+            ingest_metadata,
+            acks: row_acks,
+        };
+        let context = IngestGroupContext {
+            handles: handles.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            timestamp_source: timestamp_source.cloned(),
+            output_routes: output_routes.clone(),
+            filter_where: filter_where.cloned(),
+        };
+        let mut collector =
+            IngestRouteCollector::new(IngestMetadataKind::Headers, row_count, metrics.clone());
+        let routing =
+            collector
+                .routing_snapshot(self, domain)
+                .change_context(IngestGroupError::Routing {
+                    domain: domain.clone(),
+                })?;
+        self.execute_ingest_group(&routing, &context, rows, &mut collector)
+            .await?;
+        self.flush_ingest_collector(domain, ingestor, branched_senders, &mut collector)
+            .await
+    }
+
+    /// Decodes every payload `payload` holds into `collector`'s open group, their unfoldings
+    /// admitted as `admission` says.
+    ///
+    /// The payloads are delivered together or not at all, so a payload that fails to decode takes
+    /// the payloads decoded before it back out of the group. A caller that drops this future before
+    /// it completes discards what it decoded itself.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained payload exposes its selected message iterator \
+                                   for one admitted batch")
+    )]
+    pub(in crate::runtime) async fn decode_raw_ingest_payload(
+        &self,
+        collector: &mut IngestRouteCollector,
+        admission: QueueAdmission,
+        codec: &Arc<CompiledCodec>,
+        payload: &BufferedIngestPayload,
+    ) -> Result<(), PayloadDecodeFailure> {
+        for source_payload in payload.payloads() {
+            nervix_primitives::task::consume_budget().await;
+            if let Err(failure) = collector
+                .decode_payload(self.executor(), admission, codec, source_payload)
+                .await
+            {
+                collector.discard_undispatched_payloads();
+                return Err(failure);
+            }
+        }
+        Ok(())
+    }
+
+    /// Accepts payloads that decoded into their group, giving every message the metadata row of
+    /// the payload it came from.
+    pub(in crate::runtime) async fn accept_raw_ingest_payload(
+        &self,
+        acceptance: RawIngestAcceptance<'_>,
+    ) -> error_stack::Result<(), IngestGroupError> {
+        let RawIngestAcceptance {
+            handles,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            payload,
+            collector,
+        } = acceptance;
+        let metadata = payload.metadata_rows();
+        self.dispatch_ingested_records(IngestGroupDispatch {
+            handles,
+            collector,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            metadata: &metadata,
+            ingested_at: payload.observed_at(),
+            acks: vec![AckSet::empty(); payload.len()],
+        })
+        .await
+    }
+
+    /// Decodes and dispatches the payloads a source loop was just handed. An unfolding the
+    /// extension workers have no room for is refused, and the dispatch fails for the loop to
+    /// handle as its source's contract says.
     pub(in crate::runtime) async fn dispatch_raw_ingest_payload(
         &self,
         dispatch: RawIngestDispatch<'_>,
     ) -> error_stack::Result<(), IngestGroupError> {
         let RawIngestDispatch {
+            handles,
             domain,
             ingestor,
             timestamp_source,
@@ -1824,30 +2148,21 @@ impl Runtime {
             collector,
             flush,
         } = dispatch;
-        for source_payload in payload.payloads() {
-            tokio::task::consume_budget().await;
-            // A request carries all of its payloads or none of them, so a payload that fails to
-            // decode takes the payloads decoded before it back out of the group.
-            if let Err(error) = collector.decode_payload(&codec, source_payload).await {
-                collector.discard_undispatched_payloads();
-                return Err(
-                    Report::new(error).change_context(IngestGroupError::DecodePayload {
-                        ingestor: ingestor.clone(),
-                    }),
-                );
-            }
+        let decoded = self
+            .decode_raw_ingest_payload(collector, QueueAdmission::RefuseWhenFull, &codec, payload)
+            .await;
+        if let Err(failure) = decoded {
+            return Err(failure.into_group_error(ingestor));
         }
-        let metadata = payload.metadata_rows();
-        self.dispatch_ingested_records(IngestGroupDispatch {
-            collector,
+        self.accept_raw_ingest_payload(RawIngestAcceptance {
+            handles,
             domain,
             ingestor,
             timestamp_source,
             output_routes,
             filter_where,
-            metadata: &metadata,
-            ingested_at: payload.observed_at(),
-            acks: vec![AckSet::empty(); payload.len()],
+            payload,
+            collector: &mut *collector,
         })
         .await?;
         if flush {

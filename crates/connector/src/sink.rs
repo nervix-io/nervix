@@ -2,26 +2,30 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The record and mapped-row sink traits, their lifecycle hooks, typed start and
-//!   publish failures, the identities a sink answers for — a record the host assigned, or a mapped
-//!   row's source position — the outcome it answers with, and the opaque handles through which a
-//!   sink reports to its host or keeps host-owned acknowledgements alive.
+//! - **Owns.** The record, mapped-row, row request and HTTP request sink traits, their lifecycle
+//!   hooks, typed start and publish failures, the carriers one mapped-row write covers, the
+//!   identities a sink answers for — a record or request the host assigned, or a mapped row's source
+//!   position — the requests a row request sink prepares from mapped rows, the outcome it answers
+//!   with, and the opaque handles through which a sink reports to its host or keeps host-owned
+//!   acknowledgements alive.
 //! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
 //!   and trait-object support.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
 //!   implementations, or any connector driver.
 
-use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
+use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
 
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
+use meticulous::OptionExt as _;
+use nervix_execution::Executor;
 use nervix_models::{
-    FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp,
+    FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
+    MessageErrorOperation, StructuredMessageError, Timestamp,
 };
+use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
-use tokio::time::Instant;
-use triomphe::Arc;
 
 use crate::physical_time::PhysicalDeadline;
 
@@ -49,12 +53,13 @@ pub struct SinkRecordPosition {
     pub row_index: usize,
 }
 
-/// The identity of one record in a record sink write, which the connector answers for.
+/// The identity of one record or prepared request in a write, which the connector answers for.
 ///
 /// One record is one external payload: one source record, or with the emitter's `BATCH` clause
 /// every member of one batch. The host assigns the identity and keeps which source rows the record
 /// carries, so a connector answers for the record and never learns its members or their
-/// acknowledgements. Identities order the way the host hands records over.
+/// acknowledgements. A prepared HTTP or row request is handed over under an identity the same way.
+/// Identities order the way the host hands records over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SinkRecordId(usize);
 
@@ -116,6 +121,75 @@ impl SinkRecord {
     }
 }
 
+/// One prepared HTTP request ready for a connector to send.
+///
+/// The host evaluated and validated every request field once, when it admitted the record, and
+/// keeps them with the body until the connector answers for the request, so every attempt sends the
+/// request the first attempt sent. A request carries no runtime acknowledgement: the host retains
+/// the acknowledgement of the one source record the request carries.
+#[derive(Debug)]
+pub struct SinkHttpRequest {
+    pub id: SinkRecordId,
+    pub method: HttpMethod,
+    pub target: HttpTarget,
+    pub headers: HttpApplicationHeaders,
+    /// Exactly the bytes the codec produced, or nothing for an emitter declared `WITHOUT BODY`.
+    pub body: Option<Vec<u8>>,
+    /// When the host admitted the record, which a rejection of the request is reported with.
+    pub occurred_at: Timestamp,
+}
+
+impl SinkHttpRequest {
+    pub fn rejected(&self, message: String) -> RejectedSinkRecord<SinkRecordId> {
+        RejectedSinkRecord::external(self.id, self.occurred_at, message)
+    }
+}
+
+/// One request a row request sink prepared from mapped rows, handed back to it on every attempt
+/// until it answers for the request.
+///
+/// The host retains the bytes and the source rows the request carries from the moment the sink
+/// prepared it, so every attempt, through whichever connector the emitter holds by then, sends the
+/// bytes the first attempt sent. A request carries no runtime acknowledgement: the host retains the
+/// acknowledgements of the source rows the request carries.
+#[derive(Debug)]
+pub struct SinkRowRequest {
+    pub id: SinkRecordId,
+    /// Exactly the bytes the sink prepared.
+    pub body: Vec<u8>,
+    /// When the host evaluated the mapping the request was prepared from, which a rejection of the
+    /// request is reported with.
+    pub occurred_at: Timestamp,
+}
+
+impl SinkRowRequest {
+    pub fn rejected(&self, message: String) -> RejectedSinkRecord<SinkRecordId> {
+        RejectedSinkRecord::external(self.id, self.occurred_at, message)
+    }
+}
+
+/// One request a row request sink prepared, and the source rows it carries.
+#[derive(Debug)]
+pub struct PreparedRowRequest {
+    /// The source rows the request carries, in the order it carries them.
+    pub members: Vec<SinkRecordPosition>,
+    /// Exactly the bytes every attempt sends.
+    pub body: Vec<u8>,
+}
+
+/// What a row request sink prepared from one batch of mapped rows.
+///
+/// Every selected row is a member of exactly one request or refused, and every member of a request
+/// follows the members of the requests before it in source order. The host checks both before it
+/// retains a request.
+#[derive(Debug, Default)]
+pub struct RowRequestPreparation {
+    /// The requests that carry the rows the sink accepted, in the order it sends them.
+    pub requests: Vec<PreparedRowRequest>,
+    /// The rows the sink refused, each with the message error the host delivers for it.
+    pub rejected: Vec<RejectedSinkRecord<SinkRecordPosition>>,
+}
+
 /// One record the connector definitively rejected, with the message error the host must deliver.
 ///
 /// `Id` is what the connector answers for: a [`SinkRecordId`] from a record sink, or a
@@ -136,6 +210,23 @@ impl<Id> RejectedSinkRecord<Id> {
                 code: MessageErrorCode::External,
                 message,
                 operation: MessageErrorOperation::Publish,
+                operation_index: None,
+                fields: Default::default(),
+                occurred_at,
+            },
+        }
+    }
+
+    /// A record whose own request measures more than the emitter's `MAX SIZE`, which the connector
+    /// found by measuring the record alone. It never reaches the destination.
+    pub fn oversize(id: Id, occurred_at: Timestamp, message: String) -> Self {
+        Self {
+            id,
+            error: StructuredMessageError {
+                reference: uuid::Uuid::now_v7(),
+                code: MessageErrorCode::Validation,
+                message,
+                operation: MessageErrorOperation::Encode,
                 operation_index: None,
                 fields: Default::default(),
                 occurred_at,
@@ -168,10 +259,11 @@ impl<Id> RejectedSinkRecord<Id> {
 
 /// The result of one connector write, classified per record where a definitive outcome exists.
 ///
-/// `Id` is what the connector answers for: a [`SinkRecordId`] from a record sink, whose host
-/// applies the answer to every source row the record carries, or a [`SinkRecordPosition`] from a
-/// row sink, which answers for each mapped row. A record the connector neither delivered nor
-/// rejected stays unresolved, and only an infrastructure failure explains why the write left it so.
+/// `Id` is what the connector answers for: a [`SinkRecordId`] from a record or request sink, whose
+/// host applies the answer to every source row the record or request carries, or a
+/// [`SinkRecordPosition`] from a row sink, which answers for each mapped row. A record the connector
+/// neither delivered nor rejected stays unresolved, and only an infrastructure failure explains why
+/// the write left it so.
 pub struct PerRecordOutcome<Id> {
     delivered: Vec<Id>,
     rejected: Vec<RejectedSinkRecord<Id>>,
@@ -225,17 +317,15 @@ impl<Id> PerRecordOutcome<Id> {
     }
 }
 
-/// A host-projected Arrow batch and the rows one row sink must write from it.
+/// One host-projected Arrow carrier of a mapped-row write and the rows a row sink writes, or a row
+/// request sink prepares requests, from it.
 ///
-/// `batch.column(i)` holds the values mapped to `target_columns[i]`, so a sink reads its columns by
-/// position and never resolves a name a mapping may have used twice.
-pub struct MappedSinkRows<'a> {
+/// `batch.column(i)` holds the values mapped to the write's `target_columns[i]`, so a sink reads
+/// its columns by position and never resolves a name a mapping may have used twice.
+pub struct MappedSinkCarrier<'a> {
     pub batch_index: usize,
     pub batch: &'a RecordBatch,
-    pub target_columns: &'a [String],
     pub selected_rows: &'a [usize],
-    /// Ranges into `selected_rows` that respect the emitter's declared maximum batch size.
-    pub selected_row_chunks: &'a [Range<usize>],
     /// When the host evaluated the mapping, which a rejected row is reported with and a sink whose
     /// commit cadence is a domain duration measures that cadence from.
     pub occurred_at: Timestamp,
@@ -243,6 +333,70 @@ pub struct MappedSinkRows<'a> {
     /// [`SinkLifecycle::retains_acknowledgements`]. The host builds them for no other sink, so a
     /// sink that acknowledges on the publish boundary receives none.
     pub acknowledgements: Option<SinkAcknowledgements>,
+}
+
+/// One mapped-row write: successive host-projected Arrow carriers of one source relay and concrete
+/// branch, in the order the host released them.
+///
+/// A write never spans source relays or branches, so every row it carries may travel in one
+/// request. Each carrier keeps its own mapped columns, execution time and acknowledgements. A row
+/// sink is handed every run of carriers; a row request sink is handed one carrier per preparation,
+/// because the host checks and retains what it prepared batch by batch.
+pub struct MappedSinkRows<'a> {
+    pub target_columns: &'a [String],
+    pub carriers: Vec<MappedSinkCarrier<'a>>,
+}
+
+/// One row a write carries: the carrier that holds it and its row there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappedSinkMember {
+    pub carrier: usize,
+    pub row: usize,
+}
+
+/// The guarantee every lookup of a member's carrier relies on.
+const MEMBER_CARRIER: &str = "a member names a carrier of the write whose members it came from";
+
+impl MappedSinkRows<'_> {
+    /// Every row this write carries, in the order the host packs them: carrier by carrier, and
+    /// each carrier's selected rows in their order.
+    pub fn members(&self) -> Vec<MappedSinkMember> {
+        let mut members = Vec::with_capacity(self.member_count());
+        for (carrier, mapped) in self.carriers.iter().enumerate() {
+            for row in mapped.selected_rows {
+                members.push(MappedSinkMember { carrier, row: *row });
+            }
+        }
+        members
+    }
+
+    /// How many rows this write carries.
+    pub fn member_count(&self) -> usize {
+        let mut count = 0_usize;
+        for carrier in &self.carriers {
+            count = count
+                .checked_add(carrier.selected_rows.len())
+                .assured("the rows of one write are held in memory");
+        }
+        count
+    }
+
+    /// Where `member` sits in the host's buffered batches, which the sink answers for it under.
+    pub fn position(&self, member: MappedSinkMember) -> SinkRecordPosition {
+        let carrier = self.carriers.get(member.carrier).assured(MEMBER_CARRIER);
+        SinkRecordPosition {
+            batch_index: carrier.batch_index,
+            row_index: member.row,
+        }
+    }
+
+    /// When the host evaluated the mapping of the carrier that holds `member`.
+    pub fn occurred_at(&self, member: MappedSinkMember) -> Timestamp {
+        self.carriers
+            .get(member.carrier)
+            .assured(MEMBER_CARRIER)
+            .occurred_at
+    }
 }
 
 /// What one commit published, for the host's output metrics.
@@ -310,6 +464,14 @@ pub struct SinkRetryDelay(pub Duration);
 
 /// Lifecycle policy shared by record and row sinks.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkLifecycle: Send {
     async fn finish(&mut self, _deadline: Instant) -> SinkPublishResult<()> {
         Ok(())
@@ -360,19 +522,89 @@ pub trait SinkLifecycle: Send {
 
 /// A connector that writes codec-encoded records.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait RecordSink: SinkLifecycle {
     /// Writes `records` and answers for each of them by its identity.
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId>;
 }
 
+/// A connector that sends one prepared HTTP request for each record.
+#[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
+pub trait HttpRequestSink: SinkLifecycle {
+    /// Sends `requests` in the order they are handed over and answers for each of them by its
+    /// identity. A request the connector leaves unanswered stays with the host, which sends it
+    /// again unchanged.
+    async fn publish(&mut self, requests: Vec<SinkHttpRequest>) -> PerRecordOutcome<SinkRecordId>;
+}
+
 /// A connector that encodes values directly from host-projected Arrow columns.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait RowSink: SinkLifecycle {
     /// Writes the selected rows and answers for each of them by its source position.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition>;
 }
 
+/// A connector that prepares requests from host-projected Arrow columns once, and sends each of them
+/// unchanged until it answers for it.
+///
+/// The host retains every prepared request with the source rows it carries, beside the batches they
+/// came from, so an attempt that follows an unknown outcome, such as a lost response or a timeout,
+/// sends exactly what the first attempt sent, even through a connector the host reopened in between.
+#[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
+pub trait RowRequestSink: SinkLifecycle {
+    /// Prepares the requests that carry the selected rows, and refuses the rows it cannot carry. A
+    /// failure prepares nothing, and the host prepares the same rows again on its next attempt.
+    async fn prepare(
+        &mut self,
+        rows: MappedSinkRows<'_>,
+    ) -> SinkPublishResult<RowRequestPreparation>;
+
+    /// Sends `requests` in the order they are handed over and answers for each of them by its
+    /// identity. A request the connector leaves unanswered stays with the host, which hands it over
+    /// again unchanged.
+    async fn publish(&mut self, requests: Vec<SinkRowRequest>) -> PerRecordOutcome<SinkRecordId>;
+}
+
 /// Operations the host owns for acknowledgements retained by a sink.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkAcknowledgementServices: Send + Sync + 'static {
     fn acknowledge(&self);
     fn keep_alive(&self);
@@ -417,32 +649,87 @@ impl SinkAcknowledgements {
 }
 
 /// Transient-error status a connector may update while it retains a live client.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkTransientErrorStatus: Send + Sync + 'static {
     fn record_transient_error(&self, reason: String, retry_after: Duration);
     fn clear_transient_error(&self);
 }
 
 /// Runtime event reporting available to a connector background task.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkEventReporter: Send + Sync + 'static {
     fn report_error(&self, message: String);
 }
 
 /// The directory in which a connector may stage local files before external publication.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkStagingDirectory: Send + Sync + 'static {
     fn staging_directory(&self) -> PathBuf;
 }
 
 /// Node-wide general-error handling for acknowledgements a connector retained.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkGeneralErrorHandler: Send + Sync + 'static {
     fn handle_general_error(&self, acks: &SinkAcknowledgements, reason: String);
 }
 
+/// The node's bounded executor, through which a connector admits the synchronous filesystem work
+/// it does itself, such as writing and reading the files it stages.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
+pub trait SinkBoundedExecution: Send + Sync + 'static {
+    fn executor(&self) -> Executor;
+}
+
 /// Every service exposed through one sink host handle.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "connector host drives this contract for admitted records, polls, commits or \
+                  acknowledgements"
+    )
+)]
 pub trait SinkHostServices:
     SinkTransientErrorStatus
     + SinkEventReporter
     + SinkStagingDirectory
     + SinkGeneralErrorHandler
+    + SinkBoundedExecution
     + Send
     + Sync
     + 'static
@@ -454,6 +741,7 @@ impl<T> SinkHostServices for T where
         + SinkEventReporter
         + SinkStagingDirectory
         + SinkGeneralErrorHandler
+        + SinkBoundedExecution
         + Send
         + Sync
         + 'static
@@ -495,6 +783,12 @@ impl SinkHost {
 
     pub fn staging_directory(&self) -> PathBuf {
         self.inner.services.staging_directory()
+    }
+
+    /// The node's bounded executor. A connector keeps the handle it is given for as long as it
+    /// stages work through it.
+    pub fn executor(&self) -> Executor {
+        self.inner.services.executor()
     }
 
     pub fn handle_general_error(&self, acks: &SinkAcknowledgements, reason: String) {

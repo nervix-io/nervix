@@ -79,7 +79,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 return;
             }
         };
-        match inferencer::OnnxInferencerSession::load(&path).await {
+        match inferencer::OnnxInferencerSession::load(branch.runtime.executor(), &path).await {
             Ok(loaded) => *session = Some(loaded),
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -177,6 +177,7 @@ pub(super) async fn flush_branch_inferencer_output(
         }
     };
     let mapped_result = match execute_program_with_selection_in_context(
+        branch.runtime.executor(),
         &compiled_input_program.program,
         &mapped_vm_input,
         &VmExecutionContext {
@@ -233,7 +234,13 @@ pub(super) async fn flush_branch_inferencer_output(
         }
     };
     let output_columns = match session
-        .execute(&mapped_batch, inputs, output_schema, execution_mode)
+        .execute(
+            branch.runtime.executor(),
+            &mapped_batch,
+            inputs,
+            output_schema,
+            execution_mode,
+        )
         .await
     {
         Ok(output_fields) => output_fields,
@@ -320,10 +327,11 @@ pub(super) async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let output_metadata = messages
-        .iter()
-        .map(|message| message.record.metadata().clone())
-        .collect::<Vec<_>>();
+    let output_metadata = RecordMetadataColumns::from_rows(
+        messages
+            .iter()
+            .map(|message| message.record.metadata().clone()),
+    );
     let output_acks = messages
         .iter()
         .map(|message| message.acks.clone())

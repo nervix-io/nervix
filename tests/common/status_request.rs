@@ -9,7 +9,9 @@
 //! - **Must not know.** Ordinary scenario commands, scenario state, or the production session
 //!   client's request, redirect and reconnect policy.
 
-use std::{collections::BTreeMap, future::Future, io, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::BTreeMap, future::Future, io, net::SocketAddr, path::PathBuf, time::Duration,
+};
 
 use error_stack::Report;
 use futures_util::future::join_all;
@@ -19,9 +21,8 @@ use nervix_client_wire::{
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
 use nervix_models::CommandExecutionReference;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use thiserror::Error;
-use tokio::{sync::mpsc, time::Duration};
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Request,
     codegen::http,
@@ -264,7 +265,7 @@ impl StatusEndpoint {
         sent.map_err(|_| Report::new(StatusRequestError::SendCommand))?;
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let received = StatusOperation::ReceiveResponse
                 .within(deadline, responses.message())
                 .await?;

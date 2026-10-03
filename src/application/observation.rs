@@ -8,7 +8,7 @@
 //!   the interconnect to reach the node that owns each answer.
 //! - **Must not know.** How the reported state came to be.
 
-use std::{collections::BTreeSet, num::NonZeroU64};
+use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -34,15 +34,14 @@ use nervix_models::{
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainName, DomainStatus, FieldName, InspectionFormat, LookupName,
-    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceDescription,
-    ResourceId, ResourceName, ResourceUsage, ResourceVersion, ResourceVersionDescription,
-    ResourceVersionEntries, ScheduledNode, SchemaName, ShowRelayMaterializedState,
-    UniquelyKindedModel, WasmStateInspection,
+    DescribeWindowProcessor, DomainName, DomainStatus, FieldName, IngestorName, InspectionFormat,
+    LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
+    ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
+    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
+    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
-use tokio::time::Duration;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{
     command_result::CommandResult,
@@ -50,15 +49,15 @@ use super::{
         append_metrics_lines, dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
         format_correlator_describe_output, format_deduplicator_describe_output,
         format_emitter_describe_output, format_endpoint_describe_output,
-        format_ingestor_describe_output, format_junction_describe_output,
-        format_lookup_describe_output, format_materialized_stream_state_output,
-        format_placement_runtime_node, format_placement_runtime_nodes,
-        format_placement_runtime_nodes_in_context, format_reingestor_describe_output,
-        format_relay_describe_output, format_reorderer_describe_output,
-        format_resource_description, format_resource_entry_lines, format_resource_usage_lines,
-        format_wasm_processor_describe_output, format_window_processor_describe_output,
-        ordered_placement_corridor, placement_claim_owner, placement_group_host,
-        placement_groups_claimed_by_rule, placement_rule_coverage_status,
+        format_ingestor_describe_output, format_ingestor_listing_line,
+        format_junction_describe_output, format_lookup_describe_output,
+        format_materialized_stream_state_output, format_placement_runtime_node,
+        format_placement_runtime_nodes, format_placement_runtime_nodes_in_context,
+        format_reingestor_describe_output, format_relay_describe_output,
+        format_reorderer_describe_output, format_resource_description, format_resource_entry_lines,
+        format_resource_usage_lines, format_wasm_processor_describe_output,
+        format_window_processor_describe_output, ordered_placement_corridor, placement_claim_owner,
+        placement_group_host, placement_groups_claimed_by_rule, placement_rule_coverage_status,
         placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
         runtime_ingestor_describe_from_envelope, runtime_ingestor_describe_to_envelope,
     },
@@ -91,7 +90,7 @@ struct LookupTarget {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ObservationError {
+pub(in crate::application) enum ObservationError {
     #[error("failed to describe {kind} '{name}' in domain '{domain}' locally", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
     LocalDescribe { domain: DomainName, entity: NodeRef },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' on node '{node}'", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
@@ -615,6 +614,148 @@ impl SessionServiceImpl {
         }
     }
 
+    /// What the node that executes an ingestor reports about it, and its metrics. An ingestor no
+    /// node executes reports as stopped.
+    async fn ingestor_summary(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        ingestor_node: &ScheduledNode,
+    ) -> error_stack::Result<(RuntimeIngestorDescribe, Vec<String>), ObservationError> {
+        let local_node_id = self.inner.consensus.local_node_id();
+        if ingestor_node.executes_on(local_node_id) {
+            let summary = self
+                .inner
+                .runtime
+                .describe_local_ingestor(domain, ingestor)
+                .change_context(ObservationError::LocalDescribe {
+                    domain: domain.clone(),
+                    entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(ingestor)),
+                })?;
+            let metrics = self
+                .inner
+                .runtime
+                .describe_metrics_for(domain, "INGESTOR", ingestor);
+            return Ok((summary, metrics));
+        }
+        let Some(owner) = ingestor_node.execution_node() else {
+            let summary = RuntimeIngestorDescribe {
+                running: false,
+                ready: false,
+                quiesce_state: None,
+                quiesce_counters: Default::default(),
+                memory_backpressure_paused: self
+                    .inner
+                    .runtime
+                    .ingestors_paused_for_memory_pressure(),
+                transient_error: None,
+                reconnect_backoff: None,
+                reconnect_wait_millis: None,
+                kafka_domain_offsets: None,
+                client_producers: None,
+            };
+            let metrics = self
+                .inner
+                .runtime
+                .describe_metrics_for(domain, "INGESTOR", ingestor);
+            return Ok((summary, metrics));
+        };
+        let answered = self
+            .inner
+            .interconnect
+            .request(
+                owner,
+                RemoteDescribeIngestorRequest {
+                    domain: domain.clone(),
+                    name: ingestor.clone(),
+                },
+            )
+            .await;
+        match answered {
+            Ok(Ok(summary)) => Ok(runtime_ingestor_describe_from_envelope(summary)),
+            Ok(Err(failure)) => Err(Report::new(ObservationError::RemoteDescribeFailure {
+                failure,
+            })),
+            Err(error) => Err(
+                error.change_context(ObservationError::RemoteDescribeRequest {
+                    domain: domain.clone(),
+                    entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(ingestor)),
+                    node: owner.clone(),
+                }),
+            ),
+        }
+    }
+
+    /// Lists the ingestors of `domain`: each one's source, its schema or codec, the node that
+    /// executes it and its state, and for a client ingestor whether it admits batches and the
+    /// producers attached to it.
+    pub(in crate::application) async fn show_ingestors(
+        &self,
+        domain: &DomainName,
+    ) -> CommandResult {
+        let names = match self
+            .inner
+            .registry
+            .list_identifiers(domain, ModelKind::Ingestor, "")
+        {
+            Ok(names) => names,
+            Err(error) => return command_error(format!("failed to list ingestors: {error}")),
+        };
+        if names.is_empty() {
+            return command_ok("no ingestors".to_string());
+        }
+        let schedule = self.inner.consensus.current_schedule().await;
+        let domain_schedule = schedule.domain(domain);
+        let mut lines = Vec::with_capacity(names.len());
+        for name in names {
+            nervix_primitives::task::consume_budget().await;
+            let ingestor = IngestorName::from(&name);
+            let model = match self.inner.registry.get::<CreateIngestor>(domain, &ingestor) {
+                Ok(Some(model)) => model,
+                Ok(None) => continue,
+                Err(error) => {
+                    return command_error(format!(
+                        "failed to read ingestor '{}': {error}",
+                        ingestor.as_str()
+                    ));
+                }
+            };
+            let scheduled = match domain_schedule {
+                Some(domain_schedule) => domain_schedule
+                    .nodes
+                    .get(&NodeRef::new(ModelKind::Ingestor, name.clone()))
+                    .cloned(),
+                None => None,
+            };
+            let summary = match &scheduled {
+                Some(scheduled) => {
+                    match self.ingestor_summary(domain, &ingestor, scheduled).await {
+                        Ok((summary, _)) => Some(summary),
+                        Err(error) => {
+                            debug!(
+                                ingestor = ingestor.as_str(),
+                                error = %error,
+                                "an ingestor listing could not read its runtime state"
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            let owner = match scheduled.as_ref().and_then(ScheduledNode::execution_node) {
+                Some(owner) => owner.as_str().to_string(),
+                None => "-".to_string(),
+            };
+            lines.push(format_ingestor_listing_line(
+                &model,
+                &owner,
+                summary.as_ref(),
+            ));
+        }
+        command_ok(lines.join("\n"))
+    }
+
     pub(in crate::application) async fn describe_ingestor(
         &self,
         domain: &DomainName,
@@ -635,76 +776,9 @@ impl SessionServiceImpl {
             Err(message) => return command_error(format!("{message:#}")),
         };
 
-        let local_node_id = self.inner.consensus.local_node_id();
-        let summary: error_stack::Result<_, ObservationError> = if ingestor_node
-            .executes_on(local_node_id)
-        {
-            self.inner
-                .runtime
-                .describe_local_ingestor(domain, &describe.ingestor)
-                .change_context(ObservationError::LocalDescribe {
-                    domain: domain.clone(),
-                    entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(&describe.ingestor)),
-                })
-                .map(|summary| {
-                    (
-                        summary,
-                        self.inner.runtime.describe_metrics_for(
-                            domain,
-                            "INGESTOR",
-                            &describe.ingestor,
-                        ),
-                    )
-                })
-        } else if let Some(owner) = ingestor_node.execution_node() {
-            match self
-                .inner
-                .interconnect
-                .request(
-                    owner,
-                    RemoteDescribeIngestorRequest {
-                        domain: domain.clone(),
-                        name: describe.ingestor.clone(),
-                    },
-                )
-                .await
-            {
-                Ok(Ok(summary)) => Ok(runtime_ingestor_describe_from_envelope(summary)),
-                Ok(Err(failure)) => Err(Report::new(ObservationError::RemoteDescribeFailure {
-                    failure,
-                })),
-                Err(error) => Err(
-                    error.change_context(ObservationError::RemoteDescribeRequest {
-                        domain: domain.clone(),
-                        entity: NodeRef::new(
-                            ModelKind::Ingestor,
-                            ModelName::from(&describe.ingestor),
-                        ),
-                        node: owner.clone(),
-                    }),
-                ),
-            }
-        } else {
-            Ok((
-                RuntimeIngestorDescribe {
-                    running: false,
-                    ready: false,
-                    quiesce_state: None,
-                    quiesce_counters: Default::default(),
-                    memory_backpressure_paused: self
-                        .inner
-                        .runtime
-                        .ingestors_paused_for_memory_pressure(),
-                    transient_error: None,
-                    reconnect_backoff: None,
-                    reconnect_wait_millis: None,
-                    kafka_domain_offsets: None,
-                },
-                self.inner
-                    .runtime
-                    .describe_metrics_for(domain, "INGESTOR", &describe.ingestor),
-            ))
-        };
+        let summary = self
+            .ingestor_summary(domain, &describe.ingestor, &ingestor_node)
+            .await;
 
         match summary {
             Ok((summary, metrics)) => command_ok(append_metrics_lines(
@@ -1064,11 +1138,11 @@ impl SessionServiceImpl {
                 reason: reason.to_string(),
             })?;
         Ok(LookupDescribeEnvelope {
-            resource: description.model.resource,
-            resource_version: description.model.resource_version,
-            path: description.model.path,
-            decode_using_codec: description.model.decode_using_codec,
-            key_field: description.model.key_field,
+            resource: description.plan.resource.identifier,
+            resource_version: description.plan.resource.version,
+            path: description.plan.path,
+            decode_using_codec: description.plan.codec,
+            key_field: description.plan.key_field,
             entry_count: description.entry_count.arch_into(),
         })
     }
@@ -2158,7 +2232,7 @@ impl SessionServiceImpl {
         let latest_version = latest.map(|latest| catalog_version(latest.version));
         let mut versions = Vec::new();
         for resource in resources.versions_of(domain, &identifier) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let entries = self.resource_version_entries(resource).await;
             versions.push(ResourceVersionDescription {
                 version: catalog_version(resource.id.version),
@@ -2300,7 +2374,7 @@ impl SessionServiceImpl {
         }))
     }
 
-    async fn ingestor_target_from_schedule(
+    pub(in crate::application) async fn ingestor_target_from_schedule(
         &self,
         domain: &DomainName,
         name: impl Into<ModelName>,
@@ -2323,6 +2397,29 @@ impl SessionServiceImpl {
         };
         Ok(Some((ingestor.clone(), ingestor_node.clone())))
     }
+
+    pub(in crate::application) async fn emitter_target_from_schedule(
+        &self,
+        domain: &DomainName,
+        name: impl Into<ModelName>,
+    ) -> error_stack::Result<Option<(nervix_models::CreateEmitter, ScheduledNode)>, ObservationError>
+    {
+        let name = name.into();
+        let schedule = self.inner.consensus.current_schedule().await;
+        let Some(domain_schedule) = schedule.domain(domain) else {
+            return Ok(None);
+        };
+        let Some(node) = domain_schedule
+            .nodes
+            .get(&NodeRef::new(ModelKind::Emitter, name))
+        else {
+            return Ok(None);
+        };
+        let Model::Emitter(emitter) = node.config.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some((emitter.clone(), node.clone())))
+    }
 }
 
 #[cfg(test)]
@@ -2341,7 +2438,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test(start_paused = true)]
     async fn remote_observation_errors_retain_request_and_decode_causes() {
         let TestService {
             service,
@@ -2404,7 +2501,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn lookup_schedule_errors_identify_missing_dependencies() {
         use nervix_models::{
             CodecWireFormat, CreateCodec, CreateSchema, DomainSchedule, SchemaField,
@@ -2443,7 +2540,7 @@ mod tests {
             fingerprint,
         )];
         for stage in 0..4 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let inputs = service
                 .inner
                 .consensus
@@ -2521,7 +2618,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn show_placements_reports_fully_overridden_effective_coverage() {
         let TestService {
             service,
@@ -2577,7 +2674,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_describes_resource_metadata() {
         let TestService {
             service,

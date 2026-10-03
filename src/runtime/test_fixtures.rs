@@ -5,13 +5,13 @@
 //! test needs before it can exercise anything. A fixture used by one module belongs in
 //! that module's own test module instead.
 
-use std::{
-    collections::BTreeMap,
-    num::NonZeroUsize,
-    sync::{Arc as StdArc, OnceLock},
-};
+use std::{collections::BTreeMap, num::NonZeroUsize};
+
+use nervix_primitives::{sync::StdArc, unmodeled::sync::OnceLock};
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
+
+use std::time::Duration;
 
 use ahash::HashMap;
 use arrow_array::{ArrayRef, RecordBatch};
@@ -25,15 +25,14 @@ use nervix_models::{
     OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
     ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
+use nervix_primitives::{
+    sync::{Arc, watch},
+    time::{sleep, timeout},
+};
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
-use tokio::{
-    sync::watch,
-    time::{Duration, sleep, timeout},
-};
-use triomphe::Arc;
 
 use super::{
     wasm_output::{WasmMaterializedOutput, WasmOutputError, WasmOutputValidator},
@@ -46,6 +45,10 @@ use crate::{
         RuntimeRecordBatch, RuntimeRow, RuntimeValue, compile_schema, test_runtime_row,
     },
 };
+
+/// Duration text `humantime` panicked on instead of refusing: spans that add up to the last second
+/// a duration holds, and fractions of exactly one more second.
+pub(super) const TOO_LONG_DURATION_TEXT: &str = "18446744073709551615s 1000000000ns";
 
 pub(super) fn named<N>(raw: &str) -> N
 where
@@ -237,6 +240,26 @@ pub(super) fn u32_branch_key(field: &str, value: u32) -> Option<BranchKey> {
     branch_key([(named(field), RuntimeValue::U32(value))])
 }
 
+/// A branch lifecycle checkpoint at `lsm` naming `branches`.
+pub(super) fn branch_lifecycle_snapshot(
+    lsm: u64,
+    branches: &[Option<BranchKey>],
+) -> PersistedRuntimeStateEntry {
+    let mut entries = Vec::new();
+    for key in branches {
+        entries.push(BranchInstanceSnapshotEntry {
+            key: key.clone(),
+            last_ingestion: Timestamp::from_unix_nanos(1),
+            incarnation: 1,
+        });
+    }
+    PersistedRuntimeStateEntry {
+        lsm,
+        payload: encode_branch_lru_snapshot(&entries)
+            .expect("a current branch lifecycle checkpoint encodes"),
+    }
+}
+
 pub(super) fn key_label(key: &Option<BranchKey>) -> &str {
     key.as_ref().expect("test branch key must exist").as_str()
 }
@@ -304,6 +327,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         0,
         Vec::new(),
         None,
+        nervix_primitives::sync::Arc::new(super::BranchPresence::new()),
     ))
 }
 
@@ -331,8 +355,10 @@ pub(super) async fn attach_loopback_cluster(
         ),
         interconnect_advertise_addr: interconnect_addr.into(),
         bootstrap_host: None,
+        recovery_endpoints: Default::default(),
         interconnect: interconnect.clone(),
         node_unavailability_timeout: Duration::from_secs(10),
+        fault_injection: Default::default(),
     })
     .await
     .expect("a loopback cluster of one node should start");
@@ -417,11 +443,14 @@ pub(super) fn publish_state_identity(
     if kind == ModelKind::WasmProcessor {
         wasm_state_generations = Some(nervix_models::WasmStateGenerations::first());
     }
-    runtime.inner.state_identities.insert(
+    runtime.publish_state_assignment(
         nervix_models::DomainNodeRef::node_in(domain.clone(), kind, identifier.into()),
-        super::ScheduledStateIdentity {
-            schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
-            wasm_state_generations,
+        ScheduledStateAssignment {
+            identity: super::ScheduledStateIdentity {
+                schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                wasm_state_generations,
+            },
+            checkpoint_owners: None,
         },
     );
 }
@@ -584,13 +613,11 @@ pub(super) fn validate_wasm_test_output_groups(
             .map(|(relay, _)| super::RelayProcessorOutputNode {
                 relay: relay.clone(),
                 construction: nervix_models::RouteConstruction::default(),
-                branch: None,
                 flush_policy: None,
                 message_error_policy: MessageErrorPolicy::Log,
                 pending: Vec::new(),
                 flush_timer: BranchBufferTimer::default(),
                 compiled_program: None,
-                compiled_branch_program: None,
             })
             .collect(),
     };
@@ -677,6 +704,250 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
     ipc
 }
 
+/// Lowers `construction` as an ingestor's plan does and binds it as the ingestor's start does, for
+/// tests whose subject is the bound route program.
+pub(super) fn bind_ingestor_route_for_test(
+    domain: &DomainName,
+    identifier: &ModelName,
+    metadata_kind: IngestMetadataKind,
+    allow_header_reads: bool,
+    construction: &RouteConstruction,
+    schemas: RuntimeVmSchemaPair,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let lowered = LoweredConstruction::transforming(
+        construction,
+        schemas.input.as_ref(),
+        schemas.output.as_ref(),
+    )
+    .assured("the fixture route lowers against its schemas");
+    bind_ingestor_filter_map_program(
+        RuntimeCompileTarget { domain, identifier },
+        metadata_kind,
+        allow_header_reads,
+        &lowered,
+        schemas,
+        context,
+    )
+}
+
+/// Plans the ingestors and reingestors of `models` as the installed schedule would.
+pub(super) fn planned_entrypoints_for_test(
+    domain: &DomainName,
+    models: Vec<nervix_models::Model>,
+) -> EntrypointPlans {
+    let nodes = models
+        .into_iter()
+        .map(scheduled_model)
+        .map(|node| (node.identity(), node))
+        .collect::<ScheduledNodes>();
+    let activation = DomainActivationPlan::from_scheduled_nodes(domain, &nodes)
+        .assured("the fixture surfaces resolve");
+    EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
+        .assured("the fixture entrypoints plan")
+}
+
+/// The relays an entrypoint test plans over: every relay holds one schema of `fields`, decoded by
+/// the JSON codec `payload_codec`, and is branched by `by_<relay>` over `branch_fields` when those
+/// are given and unbranched otherwise.
+/// The decisions a domain build makes for one [`EntrypointTestDomain`].
+pub(super) struct EntrypointTestPlans {
+    pub(super) entrypoints: EntrypointPlans,
+    pub(super) nodes: ScheduledNodes,
+}
+
+pub(super) struct EntrypointTestDomain<'a> {
+    pub(super) relays: &'a [&'a str],
+    pub(super) fields: &'a [(&'a str, ParseAsType)],
+    pub(super) branch_fields: &'a [(&'a str, ParseAsType)],
+}
+
+impl EntrypointTestDomain<'_> {
+    fn schema_fields(fields: &[(&str, ParseAsType)]) -> Vec<SchemaField> {
+        fields
+            .iter()
+            .map(|(name, ty)| SchemaField {
+                name: named(name),
+                ty: ty.clone(),
+                optional: false,
+                sensitive: false,
+            })
+            .collect()
+    }
+
+    fn wire_type(ty: &ParseAsType) -> nervix_models::JsonType {
+        match ty {
+            ParseAsType::String => nervix_models::JsonType::String,
+            ParseAsType::Bool => nervix_models::JsonType::Boolean,
+            _ => nervix_models::JsonType::Integer,
+        }
+    }
+
+    /// The branch schema every branched relay of this domain resolves to.
+    pub(super) fn branching(&self, relay: &str) -> ResolvedBranching {
+        if self.branch_fields.is_empty() {
+            return ResolvedBranching::unbranched();
+        }
+        ResolvedBranching::branched(
+            named(&format!("by_{relay}")),
+            CreateSchema {
+                name: named("entrypoint_branch"),
+                fields: Self::schema_fields(self.branch_fields),
+            },
+        )
+    }
+
+    /// Plans the ingestors and reingestors among `models` in this domain.
+    pub(super) fn plan(
+        &self,
+        domain: &DomainName,
+        models: Vec<nervix_models::Model>,
+    ) -> EntrypointPlans {
+        self.plans(domain, models).entrypoints
+    }
+
+    /// Plans this domain with `models` scheduled in it, as a domain build decides it.
+    pub(super) fn plans(
+        &self,
+        domain: &DomainName,
+        models: Vec<nervix_models::Model>,
+    ) -> EntrypointTestPlans {
+        let fingerprint = SchemaFingerprint::from_digest([1; 32]);
+        let mut nodes = vec![
+            ScheduledNode::new(
+                nervix_models::Model::Schema(CreateSchema {
+                    name: named("entrypoint_payload"),
+                    fields: Self::schema_fields(self.fields),
+                }),
+                fingerprint,
+            ),
+            ScheduledNode::new(
+                nervix_models::Model::Schema(CreateSchema {
+                    name: named("entrypoint_branch"),
+                    fields: Self::schema_fields(self.branch_fields),
+                }),
+                fingerprint,
+            ),
+            ScheduledNode::new(
+                nervix_models::Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
+                    name: named("entrypoint_wire"),
+                    strictness: Default::default(),
+                    fields: self
+                        .fields
+                        .iter()
+                        .map(|(name, ty)| nervix_models::WireSchemaField {
+                            name: named(name),
+                            ty: Self::wire_type(ty),
+                            optional: false,
+                        })
+                        .collect(),
+                }),
+                fingerprint,
+            ),
+            ScheduledNode::new(
+                nervix_models::Model::Codec(nervix_models::CreateCodec {
+                    name: named("payload_codec"),
+                    wire_format: nervix_models::CodecWireFormat::Json {
+                        wire_schema: named("entrypoint_wire"),
+                    },
+                    schema: named("entrypoint_payload"),
+                    encoding_rules: Vec::new(),
+                }),
+                fingerprint,
+            ),
+        ];
+        for relay in self.relays {
+            let branching = if self.branch_fields.is_empty() {
+                nervix_models::RelayBranching::unbranched()
+            } else {
+                let branch = named::<BranchName>(&format!("by_{relay}"));
+                nodes.push(ScheduledNode::new(
+                    nervix_models::Model::Branch(CreateBranch {
+                        name: branch.clone(),
+                        schema: named("entrypoint_branch"),
+                        ttl: "5m".to_string(),
+                        eviction: None,
+                    }),
+                    fingerprint,
+                ));
+                nervix_models::RelayBranching::branched_by(branch)
+            };
+            nodes.push(
+                ScheduledNode::new(
+                    nervix_models::Model::Relay(CreateRelay {
+                        name: named(relay),
+                        schema: named("entrypoint_payload"),
+                        buffer: nonzero_capacity(2),
+                        branching,
+                        materialized_state: None,
+                    }),
+                    fingerprint,
+                )
+                .with_resolved_branching(Some(self.branching(relay))),
+            );
+        }
+        for model in models {
+            nodes.push(ScheduledNode::new(model, fingerprint));
+        }
+        let nodes = nodes
+            .into_iter()
+            .map(|node| (node.identity(), node))
+            .collect::<ScheduledNodes>();
+        let activation = DomainActivationPlan::from_scheduled_nodes(domain, &nodes)
+            .assured("the fixture surfaces resolve");
+        let entrypoints = EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
+            .assured("the fixture entrypoints plan");
+        EntrypointTestPlans { entrypoints, nodes }
+    }
+
+    /// Plans `reingestor` in this domain.
+    pub(super) fn plan_reingestor(
+        &self,
+        domain: &DomainName,
+        reingestor: CreateReingestor,
+    ) -> Arc<ReingestorPlan> {
+        let name = reingestor.name.clone();
+        self.plan(domain, vec![nervix_models::Model::Reingestor(reingestor)])
+            .reingestor(&name)
+            .cloned()
+            .assured("the fixture schedules the reingestor")
+    }
+
+    /// The compiled schema every relay of this domain carries at runtime.
+    pub(super) fn relay_schema(&self) -> Arc<CompiledSchema> {
+        test_schema(self.fields)
+    }
+
+    /// The JSON codec `payload_codec` compiled as a domain build installs it.
+    pub(super) fn codec(&self) -> Arc<CompiledCodec> {
+        crate::runtime_schema::compile_codec(
+            &nervix_models::CreateCodec {
+                name: named("payload_codec"),
+                wire_format: nervix_models::CodecWireFormat::Json {
+                    wire_schema: named("entrypoint_wire"),
+                },
+                schema: named("entrypoint_payload"),
+                encoding_rules: Vec::new(),
+            },
+            self.relay_schema(),
+            nervix_models::ResolvedCodecWireFormat::Json(&nervix_models::CreateJsonWireSchema {
+                name: named("entrypoint_wire"),
+                strictness: Default::default(),
+                fields: self
+                    .fields
+                    .iter()
+                    .map(|(name, ty)| nervix_models::WireSchemaField {
+                        name: named(name),
+                        ty: Self::wire_type(ty),
+                        optional: false,
+                    })
+                    .collect(),
+            }),
+        )
+        .assured("the fixture codec compiles")
+    }
+}
+
 pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
     let resolved_branching = match &model {
         nervix_models::Model::Relay(model) => {
@@ -737,15 +1008,16 @@ pub(super) fn install_test_domain_execution(
     routing: DomainRoutingSnapshot,
 ) {
     let (shutdown, _) = watch::channel(false);
+    let revision = test_execution_revision(domain, nodes);
     runtime.install_domain_execution(
         domain,
         DomainExecution {
-            schedule: DomainSchedule::new(domain.clone(), nodes, Vec::new()),
+            revision,
             start_version: 0,
             domain_clock: test_domain_clock(domain),
             shutdown,
             routing: runtime.stage_domain_routing(domain, routing),
-            branched_ingestors: HashMap::default(),
+
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
@@ -755,10 +1027,17 @@ pub(super) fn install_test_domain_execution(
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            clients: HashMap::default(),
             tasks: Vec::new(),
         },
     );
+}
+
+pub(super) fn test_execution_revision(
+    domain: &DomainName,
+    nodes: Vec<ScheduledNode>,
+) -> Arc<ExecutionRevision> {
+    ExecutionRevision::from_schedule(&DomainSchedule::new(domain.clone(), nodes, Vec::new()))
+        .assured("the test fixture schedules a complete domain revision")
 }
 
 pub(super) fn junction_branch_template(
@@ -824,7 +1103,7 @@ pub(super) async fn wait_for_persisted_runtime_state_lsm(
         .clone();
     timeout(Duration::from_secs(1), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if store
                 .latest_snapshot(placement)
                 .expect("snapshot lookup should succeed")
@@ -884,12 +1163,102 @@ pub(super) fn input_value(batch: &RelayRecordBatch) -> i64 {
 
 pub(super) fn sink_context() -> EmitterSinkContext {
     let domain = DomainName::parse("emitter_tests").expect("valid domain");
+    let runtime = Runtime::default();
+    let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
+    let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
     EmitterSinkContext {
-        runtime: Runtime::default(),
+        routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+        metrics_dirty: BranchMetricsMark::default(),
+        status: runtime.emitter_status(&key),
+        confirmation_waits: runtime.emitter_confirmation_counter(&key),
+        runtime,
         clock: test_domain_clock(&domain),
         domain,
-        emitter: EmitterName::parse("output").expect("valid emitter name"),
+        emitter,
         error_policies: ErrorPolicies::handled_by_log(),
         udfs: None,
+    }
+}
+
+/// An executor with one worker and one waiting place in every class, so a test can fill a class.
+pub(crate) fn single_worker_executor() -> Executor {
+    let one = NonZeroUsize::MIN;
+    Executor::new(nervix_execution::ExecutionConfig {
+        workers: nervix_execution::WorkerCounts {
+            control_cpu: one,
+            credentials_cpu: one,
+            data_cpu: one,
+            extension_cpu: one,
+            bulk_cpu: one,
+            consensus_storage: one,
+            filesystem_storage: one,
+            pending_jobs: one,
+        },
+        ..nervix_execution::ExecutionConfig::default()
+    })
+    .expect("the default budgets hold the default operation limits")
+}
+
+/// The only worker and the only waiting place of one CPU class of a
+/// [`single_worker_executor`], held so that the class refuses the next job submitted to it.
+pub(crate) struct FilledCpuClass {
+    executor: Executor,
+    class: nervix_execution::CpuClass,
+    release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
+}
+
+impl FilledCpuClass {
+    /// Fill `class` of `executor`: one job holds its worker until the fill is released, and a
+    /// second waits behind it.
+    pub(crate) async fn fill(executor: &Executor, class: nervix_execution::CpuClass) -> Self {
+        let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+        let holder = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = holder
+                .try_reserve(nervix_execution::MemoryClass::Relay, 0)
+                .expect("a zero charge is always admitted");
+            holder
+                .run_cpu(class, reservation, move |_charge, _cancellation| {
+                    // Releasing the fill disconnects the channel, which is the release.
+                    match held.recv() {
+                        Ok(()) | Err(nervix_primitives::sync::blocking::mpsc::RecvError) => {}
+                    }
+                })
+                .await
+                .expect("the holding job runs once the class has a worker");
+        });
+        while executor.snapshot().cpu_class(class).running == 0 {
+            nervix_primitives::task::yield_now().await;
+        }
+        let waiter = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = waiter
+                .try_reserve(nervix_execution::MemoryClass::Relay, 0)
+                .expect("a zero charge is always admitted");
+            waiter
+                .run_cpu(class, reservation, |_charge, _cancellation| ())
+                .await
+                .expect("the waiting job runs once the holder leaves");
+        });
+        while executor.snapshot().cpu_class(class).pending == 0 {
+            nervix_primitives::task::yield_now().await;
+        }
+        Self {
+            executor: executor.clone(),
+            class,
+            release,
+        }
+    }
+
+    /// Let the held jobs finish, and return once the class is idle again.
+    pub(crate) async fn release(self) {
+        drop(self.release);
+        loop {
+            let state = self.executor.snapshot().cpu_class(self.class);
+            if state.running == 0 && state.pending == 0 {
+                return;
+            }
+            nervix_primitives::task::yield_now().await;
+        }
     }
 }

@@ -309,6 +309,7 @@ Feature: Client wire failure regressions
       """
       has expired
       """
+    And the last command request reports an expired execution reference
     When this NSPL command request is executed on the leader node
       """
       SHOW CREATE SCHEMA reclaimed_identity_record;
@@ -370,6 +371,55 @@ Feature: Client wire failure regressions
       | 3            | created "1h" before now | has expired                                        |
       | 3            | created "10m" after now | beyond the accepted client clock-skew boundary     |
       | 3            | without a creation time | does not carry a UUID version 7 creation timestamp |
+
+  @client_wire_execution_reference_conflict
+  Scenario: A race across leaders recovers a typed execution reference conflict
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "first_leader"
+    And a node other than placeholder "first_leader" is saved as placeholder "second_leader"
+    Given command reference lookup on node "{{first_leader}}" pauses before proposal
+    When this NSPL command request with execution reference "raced-{{test_id}}" begins executing in the background on the leader node
+      """
+      CREATE SCHEMA raced_first_record (value STRING);
+      """
+    Then the command reference lookup pause on node "{{first_leader}}" is reached
+    When leadership is transferred from node "{{first_leader}}" to node "{{second_leader}}"
+    Then node "{{second_leader}}" eventually reports leader "{{second_leader}}"
+    When this NSPL command request with execution reference "raced-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA raced_second_record (value STRING);
+      """
+    Then the last command request succeeded
+    When the command reference lookup pause on node "{{first_leader}}" is released
+    Then the background command request reports a content conflict or unknown leadership outcome
+    When this NSPL command request with execution reference "raced-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA raced_first_record (value STRING);
+      """
+    Then the last command request reports an execution reference content conflict
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA raced_second_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA raced_second_record (
+        value STRING
+      );
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA raced_first_record;
+      """
+    Then the last command error contains
+      """
+      schema 'raced_first_record' does not exist in domain '{{domain}}'
+      """
 
   @client_wire_execution_history
   Scenario Outline: A full command history refuses new identities and keeps every retained result
@@ -687,3 +737,250 @@ Feature: Client wire failure regressions
       key={"tenant":"beta"}
       payload={"sequence":2,"tenant":"beta"}
       """
+
+  @client_wire_subscription_restore
+  Scenario Outline: A native client deletes a subscription its lost session held and opens the name again
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE CODEC wire_record_codec
+        FROM WIRE JSON SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE INGESTOR wire_source
+        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" executes these NSPL commands
+      """
+      DELETE SUBSCRIPTION wire_seen;
+      """
+    Then client "subscriber" no longer holds subscription "wire_seen"
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    Then client "subscriber" subscription "wire_seen" is active
+    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then the last relay subscription payload contains
+      """
+      {"sequence":1,"tenant":"acme"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire_subscription_restore
+  Scenario Outline: A native client reports a refused subscription restoration and deletes the subscription without the server
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_record (
+        value STRING
+      );
+      CREATE RELAY watched SCHEMA watched_record UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION watching TO watched;
+      """
+    And the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "watching" interrupted
+    When these NSPL commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And client "subscriber" executes these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then within "30s" client "subscriber" observes a failed restoration of subscription "watching"
+      """
+      stream 'watched' does not exist in domain '{{domain}}'
+      """
+    And client "subscriber" subscription "watching" is interrupted
+    When client "subscriber" executes these NSPL commands
+      """
+      DELETE SUBSCRIPTION watching;
+      """
+    Then client "subscriber" no longer holds subscription "watching"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire_subscription_restore
+  Scenario Outline: A native client does not restore a subscription the server ended and opens its name again on request
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE SCHEMA masked_wire_record (
+        tenant STRING,
+        sequence I64 SENSITIVE
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE CODEC wire_record_codec
+        FROM WIRE JSON SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE INGESTOR wire_source
+        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        TO wire_records
+        SET tenant = message.tenant, sequence = message.sequence
+        UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      ALTER RELAY wire_records SET SCHEMA masked_wire_record;
+      """
+    Then within "30s" client "subscriber" observes subscription "wire_seen" ended with reason "RelayChanged"
+    And client "subscriber" subscription "wire_seen" is ended
+    When the TCP forwarder at "127.0.0.1" stops
+    And client "subscriber" executes these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then client "subscriber" reports no event of subscription "wire_seen" within "5s"
+    And client "subscriber" subscription "wire_seen" is ended
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    Then client "subscriber" subscription "wire_seen" is active
+    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then the last relay subscription payload contains
+      """
+      "tenant":"acme"
+      """
+    And the last relay subscription payload masks field "sequence"
+    When these NSPL commands are executed on the leader node
+      """
+      DROP INGESTOR wire_source;
+      DROP RELAY wire_records;
+      """
+    Then within "30s" client "subscriber" observes subscription "wire_seen" ended with reason "RelayRemoved"
+    When client "subscriber" executes these NSPL commands
+      """
+      DELETE SUBSCRIPTION wire_seen;
+      """
+    Then the last command output contains
+      """
+      subscription 'wire_seen' deleted; the server had already ended it
+      """
+    And client "subscriber" no longer holds subscription "wire_seen"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire_wide_rows
+  Scenario Outline: A native client keeps a subscription active while it receives a row that fills most of a frame
+    Given a <cluster_size> node nervix cluster is started
+    And a repeated text placeholder "wide_note" of 3000000 bytes is prepared
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wide_record (
+        sequence I64,
+        note STRING
+      );
+      CREATE WIRE JSON SCHEMA wide_record_json MODE STRICT (
+        sequence integer,
+        note string
+      );
+      CREATE CODEC wide_record_codec
+        FROM WIRE JSON SCHEMA wide_record_json
+        TO SCHEMA wide_record;
+      CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
+      CREATE VHOST edge wide-rows-{{test_id}}.example.com;
+      CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE INGESTOR wide_source
+        FROM ENDPOINT wide_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
+        TO wide_records
+        SET sequence = message.sequence, note = message.note
+        UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "subscriber" is connected to node "node-1"
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wide_seen TO wide_records;
+      """
+    And http payload is posted to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+      """
+      {"sequence":1,"note":"{{wide_note}}"}
+      """
+    Then within "30s" client "subscriber" receives a subscription payload
+      """
+      {"note":"{{wide_note}}","sequence":1}
+      """
+    And client "subscriber" subscription "wide_seen" is active
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

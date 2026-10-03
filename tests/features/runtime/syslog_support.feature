@@ -175,9 +175,9 @@ Feature: Syslog support
     Then node "node-1" eventually reports interconnect to "node-4" as "connected"
     And node "node-4" eventually forwards Syslog UDP message "after-node-join" at "{{syslog_ingest_addr}}" to the observed endpoint
 
-  Scenario: Invalid Syslog transport configuration fails entity startup
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
+  Scenario Outline: Invalid Syslog transport configuration names the connector failure at startup
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -207,10 +207,15 @@ Feature: Syslog support
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "framing"
+    When these NSPL commands fail with "failed to initialize ingestor 'invalid_syslog_intake' in domain '{{domain}}': invalid Syslog client config key 'framing': UDP does not use stream framing"
       """
       START;
       """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
 
   Scenario Outline: Syslog TLS intake uses RFC 5425 framing and mounted mutual TLS identity
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

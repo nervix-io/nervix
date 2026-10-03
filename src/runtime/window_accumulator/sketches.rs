@@ -46,25 +46,19 @@ impl WindowSketch {
         }
     }
 
-    fn admit(&mut self, argument: &ArgumentColumn, row: usize) {
+    fn admit_key(&mut self, key: &[u8]) {
         match self {
-            Self::Distinct(hll) => {
-                let key = argument
-                    .sketch_key(row)
-                    .verified("distinct accepts only scalar typed arguments");
-                hll.admit(&key);
-            }
-            Self::Quantile(quantile) => {
-                let value = argument
-                    .number_at(row)
-                    .verified("quantile accepts only present numeric arguments");
-                quantile.admit(value);
-            }
-            Self::TopK(top) => {
-                let key = argument
-                    .sketch_key(row)
-                    .verified("top-k accepts only scalar typed arguments");
-                top.admit(key);
+            Self::Distinct(hll) => hll.admit(key),
+            Self::TopK(top) => top.admit_borrowed(key),
+            Self::Quantile(_) => None::<()>.verified("quantile receives numeric values"),
+        }
+    }
+
+    fn admit_number(&mut self, value: f64) {
+        match self {
+            Self::Quantile(quantile) => quantile.admit(value),
+            Self::Distinct(_) | Self::TopK(_) => {
+                None::<()>.verified("key sketches receive typed keys")
             }
         }
     }
@@ -102,30 +96,65 @@ impl PaneSketches {
         self.panes.clear();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     pub(super) fn admit<R: RetainedWindowRows>(
         &mut self,
         demand: usize,
         rows: &R,
         positions: Range<usize>,
     ) {
-        for position in positions {
-            let retained = rows.retained_row(position);
-            let argument = retained.arguments.demand(demand).first();
-            if !argument.is_present(retained.row) {
-                continue;
-            }
-            let pane = self.layout.pane_of(retained.timestamp.unix_nanos());
-            if let Some(sketch) = self.panes.get_mut(&pane) {
-                sketch.admit(argument, retained.row);
-            } else {
-                let mut sketch = WindowSketch::new(self.config);
-                sketch.admit(argument, retained.row);
-                self.panes.insert(pane, sketch);
+        for run in retained_runs(rows, positions) {
+            let argument = run.arguments.demand(demand).first();
+            match self.config {
+                WindowSketchConfig::Distinct { .. } | WindowSketchConfig::TopK { .. } => {
+                    argument.visit_sketch_keys(run.rows.clone(), |row, key| {
+                        let position = run.first_position + row - run.rows.start;
+                        let pane = self
+                            .layout
+                            .pane_of(rows.retained_row(position).timestamp.unix_nanos());
+                        if let Some(sketch) = self.panes.get_mut(&pane) {
+                            sketch.admit_key(key);
+                        } else {
+                            let mut sketch = WindowSketch::new(self.config);
+                            sketch.admit_key(key);
+                            self.panes.insert(pane, sketch);
+                        }
+                    });
+                }
+                WindowSketchConfig::Quantile { .. } => {
+                    for row in run.rows.clone() {
+                        let position = run.first_position + row - run.rows.start;
+                        let retained = rows.retained_row(position);
+                        if !argument.is_present(row) {
+                            continue;
+                        }
+                        let pane = self.layout.pane_of(retained.timestamp.unix_nanos());
+                        let value = argument
+                            .number_at(row)
+                            .verified("quantile accepts numeric arguments");
+                        if let Some(sketch) = self.panes.get_mut(&pane) {
+                            sketch.admit_number(value);
+                        } else {
+                            let mut sketch = WindowSketch::new(self.config);
+                            sketch.admit_number(value);
+                            self.panes.insert(pane, sketch);
+                        }
+                    }
+                }
             }
         }
     }
 
     /// A sketch cannot subtract a row. Rebuild from survivors, which also discards expired panes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     pub(super) fn retain_after<R: RetainedWindowRows>(
         &mut self,
         demand: usize,
@@ -139,6 +168,11 @@ impl PaneSketches {
         self.admit(demand, rows, removed..rows.retained());
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     pub(super) fn evaluate<R: RetainedWindowRows>(
         &self,
         demand: usize,
@@ -249,6 +283,11 @@ impl HyperLogLog {
             registers: vec![0; 1_usize << precision],
         }
     }
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     fn admit(&mut self, key: &[u8]) {
         let digest = blake3::hash(key);
         let hash = u64::from_le_bytes(
@@ -317,6 +356,11 @@ impl BoundedTDigest {
             ),
         }
     }
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
+                                   visitors; local callback bodies remain analyzed")
+    )]
     fn admit(&mut self, value: f64) {
         self.centroids.insert(Centroid {
             mean: OrderedFloat(value),
@@ -444,8 +488,23 @@ impl FrequencyCandidates {
             counts: BTreeMap::new(),
         }
     }
-    fn admit(&mut self, key: Vec<u8>) {
-        self.add(key, 1);
+    fn admit_borrowed(&mut self, key: &[u8]) {
+        if let Some(count) = self.counts.get_mut(key) {
+            *count = count
+                .checked_add(1)
+                .assured("a branch cannot admit 2^64 rows");
+            return;
+        }
+        if self.counts.len() < self.capacity {
+            self.counts.insert(key.to_vec(), 1);
+            return;
+        }
+        self.counts.retain(|_, count| {
+            *count = count
+                .checked_sub(1)
+                .verified("a full frequency sketch has positive counts");
+            *count > 0
+        });
     }
     fn add(&mut self, key: Vec<u8>, weight: u64) {
         if let Some(count) = self.counts.get_mut(&key) {
@@ -552,17 +611,17 @@ mod tests {
         let mut left = FrequencyCandidates::new(16);
         let mut right = FrequencyCandidates::new(16);
         for _ in 0..100 {
-            left.admit(b"hot".to_vec());
+            left.admit_borrowed(b"hot");
         }
         for _ in 0..80 {
-            right.admit(b"warm".to_vec());
+            right.admit_borrowed(b"warm");
         }
         for value in 0_u16..200 {
             let key = value.to_le_bytes().to_vec();
             if value % 2 == 0 {
-                left.admit(key);
+                left.admit_borrowed(&key);
             } else {
-                right.admit(key);
+                right.admit_borrowed(&key);
             }
         }
         left.merge(&right);
@@ -583,5 +642,16 @@ mod tests {
             .verified("Misra-Gries counts do not overestimate");
         assert!(hot_error <= 23);
         assert!(warm_error <= 23);
+    }
+
+    #[test]
+    fn borrowed_frequency_admission_matches_owned_candidates() {
+        let mut borrowed = FrequencyCandidates::new(3);
+        let mut owned = FrequencyCandidates::new(3);
+        for key in [b"a".as_slice(), b"b", b"a", b"c", b"d", b"a", b"e"] {
+            borrowed.admit_borrowed(key);
+            owned.add(key.to_vec(), 1);
+        }
+        assert_eq!(borrowed.counts, owned.counts);
     }
 }

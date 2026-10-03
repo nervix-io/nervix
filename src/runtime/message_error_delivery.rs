@@ -1,22 +1,35 @@
-use dashmap::mapref::entry::Entry as DashMapEntry;
-use nervix_models::{DomainName, NodeRef};
+//! Buffered delivery and acknowledgement of prepared message-error routes.
+//!
+//! Layer: data plane.
+//! - **Owns.** Each route's branch buffers, flush cadence, relay delivery and source ACK lease.
+//! - **Depends on.** Bound route plans, relay services and the domain clock.
+//! - **Must not know.** Scheduled Models, error-route selection or VM compilation.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "message-error route installation binds its retained execution handle"
+    )
+)]
+
+use nervix_models::DomainName;
+use nervix_primitives::collections::dash_map::Entry as DashMapEntry;
 
 use super::{message_error::MessageErrorHandlingError, *};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct MessageErrorRouteKey {
-    pub(super) domain: DomainName,
-    pub(super) node: NodeRef,
-    pub(super) source_route: Option<RelayName>,
-    pub(super) error_relay: RelayName,
-}
-
 #[derive(Clone)]
 pub(super) struct MessageErrorRouteTarget {
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a routed message error retains and observes its own acknowledgement roots"
+    )
+)]
 pub(super) struct MessageErrorDelivery {
     pub(super) batch: RelayRecordBatch,
     pub(super) source_acks: Vec<AckSet>,
@@ -49,9 +62,11 @@ impl MessageErrorDelivery {
 }
 
 pub(super) struct MessageErrorRouteRuntime {
+    /// Identifies the bound revision whose target and cadence this task is executing.
+    plan: Arc<BoundMessageErrorRoute>,
     sender: mpsc::Sender<MessageErrorDelivery>,
     shutdown: watch::Sender<bool>,
-    task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
 }
 
 struct MessageErrorRouteTask {
@@ -62,61 +77,38 @@ struct MessageErrorRouteTask {
     pending: HashMap<Option<BranchKey>, PendingMessageErrorDelivery>,
 }
 
-/// Resolves the output route a message-error policy belongs to.
-///
-/// Both passes walk the node's own declared routes, whose order is part of the Model, and each
-/// call resolves a single route while an error route is compiled. Building an index would cost the
-/// same walk it replaces.
-pub(super) fn matching_message_error_output<'a>(
-    outputs: &'a nervix_models::ProcessorOutputs,
-    source_route: Option<&RelayName>,
-    error_relay: &RelayName,
-    assignments: &[Assignment],
-) -> Option<&'a ProcessorOutput> {
-    if let Some(route) = source_route
-        && let Some(output) = outputs.routes.iter().find(|output| &output.relay == route)
-    {
-        return Some(output);
-    }
-    outputs.routes.iter().find(|output| {
-        if let MessageErrorPolicy::Dlq {
-            relay,
-            assignments: configured,
-        } = &output.message_error_policy
-        {
-            relay == error_relay && configured == assignments
-        } else {
-            false
-        }
-    })
-}
-
 impl MessageErrorRouteRuntime {
-    fn new(
-        runtime: Runtime,
-        route: MessageErrorRouteKey,
-        target: MessageErrorRouteTarget,
-        flush_policy: RuntimeFlushPolicy,
-    ) -> Arc<Self> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "install or terminate the retained message error route task"
+        )
+    )]
+    fn new(runtime: Runtime, plan: Arc<BoundMessageErrorRoute>) -> Arc<Self> {
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let route_runtime = Arc::new(Self {
+            plan: plan.clone(),
             sender,
             shutdown,
-            task: parking_lot::Mutex::new(None),
+            task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
         // A route owes the force-flush generations of the node whose messages failed. The
         // obligation is registered before the task starts, so a generation requested between the
         // spawn and the first poll is still owed by this route rather than missed.
         let force_flush = runtime.force_flush_participant(
-            &route.domain,
-            runtime.node_quiesce_counters(&route.domain, route.node.clone()),
+            &plan.key.domain,
+            runtime.node_quiesce_counters(&plan.key.domain, plan.key.node.clone()),
         );
-        let task = tokio::spawn(
+        let flush_policy = plan
+            .flush_policy
+            .assured("only a buffered prepared message-error route creates a delivery task");
+        let task = nervix_primitives::task::spawn(
             MessageErrorRouteTask {
                 runtime,
-                route,
-                target,
+                route: plan.key.clone(),
+                target: plan.target.clone(),
                 flush_policy,
                 pending: HashMap::default(),
             }
@@ -126,6 +118,13 @@ impl MessageErrorRouteRuntime {
         route_runtime
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "install or terminate the retained message error route task"
+        )
+    )]
     async fn shutdown(&self) {
         self.shutdown.send_replace(true);
         let task = self.task.lock().take();
@@ -174,7 +173,7 @@ impl MessageErrorRouteTask {
         let mut batches = Vec::with_capacity(pending.deliveries.len());
         let mut source_acks = Vec::new();
         for delivery in pending.deliveries {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             pending_acks.ack_alive();
             batches.push(delivery.batch);
             source_acks.extend(delivery.source_acks);
@@ -202,7 +201,6 @@ impl MessageErrorRouteTask {
             self.runtime.ingest_stream_boundary_message(
                 &self.route.domain,
                 &self.route.error_relay,
-                &self.target.registry,
                 &self.target.services,
                 &batch,
             ),
@@ -296,7 +294,7 @@ impl MessageErrorRouteTask {
             }
         }
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
         Ok(())
@@ -305,7 +303,7 @@ impl MessageErrorRouteTask {
     async fn flush_all(&mut self) {
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
     }
@@ -329,7 +327,7 @@ impl MessageErrorRouteTask {
     ) {
         let ready = input.len();
         for _ in 0..ready {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Ok(delivery) = input.try_recv() else {
                 break;
             };
@@ -350,19 +348,32 @@ impl MessageErrorRouteTask {
     ) {
         input.close();
         while let Some(delivery) = input.recv().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.accept(delivery, domain_clock).await;
         }
         self.flush_all().await;
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the retained message error route processes each admitted error delivery and \
+                      flush poll"
+        )
+    )]
     async fn run(
         mut self,
         mut input: mpsc::Receiver<MessageErrorDelivery>,
         mut shutdown_rx: watch::Receiver<bool>,
         mut force_flush: DomainForceFlushParticipant,
     ) {
-        let domain_clock = match self.runtime.bind_domain_clock(&self.route.domain) {
+        let domain_clock = match nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "this task or concrete branch transition attaches its retained domain clock before \
+             executing in the selected lifetime",
+            self.runtime.bind_domain_clock(&self.route.domain)
+        ) {
             Ok(clock) => clock,
             Err(error) => {
                 self.runtime.events().report_error(format!(
@@ -375,10 +386,10 @@ impl MessageErrorRouteTask {
             }
         };
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
                 // arm drains and finishes either way, so the outcome carries nothing to read.
@@ -443,15 +454,22 @@ impl MessageErrorRouteTask {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a routed message error retains and observes its own acknowledgement roots"
+    )
+)]
 async fn await_message_error_ack_alive<F>(acks: &AckSet, future: F) -> F::Output
 where
     F: std::future::Future,
 {
     tokio::pin!(future);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         acks.ack_alive();
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             result = &mut future => return result,
             _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
@@ -460,24 +478,65 @@ where
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) async fn enqueue_message_error_delivery(
         &self,
-        route: MessageErrorRouteKey,
-        target: MessageErrorRouteTarget,
-        flush_policy: RuntimeFlushPolicy,
+        plan: Arc<BoundMessageErrorRoute>,
         delivery: MessageErrorDelivery,
     ) -> error_stack::Result<(), MessageErrorHandlingError> {
+        let route = plan.key.clone();
         let failure_route = route.clone();
-        let route_runtime = match self.inner.message_error_routes.entry(route.clone()) {
-            DashMapEntry::Occupied(entry) => entry.get().clone(),
+        let (route_runtime, replaced) = match nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the message error route \
+             before admitting deliveries",
+            self.inner.message_error_routes.entry(route)
+        ) {
+            DashMapEntry::Occupied(mut entry) => {
+                if Arc::ptr_eq(&entry.get().plan, &plan) {
+                    (entry.get().clone(), None)
+                } else {
+                    let route_runtime = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "Typed Ratchet 03 (86bc9eqjv): a missing or replaced message-error route \
+                         installs its one concrete retained task lifetime",
+                        MessageErrorRouteRuntime::new(self.clone(), plan)
+                    );
+                    let replaced = entry.insert(route_runtime.clone());
+                    (route_runtime, Some(replaced))
+                }
+            }
             DashMapEntry::Vacant(entry) => {
-                let route_runtime =
-                    MessageErrorRouteRuntime::new(self.clone(), route, target, flush_policy);
+                let route_runtime = nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "Typed Ratchet 03 (86bc9eqjv): a missing or replaced message-error route \
+                     installs its one concrete retained task lifetime",
+                    MessageErrorRouteRuntime::new(self.clone(), plan)
+                );
                 entry.insert(route_runtime.clone());
-                route_runtime
+                (route_runtime, None)
             }
         };
         let source_acks = delivery.merged_source_acks();
+        if let Some(replaced) = replaced {
+            await_message_error_ack_alive(
+                &source_acks,
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "a replaced message-error route ends its exact retained task lifetime; Typed \
+                     Ratchet 03 (86bc9eqjv) retains route handles",
+                    replaced.shutdown()
+                ),
+            )
+            .await;
+        }
         await_message_error_ack_alive(&source_acks, route_runtime.sender.send(delivery))
             .await
             .map_err(|_| {
@@ -495,7 +554,7 @@ impl Runtime {
             .filter_map(|entry| (&entry.key().domain == domain).then_some(entry.key().clone()))
             .collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some((_, route)) = self.inner.message_error_routes.remove(&key) {
                 route.shutdown().await;
             }
@@ -532,6 +591,46 @@ mod tests {
         )
     }
 
+    fn test_plan(
+        route: MessageErrorRouteKey,
+        target: MessageErrorRouteTarget,
+        flush_policy: RuntimeFlushPolicy,
+    ) -> Arc<BoundMessageErrorRoute> {
+        let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
+            name: named("message_error"),
+            fields: Vec::new(),
+        }));
+        let materialized = HashMap::default();
+        let lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+        let lowered = lower_route_construction(
+            &RouteConstruction::default(),
+            SemanticScopePolicy::read_write("error_output", "error_output"),
+        )
+        .expect("the empty test error SET lowers");
+        let program = compile_message_error_set_program(
+            &route.node.identifier,
+            &lowered,
+            schema.clone(),
+            MessageErrorCompileSchemas::default(),
+            RuntimeVmCompileContext {
+                available_materialized_streams: &materialized,
+                available_lookups: &lookups,
+                current_branching: &branching,
+                udfs: None,
+            },
+        )
+        .expect("an empty test error record compiles");
+        Arc::new(BoundMessageErrorRoute {
+            key: route,
+            schema,
+            target,
+            branching,
+            program,
+            flush_policy: Some(flush_policy),
+        })
+    }
+
     fn test_task(
         flush_policy: RuntimeFlushPolicy,
         fanout: RelayBoundaryFanout,
@@ -551,8 +650,14 @@ mod tests {
                 error_relay: named("emitter_errors"),
             },
             target: MessageErrorRouteTarget {
-                registry: RelayRegistry::new(),
-                services: Arc::new(RelayBoundaryServices::new(fanout, 0, 0, Vec::new(), None)),
+                services: Arc::new(RelayBoundaryServices::new(
+                    fanout,
+                    0,
+                    0,
+                    Vec::new(),
+                    None,
+                    Arc::new(BranchPresence::new()),
+                )),
             },
             flush_policy,
             pending: HashMap::default(),
@@ -560,14 +665,13 @@ mod tests {
         let owner_task = task.runtime.spawn_relay_owner_task(
             &task.route.domain,
             &task.route.error_relay,
-            task.target.registry.clone(),
             task.target.services.clone(),
             RelayRetention::default(),
         );
         (task, owner_task)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn buffered_message_error_refreshes_source_ack_before_flush_deadline() {
         let interval = REMOTE_ACK_ALIVE_INTERVAL * 4;
         let fanout = RelayBoundaryFanout::direct_with_capacity(
@@ -587,7 +691,7 @@ mod tests {
             task.runtime
                 .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
         );
-        let task = tokio::spawn(task.run(input, shutdown_rx, force_flush));
+        let task = nervix_primitives::task::spawn(task.run(input, shutdown_rx, force_flush));
         let (delivery, mut completion) = test_delivery();
 
         sender
@@ -596,7 +700,7 @@ mod tests {
             .expect("message-error task must accept delivery");
 
         assert_eq!(
-            tokio::time::timeout(
+            nervix_primitives::time::timeout(
                 REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
@@ -614,7 +718,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_releases_a_buffered_message_error_before_its_cadence() {
         let runtime = Runtime::default();
         let domain = DomainName::try_from("test").expect("valid domain");
@@ -629,7 +733,6 @@ mod tests {
             error_relay: named("route_errors"),
         };
         let target = MessageErrorRouteTarget {
-            registry: RelayRegistry::new(),
             services: Arc::new(RelayBoundaryServices::new(
                 RelayBoundaryFanout::direct_with_capacity(
                     NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -638,17 +741,16 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
+                Arc::new(BranchPresence::new()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &route.error_relay,
-            target.registry.clone(),
             target.services.clone(),
             RelayRetention::default(),
         );
-        let route_runtime = MessageErrorRouteRuntime::new(
-            runtime.clone(),
+        let plan = test_plan(
             route,
             target,
             RuntimeFlushPolicy::Each {
@@ -656,6 +758,7 @@ mod tests {
                 max_batch_size: u64::MAX,
             },
         );
+        let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), plan);
         let (delivery, completion) = test_delivery();
         route_runtime
             .sender
@@ -666,7 +769,7 @@ mod tests {
         runtime.force_flush_domain(&domain);
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), completion.wait())
+            nervix_primitives::time::timeout(Duration::from_secs(2), completion.wait())
                 .await
                 .expect("a force flush must publish a message error its cadence still holds"),
             AckOutcome::Ack
@@ -678,7 +781,85 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn route_replacement_drains_pending_errors_and_uses_the_new_cadence() {
+        let runtime = Runtime::default();
+        let domain = DomainName::try_from("test").expect("valid domain");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let route = MessageErrorRouteKey {
+            domain: domain.clone(),
+            node: NodeRef::new(ModelKind::Junction, named::<ModelName>("route_orders")),
+            source_route: Some(named("out")),
+            error_relay: named("route_errors"),
+        };
+        let target = MessageErrorRouteTarget {
+            services: Arc::new(RelayBoundaryServices::new(
+                RelayBoundaryFanout::direct_with_capacity(
+                    NonZeroUsize::new(2).expect("non-zero test capacity"),
+                ),
+                0,
+                0,
+                Vec::new(),
+                None,
+                Arc::new(BranchPresence::new()),
+            )),
+        };
+        let owner_task = runtime.spawn_relay_owner_task(
+            &domain,
+            &route.error_relay,
+            target.services.clone(),
+            RelayRetention::default(),
+        );
+        let previous = test_plan(
+            route.clone(),
+            target.clone(),
+            RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(3600),
+                max_batch_size: u64::MAX,
+            },
+        );
+        let replacement = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let (first, first_completion) = test_delivery();
+        runtime
+            .enqueue_message_error_delivery(previous, first)
+            .await
+            .expect("the preceding route accepts its error");
+        let (second, second_completion) = test_delivery();
+        runtime
+            .enqueue_message_error_delivery(replacement.clone(), second)
+            .await
+            .expect("the replacement route accepts its error");
+
+        assert_eq!(
+            nervix_primitives::time::timeout(Duration::from_secs(2), first_completion.wait())
+                .await
+                .expect("the preceding route drains on replacement"),
+            AckOutcome::Ack
+        );
+        assert_eq!(
+            nervix_primitives::time::timeout(Duration::from_secs(2), second_completion.wait())
+                .await
+                .expect("the replacement applies its immediate cadence"),
+            AckOutcome::Ack
+        );
+        let installed = runtime
+            .inner
+            .message_error_routes
+            .get(&route)
+            .expect("the replacement is installed");
+        assert!(Arc::ptr_eq(&installed.plan, &replacement));
+        drop(installed);
+        runtime.stop_message_error_routes_for_domain(&domain).await;
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
+    }
+
+    #[nervix_primitives::test]
     async fn blocked_message_error_relay_delivery_refreshes_source_ack() {
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -696,7 +877,7 @@ mod tests {
             task.runtime
                 .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
         );
-        let task = tokio::spawn(task.run(input, shutdown_rx, force_flush));
+        let task = nervix_primitives::task::spawn(task.run(input, shutdown_rx, force_flush));
         let (delivery, mut completion) = test_delivery();
 
         sender
@@ -705,7 +886,7 @@ mod tests {
             .expect("message-error task must accept delivery");
 
         assert_eq!(
-            tokio::time::timeout(
+            nervix_primitives::time::timeout(
                 REMOTE_ACK_ALIVE_INTERVAL * 2,
                 completion.wait_for_progress(),
             )
@@ -724,7 +905,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn enqueue_reports_when_the_error_route_has_stopped() {
         let runtime = Runtime::default();
         let domain = DomainName::try_from("test").expect("valid domain");
@@ -739,7 +920,6 @@ mod tests {
             error_relay: named("route_errors"),
         };
         let target = MessageErrorRouteTarget {
-            registry: RelayRegistry::new(),
             services: Arc::new(RelayBoundaryServices::new(
                 RelayBoundaryFanout::direct_with_capacity(
                     NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -748,14 +928,11 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
+                Arc::new(BranchPresence::new()),
             )),
         };
-        let route_runtime = MessageErrorRouteRuntime::new(
-            runtime.clone(),
-            route.clone(),
-            target.clone(),
-            RuntimeFlushPolicy::Immediate,
-        );
+        let plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), plan.clone());
         route_runtime.shutdown().await;
         runtime
             .inner
@@ -764,12 +941,7 @@ mod tests {
         let (delivery, _) = test_delivery();
 
         let error = runtime
-            .enqueue_message_error_delivery(
-                route.clone(),
-                target,
-                RuntimeFlushPolicy::Immediate,
-                delivery,
-            )
+            .enqueue_message_error_delivery(plan, delivery)
             .await
             .expect_err("a stopped error route must reject new delivery");
 

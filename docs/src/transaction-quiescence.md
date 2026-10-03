@@ -95,6 +95,25 @@ change. [Data Plane](./data-plane.md) explains the runtime work these gates prot
 that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its external-source
 behavior under a hold; it is distinct from the step's quiesce level.
 
+A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
+are told admission is suspended, batches that were queued but not admitted are refused as
+`suspended`, and batches that arrive during the hold are refused the same way. The drain waits for
+the acknowledgement roots of the batches admitted before the hold, which the admission fence
+guarantees it counts: a batch either has its root tracked before the hold is observed, or is refused
+with nothing dispatched. Whether producers survive the step is decided by the ingestor's endpoint
+contract, not by the quiesce level: an alteration that keeps the contract reopens admission with
+every producer attached once the step is applied, one that changes it ends them as
+`endpoint changed`, and a failed drain releases the hold and reopens admission with the previous
+execution and every producer still attached.
+
+A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
+emitter work. Force flush releases rows into that same wait; a read or network delivery does not
+finish the drain. A consumer settlement runs beside the session's ordered command lane, so an
+engaged transaction can receive the ACK that allows its own drain to finish. A flush-only ALTER
+changes only the running task's cadence. A contract-changing replacement or failed drain follows
+the same retained-work and rollback boundaries as other emitters: the previous execution remains
+the owner until the change commits, and a canceled attempt cannot resolve a new owner's ACK.
+
 The report keeps separate effect sets for configuration creation/change/drop, resource catalog and
 version bindings, domain lifecycle, ownership moves, activations and deactivations, rebuilds,
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
@@ -106,6 +125,12 @@ a stopped domain, a model or resource rebinding has no running work to pause and
 and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
 model steps plan against a running or stopped domain. [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects)
 owns what each pinned resource version loads and which rebindings reset state.
+
+An automatic schedule change that moves work away from a node the leader has marked unavailable
+retains its planned and actual impact. Completion waits for the leader's current required runtime
+participants, including the connected local node, and does not wait for preparation by that
+unavailable node. If the node rejoins, its later catch-up is a separate application of the current
+revision; it does not change the committed step's impact report.
 
 ### Concrete joint and mixed-scope examples
 
@@ -220,7 +245,9 @@ A new leader resumes a `COMMITTING` transaction from its recorded applying step 
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery
-rebuild effects beside the original entity plan. The actual aggregate rises accordingly. Node
+rebuild effects beside the original entity plan. The runtime retries the same complete typed
+schedule revision during that rebuild, and reports its wider node scope to the transaction. The
+actual aggregate rises accordingly. Node
 shutdown and restart use their own intake, drain, and former-owner fences, described in
 [Shutdown And Recovery](./shutdown.md); the transaction report does not redefine them.
 
@@ -242,6 +269,13 @@ across report revisions. A finished transaction retains its frozen report with i
 the configured retention period, **15 minutes by default**, including after subsequent graph
 changes. Retention cleanup removes the transaction's report records and topology content no other
 retained report references. Once its tombstone is reclaimed, inspection by id returns unknown.
+
+Transaction positions and operation numbers, commit-plan step counts, accepted and applied
+operation counts, report operation and execution-step counts, and topology node and edge counts
+use fixed-width 64-bit archives with checked native decoding. Durable record replay and snapshots
+retain every bit of those counts. Their representation is owned by
+[Archived Counts](./typed-states.md#archived-counts), and their current storage namespace is defined
+in [Consensus Storage And Replication](./consensus-storage-and-replication.md).
 
 These are control-plane facts. Arrow record batches, payload attempts, relay or connector buffers,
 handoff data, ACK guards, tokens, and maps remain volatile data-plane state. Inspection cannot
@@ -290,7 +324,8 @@ prevents delayed or out-of-order responses from updating the wrong waiter. Recon
 redirect recover the same admitted command by execution reference; a side-effect-free inspection
 can instead be read again. [Rust Client Library](./client-library.md#inspecting-a-transaction),
 [Command Line Client](./client-tools-cli.md), and [NSPL Overview](./nspl-overview.md) own usage;
-client reconnection and correlated response handling remain with the Rust client contract.
+[Client Session Protocol](./client-session-protocol.md) owns client reconnection, correlated
+response handling, and the exact recovery of transaction requests.
 
 The web console uses the typed envelope directly. Its outline selects the whole transaction, an
 effective execution step, or one operation's contribution. The graph combines each step's before
@@ -299,6 +334,9 @@ and after topology at stable positions, then offers **Before**, **Changes**, and
 parallel relations, shared gates, ownership moves, rebuilds, and state resets. A domain-wide pause
 gets an explicit domain outline; a force flush outside the pictured subgraph remains visible in
 the domain summary. An incomplete or stale preview is marked, and a refresh obtains a new basis.
+The console reads a report again only when the inspector opens or changes its target, when the
+attached transaction's position, state, or applied count changes, or when the operator refreshes;
+a delivered report never requests itself again.
 Historical retained topology is drawn from the report rather than a live graph snapshot. Selecting
 one operation still sends the whole-transaction preview identity on commit. See
 [Web Console](./client-tools-web-console.md#inspecting-a-transaction) for the controls.

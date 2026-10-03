@@ -117,6 +117,7 @@ Feature: Pulsar emission
           MODE <publishing_mode>
           ENCODE USING notification_codec
         INHERIT ALL
+        <batch>
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -132,13 +133,17 @@ Feature: Pulsar emission
     When the stallable endpoint "pulsar" is resumed
     Then the observed broker receives a payload
       """
-      {"user_id":42}
+      <payload>
       """
     And within "5s" Kafka consumer group "pulsar_boundary_group_{{test_id}}" next offset for topic "pulsar_boundary_in_{{test_id}}" partition 0 is "at least 1"
 
+    # A batch payload is one publish, so batching keeps each mode's completion point: producer
+    # acceptance for NO_ACK and the broker receipt of the one message for ACK.
     Examples:
-      | cluster_size | publishing_mode                                                       | offset_condition |
-      | 1            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
-      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
-      | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |
-      | 3            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |
+      | cluster_size | publishing_mode                                                       | offset_condition | batch                              | payload          |
+      | 1            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |                                    | {"user_id":42}   |
+      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |                                    | {"user_id":42}   |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |                                    | {"user_id":42}   |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |                                    | {"user_id":42}   |
+      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |

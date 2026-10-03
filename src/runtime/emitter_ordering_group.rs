@@ -31,41 +31,23 @@ pub(super) enum CompiledOrderingGroup {
 impl CompiledOrderingGroup {
     /// Compiles the group `declared` against the emitter's input schema.
     pub(super) fn compile(
-        declared: &EmitterOrderingGroup,
+        declared: &EmitterOrderingGroupPlan,
         domain: &DomainName,
         emitter: &EmitterName,
         input: RuntimeVmSchema,
         context: RuntimeVmCompileContext<'_>,
     ) -> Result<Self, RuntimeError> {
         let expression = match declared {
-            EmitterOrderingGroup::FromBranch => return Ok(Self::FromBranch),
-            EmitterOrderingGroup::Expression(expression) => expression,
+            EmitterOrderingGroupPlan::FromBranch => return Ok(Self::FromBranch),
+            EmitterOrderingGroupPlan::Expression(program) => program,
         };
-        let field = FieldName::parse(ORDERING_GROUP_FIELD)
-            .assured("this is a constant literal that satisfies the identifier grammar");
         let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-            field.as_str(),
+            ORDERING_GROUP_FIELD,
             ArrowDataType::Utf8,
             false,
         )]));
-        let construction = RouteConstruction {
-            assignments: vec![Assignment {
-                target: nervix_models::AssignmentTarget::bare(field),
-                value: expression.clone(),
-            }],
-            ..RouteConstruction::default()
-        };
-        let parsed =
-            lower_transforming_route(&construction, input.schema.as_ref(), output_schema.as_ref())
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "ordering group expression for emitter '{}' is invalid: {reason}",
-                        emitter.as_str()
-                    ),
-                })?;
         let error_sites =
-            compiled_message_error_sites(&parsed, &[MessageErrorOperation::Set], None).map_err(
+            compiled_message_error_sites(expression, &[MessageErrorOperation::Set], None).map_err(
                 |reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!("{reason:#}"),
@@ -76,7 +58,7 @@ impl CompiledOrderingGroup {
                 domain,
                 identifier: &ModelName::from(emitter),
             },
-            parsed,
+            expression.clone(),
             RuntimeVmSchemaPair {
                 input: input.schema,
                 input_sensitivity: input.sensitivity,
@@ -96,6 +78,7 @@ impl CompiledOrderingGroup {
     /// cannot be evaluated keeps its reason, and the emitter rejects that row when it publishes.
     pub(super) async fn evaluate(
         &self,
+        executor: &Executor,
         emitter: &EmitterName,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
@@ -106,6 +89,10 @@ impl CompiledOrderingGroup {
             Self::Expression(program) => program,
         };
         let executed = execute_filter_map_program_on_batch(
+            ProgramRun {
+                executor,
+                now: execution_now,
+            },
             "emitter",
             emitter,
             program,
@@ -116,7 +103,6 @@ impl CompiledOrderingGroup {
                 side_inputs,
                 ingest_metadata: None,
             },
-            execution_now,
             batch.acks.clone(),
             None,
         )
@@ -200,6 +186,27 @@ impl OrderingGroups {
             Self::Evaluated(groups) => groups.groups.values().len().arch_into(),
         }
     }
+
+    /// The bytes the groups of `rows` hold beyond the batch they describe, as
+    /// [`Self::estimated_bytes`] measures them for every row.
+    pub(super) fn estimated_bytes_of_rows(&self, rows: &[usize]) -> u64 {
+        let Self::Evaluated(groups) = self else {
+            // The branch key is the one the batch already carries.
+            return 0;
+        };
+        let mut bytes = 0_u64;
+        for row in rows {
+            // A row without a group holds only the reason it has none.
+            let Some(Ok(group)) = groups.group(*row) else {
+                continue;
+            };
+            let group_bytes: u64 = group.len().arch_into();
+            bytes = bytes
+                .checked_add(group_bytes)
+                .assured("every term counts bytes of a group this node already holds in memory");
+        }
+        bytes
+    }
 }
 
 /// Each row's own ordering group, as one Arrow column beside the batch.
@@ -219,6 +226,12 @@ impl EvaluatedOrderingGroups {
     /// The program selects each input row it evaluated, so a row it left out, a row whose
     /// evaluation recorded an error, and a row it produced no value for are the rows without a
     /// group.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the VM iterator maps selected output rows to the admitted input batch"
+        )
+    )]
     fn from_executed(
         emitter: &EmitterName,
         batch: &RelayRecordBatch,
@@ -397,10 +410,17 @@ mod tests {
         group: &str,
         input_schema: &Arc<CompiledSchema>,
     ) -> CompiledOrderingGroup {
+        let emitter = named("ordered_notifications");
+        let declared = EmitterOrderingGroupPlan::expression(
+            &emitter,
+            &expression(group),
+            input_schema.arrow_schema().as_ref(),
+        )
+        .expect("the ordering group expression must lower");
         CompiledOrderingGroup::compile(
-            &EmitterOrderingGroup::Expression(expression(group)),
+            &declared,
             &domain("default"),
-            &named("ordered_notifications"),
+            &emitter,
             RuntimeVmSchema {
                 schema: input_schema.arrow_schema(),
                 sensitivity: VmSchemaSensitivity::default(),
@@ -440,6 +460,7 @@ mod tests {
     async fn evaluate(group: &CompiledOrderingGroup, batch: &RelayRecordBatch) -> OrderingGroups {
         group
             .evaluate(
+                &Executor::default(),
                 &named("ordered_notifications"),
                 batch,
                 Timestamp::from_unix_nanos(1),
@@ -459,7 +480,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_expression_group_is_evaluated_per_source_row_in_order() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -490,7 +511,7 @@ mod tests {
         assert_eq!(groups.estimated_bytes(), group_bytes);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_expression_group_fails_only_the_row_whose_evaluation_failed() {
         let input_schema =
             test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);
@@ -529,7 +550,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_branch_group_is_the_batch_key_and_an_unbranched_batch_has_none() {
         let input_schema = test_schema(&[("tenant", ParseAsType::String)]);
         let unbranched = unbranched_batch(

@@ -26,7 +26,7 @@ use crate::application::{
 };
 
 /// The outcome a command request is answered with.
-pub(super) fn command_outcome(
+pub(in crate::application) fn command_outcome(
     execution_reference: CommandExecutionReference,
     response: CommandResponse,
 ) -> CommandOutcome {
@@ -41,6 +41,8 @@ pub(super) fn command_outcome(
         inspection,
         wasm_state,
         resource,
+        backup,
+        restore,
     } = result;
     let origin = match origin {
         CommandOrigin::Executed => OutcomeOrigin::Executed,
@@ -58,6 +60,8 @@ pub(super) fn command_outcome(
         inspection,
         wasm_state,
         resource,
+        backup,
+        restore,
     }
 }
 

@@ -29,8 +29,10 @@ at or before the fence, and one created too far ahead are refused before any eff
 An applying execution never expires. A terminal result is retained for the retry validity after the
 command finishes. The record then shrinks to a tombstone holding only the reference, and the
 tombstone is removed once the fence passes the reference's creation time. From then on the fence
-refuses the reference by itself, so a reclaimed reference reports that it has expired and never
-starts its effect again. Report retention is a separate contract: a transaction's report follows
+refuses the reference by itself, so a reclaimed reference returns the typed
+`ExecutionReferenceExpired` disposition and never starts its effect again. A conflicting reference
+found during replicated admission returns `ExecutionReferenceConflict` with the kind that differed.
+Report retention is a separate contract: a transaction's report follows
 the transaction tombstone retention, so inspection can still read it after its command reference
 has expired, and a report that inspection no longer knows does not make its reference executable.
 
@@ -92,14 +94,39 @@ flowchart LR
 ```
 
 Commands in different domains and independent resource uploads have separate execution ownership.
-Conflicting work in one domain uses that domain's alteration or handoff ownership. Reads, health,
-subscription delivery, and transport control frames continue while a command waits.
+Conflicting work in one domain uses that domain's alteration or handoff ownership. Other sessions,
+health, subscription delivery, and transport control frames continue while a command waits, and so
+do the waiting session's completion, choice, domain, and inspection requests. That session's later
+commands wait for it, because a session runs its commands in order; see [Requests, Lanes, And
+Cancellation](./client-session-protocol.md#requests-lanes-and-cancellation).
 
 `REBIND RESOURCE` completes only after its entire selected model set has been validated, committed,
 and activated under this same barrier. The successful response is therefore the boundary at which
 every selected usage observes the new pinned version. A validation or activation failure cannot
 report a partially rebound set. [Resource Versions And Bindings](./resource-versions.md#rebinding)
 defines the rebinding contract.
+
+`BACKUP` uses the same durable execution reference and retained outcome. Its success means the
+archive was assembled from one applied revision, verified, and retained on the leader under that
+reference, and its outcome carries the archive's size, digest, and per-domain revisions. The
+execution reference is also the key the client downloads the archive by. Retrying the reference
+returns the recorded outcome, and the client downloads the archive again while it is retained,
+which lasts until a download collects it or the reference's retry validity ends. See
+[Backup And Restore](./backup-and-restore.md#downloading-the-archive).
+
+`RESTORE` uses the same durable execution reference and retained outcome, and its request identity
+includes the size and BLAKE3 digest of the archive the client streams with it, so the same
+reference with another archive is a different request. The leader admits a restore only after the
+archive verified and the whole restore planned, and records every step the restore applies in the
+restore's execution as the step's effect commits. Its success means every step applied: the users,
+each domain created stopped, its resource versions completed under their archived numbers on every
+live node, and its models applied. A failure names the step, and the steps before it stay applied.
+Retrying the reference while the restore applies on the leader returns `OutcomeUnknown` with the
+`StillApplying` cause at once, and after it finished returns the recorded outcome with the typed
+restore report. Only the leader the archive was streamed to holds it, so a new leader resumes an
+applying restore from its first step not recorded when a retry streams the archive again, and ends
+it as failed once the reference's retry validity passes without one. See
+[Backup And Restore](./backup-and-restore.md#retries-disconnects-and-leader-changes).
 
 `RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.
 The ordered transaction records the reset as an effect even though it changes no Model. Success
@@ -109,11 +136,17 @@ start another destructive reset. See [Coordinated Reset](./wasm-state.md#coordin
 
 ## All-live-node barriers
 
-A completion barrier continuously derives the required set from current effective live membership.
-It keys each member by node name and process incarnation. A node joining while the effect is still
-applying joins the required set. A process restarting under the same name must apply the effect in
-its new incarnation. A node leaves the set only through the cluster's actual availability policy;
-a stale observation or one failed probe does not waive its work.
+A completion barrier continuously derives the required set from the current leader's effective
+application-health view. Followers request that view through an authenticated management operation
+and accept it only while their Raft leader and term still match the response. If the leader or its
+view cannot be confirmed, they keep waiting. Every node also requires its own current incarnation
+to finish locally. The set keys each member by node name and process incarnation. A node joining
+while the effect is still applying joins the required set. A process restarting under the same name
+must apply the effect in its new incarnation. A node leaves the set only when the leader's
+availability policy retires it; a stale observation or one failed probe does not waive its work.
+This shared view lets a connected follower finish control commands even when its own health probes
+still see another follower that the leader has already retired. The retired process catches up on
+reconnection before it can participate again.
 
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports
@@ -271,8 +304,10 @@ waits for membership and all resulting schedules to become authoritative and usa
 
 The gRPC and WebSocket transport loops keep control frames, server events, subscription delivery,
 and close detection moving while an ordered command worker waits. Disconnecting either transport
-drops its binding and waiter. Service-owned command, commit, and fully admitted upload tasks keep
-running.
+ends the session's waiters. An unclean end releases the session's transaction binding, and a clean
+close with no request in flight reverts the open transaction bound to it. Service-owned command,
+commit, and fully admitted upload tasks keep running. [Client Session
+Protocol](./client-session-protocol.md) defines how a client recovers each of them by its identity.
 
 ```mermaid
 sequenceDiagram

@@ -32,20 +32,21 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     RequestId, SessionLimits, UploadChunk, UploadStart, grpc::UPLOAD_RESOURCE_PATH,
 };
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
+use nervix_primitives::{
+    net::TcpStream,
+    sync::{CancellationToken, watch},
+    task::AbortOnDropHandle,
+    time::{sleep, timeout},
+};
 use nervix_recovery::Discarded as _;
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
 use tempfile::TempDir;
-use tokio::{
-    net::TcpStream,
-    process::{Child, Command},
-    sync::watch,
-    time::{sleep, timeout},
-};
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio::process::{Child, Command};
 
 use super::{
     cluster::{
@@ -124,9 +125,13 @@ impl ServerProcessLaunch {
     }
 }
 
-/// A command-line option a scenario sets on the server process in addition to the fixture's own.
-#[derive(Clone, Copy, Debug)]
+/// A setting a scenario gives the server process in addition to the fixture's own.
+#[derive(Clone, Debug)]
 pub(crate) enum ServerProcessOption {
+    /// The files and authority the node's resolver loads.
+    Dns(DnsConfiguration),
+    /// Enable the node's own exporter with a distinct service identity for each process.
+    TraceExport { endpoint: String, service: String },
     /// `--drain-timeout`.
     DrainTimeout(Duration),
     /// `--state-snapshot-interval`.
@@ -137,35 +142,67 @@ pub(crate) enum ServerProcessOption {
     TransactionIdleTimeout(Duration),
     /// `--transaction-tombstone-retention`.
     TransactionTombstoneRetention(Duration),
+    /// A command-line option with its value written exactly as the scenario gives it, whether or
+    /// not the server can read it.
+    Written { option: String, value: String },
+    /// An environment variable set exactly as the scenario gives it, whether or not the server
+    /// can read it.
+    Environment { variable: String, value: String },
 }
 
 impl ServerProcessOption {
-    fn apply_to(self, command: &mut Command) {
+    fn apply_to(&self, command: &mut Command, node_id: &str) {
         match self {
+            Self::Dns(configuration) => {
+                command
+                    .arg("--dns-resolver-config")
+                    .arg(&configuration.resolver_configuration)
+                    .arg("--dns-hosts-file")
+                    .arg(&configuration.hosts_file);
+                if let NameServers::Explicit(servers) = &configuration.name_servers {
+                    for server in servers {
+                        command.arg("--dns-name-server").arg(server.to_string());
+                    }
+                }
+            }
+            Self::TraceExport { endpoint, service } => {
+                command
+                    .arg("--otel-enabled")
+                    .arg("--otel-otlp-endpoint")
+                    .arg(endpoint)
+                    .arg("--otel-service-name")
+                    .arg(format!("{service}-{node_id}"));
+            }
             Self::DrainTimeout(timeout) => {
                 command
                     .arg("--drain-timeout")
-                    .arg(humantime::format_duration(timeout).to_string());
+                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::StateSnapshotInterval(interval) => {
                 command
                     .arg("--state-snapshot-interval")
-                    .arg(humantime::format_duration(interval).to_string());
+                    .arg(humantime::format_duration(*interval).to_string());
             }
             Self::ShutdownTimeout(timeout) => {
                 command
                     .arg("--shutdown-timeout")
-                    .arg(humantime::format_duration(timeout).to_string());
+                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::TransactionIdleTimeout(timeout) => {
                 command
                     .arg("--transaction-idle-timeout")
-                    .arg(humantime::format_duration(timeout).to_string());
+                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::TransactionTombstoneRetention(retention) => {
                 command
                     .arg("--transaction-tombstone-retention")
-                    .arg(humantime::format_duration(retention).to_string());
+                    .arg(humantime::format_duration(*retention).to_string());
+            }
+            Self::Written { option, value } => {
+                command.arg(option).arg(value);
+            }
+            Self::Environment { variable, value } => {
+                command.env(variable, value);
             }
         }
     }
@@ -230,6 +267,8 @@ struct ServerProcessConfiguration {
     launch: ServerProcessLaunch,
     options: Vec<ServerProcessOption>,
     ports: ServerProcessPorts,
+    node_id: String,
+    bootstrap_host: Option<String>,
     certificate_authority: PathBuf,
     certificate: PathBuf,
     private_key: PathBuf,
@@ -261,7 +300,7 @@ impl ServerProcessConfiguration {
             .arg("--cluster-id")
             .arg(CLUSTER_ID)
             .arg("--node-id")
-            .arg(NODE_ID)
+            .arg(&self.node_id)
             .arg("--interconnect-listen-addr")
             .arg(loopback(self.ports.interconnect))
             .arg("--interconnect-advertise-addr")
@@ -272,7 +311,6 @@ impl ServerProcessConfiguration {
             .arg(&self.certificate)
             .arg("--interconnect-tls-key")
             .arg(&self.private_key)
-            .arg("--allow-bootstrap")
             .arg("--default-user")
             .arg(TEST_AUTH_USERNAME)
             .arg("--init-default-user-password")
@@ -285,8 +323,10 @@ impl ServerProcessConfiguration {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log))
             .kill_on_drop(true);
-        for option in &self.options {
-            option.apply_to(&mut command);
+        if let Some(bootstrap_host) = &self.bootstrap_host {
+            command.arg("--cluster-bootstrap-host").arg(bootstrap_host);
+        } else {
+            command.arg("--allow-bootstrap");
         }
         // Any `NERVIX_*` variable the scenario runner carries would silently reconfigure the
         // server, and `RUST_LOG` would replace the log filter the server ships with.
@@ -296,6 +336,10 @@ impl ServerProcessConfiguration {
             }
         }
         command.env_remove("RUST_LOG");
+        // Options go last, so a variable a scenario sets survives the removal above.
+        for option in &self.options {
+            option.apply_to(&mut command, &self.node_id);
+        }
         command.spawn()
     }
 }
@@ -322,9 +366,21 @@ impl ServerProcess {
             .prefix("nervix-server-process-")
             .tempdir()?;
         let certificate_authority = InterconnectTestCa::new(&root)?;
+        Self::start_cluster_member(root, &certificate_authority, NODE_ID, None, launch, options)
+    }
+
+    /// Starts one independently persisted member under a shared cluster certificate authority.
+    pub(crate) fn start_cluster_member(
+        root: TempDir,
+        certificate_authority: &InterconnectTestCa,
+        node_id: &str,
+        bootstrap_host: Option<&str>,
+        launch: ServerProcessLaunch,
+        options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
         let (certificate, private_key) = certificate_authority.issue_node_with_identity(
             CLUSTER_ID,
-            NODE_ID,
+            node_id,
             TestCertificateValidity::Current,
             root.path(),
         )?;
@@ -334,6 +390,8 @@ impl ServerProcess {
             launch,
             options: options.to_vec(),
             ports: ServerProcessPorts::allocate()?,
+            node_id: node_id.to_string(),
+            bootstrap_host: bootstrap_host.map(str::to_string),
             certificate_authority: certificate_authority.path.clone(),
             certificate,
             private_key,
@@ -352,6 +410,13 @@ impl ServerProcess {
 
     /// Reopens this process's existing database on the same isolated ports.
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
+        self.restart_without_waiting()?;
+        self.wait_until_ready().await
+    }
+
+    /// Starts the next process before checking readiness. A whole cluster must bring up its
+    /// persisted voters together because one voter alone cannot form the old quorum.
+    pub(crate) fn restart_without_waiting(&mut self) -> io::Result<()> {
         if self.observe_exit()?.is_none() {
             return Err(io::Error::other(
                 "cannot restart nervix-server before its preceding process exits",
@@ -360,7 +425,7 @@ impl ServerProcess {
         self.log_start = std::fs::metadata(self.root.path().join("server.log"))?.len();
         self.child = self.configuration.spawn(self.root.path())?;
         self.exit_status = None;
-        self.wait_until_ready().await
+        Ok(())
     }
 
     /// Waits until the server answers an authenticated command, which also proves that its
@@ -371,7 +436,7 @@ impl ServerProcess {
         let endpoint = self.status_endpoint();
         let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited during startup with {}; last readiness outcome: \
@@ -397,7 +462,7 @@ impl ServerProcess {
         }
     }
 
-    fn status_endpoint(&self) -> StatusEndpoint {
+    pub(crate) fn status_endpoint(&self) -> StatusEndpoint {
         StatusEndpoint::new(
             SocketAddr::from((Ipv4Addr::LOCALHOST, self.configuration.ports.grpc)),
             StatusTransport::Plaintext,
@@ -451,7 +516,7 @@ impl ServerProcess {
         payload: &str,
     ) -> io::Result<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited with {} before it admitted the HTTP payload\n{}",
@@ -493,7 +558,7 @@ impl ServerProcess {
         let task_cancellation = cancellation.clone();
         let (observation_tx, observation) = watch::channel(HttpLoadObservation::default());
         let host = host.to_string();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             run_http_load(
                 task_cancellation,
                 observation_tx,
@@ -580,7 +645,7 @@ impl ServerProcess {
 
     async fn poll_for_log(&mut self, fragment: &str) -> io::Result<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // The exit is read before the log, so a process that logged the fragment and then
             // exited is still seen to have logged it.
             let exit = self.observe_exit()?;
@@ -626,7 +691,7 @@ impl ServerProcess {
         let mut ping_pong = connection
             .ping_pong()
             .ok_or_else(|| io::Error::other("the HTTP/2 connection yielded no ping handle"))?;
-        let connection = AbortOnDropHandle::new(tokio::spawn(async move {
+        let connection = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             connection.await.discarded(
                 "the scenario observes the server process, not the connection it holds open",
             );
@@ -675,8 +740,10 @@ impl ServerProcess {
                     .send_data(upload_start_frame(domain, resource)?, false)
                     .map_err(io::Error::other)?;
                 self.wait_for_staged_upload_archive().await?;
-                let sender =
-                    tokio::spawn(trickle_upload_chunks(request_body, upload_chunk_frame()?));
+                let sender = nervix_primitives::task::spawn(trickle_upload_chunks(
+                    request_body,
+                    upload_chunk_frame()?,
+                ));
                 HeldUploadBody::Trickling {
                     _sender: AbortOnDropHandle::new(sender),
                 }
@@ -706,7 +773,7 @@ impl ServerProcess {
     async fn poll_for_staged_upload_archive(&mut self) -> io::Result<()> {
         let resources = self.root.path().join("db").join("resources");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited with {} before it staged an upload archive\n{}",
@@ -723,6 +790,10 @@ impl ServerProcess {
 
     pub(crate) fn grpc_uri(&self) -> String {
         format!("http://{}", loopback(self.configuration.ports.grpc))
+    }
+
+    pub(crate) fn interconnect_endpoint(&self) -> String {
+        loopback(self.configuration.ports.interconnect)
     }
 
     pub(crate) fn observability_uri(&self, path: &str) -> String {
@@ -783,7 +854,7 @@ impl ServerProcessHttpLoad {
 
     async fn poll_for_admissions(&mut self, expected: u64) -> io::Result<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let current = self.observation.borrow().clone();
             if current.admitted >= expected {
                 return Ok(());
@@ -819,12 +890,12 @@ async fn run_http_load(
     let mut load_id = first_id;
     let mut template_index = 0_usize;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let payload_template = payload_templates
             .get(template_index)
             .assured("the template index is kept below the non-empty template list length");
         let payload = payload_template.replace("{{load_id}}", &load_id.to_string());
-        let published = tokio::select! {
+        let published = nervix_primitives::select! {
             () = cancellation.cancelled() => return,
             result = publish_http_uri_with_headers(
                 uri.clone(),
@@ -876,7 +947,7 @@ async fn run_http_load(
             next_template_index
         };
 
-        tokio::select! {
+        nervix_primitives::select! {
             () = cancellation.cancelled() => return,
             () = sleep(HTTP_LOAD_INTERVAL) => {}
         }
@@ -901,7 +972,7 @@ enum HeldUploadBody {
 /// Sends one chunk per interval until the server closes the stream or the upload is dropped.
 async fn trickle_upload_chunks(mut body: h2::SendStream<Bytes>, chunk: Bytes) {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         sleep(SLOW_UPLOAD_CHUNK_INTERVAL).await;
         if body.send_data(chunk.clone(), false).is_err() {
             return;

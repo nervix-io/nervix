@@ -53,6 +53,11 @@ The HTTPS listener runs on every live node, independent of Raft leadership and g
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
 runtime revision its node applied.
 
+Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
+typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
+creates resource content. The server applies the same version validation and pinning as the NSPL
+command path, so the rendered stored Model and every listener use a concrete version.
+
 ## Version Lifecycle
 
 ### Assignment
@@ -77,7 +82,9 @@ recorded under that identity, with the number already assigned; the same identit
 digest is rejected as a digest conflict. An upload admitted through the client protocol keeps
 installing when the uploading connection closes. The identity rules and client retries are covered
 in [Resources](./resources.md#lifecycle) and
-[Command Completion](./command-completion.md#lifecycle-and-ownership).
+[Command Completion](./command-completion.md#lifecycle-and-ownership), and the upload stream, its
+typed failures, and its recovery in
+[Resource Uploads](./client-session-protocol.md#resource-uploads).
 
 ### Installing One Copy
 
@@ -155,7 +162,9 @@ If an applying upload loses the task that was installing it, because leadership 
 upload's connection was aborted, the leader resumes it at its next reconciliation. An upload whose
 version was never published fails with
 `the admitted archive is unavailable before durable version installation`, because only the node
-that admitted it held the archive. A published version keeps waiting for the live set as above.
+that admitted it held the archive. A retry of the same upload identity that reaches the leader
+before that reconciliation carries the archive again, so it installs the version and completes the
+upload instead. A published version keeps waiting for the live set as above.
 
 A node that joins after completion does not change the outcome. Its reconciliation installs every
 published version it does not hold from a live node that holds it, and
@@ -197,6 +206,35 @@ stateDiagram-v2
 Nervix does not delete or expire versions. Every published version, including one that failed after
 publication, stays in the catalog, and every node keeps installing each published version it lacks.
 
+### Restored Versions
+
+A restore brings a domain's catalog from a backup archive instead of uploading it; see
+[Backup And Restore](./backup-and-restore.md#restoring). When it creates the domain, it declares
+every resource the archive declares with the next number of its archived sequence, so the next
+upload of the resource receives the number the source cluster would have assigned next. It then
+imports each completed version of the archive under its archived number, one at a time:
+
+1. The leader installs the version's original upload from its section of the restore's archive,
+   through the same verification as any first copy. The archive must have the version's archived
+   root checksum, and the manifest the leader records must reproduce every archived checksum and
+   count exactly.
+2. One consensus command publishes the version under its archived number, with its archived
+   metadata, creation time, and creating node, together with the leader's ready replica record. It
+   records the import as the upload of an identity derived from the version's number, owned by the
+   user who ran the restore. It refuses a number at or above the declared sequence, a number
+   already published, and a replica other than the leader's ready copy with the version's digest.
+   Importing the same number again under the same identity changes nothing, which is what lets a
+   resumed restore repeat an import whose outcome it did not see.
+3. The version completes as an upload completes: when every live node process incarnation has
+   recorded a ready replica with its digest. The restore waits for that before it imports the next
+   version, and applies the domain's models only after every version is completed.
+
+A number the archive records for an upload that failed, or was still installing when the backup
+read it, is not imported. It stays below the declared sequence, so it stays a gap that no upload
+receives and no binding can name. A restored catalog therefore holds only completed versions, and
+`DESCRIBE RESOURCE` in the restored domain shows the same numbers, gaps, and checksums as in the
+source, with the replicas of the restoring cluster's own nodes.
+
 ## Bindings
 
 Seven model forms bind a resource version, and each requires a `VERSION <n>` or `VERSION LATEST`
@@ -212,11 +250,26 @@ clause. Omitting the clause is a parse error.
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
 
+Registry planning derives typed lookup and WASM resource inputs from each committed schedule. The
+lookup input carries the exact resource identity, version, file path, codec, and key field. The
+leader rejects a missing file during candidate binding validation. Running and stopped domain
+builds use the same pinned input; the loader reports invalid decoded content before publishing the
+new runtime. A WASM input carries the exact module resource identity, version, and file. Running
+builds and entity swaps prepare that
+module from the scheduled input before replacing execution. The guest-state generations remain in
+the same scheduled processor revision and are part of its prepared-plan identity.
+
 An HTTP emitter validates its referenced client's origin, attempt timeout and paired client
 certificate/key settings before its candidate graph activates. A TLS path rendered from `CLIENT
 ... MOUNT` still names the pinned version in the client Model; validation does not fetch a newer
 version or probe the remote HTTP endpoint. Client instantiation reads the mounted CA or identity
 files at the existing load boundary above.
+
+Replacing only the emitter's client reference takes an entity pause: admitted requests finish
+through the existing client's pinned mount before the replacement opens the newly selected
+client. Changing that client's definition or rebinding its mounted resource takes the ordinary
+configuration-entity domain pause. If the drain cannot complete, the candidate definition and
+its resource binding are not installed.
 
 ### The Pinning Invariant
 
@@ -226,13 +279,14 @@ Three rules together guarantee that a consumer uses exactly the version its mode
    stored, and a stored model holds only the resulting number. The written `LATEST` is kept only in
    the transaction record of the statement that carried it, which is never planned again once that
    statement is applied.
-2. **The execution plan carries it.** Schedule application builds each consumer from the scheduled
-   model it runs, so the number travels with the model into every node's execution.
+2. **The execution plan carries it.** The decision layer derives each typed consumer plan from the
+   committed schedule, including the pinned number. Runtime installation binds that plan to the
+   node's local store without reading a Model; see [Execution Plans](./execution-plans.md).
 3. **No consumer consults the catalog.** A consumer resolves its number to a directory in the local
    store and loads it. It never asks which version is newest.
 
-A rebuild, a restart, a failover, and a relocation all rebuild consumers from the same stored
-models, so they load the same versions. Only a model mutation can change a number.
+A rebuild, a restart, a failover, and a relocation derive typed consumer plans from the same
+committed models, so they load the same versions. Only a model mutation can change a number.
 
 ## `LATEST` Resolution
 
@@ -308,11 +362,11 @@ binding also replaces the guest state of every branch: a module discovered to be
 afterwards has already invalidated the state its predecessor saved. The compiled module the check
 produces is the one activation installs, so nothing is compiled twice.
 
-The remaining content that only a consumer can prove is proven when the nodes build the consumers
-from the committed models: the protobuf sources a codec or signaling protocol compiles, and every
-line of a hash-map file. A client mount only needs the version's directory; the connector
-reads the files it names when it uses them. A version that fails during activation fails the
-command after its models were committed, as described in
+The remaining content that only a consumer can prove is proven when nodes build the consumers
+from the committed schedule's typed plans: the protobuf sources a codec or signaling protocol
+compiles, and every line of a hash-map file. A client mount only needs the version's directory; the
+connector reads the files it names when it uses them. A version that fails during activation fails
+the command after its models were committed, as described in
 [Failure Semantics And Recovery](#failure-semantics-and-recovery). A stopped domain builds only its
 codecs and hash maps, so an unusable version bound by one of its other consumers surfaces when the
 domain starts.

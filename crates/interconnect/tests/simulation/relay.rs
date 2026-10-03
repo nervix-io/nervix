@@ -6,10 +6,9 @@
 //! - **Depends on.** The transport fixture, production relay APIs, and Turmoil network faults.
 //! - **Must not know.** Runtime graphs, persistent ACK stores, or connector behavior.
 
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-
 use nervix_interconnect::{RelayAdmissionDecision, RelayAdmissionStatus};
 use nervix_models::{CoordinationIdentity, RemoteAckOutcome, RemoteAckResolution};
+use nervix_primitives::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use super::*;
 
@@ -102,10 +101,7 @@ fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> Re
         batch_ipc,
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id,
-            reply_node_id: sender.node_id().clone(),
-        }),
+        admission: Some(fixture_registration(ack_id, sender)),
     }
 }
 
@@ -142,10 +138,13 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                     server.replace_live_nodes(&live);
                     ready.send_replace(true);
                     if !matches!(case, RelayCase::CancelBeforeGrant) {
-                        let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                            .await
-                            .assured("the relay reaches the receiver before the simulated deadline")
-                            .assured("the relay receiver remains open");
+                        let envelope =
+                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured(
+                                    "the relay reaches the receiver before the simulated deadline",
+                                )
+                                .assured("the relay receiver remains open");
                         let Envelope::RelayPayload(ref body) = envelope.envelope else {
                             panic!("the relay channel carries a relay payload");
                         };
@@ -243,7 +242,10 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             Ok(()) => panic!("the fenced grant must be refused"),
                             Err(error) => error,
                         };
-                        assert!(matches!(error, TransportError::RelayCancelled), "{error:?}");
+                        assert!(
+                            matches!(error.current_context(), TransportError::RelayCancelled),
+                            "{error:?}"
+                        );
                         assert_eq!(
                             client
                                 .relay_admission_status(&peer, case.delivery())
@@ -254,7 +256,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                     } else {
                         let sending = client.clone();
                         let target = peer.clone();
-                        let send_task = tokio::spawn(async move {
+                        let send_task = nervix_primitives::task::spawn(async move {
                             sending.send(&target, Envelope::RelayPayload(body)).await
                         });
                         wait_for(&mut received).await;
@@ -265,7 +267,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                                 "client",
                                 "cancellation requested while body reply is pending",
                             );
-                            Some(tokio::spawn(async move {
+                            Some(nervix_primitives::task::spawn(async move {
                                 cancelling.cancel_relay(&target, case.delivery()).await
                             }))
                         } else {
@@ -278,7 +280,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                         };
                         assert!(
                             matches!(
-                                error,
+                                error.current_context(),
                                 TransportError::RequestTimeout { .. }
                                     | TransportError::ProgressTimeout { .. }
                                     | TransportError::Closed(_)
@@ -310,7 +312,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             let cancelling = client.clone();
                             let target = peer.clone();
                             trace.record("client", "cancellation requested during reconnect");
-                            Some(tokio::spawn(async move {
+                            Some(nervix_primitives::task::spawn(async move {
                                 cancelling.cancel_relay(&target, case.delivery()).await
                             }))
                         } else {
@@ -344,21 +346,25 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                                 Ok(()) => panic!("the cancelled retry must be refused"),
                                 Err(error) => error,
                             };
-                            assert!(matches!(error, TransportError::RelayCancelled), "{error:?}");
+                            assert!(
+                                matches!(error.current_context(), TransportError::RelayCancelled),
+                                "{error:?}"
+                            );
                             trace.record("client", "reconciled cancellation refused the retry");
                         } else {
                             client
                                 .send(&peer, Envelope::RelayPayload(body))
                                 .await
                                 .assured("same-epoch retry reconciles admitted attempt");
-                            let outcome = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                                .await
-                                .assured("the semantic ACK arrives")
-                                .assured("sender queue remains open");
+                            let outcome =
+                                nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                    .await
+                                    .assured("the semantic ACK arrives")
+                                    .assured("sender queue remains open");
                             assert!(matches!(
                                 outcome.envelope,
                                 Envelope::Ack(RemoteAckResolution {
-                                    ack_id: 71,
+                                    registration: RemoteAckRegistration { ack_id: 71, .. },
                                     outcome: RemoteAckOutcome::Ack
                                 })
                             ));
@@ -491,7 +497,9 @@ fn restarted_receiver_fences_unresolved_relay(
     let (fresh_tx, fresh_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
-    let epochs = StdArc::new(parking_lot::Mutex::new(Vec::<CoordinationIdentity>::new()));
+    let epochs = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::<
+        CoordinationIdentity,
+    >::new()));
     let incarnations = StdArc::new(AtomicUsize::new(0));
     let crash_phase = StdArc::new(AtomicU8::new(0));
     let seed = run.seed();
@@ -539,10 +547,11 @@ fn restarted_receiver_fences_unresolved_relay(
                             *count = count.checked_add(1).assured("two incarnations start")
                         });
                         if incarnation == 0 {
-                            let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                                .await
-                                .assured("the first relay reaches the receiver")
-                                .assured("the first receiver queue remains open");
+                            let envelope =
+                                nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                    .await
+                                    .assured("the first relay reaches the receiver")
+                                    .assured("the first receiver queue remains open");
                             let Envelope::RelayPayload(ref body) = envelope.envelope else {
                                 panic!("the first receiver gets a relay body");
                             };
@@ -578,10 +587,11 @@ fn restarted_receiver_fences_unresolved_relay(
                         }
                         assert_eq!(incarnation, 1, "only one receiver restart is scheduled");
                         wait_for(&mut fresh).await;
-                        let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
-                            .await
-                            .assured("fresh relay reaches the restarted receiver")
-                            .assured("restarted receiver queue remains open");
+                        let envelope =
+                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured("fresh relay reaches the restarted receiver")
+                                .assured("restarted receiver queue remains open");
                         let Envelope::RelayPayload(ref body) = envelope.envelope else {
                             panic!("restarted receiver gets a relay body");
                         };
@@ -639,7 +649,7 @@ fn restarted_receiver_fences_unresolved_relay(
                         register_peer(&client, "server").await;
                         let sending = client.clone();
                         let target = peer.clone();
-                        let first = tokio::spawn(async move {
+                        let first = nervix_primitives::task::spawn(async move {
                             sending
                                 .send(
                                     &target,
@@ -699,7 +709,10 @@ fn restarted_receiver_fences_unresolved_relay(
                                 Err(error) => error,
                             };
                             assert!(
-                                matches!(error, TransportError::RelayIndeterminate),
+                                matches!(
+                                    error.current_context(),
+                                    TransportError::RelayIndeterminate
+                                ),
                                 "{error:?}"
                             );
                         }
@@ -734,9 +747,9 @@ fn restarted_receiver_fences_unresolved_relay(
             });
             simulation.client("observer", async move {
                 let mut finished = finished_rx;
-                tokio::time::timeout(Duration::from_secs(60), async {
+                nervix_primitives::time::timeout(Duration::from_secs(60), async {
                     while *finished.borrow() < 2 {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         finished
                             .changed()
                             .await

@@ -4,15 +4,17 @@
 //!
 //! - **Owns.** Composing the SQS connector plan with the declared acknowledgement policy and
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the SQS connector, and pre-resolved runtime
-//!   execution handles.
+//! - **Depends on.** The connector source contract, the SQS connector, the node resolver, and
+//!   pre-resolved runtime execution handles.
 //! - **Must not know.** The SQS SDK, queue polling, NSPL parsing, registry validation, or
 //!   placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_sqs::{SqsSource, SqsSourcePlan};
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -21,7 +23,7 @@ impl SqsIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let SqsIngestorStartPlan {
             client,
             queue,
@@ -30,10 +32,13 @@ impl SqsIngestorStartPlan {
         } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
-        let connector = SqsSourcePlan::connect(&resolved.entries, &queue)
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let Some(dns) = runtime.dns() else {
+            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+        };
+        let connector = SqsSourcePlan::connect(&resolved.entries, &queue, dns.clone())
             .await
-            .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
             instances,

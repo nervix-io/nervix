@@ -7,16 +7,14 @@
 //! - **Depends on.** The store's database and executor.
 //! - **Must not know.** What the writes it makes durable hold, who waits for them, or replicas.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use error_stack::{Report, ResultExt as _};
 use fjall::PersistMode;
 use meticulous::OptionExt as _;
 use nervix_execution::{MemoryClass, StorageClass};
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::Notify;
+use nervix_primitives::sync::{
+    Notify,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use super::{RuntimePersistenceError, RuntimeStateStore};
 
@@ -109,6 +107,12 @@ impl DurabilityBarrier {
     /// barrier runs at most one round at a time and lets every caller waiting meanwhile share the
     /// next one. A round that fails with [`RuntimePersistenceError::Synchronize`] refuses this and
     /// every later durability promise.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external storage driver owns the admitted durability action"
+        )
+    )]
     async fn synchronize<Round, Synchronized>(
         &self,
         round: Round,
@@ -119,7 +123,7 @@ impl DurabilityBarrier {
     {
         let ticket = self.issue();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let finished = self.finished.notified();
             tokio::pin!(finished);
             finished.as_mut().enable();
@@ -160,6 +164,12 @@ impl RuntimeStateStore {
     ///
     /// Callers waiting at the same time share synchronizations, and a synchronization runs on the
     /// storage workers, never on the async worker that awaits it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external storage driver owns the admitted durability action"
+        )
+    )]
     pub(in crate::runtime) async fn synchronize(
         &self,
     ) -> error_stack::Result<(), RuntimePersistenceError> {
@@ -211,7 +221,7 @@ mod tests {
     /// Writers that ask for durability at the same time share synchronizations instead of each
     /// queuing one behind the storage workers. A writer that asks while a synchronization runs is
     /// covered by the next one at the latest.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn concurrent_writers_share_synchronizations() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
@@ -232,7 +242,7 @@ mod tests {
     /// A synchronization that fails leaves every write it covered, and every later one, without a
     /// durability promise: the database refuses later synchronizations, and none of them could
     /// prove that writes the failed one did not flush reached storage.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_synchronization_refuses_every_later_durability_promise() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
@@ -254,7 +264,7 @@ mod tests {
 
     /// Cancelling the writer that runs a synchronization frees the barrier for the others: the next
     /// writer runs its own synchronization instead of waiting for one nobody will finish.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_cancelled_synchronization_frees_the_barrier() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
@@ -264,7 +274,7 @@ mod tests {
             .expect("nothing else runs a synchronization");
         drop(abandoned);
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), store.synchronize())
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(5), store.synchronize())
             .await
             .expect("a freed barrier must not keep writers waiting")
             .expect("the synchronization should succeed");

@@ -10,15 +10,12 @@ workspace = true
 
 [features]
 default = []
+# Selects Loom's primitives for the whole graph, so a Loom model of a consensus owner runs on them.
+loom = ["nervix-execution/loom", "nervix-primitives/loom"]
 shuttle = [
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
-  "dep:shuttle-parking-lot",
-  "dep:shuttle-tokio",
-  "dep:shuttle-tokio-util",
-  "shuttle-parking-lot/shuttle",
-  "shuttle-tokio/shuttle",
-  "shuttle-tokio-util/shuttle",
+  "nervix-primitives/shuttle",
 ]
 testing = []
 
@@ -33,27 +30,21 @@ meticulous = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 openraft = { workspace = true }
-parking_lot = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
-shuttle-parking-lot = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = [
-  "full",
-  "test-util",
-], optional = true }
-shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 sorted-vec = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ubyte = { workspace = true }

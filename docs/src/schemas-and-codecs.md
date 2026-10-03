@@ -87,6 +87,14 @@ CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
 ```
 
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
+JSON and CBOR also accept exact numeric and datetime wire types (`U8` through `I64`, `F32`,
+`F64`, and `DATETIME`) alongside the generic JSON types. The exact variants retain their type in
+the canonical definition and in completion suggestions.
+
+The web console's **Create** menu provides structured editors for internal schemas and each of
+these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
+types from an exact scalar type. Field order, `OPTIONAL`, `SENSITIVE`, wire mode, and exact format
+are preserved in the completed Model and its canonical command. See [Web Console](client-tools-web-console.md).
 
 SYSLOG is different: it is a predefined singleton wire schema whose shape comes from the syslog
 protocol. It has no user-defined name, `CREATE WIRE` declaration, mode, field list, `ALTER`, or
@@ -223,6 +231,14 @@ a serde JSON tree or a row map. Strict and loose field behavior, optional nulls,
 ranges, nested sequence shapes, invalid UTF-8 and malformed escape rejection remain the public
 wire-schema contract.
 
+On emission, a compiled `WIRE JSON` codec writes each object in schema field order directly from
+its typed Arrow columns. Field names are escaped when the codec is compiled. A runtime-selected
+SIMD classifier marks quotes, backslashes and control bytes in each string column once per batch;
+clean UTF-8 strings are copied without an escape pass, while marked strings use JSON escaping.
+Optional null fields are omitted, required null fields fail encoding, datetimes use their declared
+wire rule, and bytes use padded base64. Nested arrays retain their declared shape. The encoder
+writes into the caller's output buffer, including a bounded buffer when `MAX SIZE` applies.
+
 JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
 JAQ transformations. An ingestion transformation turns every value the payload holds into zero
 or more JSON objects, and each object is decoded into the internal schema as one message
@@ -327,7 +343,7 @@ Semantics:
 - `ON INGESTION` runs on every value the parsed native or protobuf payload holds and may yield zero or more JSON objects, each of which becomes one message compatible with the internal schema ([Unfolding Payloads](#unfolding-payloads))
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
-JAQ-backed encode/decode is dispatched to blocking workers so expensive transforms do not stall async ingestor or emitter tasks.
+JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them. A payload an ingestor's quiesce buffer retained is not refused: it waits in the buffer until the extension workers take it ([Quiesce Modes](ingestors.md#quiesce-modes)).
 JAQ JSON output intentionally preserves object member declaration order. The serde JSON
 `preserve_order` feature exists for that public JAQ behavior; schemaful `WIRE JSON` ingestion does
 not depend on serde JSON object storage.

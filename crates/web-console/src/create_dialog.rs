@@ -1,16 +1,18 @@
-//! Structured creation of the small entities operators need before a graph can be configured.
+//! Structured creation of the entities operators configure before and around a graph.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser-local create drafts, typed choice presentation, canonical previews, dialog
-//!   accessibility, and the state shown for one durable submission.
-//! - **Depends on.** Public semantic models, the session choice contract, and the console request
-//!   dispatcher owned by the parent module.
-//! - **Must not know.** Registry state, command execution internals, or how the server resolves a
-//!   choice.
+//!   accessibility, the state shown for one submission, and how a completed draft is dispatched:
+//!   as a durable command or as a session subscription.
+//! - **Depends on.** Public semantic models, the canonical client statement renderer, the session
+//!   choice contract, and the console request dispatcher owned by the parent module.
+//! - **Must not know.** Registry state, command execution internals, subscription tabs, or how the
+//!   server resolves a choice.
+
+use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
-use futures_channel::mpsc::UnboundedSender;
 use leptos::{ev, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -18,20 +20,110 @@ use nervix_client_wire::{
     ChoiceValue, DomainPaceChoice,
 };
 use nervix_models::{
-    CreateDomain, CreateResource, CreateStatement, CreateUser, DomainClockPeriod, DomainClockSkew,
-    DomainConfig, DomainName, DomainPace, PlacementPolicy, ResourceName, Statement, UserName,
+    CanonicalNsplError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
+    CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
+    ModelKind, ModelName, PlacementPolicy, RelayName, RequestedResourceVersion, ResourceName,
+    Statement, SubscriptionName, UserName,
 };
+use nervix_nspl::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use wasm_bindgen::JsCast as _;
 
-use super::{ConsoleConnectionState, ConsoleRequest};
+use super::{ConsoleConnectionState, ConsoleRequest, request_handoff::RequestSender};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+mod choice_group;
+mod client_draft;
+mod client_editor;
+mod codec_draft;
+mod codec_editor;
+mod endpoint_draft;
+mod endpoint_editor;
+mod hash_map_draft;
+mod hash_map_editor;
+mod ingestor_draft;
+mod ingestor_editor;
+mod ingestor_route_draft;
+mod ingestor_route_editor;
+mod ingestor_source_draft;
+mod processor_assignment_editor;
+mod processor_choices;
+mod processor_draft;
+mod processor_editor;
+mod processor_inheritance_editor;
+mod processor_input_editor;
+mod processor_invocation_editor;
+mod processor_route_editor;
+mod processor_state_editor;
+mod relay_draft;
+mod relay_editor;
+mod resource_binding_draft;
+mod resource_binding_editor;
+mod resource_pin_draft;
+mod schema_draft;
+mod schema_editor;
+mod signaling_draft;
+mod signaling_editor;
+mod subscription_draft;
+mod subscription_editor;
+mod udf_draft;
+mod udf_editor;
+mod vhost_draft;
+mod vhost_editor;
+#[cfg(test)]
+mod visual_forms_tests;
+
+use choice_group::ChoiceGroup;
+#[cfg(test)]
+use choice_group::{ChoiceGroupProps, select_choice, selected_choice};
+use client_draft::{ClientDraft, ClientDraftError, ClientTransport};
+use client_editor::ClientEditor;
+use codec_draft::{CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind};
+use codec_editor::CodecEditor;
+use endpoint_draft::{EndpointDraft, EndpointDraftError};
+use endpoint_editor::EndpointEditor;
+use hash_map_draft::{HashMapDraft, HashMapDraftError};
+use hash_map_editor::HashMapEditor;
+use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
+use ingestor_editor::IngestorEditor;
+use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
+use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
+use processor_editor::ProcessorEditor;
+use relay_draft::{RelayDraft, RelayDraftError};
+use relay_editor::RelayEditor;
+use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
+use schema_editor::{BranchEditor, SchemaEditor, WireSchemaEditor};
+use signaling_draft::{SignalingDraft, SignalingDraftError, SignalingFormatDraft};
+use signaling_editor::SignalingEditor;
+use subscription_draft::{SubscriptionDraft, SubscriptionDraftError};
+use subscription_editor::SubscriptionEditor;
+use udf_draft::{UdfDraft, UdfDraftError};
+use udf_editor::UdfEditor;
+use vhost_draft::{VhostDraft, VhostDraftError};
+use vhost_editor::VhostEditor;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CreateKind {
     Domain,
     User,
     Resource,
+    Schema,
+    WireJsonSchema,
+    WireCborSchema,
+    WireAvroSchema,
+    Branch,
+    Relay,
+    Subscription,
+    Codec,
+    SignalingProtocol,
+    Client,
+    Vhost,
+    Endpoint,
+    HashMap,
+    Udf,
+    Ingestor,
+    Junction,
+    Reingestor,
 }
 
 impl CreateKind {
@@ -40,6 +132,54 @@ impl CreateKind {
             Self::Domain => "domain",
             Self::User => "user",
             Self::Resource => "resource",
+            Self::Schema => "schema",
+            Self::WireJsonSchema => "wire JSON schema",
+            Self::WireCborSchema => "wire CBOR schema",
+            Self::WireAvroSchema => "wire AVRO schema",
+            Self::Branch => "branch",
+            Self::Relay => "relay",
+            Self::Subscription => "subscription",
+            Self::Codec => "codec",
+            Self::SignalingProtocol => "signaling protocol",
+            Self::Client => "client",
+            Self::Vhost => "VHOST",
+            Self::Endpoint => "endpoint",
+            Self::HashMap => "hash map",
+            Self::Udf => "Roto UDF",
+            Self::Ingestor => "ingestor",
+            Self::Junction => "junction",
+            Self::Reingestor => "reingestor",
+        }
+    }
+
+    fn domain_scoped(self) -> bool {
+        !matches!(self, Self::Domain | Self::User)
+    }
+
+    /// Whether the created statement takes `IF NOT EXISTS`. A session subscription is not a stored
+    /// entity, so its statement has no such modifier.
+    fn takes_if_not_exists(self) -> bool {
+        self != Self::Subscription
+    }
+
+    fn wire_format(self) -> Option<WireFormat> {
+        match self {
+            Self::WireJsonSchema => Some(WireFormat::Json),
+            Self::WireCborSchema => Some(WireFormat::Cbor),
+            Self::WireAvroSchema => Some(WireFormat::Avro),
+            Self::Domain
+            | Self::User
+            | Self::Resource
+            | Self::Schema
+            | Self::Branch
+            | Self::Relay
+            | Self::Subscription
+            | Self::Codec
+            | Self::SignalingProtocol
+            | Self::Client
+            | Self::Vhost
+            | Self::Endpoint => None,
+            Self::HashMap | Self::Udf | Self::Ingestor | Self::Junction | Self::Reingestor => None,
         }
     }
 }
@@ -48,6 +188,103 @@ impl CreateKind {
 pub(crate) enum ChoiceControl {
     DomainPace,
     PlacementPolicy,
+    BranchSchema,
+    RelaySchema,
+    RelayBranch,
+    SubscriptionRelay,
+    /// Inserts typed references to the selected relay's fields into the subscription filter.
+    SubscriptionField,
+    CodecSchema,
+    CodecWireSchema,
+    CodecResource,
+    CodecVersion,
+    SignalingResource,
+    SignalingVersion,
+    ClientResource,
+    ClientVersion,
+    ClientSignaling,
+    VhostResource,
+    VhostVersion,
+    EndpointVhost,
+    EndpointSignaling,
+    HashResource,
+    HashVersion,
+    HashCodec,
+    HashKey,
+    IngestSourceRef,
+    IngestCodec,
+    IngestTimestampField,
+    IngestInputField,
+    IngestRouteBranch,
+    IngestRouteRelay,
+    IngestOutputField,
+    IngestBranchField,
+    IngestErrorRelay,
+    IngestErrorField,
+    ProcessorInputRelay,
+    ProcessorBranch,
+    ProcessorStateRelay,
+    ProcessorStateField,
+    ProcessorRouteBranch,
+    ProcessorRouteRelay,
+    ProcessorInputField,
+    ProcessorOutputField,
+    ProcessorBranchField,
+    ProcessorErrorRelay,
+    ProcessorErrorField,
+}
+
+impl ChoiceControl {
+    /// The form whose draft this control edits.
+    fn form(self) -> CreateKind {
+        match self {
+            Self::DomainPace | Self::PlacementPolicy => CreateKind::Domain,
+            Self::BranchSchema => CreateKind::Branch,
+            Self::RelaySchema | Self::RelayBranch => CreateKind::Relay,
+            Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
+            Self::CodecSchema
+            | Self::CodecWireSchema
+            | Self::CodecResource
+            | Self::CodecVersion => CreateKind::Codec,
+            Self::SignalingResource | Self::SignalingVersion => CreateKind::SignalingProtocol,
+            Self::ClientResource | Self::ClientVersion | Self::ClientSignaling => {
+                CreateKind::Client
+            }
+            Self::VhostResource | Self::VhostVersion => CreateKind::Vhost,
+            Self::EndpointVhost | Self::EndpointSignaling => CreateKind::Endpoint,
+            Self::HashResource | Self::HashVersion | Self::HashCodec | Self::HashKey => {
+                CreateKind::HashMap
+            }
+            Self::IngestSourceRef
+            | Self::IngestCodec
+            | Self::IngestTimestampField
+            | Self::IngestInputField
+            | Self::IngestRouteBranch
+            | Self::IngestRouteRelay
+            | Self::IngestOutputField
+            | Self::IngestBranchField
+            | Self::IngestErrorRelay
+            | Self::IngestErrorField => CreateKind::Ingestor,
+            Self::ProcessorInputRelay
+            | Self::ProcessorBranch
+            | Self::ProcessorStateRelay
+            | Self::ProcessorStateField
+            | Self::ProcessorRouteBranch
+            | Self::ProcessorRouteRelay
+            | Self::ProcessorInputField
+            | Self::ProcessorOutputField
+            | Self::ProcessorBranchField
+            | Self::ProcessorErrorRelay
+            | Self::ProcessorErrorField => CreateKind::Junction,
+        }
+    }
+
+    fn applies_to(self, kind: CreateKind) -> bool {
+        if self.form() == kind {
+            return true;
+        }
+        kind == CreateKind::Reingestor && self.form() == CreateKind::Junction
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +304,231 @@ enum ChoiceLoad {
         page_cursor: Option<String>,
     },
     Empty,
+    MissingPrerequisite(&'static str),
+    StaleContext,
     Failed(String),
+}
+
+/// The search text and the loaded choices of one structured control.
+#[derive(Clone, Copy)]
+struct ChoiceControlSignals {
+    search: RwSignal<String>,
+    load: RwSignal<ChoiceLoad>,
+}
+
+impl ChoiceControlSignals {
+    fn new() -> Self {
+        Self {
+            search: RwSignal::new(String::new()),
+            load: RwSignal::new(ChoiceLoad::Waiting),
+        }
+    }
+}
+
+/// Every structured control's signals, one set per control so each owns its own latest request.
+#[derive(Clone, Copy)]
+struct ChoiceControls {
+    domain_pace: ChoiceControlSignals,
+    placement_policy: ChoiceControlSignals,
+    branch_schema: ChoiceControlSignals,
+    relay_schema: ChoiceControlSignals,
+    relay_branch: ChoiceControlSignals,
+    subscription_relay: ChoiceControlSignals,
+    subscription_field: ChoiceControlSignals,
+    codec_schema: ChoiceControlSignals,
+    codec_wire_schema: ChoiceControlSignals,
+    codec_resource: ChoiceControlSignals,
+    codec_version: ChoiceControlSignals,
+    signaling_resource: ChoiceControlSignals,
+    signaling_version: ChoiceControlSignals,
+    client_resource: ChoiceControlSignals,
+    client_version: ChoiceControlSignals,
+    client_signaling: ChoiceControlSignals,
+    vhost_resource: ChoiceControlSignals,
+    vhost_version: ChoiceControlSignals,
+    endpoint_vhost: ChoiceControlSignals,
+    endpoint_signaling: ChoiceControlSignals,
+    hash_resource: ChoiceControlSignals,
+    hash_version: ChoiceControlSignals,
+    hash_codec: ChoiceControlSignals,
+    hash_key: ChoiceControlSignals,
+    ingest_source_ref: ChoiceControlSignals,
+    ingest_codec: ChoiceControlSignals,
+    ingest_timestamp_field: ChoiceControlSignals,
+    ingest_input_field: ChoiceControlSignals,
+    ingest_route_branch: ChoiceControlSignals,
+    ingest_route_relay: ChoiceControlSignals,
+    ingest_output_field: ChoiceControlSignals,
+    ingest_branch_field: ChoiceControlSignals,
+    ingest_error_relay: ChoiceControlSignals,
+    ingest_error_field: ChoiceControlSignals,
+    processor_input_relay: ChoiceControlSignals,
+    processor_branch: ChoiceControlSignals,
+    processor_state_relay: ChoiceControlSignals,
+    processor_state_field: ChoiceControlSignals,
+    processor_route_branch: ChoiceControlSignals,
+    processor_route_relay: ChoiceControlSignals,
+    processor_input_field: ChoiceControlSignals,
+    processor_output_field: ChoiceControlSignals,
+    processor_branch_field: ChoiceControlSignals,
+    processor_error_relay: ChoiceControlSignals,
+    processor_error_field: ChoiceControlSignals,
+}
+
+impl ChoiceControls {
+    fn new() -> Self {
+        Self {
+            domain_pace: ChoiceControlSignals::new(),
+            placement_policy: ChoiceControlSignals::new(),
+            branch_schema: ChoiceControlSignals::new(),
+            relay_schema: ChoiceControlSignals::new(),
+            relay_branch: ChoiceControlSignals::new(),
+            subscription_relay: ChoiceControlSignals::new(),
+            subscription_field: ChoiceControlSignals::new(),
+            codec_schema: ChoiceControlSignals::new(),
+            codec_wire_schema: ChoiceControlSignals::new(),
+            codec_resource: ChoiceControlSignals::new(),
+            codec_version: ChoiceControlSignals::new(),
+            signaling_resource: ChoiceControlSignals::new(),
+            signaling_version: ChoiceControlSignals::new(),
+            client_resource: ChoiceControlSignals::new(),
+            client_version: ChoiceControlSignals::new(),
+            client_signaling: ChoiceControlSignals::new(),
+            vhost_resource: ChoiceControlSignals::new(),
+            vhost_version: ChoiceControlSignals::new(),
+            endpoint_vhost: ChoiceControlSignals::new(),
+            endpoint_signaling: ChoiceControlSignals::new(),
+            hash_resource: ChoiceControlSignals::new(),
+            hash_version: ChoiceControlSignals::new(),
+            hash_codec: ChoiceControlSignals::new(),
+            hash_key: ChoiceControlSignals::new(),
+            ingest_source_ref: ChoiceControlSignals::new(),
+            ingest_codec: ChoiceControlSignals::new(),
+            ingest_timestamp_field: ChoiceControlSignals::new(),
+            ingest_input_field: ChoiceControlSignals::new(),
+            ingest_route_branch: ChoiceControlSignals::new(),
+            ingest_route_relay: ChoiceControlSignals::new(),
+            ingest_output_field: ChoiceControlSignals::new(),
+            ingest_branch_field: ChoiceControlSignals::new(),
+            ingest_error_relay: ChoiceControlSignals::new(),
+            ingest_error_field: ChoiceControlSignals::new(),
+            processor_input_relay: ChoiceControlSignals::new(),
+            processor_branch: ChoiceControlSignals::new(),
+            processor_state_relay: ChoiceControlSignals::new(),
+            processor_state_field: ChoiceControlSignals::new(),
+            processor_route_branch: ChoiceControlSignals::new(),
+            processor_route_relay: ChoiceControlSignals::new(),
+            processor_input_field: ChoiceControlSignals::new(),
+            processor_output_field: ChoiceControlSignals::new(),
+            processor_branch_field: ChoiceControlSignals::new(),
+            processor_error_relay: ChoiceControlSignals::new(),
+            processor_error_field: ChoiceControlSignals::new(),
+        }
+    }
+
+    fn of(self, control: ChoiceControl) -> ChoiceControlSignals {
+        match control {
+            ChoiceControl::DomainPace => self.domain_pace,
+            ChoiceControl::PlacementPolicy => self.placement_policy,
+            ChoiceControl::BranchSchema => self.branch_schema,
+            ChoiceControl::RelaySchema => self.relay_schema,
+            ChoiceControl::RelayBranch => self.relay_branch,
+            ChoiceControl::SubscriptionRelay => self.subscription_relay,
+            ChoiceControl::SubscriptionField => self.subscription_field,
+            ChoiceControl::CodecSchema => self.codec_schema,
+            ChoiceControl::CodecWireSchema => self.codec_wire_schema,
+            ChoiceControl::CodecResource => self.codec_resource,
+            ChoiceControl::CodecVersion => self.codec_version,
+            ChoiceControl::SignalingResource => self.signaling_resource,
+            ChoiceControl::SignalingVersion => self.signaling_version,
+            ChoiceControl::ClientResource => self.client_resource,
+            ChoiceControl::ClientVersion => self.client_version,
+            ChoiceControl::ClientSignaling => self.client_signaling,
+            ChoiceControl::VhostResource => self.vhost_resource,
+            ChoiceControl::VhostVersion => self.vhost_version,
+            ChoiceControl::EndpointVhost => self.endpoint_vhost,
+            ChoiceControl::EndpointSignaling => self.endpoint_signaling,
+            ChoiceControl::HashResource => self.hash_resource,
+            ChoiceControl::HashVersion => self.hash_version,
+            ChoiceControl::HashCodec => self.hash_codec,
+            ChoiceControl::HashKey => self.hash_key,
+            ChoiceControl::IngestSourceRef => self.ingest_source_ref,
+            ChoiceControl::IngestCodec => self.ingest_codec,
+            ChoiceControl::IngestTimestampField => self.ingest_timestamp_field,
+            ChoiceControl::IngestInputField => self.ingest_input_field,
+            ChoiceControl::IngestRouteBranch => self.ingest_route_branch,
+            ChoiceControl::IngestRouteRelay => self.ingest_route_relay,
+            ChoiceControl::IngestOutputField => self.ingest_output_field,
+            ChoiceControl::IngestBranchField => self.ingest_branch_field,
+            ChoiceControl::IngestErrorRelay => self.ingest_error_relay,
+            ChoiceControl::IngestErrorField => self.ingest_error_field,
+            ChoiceControl::ProcessorInputRelay => self.processor_input_relay,
+            ChoiceControl::ProcessorBranch => self.processor_branch,
+            ChoiceControl::ProcessorStateRelay => self.processor_state_relay,
+            ChoiceControl::ProcessorStateField => self.processor_state_field,
+            ChoiceControl::ProcessorRouteBranch => self.processor_route_branch,
+            ChoiceControl::ProcessorRouteRelay => self.processor_route_relay,
+            ChoiceControl::ProcessorInputField => self.processor_input_field,
+            ChoiceControl::ProcessorOutputField => self.processor_output_field,
+            ChoiceControl::ProcessorBranchField => self.processor_branch_field,
+            ChoiceControl::ProcessorErrorRelay => self.processor_error_relay,
+            ChoiceControl::ProcessorErrorField => self.processor_error_field,
+        }
+    }
+}
+
+/// A reference a picker selected, kept visible after the context it was chosen in changes.
+///
+/// A draft that moves to another domain keeps showing the name, but no longer offers it to its
+/// Model until the operator selects it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedReference<N> {
+    name: N,
+    /// Whether the draft still holds the captured domain the reference was selected in.
+    current: bool,
+}
+
+impl<N> SelectedReference<N> {
+    fn chosen(name: N) -> Self {
+        Self {
+            name,
+            current: true,
+        }
+    }
+
+    fn name(&self) -> &N {
+        &self.name
+    }
+
+    fn is_current(&self) -> bool {
+        self.current
+    }
+
+    /// The selected name, while it still belongs to the draft's context.
+    fn current_name(&self) -> Option<&N> {
+        if self.current { Some(&self.name) } else { None }
+    }
+
+    fn invalidate(&mut self) {
+        self.current = false;
+    }
+}
+
+impl<N> SelectedReference<N>
+where
+    for<'a> &'a N: Into<ModelName>,
+{
+    /// Whether this is a current selection of `node`, a Model of `kind`.
+    fn selects(&self, kind: ModelKind, node: &nervix_models::NodeRef) -> bool {
+        self.current && *node == nervix_models::NodeRef::new(kind, &self.name)
+    }
+}
+
+/// The question a control asks the session, or why it cannot ask one yet.
+struct ChoiceQuery {
+    target: ChoiceTarget,
+    dependencies: Vec<ChoiceSelection>,
+    page_size: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +593,51 @@ impl Default for DomainDraft {
     }
 }
 
+impl DomainDraft {
+    fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let name = DomainName::parse(self.name.trim())
+            .map_err(|_| Report::new(CreateDraftError::DomainName))?;
+        let pace = match self.pace {
+            DomainPaceChoice::Unpaced => DomainPace::Unpaced,
+            DomainPaceChoice::Paced => DomainPace::Paced {
+                period: self
+                    .period
+                    .trim()
+                    .parse::<DomainClockPeriod>()
+                    .map_err(|_| Report::new(CreateDraftError::Period))?,
+                skew: self
+                    .skew
+                    .trim()
+                    .parse::<DomainClockSkew>()
+                    .map_err(|_| Report::new(CreateDraftError::Skew))?,
+            },
+        };
+        let statement = Statement::CreateDomain(CreateStatement::new(
+            CreateDomain {
+                id: name.clone(),
+                config: DomainConfig {
+                    pace,
+                    placement: self.placement,
+                },
+            },
+            self.if_not_exists,
+        ));
+        let query = statement
+            .to_canonical_nspl()
+            .change_context(CreateDraftError::CanonicalNspl)?;
+        Ok(CreateSubmission {
+            kind: CreateKind::Domain,
+            presentation: query.clone(),
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query,
+                domain: None,
+                resource: None,
+                created_domain: Some(name),
+            }),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct UserDraft {
     name: String,
@@ -139,10 +645,81 @@ struct UserDraft {
     if_not_exists: bool,
 }
 
+impl UserDraft {
+    /// The submitted statement carries the password; its presentation masks it, so the cleartext
+    /// never reaches the preview or the terminal.
+    fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let name = UserName::parse(self.name.trim())
+            .map_err(|_| Report::new(CreateDraftError::UserName))?;
+        if self.password.is_empty() {
+            return Err(Report::new(CreateDraftError::PasswordRequired));
+        }
+        let statement = Statement::CreateUser(CreateStatement::new(
+            CreateUser {
+                name: name.clone(),
+                password: self.password.clone(),
+            },
+            self.if_not_exists,
+        ));
+        let presentation_statement = Statement::CreateUser(CreateStatement::new(
+            CreateUser {
+                name,
+                password: "********".to_string(),
+            },
+            self.if_not_exists,
+        ));
+        Ok(CreateSubmission {
+            kind: CreateKind::User,
+            presentation: presentation_statement
+                .to_canonical_nspl()
+                .change_context(CreateDraftError::CanonicalNspl)?,
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query: statement
+                    .to_canonical_nspl()
+                    .change_context(CreateDraftError::CanonicalNspl)?,
+                domain: None,
+                resource: None,
+                created_domain: None,
+            }),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ResourceDraft {
     name: String,
     if_not_exists: bool,
+}
+
+impl ResourceDraft {
+    fn submission(
+        &self,
+        captured_domain: Option<DomainName>,
+    ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let scope =
+            captured_domain.ok_or_else(|| Report::new(CreateDraftError::ResourceDomainRequired))?;
+        let name = ResourceName::parse(self.name.trim())
+            .map_err(|_| Report::new(CreateDraftError::ResourceName))?;
+        let statement = Statement::CreateResource(CreateStatement::new(
+            CreateResource {
+                identifier: name.clone(),
+            },
+            self.if_not_exists,
+        ));
+        let query = statement
+            .to_canonical_nspl()
+            .change_context(CreateDraftError::CanonicalNspl)?;
+        Ok(CreateSubmission {
+            kind: CreateKind::Resource,
+            presentation: query.clone(),
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query,
+                domain: Some(scope),
+                resource: Some(name.to_string()),
+                created_domain: None,
+            }),
+        })
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -163,18 +740,149 @@ enum CreateDraftError {
     ResourceDomainRequired,
     #[error("Resource name is invalid")]
     ResourceName,
+    #[error("Select a domain before creating this entity")]
+    ScopedDomainRequired,
+    #[error("{0}")]
+    Structured(#[from] SchemaDraftError),
+    #[error("{0}")]
+    Relay(#[from] RelayDraftError),
+    #[error("{0}")]
+    Subscription(#[from] SubscriptionDraftError),
+    #[error("{0}")]
+    Codec(#[from] CodecDraftError),
+    #[error("{0}")]
+    Signaling(#[from] SignalingDraftError),
+    #[error("{0}")]
+    Client(#[from] ClientDraftError),
+    #[error("{0}")]
+    Vhost(#[from] VhostDraftError),
+    #[error("{0}")]
+    Endpoint(#[from] EndpointDraftError),
+    #[error("{0}")]
+    HashMap(#[from] HashMapDraftError),
+    #[error("{0}")]
+    Udf(#[from] UdfDraftError),
+    #[error("{0}")]
+    Ingestor(#[from] IngestorDraftError),
+    #[error("{0}")]
+    Processor(#[from] ProcessorDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
 
+/// Carries a draft's own error as the create dialog's, keeping the draft's report beneath it.
+fn draft_error<E>(error: Report<E>) -> Report<CreateDraftError>
+where
+    E: error_stack::Context + Clone + Into<CreateDraftError>,
+{
+    let context = error.current_context().clone().into();
+    error.change_context(context)
+}
+
+/// A completed draft, the statement it previews, and how it is dispatched.
 #[derive(Debug, Clone)]
 pub(crate) struct CreateSubmission {
     pub(crate) kind: CreateKind,
-    pub(crate) query: String,
+    /// The canonical statement as the preview and the terminal show it, with secrets masked.
     pub(crate) presentation: String,
+    pub(crate) dispatch: CreateDispatch,
+}
+
+/// Where a completed draft goes: a persistent statement runs on the durable command path, and a
+/// session subscription opens a tab under the subscription lifecycle.
+#[derive(Debug, Clone)]
+pub(crate) enum CreateDispatch {
+    Command(CommandDispatch),
+    Subscription(SubscriptionDispatch),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommandDispatch {
+    pub(crate) query: String,
     pub(crate) domain: Option<DomainName>,
     pub(crate) resource: Option<String>,
     pub(crate) created_domain: Option<DomainName>,
+}
+
+/// A session subscription, the canonical statement that opens it, and the domain it reads.
+#[derive(Debug, Clone)]
+pub(crate) struct SubscriptionDispatch {
+    pub(crate) domain: DomainName,
+    pub(crate) subscription: CreateSubscription,
+    pub(crate) statement: String,
+}
+
+impl SubscriptionDispatch {
+    /// Renders `subscription` as the canonical client statement a subscribe request carries.
+    pub(crate) fn new(
+        domain: DomainName,
+        subscription: CreateSubscription,
+    ) -> error_stack::Result<Self, CanonicalNsplError> {
+        let statement =
+            ClientStatement::CreateSubscription(subscription.clone()).to_canonical_nspl()?;
+        Ok(Self {
+            domain,
+            subscription,
+            statement,
+        })
+    }
+}
+
+impl CreateSubmission {
+    /// A domain-owned Model created through the durable command path.
+    fn domain_model(
+        kind: CreateKind,
+        model: Model,
+        if_not_exists: bool,
+        scope: DomainName,
+    ) -> error_stack::Result<Self, CreateDraftError> {
+        Self::domain_requested_model(kind, model.into(), if_not_exists, scope)
+    }
+
+    fn domain_requested_model(
+        kind: CreateKind,
+        model: Model<RequestedResourceVersion>,
+        if_not_exists: bool,
+        scope: DomainName,
+    ) -> error_stack::Result<Self, CreateDraftError> {
+        let presentation = model.clone();
+        Self::domain_requested_model_with_presentation(
+            kind,
+            model,
+            presentation,
+            if_not_exists,
+            scope,
+        )
+    }
+
+    fn domain_requested_model_with_presentation(
+        kind: CreateKind,
+        model: Model<RequestedResourceVersion>,
+        presentation_model: Model<RequestedResourceVersion>,
+        if_not_exists: bool,
+        scope: DomainName,
+    ) -> error_stack::Result<Self, CreateDraftError> {
+        let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
+        let query = statement
+            .to_canonical_nspl()
+            .change_context(CreateDraftError::CanonicalNspl)?;
+        let presentation = Statement::Create(CreateStatement::new(
+            Box::new(presentation_model),
+            if_not_exists,
+        ))
+        .to_canonical_nspl()
+        .change_context(CreateDraftError::CanonicalNspl)?;
+        Ok(Self {
+            kind,
+            presentation,
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query,
+                domain: Some(scope),
+                resource: None,
+                created_domain: None,
+            }),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -193,7 +901,7 @@ pub(crate) struct CreateSignals {
     open: RwSignal<Option<CreateKind>>,
     return_focus: RwSignal<Option<String>>,
     captured_domain: RwSignal<Option<DomainName>>,
-    resource_scope_captured: RwSignal<bool>,
+    captured_scopes: RwSignal<BTreeMap<CreateKind, Option<DomainName>>>,
     revision: RwSignal<u64>,
     next_attempt: RwSignal<u64>,
     active_attempt: RwSignal<Option<(u64, u64)>>,
@@ -202,19 +910,47 @@ pub(crate) struct CreateSignals {
     domain: RwSignal<DomainDraft>,
     user: RwSignal<UserDraft>,
     resource: RwSignal<ResourceDraft>,
-    pace_search: RwSignal<String>,
-    placement_search: RwSignal<String>,
-    pace_choices: RwSignal<ChoiceLoad>,
-    placement_choices: RwSignal<ChoiceLoad>,
+    structured: RwSignal<StructuredDrafts>,
+    relay: RwSignal<RelayDraft>,
+    subscription: RwSignal<SubscriptionDraft>,
+    codec: RwSignal<CodecDraft>,
+    signaling: RwSignal<SignalingDraft>,
+    client: RwSignal<ClientDraft>,
+    vhost: RwSignal<VhostDraft>,
+    endpoint: RwSignal<EndpointDraft>,
+    hash_map: RwSignal<HashMapDraft>,
+    udf: RwSignal<UdfDraft>,
+    ingestor: RwSignal<IngestorDraft>,
+    junction: RwSignal<ProcessorDraft>,
+    reingestor: RwSignal<ProcessorDraft>,
+    /// The number the next generated subscription name carries. Numbers only increase, so no two
+    /// generated names of one console coincide.
+    next_subscription_name: RwSignal<u64>,
+    choices: ChoiceControls,
 }
 
 impl CreateSignals {
+    fn processor(self, family: ProcessorFamily) -> RwSignal<ProcessorDraft> {
+        match family {
+            ProcessorFamily::Junction => self.junction,
+            ProcessorFamily::Reingestor => self.reingestor,
+        }
+    }
+
+    fn active_processor(self) -> Option<RwSignal<ProcessorDraft>> {
+        match self.open.get_untracked() {
+            Some(CreateKind::Junction) => Some(self.junction),
+            Some(CreateKind::Reingestor) => Some(self.reingestor),
+            _ => None,
+        }
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             open: RwSignal::new(None),
             return_focus: RwSignal::new(None),
             captured_domain: RwSignal::new(None),
-            resource_scope_captured: RwSignal::new(false),
+            captured_scopes: RwSignal::new(BTreeMap::new()),
             revision: RwSignal::new(0),
             next_attempt: RwSignal::new(0),
             active_attempt: RwSignal::new(None),
@@ -223,10 +959,24 @@ impl CreateSignals {
             domain: RwSignal::new(DomainDraft::default()),
             user: RwSignal::new(UserDraft::default()),
             resource: RwSignal::new(ResourceDraft::default()),
-            pace_search: RwSignal::new(String::new()),
-            placement_search: RwSignal::new(String::new()),
-            pace_choices: RwSignal::new(ChoiceLoad::Waiting),
-            placement_choices: RwSignal::new(ChoiceLoad::Waiting),
+            structured: RwSignal::new(StructuredDrafts::default()),
+            relay: RwSignal::new(RelayDraft::default()),
+            subscription: RwSignal::new(SubscriptionDraft::named(
+                SubscriptionName::parse("web_console_subscription_1")
+                    .assured("the first generated subscription name is a valid name"),
+            )),
+            codec: RwSignal::new(CodecDraft::default()),
+            signaling: RwSignal::new(SignalingDraft::default()),
+            client: RwSignal::new(ClientDraft::default()),
+            vhost: RwSignal::new(VhostDraft::default()),
+            endpoint: RwSignal::new(EndpointDraft::default()),
+            hash_map: RwSignal::new(HashMapDraft::default()),
+            udf: RwSignal::new(UdfDraft::default()),
+            ingestor: RwSignal::new(IngestorDraft::default()),
+            junction: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Junction)),
+            reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
+            next_subscription_name: RwSignal::new(2),
+            choices: ChoiceControls::new(),
         }
     }
 
@@ -236,15 +986,54 @@ impl CreateSignals {
         domain: Option<DomainName>,
         return_focus: &'static str,
     ) {
-        if kind == CreateKind::Resource && !self.resource_scope_captured.get_untracked() {
-            self.captured_domain.set(domain);
-            self.resource_scope_captured.set(true);
+        if kind.domain_scoped() {
+            let captured = match self.captured_scopes.get_untracked().get(&kind) {
+                Some(captured) => captured.clone(),
+                None => {
+                    self.captured_scopes.update(|scopes| {
+                        scopes.insert(kind, domain.clone());
+                    });
+                    domain
+                }
+            };
+            self.captured_domain.set(captured);
+        } else {
+            self.captured_domain.set(None);
         }
         self.return_focus.set(Some(return_focus.to_string()));
         self.progress.set(CreateProgress::Editing);
         self.validation.set(None);
         self.open.set(Some(kind));
         self.advance_revision();
+    }
+
+    /// Opens a new subscription draft that reads `relay` in `domain`, as the graph's relay action
+    /// does. The action names what the operator wants to read, so it replaces a retained
+    /// subscription draft rather than editing it, under a newly generated name.
+    pub(crate) fn open_subscription(
+        self,
+        domain: DomainName,
+        relay: RelayName,
+        return_focus: &'static str,
+    ) {
+        let name = self.generate_subscription_name();
+        self.subscription
+            .set(SubscriptionDraft::for_relay(name, relay));
+        self.captured_scopes.update(|scopes| {
+            scopes.insert(CreateKind::Subscription, Some(domain.clone()));
+        });
+        self.open(CreateKind::Subscription, Some(domain), return_focus);
+    }
+
+    fn generate_subscription_name(self) -> SubscriptionName {
+        let number = self.next_subscription_name.get_untracked();
+        self.next_subscription_name.set(
+            number
+                .checked_add(1)
+                .assured("a console cannot generate 2^64 subscription names"),
+        );
+        SubscriptionName::parse(&format!("web_console_subscription_{number}"))
+            .assured("lower-case letters, underscores and at most 20 digits form a valid name")
     }
 
     fn close(self) {
@@ -268,6 +1057,54 @@ impl CreateSignals {
         self.active_attempt.set(None);
         self.validation.set(None);
         self.advance_revision();
+    }
+
+    /// Moves the open draft to `domain`. References the draft selected in its previous domain stay
+    /// visible but must be selected again before the draft completes.
+    fn change_scope(self, domain: Option<DomainName>) {
+        let Some(kind) = self.open.get_untracked() else {
+            return;
+        };
+        if !kind.domain_scoped() {
+            return;
+        }
+        if self.captured_domain.get_untracked() != domain {
+            match kind {
+                CreateKind::Branch => self
+                    .structured
+                    .update(|drafts| drafts.branch.invalidate_references()),
+                CreateKind::Relay => self.relay.update(RelayDraft::invalidate_references),
+                CreateKind::Subscription => self
+                    .subscription
+                    .update(SubscriptionDraft::invalidate_references),
+                CreateKind::Codec => self.codec.update(CodecDraft::invalidate_references),
+                CreateKind::SignalingProtocol => {
+                    self.signaling.update(SignalingDraft::invalidate_references)
+                }
+                CreateKind::Client => self.client.update(ClientDraft::invalidate_references),
+                CreateKind::Vhost => self.vhost.update(VhostDraft::invalidate_references),
+                CreateKind::Endpoint => self.endpoint.update(EndpointDraft::invalidate_references),
+                CreateKind::HashMap => self.hash_map.update(HashMapDraft::invalidate_references),
+                CreateKind::Ingestor => self.ingestor.update(IngestorDraft::invalidate_references),
+                CreateKind::Junction => self.junction.update(ProcessorDraft::invalidate_references),
+                CreateKind::Reingestor => self
+                    .reingestor
+                    .update(ProcessorDraft::invalidate_references),
+                CreateKind::Udf => {}
+                CreateKind::Domain
+                | CreateKind::User
+                | CreateKind::Resource
+                | CreateKind::Schema
+                | CreateKind::WireJsonSchema
+                | CreateKind::WireCborSchema
+                | CreateKind::WireAvroSchema => {}
+            }
+        }
+        self.captured_scopes.update(|scopes| {
+            scopes.insert(kind, domain.clone());
+        });
+        self.captured_domain.set(domain);
+        self.edit();
     }
 
     fn advance_revision(self) {
@@ -334,13 +1171,16 @@ impl CreateSignals {
         current_generation: u64,
         outcome: ChoiceOutcome,
     ) {
-        if self.open.get_untracked() != Some(CreateKind::Domain)
+        if !self
+            .open
+            .get_untracked()
+            .is_some_and(|kind| context.control.applies_to(kind))
             || self.revision.get_untracked() != context.draft_revision
             || current_generation != context.session_generation
         {
             return;
         }
-        let target = self.choice_load(context.control);
+        let target = self.choices.of(context.control).load;
         match outcome.status {
             ChoiceStatus::Ready if outcome.choices.is_empty() && !context.append => {
                 target.set(ChoiceLoad::Empty);
@@ -352,6 +1192,8 @@ impl CreateSignals {
                         ChoiceLoad::Waiting
                         | ChoiceLoad::Loading
                         | ChoiceLoad::Empty
+                        | ChoiceLoad::MissingPrerequisite(_)
+                        | ChoiceLoad::StaleContext
                         | ChoiceLoad::Failed(_) => Vec::new(),
                     }
                 } else {
@@ -363,14 +1205,10 @@ impl CreateSignals {
                     page_cursor: outcome.page_cursor,
                 });
             }
-            ChoiceStatus::MissingContext => target.set(ChoiceLoad::Failed(
-                "Choose the fields this control depends on".to_string(),
+            ChoiceStatus::MissingContext => target.set(ChoiceLoad::MissingPrerequisite(
+                "Choose the fields this control depends on",
             )),
-            ChoiceStatus::StaleContext => {
-                target.set(ChoiceLoad::Failed(
-                    "The form context changed; retry".to_string(),
-                ));
-            }
+            ChoiceStatus::StaleContext => target.set(ChoiceLoad::StaleContext),
             ChoiceStatus::LookupFailed => {
                 target.set(ChoiceLoad::Failed(
                     "Choices could not be loaded".to_string(),
@@ -388,134 +1226,536 @@ impl CreateSignals {
         if self.revision.get_untracked() == context.draft_revision
             && current_generation == context.session_generation
         {
-            self.choice_load(context.control)
+            self.choices
+                .of(context.control)
+                .load
                 .set(ChoiceLoad::Failed(reason));
         }
     }
 
-    fn choice_load(self, control: ChoiceControl) -> RwSignal<ChoiceLoad> {
+    /// The typed question `control` asks, or why it cannot ask one while the draft lacks what the
+    /// question depends on.
+    fn choice_query(self, control: ChoiceControl) -> Result<ChoiceQuery, &'static str> {
         match control {
-            ChoiceControl::DomainPace => self.pace_choices,
-            ChoiceControl::PlacementPolicy => self.placement_choices,
+            ChoiceControl::DomainPace => Ok(ChoiceQuery {
+                target: ChoiceTarget::DomainPace,
+                dependencies: Vec::new(),
+                page_size: 2,
+            }),
+            ChoiceControl::PlacementPolicy => Ok(ChoiceQuery {
+                target: ChoiceTarget::PlacementPolicy,
+                dependencies: vec![ChoiceSelection {
+                    value: ChoiceValue::DomainPace(self.domain.get_untracked().pace),
+                }],
+                page_size: 3,
+            }),
+            ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
+                ChoiceTarget::Schema,
+                "Select a domain before choosing a schema",
+            ),
+            ChoiceControl::CodecSchema => self.domain_question(
+                ChoiceTarget::Schema,
+                "Select a domain before choosing a schema",
+            ),
+            ChoiceControl::CodecWireSchema => {
+                let target = match self
+                    .codec
+                    .get_untracked()
+                    .format
+                    .as_ref()
+                    .map(CodecFormatDraft::kind)
+                {
+                    Some(CodecFormatKind::WireJson) => ChoiceTarget::WireJsonSchema,
+                    Some(CodecFormatKind::WireCbor) => ChoiceTarget::WireCborSchema,
+                    Some(CodecFormatKind::WireAvro) => ChoiceTarget::WireAvroSchema,
+                    _ => return Err("Choose a wire schema format first"),
+                };
+                self.domain_question(target, "Select a domain before choosing a wire schema")
+            }
+            ChoiceControl::CodecResource
+            | ChoiceControl::SignalingResource
+            | ChoiceControl::ClientResource
+            | ChoiceControl::VhostResource
+            | ChoiceControl::HashResource => self.domain_question(
+                ChoiceTarget::Resource,
+                "Select a domain before choosing a resource",
+            ),
+            ChoiceControl::CodecVersion
+            | ChoiceControl::SignalingVersion
+            | ChoiceControl::ClientVersion
+            | ChoiceControl::VhostVersion
+            | ChoiceControl::HashVersion => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a resource version");
+                };
+                let resource = match control {
+                    ChoiceControl::CodecVersion => self
+                        .codec
+                        .get_untracked()
+                        .binding()
+                        .and_then(|binding| binding.current_resource().cloned()),
+                    ChoiceControl::SignalingVersion => self
+                        .signaling
+                        .get_untracked()
+                        .binding()
+                        .and_then(|binding| binding.current_resource().cloned()),
+                    ChoiceControl::ClientVersion => {
+                        self.client.get_untracked().current_resource().cloned()
+                    }
+                    ChoiceControl::VhostVersion => {
+                        self.vhost.get_untracked().current_resource().cloned()
+                    }
+                    ChoiceControl::HashVersion => self
+                        .hash_map
+                        .get_untracked()
+                        .pin
+                        .current_resource()
+                        .cloned(),
+                    _ => None,
+                };
+                let Some(resource) = resource else {
+                    return Err("Select a resource to list its completed versions");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::CompletedResourceVersion,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Resource(resource),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::RelayBranch => self.domain_question(
+                ChoiceTarget::Branch,
+                "Select a domain before choosing a branch",
+            ),
+            ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => self
+                .domain_question(
+                    ChoiceTarget::SignalingProtocol,
+                    "Select a domain before choosing a signaling protocol",
+                ),
+            ChoiceControl::EndpointVhost => self.domain_question(
+                ChoiceTarget::Vhost,
+                "Select a domain before choosing a VHOST",
+            ),
+            ChoiceControl::HashCodec => self.domain_question(
+                ChoiceTarget::Codec,
+                "Select a domain before choosing a codec",
+            ),
+            ChoiceControl::HashKey => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a key field");
+                };
+                let draft = self.hash_map.get_untracked();
+                let Some(codec) = draft.current_codec() else {
+                    return Err("Select a codec to list the fields of its output schema");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::CodecField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Codec,
+                                codec,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::SubscriptionRelay => self.domain_question(
+                ChoiceTarget::Relay,
+                "Select a domain before choosing a relay",
+            ),
+            ChoiceControl::SubscriptionField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a relay");
+                };
+                let draft = self.subscription.get_untracked();
+                let Some(relay) = draft.current_relay() else {
+                    return Err("Select a relay to list the fields of its records");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::RelayField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Relay,
+                                relay,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::IngestSourceRef => {
+                let kind = self
+                    .ingestor
+                    .get_untracked()
+                    .source
+                    .kind
+                    .ok_or("Choose a source type before its client or endpoint")?;
+                self.domain_question(
+                    ChoiceTarget::for_ingest_source(kind),
+                    "Select a domain before choosing a source",
+                )
+            }
+            ChoiceControl::IngestCodec => self.domain_question(
+                ChoiceTarget::IngestCodec,
+                "Select a domain before choosing a decoding codec",
+            ),
+            ChoiceControl::IngestTimestampField | ChoiceControl::IngestInputField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing decoded fields");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(codec) = draft.current_codec() else {
+                    return Err("Choose a decoding codec before its fields");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::CodecField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Codec,
+                                codec,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::IngestRouteBranch => self.domain_question(
+                ChoiceTarget::Branch,
+                "Select a domain before choosing a route branch",
+            ),
+            ChoiceControl::IngestErrorRelay => self.domain_question(
+                ChoiceTarget::IngestUnbranchedRelay,
+                "Select a domain before choosing an ingestor error relay",
+            ),
+            ChoiceControl::IngestRouteRelay => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a route relay");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(route) = draft.active_route() else {
+                    return Err("Add a route before choosing a relay");
+                };
+                let mut dependencies = vec![ChoiceSelection {
+                    value: ChoiceValue::Domain(domain),
+                }];
+                let target = match &route.branch {
+                    RouteBranchDraft::Unselected | RouteBranchDraft::Preserve => {
+                        return Err("Choose the route branch before its relay");
+                    }
+                    RouteBranchDraft::Unbranched => ChoiceTarget::IngestUnbranchedRelay,
+                    RouteBranchDraft::Branched { .. } => {
+                        let Some(branch) = route.branch.current_branch() else {
+                            return Err("Choose the named branch before its relay");
+                        };
+                        dependencies.push(ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Branch,
+                                branch,
+                            )),
+                        });
+                        ChoiceTarget::IngestBranchedRelay
+                    }
+                };
+                Ok(ChoiceQuery {
+                    target,
+                    dependencies,
+                    page_size: 20,
+                })
+            }
+            ChoiceControl::IngestOutputField | ChoiceControl::IngestErrorField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing an output field");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(route) = draft.active_route() else {
+                    return Err("Add a route before choosing an output field");
+                };
+                let relay = if control == ChoiceControl::IngestErrorField {
+                    route.message_error.current_relay()
+                } else {
+                    route.current_relay()
+                };
+                let Some(relay) = relay else {
+                    return Err("Choose the relay before its output fields");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::RelayField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Relay,
+                                relay,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::IngestBranchField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a branch field");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(branch) = draft
+                    .active_route()
+                    .and_then(|route| route.branch.current_branch())
+                else {
+                    return Err("Choose a named branch before its key fields");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::BranchField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Branch,
+                                branch,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::ProcessorInputRelay
+            | ChoiceControl::ProcessorBranch
+            | ChoiceControl::ProcessorStateRelay
+            | ChoiceControl::ProcessorStateField
+            | ChoiceControl::ProcessorRouteBranch
+            | ChoiceControl::ProcessorRouteRelay
+            | ChoiceControl::ProcessorInputField
+            | ChoiceControl::ProcessorOutputField
+            | ChoiceControl::ProcessorBranchField
+            | ChoiceControl::ProcessorErrorRelay
+            | ChoiceControl::ProcessorErrorField => self.processor_choice_query(control),
         }
+    }
+
+    /// A lookup of the models of the draft's captured domain.
+    fn domain_question(
+        self,
+        target: ChoiceTarget,
+        missing_domain: &'static str,
+    ) -> Result<ChoiceQuery, &'static str> {
+        let Some(domain) = self.captured_domain.get_untracked() else {
+            return Err(missing_domain);
+        };
+        Ok(ChoiceQuery {
+            target,
+            dependencies: vec![ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            }],
+            page_size: 20,
+        })
     }
 
     fn submission(self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
-        build_submission(
-            self.open
-                .get_untracked()
-                .ok_or_else(|| Report::new(CreateDraftError::KindRequired))?,
-            &self.domain.get_untracked(),
-            &self.user.get_untracked(),
-            &self.resource.get_untracked(),
-            self.captured_domain.get_untracked(),
-        )
-    }
-}
-
-fn build_submission(
-    kind: CreateKind,
-    domain_draft: &DomainDraft,
-    user_draft: &UserDraft,
-    resource_draft: &ResourceDraft,
-    captured_domain: Option<DomainName>,
-) -> error_stack::Result<CreateSubmission, CreateDraftError> {
-    match kind {
-        CreateKind::Domain => {
-            let name = DomainName::parse(domain_draft.name.trim())
-                .map_err(|_| Report::new(CreateDraftError::DomainName))?;
-            let pace = match domain_draft.pace {
-                DomainPaceChoice::Unpaced => DomainPace::Unpaced,
-                DomainPaceChoice::Paced => DomainPace::Paced {
-                    period: domain_draft
-                        .period
-                        .trim()
-                        .parse::<DomainClockPeriod>()
-                        .map_err(|_| Report::new(CreateDraftError::Period))?,
-                    skew: domain_draft
-                        .skew
-                        .trim()
-                        .parse::<DomainClockSkew>()
-                        .map_err(|_| Report::new(CreateDraftError::Skew))?,
-                },
-            };
-            let statement = Statement::CreateDomain(CreateStatement::new(
-                CreateDomain {
-                    id: name.clone(),
-                    config: DomainConfig {
-                        pace,
-                        placement: domain_draft.placement,
-                    },
-                },
-                domain_draft.if_not_exists,
-            ));
-            let query = statement
-                .to_canonical_nspl()
-                .change_context(CreateDraftError::CanonicalNspl)?;
-            Ok(CreateSubmission {
-                kind,
-                presentation: query.clone(),
-                query,
-                domain: None,
-                resource: None,
-                created_domain: Some(name),
-            })
-        }
-        CreateKind::User => {
-            let name = UserName::parse(user_draft.name.trim())
-                .map_err(|_| Report::new(CreateDraftError::UserName))?;
-            if user_draft.password.is_empty() {
-                return Err(Report::new(CreateDraftError::PasswordRequired));
+        let kind = self
+            .open
+            .get_untracked()
+            .ok_or_else(|| Report::new(CreateDraftError::KindRequired))?;
+        let captured_domain = self.captured_domain.get_untracked();
+        match kind {
+            CreateKind::Domain => self.domain.get_untracked().submission(),
+            CreateKind::User => self.user.get_untracked().submission(),
+            CreateKind::Resource => self.resource.get_untracked().submission(captured_domain),
+            CreateKind::Schema
+            | CreateKind::WireJsonSchema
+            | CreateKind::WireCborSchema
+            | CreateKind::WireAvroSchema
+            | CreateKind::Branch => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let drafts = self.structured.get_untracked();
+                let (model, if_not_exists) = match kind {
+                    CreateKind::Schema => (
+                        Model::Schema(drafts.schema.build().map_err(draft_error)?),
+                        drafts.schema.if_not_exists,
+                    ),
+                    CreateKind::Branch => (
+                        Model::Branch(drafts.branch.build().map_err(draft_error)?),
+                        drafts.branch.if_not_exists,
+                    ),
+                    _ => {
+                        let format = kind.wire_format().assured(
+                            "the structured kinds left after schema and branch are wire schemas",
+                        );
+                        let draft = drafts.wire(format);
+                        (
+                            draft.build(format).map_err(draft_error)?,
+                            draft.if_not_exists,
+                        )
+                    }
+                };
+                CreateSubmission::domain_model(kind, model, if_not_exists, scope)
             }
-            let statement = Statement::CreateUser(CreateStatement::new(
-                CreateUser {
-                    name: name.clone(),
-                    password: user_draft.password.clone(),
-                },
-                user_draft.if_not_exists,
-            ));
-            let presentation_statement = Statement::CreateUser(CreateStatement::new(
-                CreateUser {
-                    name,
-                    password: "********".to_string(),
-                },
-                user_draft.if_not_exists,
-            ));
-            Ok(CreateSubmission {
-                kind,
-                query: statement
-                    .to_canonical_nspl()
-                    .change_context(CreateDraftError::CanonicalNspl)?,
-                presentation: presentation_statement
-                    .to_canonical_nspl()
-                    .change_context(CreateDraftError::CanonicalNspl)?,
-                domain: None,
-                resource: None,
-                created_domain: None,
-            })
-        }
-        CreateKind::Resource => {
-            let scope = captured_domain
-                .ok_or_else(|| Report::new(CreateDraftError::ResourceDomainRequired))?;
-            let name = ResourceName::parse(resource_draft.name.trim())
-                .map_err(|_| Report::new(CreateDraftError::ResourceName))?;
-            let statement = Statement::CreateResource(CreateStatement::new(
-                CreateResource {
-                    identifier: name.clone(),
-                },
-                resource_draft.if_not_exists,
-            ));
-            let query = statement
-                .to_canonical_nspl()
-                .change_context(CreateDraftError::CanonicalNspl)?;
-            Ok(CreateSubmission {
-                kind,
-                presentation: query.clone(),
-                query,
-                domain: Some(scope),
-                resource: Some(name.to_string()),
-                created_domain: None,
-            })
+            CreateKind::Relay => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.relay.get_untracked();
+                let relay = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Relay(relay),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Codec => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.codec.get_untracked();
+                let codec = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::Codec(codec),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::SignalingProtocol => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.signaling.get_untracked();
+                let protocol = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::SignalingProtocol(protocol),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Client => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.client.get_untracked();
+                let completed = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model_with_presentation(
+                    kind,
+                    completed.actual,
+                    completed.presentation,
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Vhost => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.vhost.get_untracked();
+                let vhost = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::Vhost(vhost),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Endpoint => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.endpoint.get_untracked();
+                let endpoint = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Endpoint(endpoint),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::HashMap => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.hash_map.get_untracked();
+                let lookup = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::Lookup(lookup),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Udf => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.udf.get_untracked();
+                let udf = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(kind, Model::Udf(udf), draft.if_not_exists, scope)
+            }
+            CreateKind::Ingestor => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.ingestor.get_untracked();
+                let ingestor = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Ingestor(ingestor),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Junction => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.junction.get_untracked();
+                let junction = draft.build_junction().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Junction(junction),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Reingestor => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.reingestor.get_untracked();
+                let reingestor = draft.build_reingestor().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Reingestor(reingestor),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Subscription => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let subscription = self
+                    .subscription
+                    .get_untracked()
+                    .build()
+                    .map_err(draft_error)?;
+                let dispatch = SubscriptionDispatch::new(scope, subscription)
+                    .change_context(CreateDraftError::CanonicalNspl)?;
+                Ok(CreateSubmission {
+                    kind,
+                    presentation: dispatch.statement.clone(),
+                    dispatch: CreateDispatch::Subscription(dispatch),
+                })
+            }
         }
     }
 }
@@ -560,6 +1800,57 @@ pub(crate) fn CreateMenu(
                 <button type="button" role="menuitem" data-create-kind="resource" on:click=move |_| choose(CreateKind::Resource)>
                     <span>"Resource"</span><em>"Catalog and upload"</em>
                 </button>
+                <button type="button" role="menuitem" data-create-kind="schema" on:click=move |_| choose(CreateKind::Schema)>
+                    <span>"Schema"</span><em>"Internal record fields"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="wire-json-schema" on:click=move |_| choose(CreateKind::WireJsonSchema)>
+                    <span>"Wire JSON schema"</span><em>"JSON payload fields"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="wire-cbor-schema" on:click=move |_| choose(CreateKind::WireCborSchema)>
+                    <span>"Wire CBOR schema"</span><em>"CBOR payload fields"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="wire-avro-schema" on:click=move |_| choose(CreateKind::WireAvroSchema)>
+                    <span>"Wire AVRO schema"</span><em>"AVRO payload fields"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose(CreateKind::Branch)>
+                    <span>"Branch"</span><em>"Key schema and lifetime"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose(CreateKind::Relay)>
+                    <span>"Relay"</span><em>"Schema, branching and capacity"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose(CreateKind::Subscription)>
+                    <span>"Subscription"</span><em>"Read-only relay tab"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose(CreateKind::Codec)>
+                    <span>"Codec"</span><em>"Wire format and schema mapping"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose(CreateKind::SignalingProtocol)>
+                    <span>"Signaling protocol"</span><em>"Ordered connection handshake"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose(CreateKind::Client)>
+                    <span>"Client"</span><em>"External transport configuration"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose(CreateKind::Vhost)>
+                    <span>"VHOST"</span><em>"Hostnames and optional TLS"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose(CreateKind::Endpoint)>
+                    <span>"Endpoint"</span><em>"HTTP or WebSocket path"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose(CreateKind::HashMap)>
+                    <span>"Hash map"</span><em>"Resource-backed lookup"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose(CreateKind::Udf)>
+                    <span>"Roto UDF"</span><em>"Typed function and source tests"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose(CreateKind::Ingestor)>
+                    <span>"Ingestor"</span><em>"External source and ordered routes"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose(CreateKind::Junction)>
+                    <span>"Junction"</span><em>"Transform and fan out relay records"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose(CreateKind::Reingestor)>
+                    <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
+                </button>
             </div>
         </div>
     }
@@ -568,42 +1859,35 @@ pub(crate) fn CreateMenu(
 fn request_choices(
     signals: CreateSignals,
     control: ChoiceControl,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     generation: u64,
     append: bool,
 ) {
-    let (target, dependencies, search, page_size, cursor) = match control {
-        ChoiceControl::DomainPace => (
-            ChoiceTarget::DomainPace,
-            Vec::new(),
-            signals.pace_search.get_untracked(),
-            2,
-            if append {
-                page_cursor(signals.pace_choices)
-            } else {
-                None
-            },
-        ),
-        ChoiceControl::PlacementPolicy => (
-            ChoiceTarget::PlacementPolicy,
-            vec![ChoiceSelection {
-                value: ChoiceValue::DomainPace(signals.domain.get_untracked().pace),
-            }],
-            signals.placement_search.get_untracked(),
-            3,
-            if append {
-                page_cursor(signals.placement_choices)
-            } else {
-                None
-            },
-        ),
+    let control_signals = signals.choices.of(control);
+    let query = match signals.choice_query(control) {
+        Ok(query) => query,
+        Err(reason) => {
+            control_signals
+                .load
+                .set(ChoiceLoad::MissingPrerequisite(reason));
+            return;
+        }
+    };
+    let cursor = if append {
+        page_cursor(control_signals.load)
+    } else {
+        None
     };
     if append && cursor.is_none() {
         return;
     }
-    let request = ChoiceLookupRequest::new(target, dependencies, search)
-        .with_page(page_size, cursor)
-        .assured("the create dialog uses a bounded choice page size");
+    let request = ChoiceLookupRequest::new(
+        query.target,
+        query.dependencies,
+        control_signals.search.get_untracked(),
+    )
+    .with_page(query.page_size, cursor)
+    .assured("the create dialog uses a bounded choice page size");
     let context = ChoiceRequestContext {
         control,
         draft_revision: signals.revision.get_untracked(),
@@ -611,30 +1895,188 @@ fn request_choices(
         append,
     };
     if !append {
-        signals.choice_load(control).set(ChoiceLoad::Loading);
+        control_signals.load.set(ChoiceLoad::Loading);
     }
     let Some(request_tx) = request_tx.get_untracked() else {
-        signals.choice_load(control).set(ChoiceLoad::Failed(
+        control_signals.load.set(ChoiceLoad::Failed(
             "The session is not available".to_string(),
         ));
         return;
     };
-    if request_tx
-        .unbounded_send(ConsoleRequest::Choice { request, context })
-        .is_err()
-    {
-        signals.choice_load(control).set(ChoiceLoad::Failed(
-            "The session channel is closed".to_string(),
-        ));
+    if let Err(refusal) = request_tx.send(ConsoleRequest::Choice { request, context }) {
+        control_signals
+            .load
+            .set(ChoiceLoad::Failed(refusal.current_context().to_string()));
     }
 }
 
 fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
     match load.get_untracked() {
         ChoiceLoad::Ready { page_cursor, .. } => page_cursor,
-        ChoiceLoad::Waiting | ChoiceLoad::Loading | ChoiceLoad::Empty | ChoiceLoad::Failed(_) => {
-            None
+        ChoiceLoad::Waiting
+        | ChoiceLoad::Loading
+        | ChoiceLoad::Empty
+        | ChoiceLoad::MissingPrerequisite(_)
+        | ChoiceLoad::StaleContext
+        | ChoiceLoad::Failed(_) => None,
+    }
+}
+
+/// The controls the open form asks the session about. Each asks again whenever its draft changes,
+/// so a reply to an older draft or connection never fills it.
+fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
+    match kind {
+        CreateKind::Domain => vec![ChoiceControl::DomainPace, ChoiceControl::PlacementPolicy],
+        CreateKind::Branch => vec![ChoiceControl::BranchSchema],
+        CreateKind::Relay => {
+            let mut controls = vec![ChoiceControl::RelaySchema];
+            if signals.relay.get_untracked().branching.is_branched() {
+                controls.push(ChoiceControl::RelayBranch);
+            }
+            controls
         }
+        CreateKind::Subscription => vec![
+            ChoiceControl::SubscriptionRelay,
+            ChoiceControl::SubscriptionField,
+        ],
+        CreateKind::Codec => {
+            let mut controls = vec![ChoiceControl::CodecSchema];
+            match signals.codec.get_untracked().format {
+                Some(CodecFormatDraft::Wire { .. }) => {
+                    controls.push(ChoiceControl::CodecWireSchema)
+                }
+                Some(CodecFormatDraft::Protobuf { .. }) => {
+                    controls.push(ChoiceControl::CodecResource);
+                    controls.push(ChoiceControl::CodecVersion);
+                }
+                _ => {}
+            }
+            controls
+        }
+        CreateKind::SignalingProtocol => {
+            if matches!(
+                signals.signaling.get_untracked().format,
+                Some(SignalingFormatDraft::Protobuf { .. })
+            ) {
+                vec![
+                    ChoiceControl::SignalingResource,
+                    ChoiceControl::SignalingVersion,
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+        CreateKind::Client => {
+            let draft = signals.client.get_untracked();
+            let mut controls = Vec::new();
+            if draft.mount_enabled {
+                controls.push(ChoiceControl::ClientResource);
+                controls.push(ChoiceControl::ClientVersion);
+            }
+            if draft.transport.is_some_and(ClientTransport::websockets) {
+                controls.push(ChoiceControl::ClientSignaling);
+            }
+            controls
+        }
+        CreateKind::Vhost => {
+            if signals.vhost.get_untracked().tls_enabled {
+                vec![ChoiceControl::VhostResource, ChoiceControl::VhostVersion]
+            } else {
+                Vec::new()
+            }
+        }
+        CreateKind::Endpoint => {
+            let mut controls = vec![ChoiceControl::EndpointVhost];
+            if signals.endpoint.get_untracked().endpoint_type
+                == Some(nervix_models::EndpointType::Websockets)
+            {
+                controls.push(ChoiceControl::EndpointSignaling);
+            }
+            controls
+        }
+        CreateKind::HashMap => vec![
+            ChoiceControl::HashResource,
+            ChoiceControl::HashVersion,
+            ChoiceControl::HashCodec,
+            ChoiceControl::HashKey,
+        ],
+        CreateKind::Ingestor => {
+            let draft = signals.ingestor.get_untracked();
+            let mut controls = vec![ChoiceControl::IngestCodec, ChoiceControl::IngestRouteRelay];
+            if draft.source.kind.is_some() {
+                controls.push(ChoiceControl::IngestSourceRef);
+            }
+            if matches!(draft.timestamp, TimestampDraft::At(_)) {
+                controls.push(ChoiceControl::IngestTimestampField);
+            }
+            if let Some(route) = draft.active_route() {
+                if matches!(
+                    route.inherit,
+                    InheritDraft::AllExcept(_) | InheritDraft::Fields(_)
+                ) {
+                    controls.push(ChoiceControl::IngestInputField);
+                }
+                if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
+                    controls.push(ChoiceControl::IngestRouteBranch);
+                    controls.push(ChoiceControl::IngestBranchField);
+                }
+                controls.push(ChoiceControl::IngestOutputField);
+                if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
+                    controls.push(ChoiceControl::IngestErrorRelay);
+                    controls.push(ChoiceControl::IngestErrorField);
+                }
+            }
+            controls
+        }
+        CreateKind::Junction | CreateKind::Reingestor => {
+            let Some(processor) = signals.active_processor() else {
+                return Vec::new();
+            };
+            let draft = processor.get_untracked();
+            let mut controls = vec![
+                ChoiceControl::ProcessorInputRelay,
+                ChoiceControl::ProcessorRouteRelay,
+            ];
+            if kind == CreateKind::Junction
+                && matches!(
+                    draft.branching,
+                    processor_draft::JunctionBranchDraft::Branched(_)
+                )
+            {
+                controls.push(ChoiceControl::ProcessorBranch);
+            }
+            if let Some(state) = draft.active_state() {
+                controls.push(ChoiceControl::ProcessorStateRelay);
+                if matches!(state.policy, processor_draft::StatePolicyDraft::Default(_)) {
+                    controls.push(ChoiceControl::ProcessorStateField);
+                }
+            }
+            if let Some(route) = draft.active_route() {
+                if matches!(
+                    route.inherit,
+                    InheritDraft::AllExcept(_) | InheritDraft::Fields(_)
+                ) {
+                    controls.push(ChoiceControl::ProcessorInputField);
+                }
+                if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
+                    controls.push(ChoiceControl::ProcessorRouteBranch);
+                    controls.push(ChoiceControl::ProcessorBranchField);
+                }
+                controls.push(ChoiceControl::ProcessorOutputField);
+                if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
+                    controls.push(ChoiceControl::ProcessorErrorRelay);
+                    controls.push(ChoiceControl::ProcessorErrorField);
+                }
+            }
+            controls
+        }
+        CreateKind::Udf => Vec::new(),
+        CreateKind::User
+        | CreateKind::Resource
+        | CreateKind::Schema
+        | CreateKind::WireJsonSchema
+        | CreateKind::WireCborSchema
+        | CreateKind::WireAvroSchema => Vec::new(),
     }
 }
 
@@ -644,15 +2086,12 @@ pub(crate) fn CreateDialog(
     active_domain: RwSignal<Option<DomainName>>,
     connection_state: RwSignal<ConsoleConnectionState>,
     session_generation: RwSignal<u64>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     submit: impl Fn(CreateSubmission, u64, u64) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let name_input = NodeRef::<leptos::html::Input>::new();
     Effect::new(move |_| {
         let open = signals.open.get();
-        let revision = signals.revision.get();
-        let generation = session_generation.get();
-        let connected = connection_state.get() == ConsoleConnectionState::Connected;
         if open.is_some()
             && let Some(input) = name_input.get()
         {
@@ -660,33 +2099,36 @@ pub(crate) fn CreateDialog(
                 .focus()
                 .discarded("the create name input may already hold focus");
         }
-        if open == Some(CreateKind::Domain) && connected {
-            request_choices(
-                signals,
-                ChoiceControl::DomainPace,
-                request_tx,
-                generation,
-                false,
-            );
-            request_choices(
-                signals,
-                ChoiceControl::PlacementPolicy,
-                request_tx,
-                generation,
-                false,
-            );
-        } else if open == Some(CreateKind::Domain) {
-            signals.pace_choices.set(ChoiceLoad::Waiting);
-            signals.placement_choices.set(ChoiceLoad::Waiting);
+    });
+    Effect::new(move |_| {
+        let open = signals.open.get();
+        signals.revision.track();
+        let generation = session_generation.get();
+        let connected = connection_state.get() == ConsoleConnectionState::Connected;
+        let Some(kind) = open else {
+            return;
+        };
+        for control in open_form_controls(signals, kind) {
+            if connected {
+                request_choices(signals, control, request_tx, generation, false);
+            } else {
+                signals.choices.of(control).load.set(ChoiceLoad::Waiting);
+            }
         }
-        let _ = revision;
     });
     let scope_changed = move || {
         signals.captured_domain.get() != active_domain.get()
-            && signals.open.get() == Some(CreateKind::Resource)
+            && signals.open.get().is_some_and(CreateKind::domain_scoped)
     };
+    // The drafts own validation and report it inline, so the form is `novalidate`: the browser's
+    // constraint checks, such as a number input's minimum, never keep a submit from reaching them.
     let submit_form = move |event: ev::SubmitEvent| {
         event.prevent_default();
+        // A submitted draft is not submitted again until it is edited. The handler holds the rule
+        // the disabled button shows, because a form can be submitted without clicking it.
+        if signals.progress.get_untracked().blocks_repeat_submit() {
+            return;
+        }
         match signals.submission() {
             Ok(submission) => {
                 signals.validation.set(None);
@@ -732,23 +2174,22 @@ pub(crate) fn CreateDialog(
                         </div>
                         <button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
                     </header>
-                    <form on:submit=submit_form>
+                    <form novalidate on:submit=submit_form>
                         <div class="create-scope-row">
                             <span>"Scope"</span>
                             <strong class="create-scope">{move || match signals.open.get() {
-                                Some(CreateKind::Resource) => match signals.captured_domain.get() {
+                                Some(kind) if kind.domain_scoped() => match signals.captured_domain.get() {
                                     Some(domain) => domain.to_string(),
                                     None => "No domain selected".to_string(),
                                 },
-                                Some(CreateKind::Domain | CreateKind::User) | None => "Cluster".to_string(),
+                                Some(_) | None => "Cluster".to_string(),
                             }}</strong>
                             <Show when=scope_changed fallback=|| ()>
                                 <button
                                     class="create-scope-change"
                                     type="button"
                                     on:click=move |_| {
-                                        signals.captured_domain.set(active_domain.get_untracked());
-                                        signals.edit();
+                                        signals.change_scope(active_domain.get_untracked());
                                     }
                                 >
                                     "Use current domain"
@@ -835,30 +2276,116 @@ pub(crate) fn CreateDialog(
                             </label>
                         </Show>
 
-                        <label class="create-check">
-                            <input
-                                class="create-if-not-exists"
-                                type="checkbox"
-                                prop:checked=move || match signals.open.get() {
-                                    Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
-                                    Some(CreateKind::User) => signals.user.get().if_not_exists,
-                                    Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
-                                    None => false,
-                                }
-                                disabled=move || signals.progress.get().is_pending()
-                                on:change=move |event| {
-                                    let checked = event_target_checked(&event);
-                                    match signals.open.get_untracked() {
-                                        Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
-                                        Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
-                                        Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
-                                        None => {}
+                        <Show when=move || signals.open.get() == Some(CreateKind::Schema) fallback=|| ()>
+                            <SchemaEditor signals=signals name_input=name_input />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::WireJsonSchema) fallback=|| ()>
+                            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Json />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::WireCborSchema) fallback=|| ()>
+                            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Cbor />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::WireAvroSchema) fallback=|| ()>
+                            <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Avro />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Branch) fallback=|| ()>
+                            <BranchEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Relay) fallback=|| ()>
+                            <RelayEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
+                            <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Codec) fallback=|| ()>
+                            <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::SignalingProtocol) fallback=|| ()>
+                            <SignalingEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Client) fallback=|| ()>
+                            <ClientEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Vhost) fallback=|| ()>
+                            <VhostEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Endpoint) fallback=|| ()>
+                            <EndpointEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::HashMap) fallback=|| ()>
+                            <HashMapEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Udf) fallback=|| ()>
+                            <UdfEditor signals=signals name_input=name_input />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Ingestor) fallback=|| ()>
+                            <IngestorEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Junction) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Junction signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+
+                        <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
+                            <label class="create-check">
+                                <input
+                                    class="create-if-not-exists"
+                                    type="checkbox"
+                                    prop:checked=move || match signals.open.get() {
+                                        Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
+                                        Some(CreateKind::User) => signals.user.get().if_not_exists,
+                                        Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
+                                        Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
+                                        Some(CreateKind::WireJsonSchema) => signals.structured.get().wire_json.if_not_exists,
+                                        Some(CreateKind::WireCborSchema) => signals.structured.get().wire_cbor.if_not_exists,
+                                        Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
+                                        Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
+                                        Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
+                                        Some(CreateKind::Codec) => signals.codec.get().if_not_exists,
+                                        Some(CreateKind::SignalingProtocol) => signals.signaling.get().if_not_exists,
+                                        Some(CreateKind::Client) => signals.client.get().if_not_exists,
+                                        Some(CreateKind::Vhost) => signals.vhost.get().if_not_exists,
+                                        Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
+                                        Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
+                                        Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
+                                        Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
+                                        Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
+                                        Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
+                                        Some(CreateKind::Subscription) | None => false,
                                     }
-                                    signals.edit();
-                                }
-                            />
-                            <span>"If not exists"</span>
-                        </label>
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:change=move |event| {
+                                        let checked = event_target_checked(&event);
+                                        match signals.open.get_untracked() {
+                                            Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
+                                            Some(CreateKind::WireJsonSchema) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
+                                            Some(CreateKind::WireCborSchema) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
+                                            Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
+                                            Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
+                                            Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Codec) => signals.codec.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::SignalingProtocol) => signals.signaling.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Client) => signals.client.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Vhost) => signals.vhost.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Subscription) | None => {}
+                                        }
+                                        signals.edit();
+                                    }
+                                />
+                                <span>"If not exists"</span>
+                            </label>
+                        </Show>
 
                         <div class="create-preview-block">
                             <span>"Canonical NSPL preview"</span>
@@ -891,110 +2418,12 @@ pub(crate) fn CreateDialog(
     }
 }
 
-#[component]
-fn ChoiceGroup(
-    class_name: &'static str,
-    label: &'static str,
-    control: ChoiceControl,
-    signals: CreateSignals,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
-    session_generation: RwSignal<u64>,
-) -> impl IntoView {
-    let load = signals.choice_load(control);
-    let search = match control {
-        ChoiceControl::DomainPace => signals.pace_search,
-        ChoiceControl::PlacementPolicy => signals.placement_search,
-    };
-    view! {
-        <fieldset class=format!("create-choice-group {class_name}")>
-            <legend>{label}</legend>
-            <label class="create-choice-search-label">
-                <span class="sr-only">{format!("Search {label}")}</span>
-                <input
-                    class="create-choice-search"
-                    type="search"
-                    placeholder=format!("Search {}", label.to_ascii_lowercase())
-                    prop:value=move || search.get()
-                    on:input=move |event| {
-                        search.set(event_target_value(&event));
-                        signals.edit();
-                    }
-                />
-            </label>
-            <Show when=move || matches!(load.get(), ChoiceLoad::Loading | ChoiceLoad::Waiting) fallback=|| ()>
-                <p class="create-choice-state">{move || if load.get() == ChoiceLoad::Waiting { "Waiting for connection" } else { "Loading choices" }}</p>
-            </Show>
-            <Show when=move || load.get() == ChoiceLoad::Empty fallback=|| ()>
-                <p class="create-choice-state">"No choices"</p>
-            </Show>
-            <Show when=move || matches!(load.get(), ChoiceLoad::Failed(_)) fallback=|| ()>
-                <p class="create-choice-state choice-failed" role="alert">{move || match load.get() {
-                    ChoiceLoad::Failed(reason) => reason,
-                    _ => String::new(),
-                }}</p>
-            </Show>
-            <div class="create-choice-buttons">
-                <For
-                    each=move || match load.get() {
-                        ChoiceLoad::Ready { choices, .. } => choices,
-                        ChoiceLoad::Waiting | ChoiceLoad::Loading | ChoiceLoad::Empty | ChoiceLoad::Failed(_) => Vec::new(),
-                    }
-                    key=|choice| choice.presentation.label.clone()
-                    children=move |choice| {
-                        let label = choice.presentation.label.clone();
-                        let detail = choice.presentation.detail.clone().unwrap_or_default();
-                        let selected_value = choice.value.clone();
-                        let selected_for_class = selected_value.clone();
-                        view! {
-                            <button
-                                type="button"
-                                data-value=label.clone()
-                                class:active=move || selected_choice(signals, &selected_for_class)
-                                title=detail
-                                on:click=move |_| {
-                                    select_choice(signals, selected_value.clone());
-                                    signals.edit();
-                                }
-                            >
-                                {label.clone()}
-                            </button>
-                        }
-                    }
-                />
-            </div>
-            <Show when=move || matches!(load.get(), ChoiceLoad::Ready { page_cursor: Some(_), .. }) fallback=|| ()>
-                <button class="create-choice-more" type="button" on:click=move |_| request_choices(
-                    signals,
-                    control,
-                    request_tx,
-                    session_generation.get_untracked(),
-                    true,
-                )>"Load more"</button>
-            </Show>
-        </fieldset>
-    }
-}
-
-fn selected_choice(signals: CreateSignals, value: &ChoiceValue) -> bool {
-    match value {
-        ChoiceValue::DomainPace(value) => signals.domain.get().pace == *value,
-        ChoiceValue::PlacementPolicy(value) => signals.domain.get().placement == *value,
-        ChoiceValue::Domain(_) | ChoiceValue::Resource(_) | ChoiceValue::Model(_) => false,
-    }
-}
-
-fn select_choice(signals: CreateSignals, value: ChoiceValue) {
-    match value {
-        ChoiceValue::DomainPace(value) => signals.domain.update(|draft| draft.pace = value),
-        ChoiceValue::PlacementPolicy(value) => {
-            signals.domain.update(|draft| draft.placement = value);
-        }
-        ChoiceValue::Domain(_) | ChoiceValue::Resource(_) | ChoiceValue::Model(_) => {}
-    }
-}
-
 fn event_target_value(event: &ev::Event) -> String {
     event_target::<web_sys::HtmlInputElement>(event).value()
+}
+
+fn event_target_textarea_value(event: &ev::Event) -> String {
+    event_target::<web_sys::HtmlTextAreaElement>(event).value()
 }
 
 fn event_target_checked(event: &ev::Event) -> bool {
@@ -1002,587 +2431,4 @@ fn event_target_checked(event: &ev::Event) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use futures_channel::mpsc::unbounded;
-    use leptos::prelude::{
-        GetUntracked as _, Owner, RenderHtml as _, RwSignal, Set as _, Update as _,
-    };
-    use meticulous::ResultExt as _;
-    use nervix_client_wire::{
-        Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, DomainPaceChoice,
-    };
-    use nervix_models::{DomainName, PlacementPolicy};
-
-    use super::{
-        super::ConsoleRequest, ChoiceControl, ChoiceLoad, ChoiceRequestContext, CreateDialog,
-        CreateDialogProps, CreateDraftError, CreateKind, CreateMenu, CreateMenuProps,
-        CreateProgress, CreateSignals, DomainDraft, ResourceDraft, UserDraft, build_submission,
-        request_choices, select_choice,
-    };
-
-    #[test]
-    fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
-        let domain = DomainDraft {
-            name: "orders".to_string(),
-            if_not_exists: true,
-            placement: nervix_models::PlacementPolicy::PreferColocation,
-            ..DomainDraft::default()
-        };
-        let submission = build_submission(
-            CreateKind::Domain,
-            &domain,
-            &UserDraft::default(),
-            &ResourceDraft::default(),
-            None,
-        )
-        .assured("the domain draft is valid");
-        assert_eq!(
-            submission.query,
-            "CREATE IF NOT EXISTS UNPACED DOMAIN orders PLACEMENT PREFER COLOCATION;"
-        );
-
-        let resource = ResourceDraft {
-            name: "bundle".to_string(),
-            if_not_exists: false,
-        };
-        let scope = DomainName::parse("orders").assured("the scope is a valid domain name");
-        let submission = build_submission(
-            CreateKind::Resource,
-            &DomainDraft::default(),
-            &UserDraft::default(),
-            &resource,
-            Some(scope.clone()),
-        )
-        .assured("the resource draft and scope are valid");
-        assert_eq!(submission.query, "CREATE RESOURCE bundle;");
-        assert_eq!(submission.domain, Some(scope));
-    }
-
-    #[test]
-    fn credential_presentation_is_masked_while_the_submitted_statement_keeps_the_secret() {
-        let user = UserDraft {
-            name: "operator".to_string(),
-            password: "it's-secret".to_string(),
-            if_not_exists: false,
-        };
-        let submission = build_submission(
-            CreateKind::User,
-            &DomainDraft::default(),
-            &user,
-            &ResourceDraft::default(),
-            None,
-        )
-        .assured("the user draft is valid");
-        assert!(submission.query.contains("it's-secret"));
-        assert!(!submission.presentation.contains("it's-secret"));
-        assert_eq!(
-            submission.presentation,
-            "CREATE USER operator WITH PASSWORD '********';"
-        );
-    }
-
-    #[test]
-    fn a_resource_requires_the_scope_captured_when_the_dialog_opened() {
-        let resource = ResourceDraft {
-            name: "bundle".to_string(),
-            if_not_exists: false,
-        };
-        let error = build_submission(
-            CreateKind::Resource,
-            &DomainDraft::default(),
-            &UserDraft::default(),
-            &resource,
-            None,
-        )
-        .expect_err("resource creation needs a selected domain");
-        assert_eq!(
-            error.current_context(),
-            &CreateDraftError::ResourceDomainRequired
-        );
-    }
-
-    #[test]
-    fn independent_choice_controls_discard_older_drafts_and_session_generations() {
-        Owner::new().with(|| {
-            let signals = CreateSignals::new();
-            signals.open(CreateKind::Domain, None, "trigger");
-            let revision = signals.revision.get_untracked();
-            let pace_context = ChoiceRequestContext {
-                control: ChoiceControl::DomainPace,
-                draft_revision: revision,
-                session_generation: 7,
-                append: false,
-            };
-            let placement_context = ChoiceRequestContext {
-                control: ChoiceControl::PlacementPolicy,
-                ..pace_context
-            };
-            let outcome = |value, label: &str| ChoiceOutcome {
-                status: ChoiceStatus::Ready,
-                choices: vec![Choice {
-                    value,
-                    presentation: ChoicePresentation {
-                        label: label.to_string(),
-                        detail: None,
-                        group: None,
-                    },
-                }],
-                page_cursor: None,
-            };
-
-            signals.apply_choice(
-                placement_context,
-                7,
-                outcome(
-                    ChoiceValue::PlacementPolicy(PlacementPolicy::Neutral),
-                    "NEUTRAL",
-                ),
-            );
-            signals.apply_choice(
-                pace_context,
-                7,
-                outcome(
-                    ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
-                    "UNPACED",
-                ),
-            );
-            assert!(matches!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "UNPACED"
-            ));
-            assert!(matches!(
-                signals.placement_choices.get_untracked(),
-                ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "NEUTRAL"
-            ));
-
-            signals.edit();
-            signals.apply_choice(
-                pace_context,
-                7,
-                outcome(ChoiceValue::DomainPace(DomainPaceChoice::Paced), "PACED"),
-            );
-            signals.apply_choice(
-                ChoiceRequestContext {
-                    draft_revision: signals.revision.get_untracked(),
-                    ..placement_context
-                },
-                8,
-                outcome(
-                    ChoiceValue::PlacementPolicy(PlacementPolicy::RequireColocation),
-                    "REQUIRE COLOCATION",
-                ),
-            );
-            assert!(matches!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "UNPACED"
-            ));
-            assert!(matches!(
-                signals.placement_choices.get_untracked(),
-                ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "NEUTRAL"
-            ));
-        });
-    }
-
-    #[test]
-    fn a_finished_attempt_requires_an_edit_before_it_can_be_submitted_again() {
-        Owner::new().with(|| {
-            let signals = CreateSignals::new();
-            signals.open(CreateKind::Resource, None, "trigger");
-            let (attempt, revision) = signals.begin_submission(true);
-            assert!(signals.progress.get_untracked().blocks_repeat_submit());
-
-            signals.queued_transaction(attempt, revision, 1);
-            assert_eq!(
-                signals.progress.get_untracked(),
-                CreateProgress::QueuedTransaction { position: 1 }
-            );
-            assert!(signals.progress.get_untracked().blocks_repeat_submit());
-
-            signals.edit();
-            assert_eq!(signals.progress.get_untracked(), CreateProgress::Editing);
-            assert!(!signals.progress.get_untracked().blocks_repeat_submit());
-        });
-    }
-
-    #[test]
-    fn submission_state_changes_only_for_the_active_attempt() {
-        Owner::new().with(|| {
-            let signals = CreateSignals::new();
-            signals.open(CreateKind::User, None, "trigger");
-            let (attempt, revision) = signals.begin_submission(true);
-            assert_eq!(signals.progress.get_untracked().label(), "Submitting");
-
-            assert!(!signals.completed(0, revision));
-            signals.queued_reconnect(0, revision);
-            assert_eq!(signals.progress.get_untracked(), CreateProgress::Submitting);
-
-            signals.connection_lost();
-            assert_eq!(
-                signals.progress.get_untracked().label(),
-                "Queued until reconnect"
-            );
-            signals.queued_reconnect(attempt, revision);
-            assert!(signals.completed(attempt, revision));
-            assert_eq!(signals.progress.get_untracked().label(), "Completed");
-
-            signals.queued_transaction(attempt, revision, 2);
-            assert_eq!(
-                signals.progress.get_untracked().label(),
-                "Queued in transaction · position 2"
-            );
-        });
-    }
-
-    #[test]
-    fn choice_outcomes_cover_empty_append_and_each_failure_state() {
-        Owner::new().with(|| {
-            let signals = CreateSignals::new();
-            signals.open(CreateKind::Domain, None, "trigger");
-            let revision = signals.revision.get_untracked();
-            let context = ChoiceRequestContext {
-                control: ChoiceControl::DomainPace,
-                draft_revision: revision,
-                session_generation: 3,
-                append: false,
-            };
-            let outcome = |status, choices, page_cursor| ChoiceOutcome {
-                status,
-                choices,
-                page_cursor,
-            };
-            signals.apply_choice(context, 3, outcome(ChoiceStatus::Ready, Vec::new(), None));
-            assert_eq!(signals.pace_choices.get_untracked(), ChoiceLoad::Empty);
-
-            let choice = |pace, label: &str| Choice {
-                value: ChoiceValue::DomainPace(pace),
-                presentation: ChoicePresentation {
-                    label: label.to_string(),
-                    detail: None,
-                    group: None,
-                },
-            };
-            signals.apply_choice(
-                context,
-                3,
-                outcome(
-                    ChoiceStatus::Ready,
-                    vec![choice(DomainPaceChoice::Unpaced, "UNPACED")],
-                    Some("next".to_string()),
-                ),
-            );
-            signals.apply_choice(
-                ChoiceRequestContext {
-                    append: true,
-                    ..context
-                },
-                3,
-                outcome(
-                    ChoiceStatus::Ready,
-                    vec![choice(DomainPaceChoice::Paced, "PACED")],
-                    None,
-                ),
-            );
-            assert!(matches!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Ready { choices, page_cursor: None } if choices.len() == 2
-            ));
-
-            for (status, message) in [
-                (
-                    ChoiceStatus::MissingContext,
-                    "Choose the fields this control depends on",
-                ),
-                (
-                    ChoiceStatus::StaleContext,
-                    "The form context changed; retry",
-                ),
-                (ChoiceStatus::LookupFailed, "Choices could not be loaded"),
-            ] {
-                signals.apply_choice(context, 3, outcome(status, Vec::new(), None));
-                assert_eq!(
-                    signals.pace_choices.get_untracked(),
-                    ChoiceLoad::Failed(message.to_string())
-                );
-            }
-            signals.fail_choice(context, 3, "transport ended".to_string());
-            assert_eq!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Failed("transport ended".to_string())
-            );
-            signals.fail_choice(context, 4, "stale transport".to_string());
-            assert_eq!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Failed("transport ended".to_string())
-            );
-        });
-    }
-
-    #[test]
-    fn paced_domain_and_password_validation_report_the_owning_field() {
-        let mut domain = DomainDraft {
-            name: "orders".to_string(),
-            pace: DomainPaceChoice::Paced,
-            period: "2s".to_string(),
-            skew: "500ms".to_string(),
-            ..DomainDraft::default()
-        };
-        let submission = build_submission(
-            CreateKind::Domain,
-            &domain,
-            &UserDraft::default(),
-            &ResourceDraft::default(),
-            None,
-        )
-        .assured("the paced domain draft is valid");
-        assert!(submission.query.contains("PACED"));
-        assert!(submission.query.contains("PERIOD 2s"));
-
-        domain.period = "soon".to_string();
-        assert_eq!(
-            build_submission(
-                CreateKind::Domain,
-                &domain,
-                &UserDraft::default(),
-                &ResourceDraft::default(),
-                None,
-            )
-            .expect_err("an invalid period is rejected")
-            .current_context(),
-            &CreateDraftError::Period
-        );
-        domain.period = "2s".to_string();
-        domain.skew = "later".to_string();
-        assert_eq!(
-            build_submission(
-                CreateKind::Domain,
-                &domain,
-                &UserDraft::default(),
-                &ResourceDraft::default(),
-                None,
-            )
-            .expect_err("an invalid skew is rejected")
-            .current_context(),
-            &CreateDraftError::Skew
-        );
-
-        let user = UserDraft {
-            name: "operator".to_string(),
-            password: String::new(),
-            if_not_exists: false,
-        };
-        assert_eq!(
-            build_submission(
-                CreateKind::User,
-                &DomainDraft::default(),
-                &user,
-                &ResourceDraft::default(),
-                None,
-            )
-            .expect_err("an empty password is rejected")
-            .current_context(),
-            &CreateDraftError::PasswordRequired
-        );
-    }
-
-    #[test]
-    fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
-        Owner::new().with(|| {
-            let signals = CreateSignals::new();
-            signals.open(CreateKind::Domain, None, "trigger");
-            signals.pace_search.set("wall".to_string());
-            let (sender, mut receiver) = unbounded();
-            let request_tx = RwSignal::new(Some(sender));
-            request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, false);
-            let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
-                .assured("the choice channel remains open")
-            else {
-                panic!("the create dialog sends a typed choice request");
-            };
-            assert_eq!(
-                request.target(),
-                nervix_client_wire::ChoiceTarget::DomainPace
-            );
-            assert_eq!(request.search(), "wall");
-            assert!(request.dependencies().is_empty());
-            assert_eq!(context.session_generation, 8);
-            assert!(!context.append);
-
-            signals.pace_choices.set(ChoiceLoad::Ready {
-                choices: Vec::new(),
-                page_cursor: Some("page-two".to_string()),
-            });
-            request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
-            let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
-                .assured("the choice channel remains open")
-            else {
-                panic!("the create dialog sends a typed choice request");
-            };
-            assert_eq!(request.page_cursor(), Some("page-two"));
-            assert!(context.append);
-
-            request_choices(
-                signals,
-                ChoiceControl::PlacementPolicy,
-                request_tx,
-                8,
-                false,
-            );
-            let ConsoleRequest::Choice { request, .. } = receiver
-                .try_recv()
-                .assured("the choice channel remains open")
-            else {
-                panic!("the create dialog sends a typed choice request");
-            };
-            assert_eq!(request.dependencies().len(), 1);
-
-            let unavailable = RwSignal::new(None);
-            request_choices(signals, ChoiceControl::DomainPace, unavailable, 8, false);
-            assert_eq!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Failed("The session is not available".to_string())
-            );
-
-            let (closed_sender, closed_receiver) = unbounded();
-            drop(closed_receiver);
-            request_choices(
-                signals,
-                ChoiceControl::DomainPace,
-                RwSignal::new(Some(closed_sender)),
-                8,
-                false,
-            );
-            assert_eq!(
-                signals.pace_choices.get_untracked(),
-                ChoiceLoad::Failed("The session channel is closed".to_string())
-            );
-
-            signals.pace_choices.set(ChoiceLoad::Empty);
-            request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
-            assert!(receiver.try_recv().is_err());
-        });
-    }
-
-    #[test]
-    fn typed_choice_selection_updates_only_supported_create_fields() {
-        Owner::new().with(|| {
-            let signals = CreateSignals::new();
-            select_choice(signals, ChoiceValue::DomainPace(DomainPaceChoice::Paced));
-            select_choice(
-                signals,
-                ChoiceValue::PlacementPolicy(PlacementPolicy::RequireColocation),
-            );
-            assert_eq!(signals.domain.get_untracked().pace, DomainPaceChoice::Paced);
-            assert_eq!(
-                signals.domain.get_untracked().placement,
-                PlacementPolicy::RequireColocation
-            );
-            let domain = DomainName::parse("orders").assured("the test domain is valid");
-            select_choice(signals, ChoiceValue::Domain(domain));
-            assert_eq!(signals.domain.get_untracked().pace, DomainPaceChoice::Paced);
-        });
-    }
-
-    #[test]
-    fn creation_components_render_each_typed_draft_and_accessible_status() {
-        super::super::initialize_test_executor();
-        Owner::new().with(|| {
-            let scope = DomainName::parse("orders").assured("the test scope is valid");
-            let active_domain = RwSignal::new(Some(scope.clone()));
-            let connection_state = RwSignal::new(super::super::ConsoleConnectionState::Waiting);
-            let generation = RwSignal::new(4);
-            let request_tx = RwSignal::new(None);
-            let signals = CreateSignals::new();
-
-            let menu = CreateMenu(
-                CreateMenuProps::builder()
-                    .signals(signals)
-                    .active_domain(active_domain)
-                    .build(),
-            );
-            let menu_markup = menu.to_html();
-            assert!(menu_markup.contains("global-create-button"));
-            assert!(menu_markup.contains("Create"));
-            assert!(menu_markup.contains("Resource"));
-
-            signals.domain.update(|draft| {
-                draft.name = "analytics".to_string();
-                draft.if_not_exists = true;
-                draft.placement = PlacementPolicy::PreferColocation;
-            });
-            signals.open(CreateKind::Domain, None, "global-create-button");
-            let render = || {
-                let dialog = CreateDialog(
-                    CreateDialogProps::builder()
-                        .signals(signals)
-                        .active_domain(active_domain)
-                        .connection_state(connection_state)
-                        .session_generation(generation)
-                        .request_tx(request_tx)
-                        .submit(|_, _, _| {})
-                        .build(),
-                );
-                any_spawner::Executor::poll_local();
-                if signals.open.get_untracked() == Some(CreateKind::Domain) {
-                    signals.pace_choices.set(ChoiceLoad::Ready {
-                        choices: vec![Choice {
-                            value: ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
-                            presentation: ChoicePresentation {
-                                label: "UNPACED".to_string(),
-                                detail: Some("No domain clock".to_string()),
-                                group: None,
-                            },
-                        }],
-                        page_cursor: Some("more-pace".to_string()),
-                    });
-                    signals.placement_choices.set(ChoiceLoad::Ready {
-                        choices: vec![Choice {
-                            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
-                            presentation: ChoicePresentation {
-                                label: "PREFER COLOCATION".to_string(),
-                                detail: None,
-                                group: None,
-                            },
-                        }],
-                        page_cursor: None,
-                    });
-                }
-                dialog.to_html()
-            };
-            let domain_markup = render();
-            assert!(domain_markup.contains("role=\"dialog\""));
-            assert!(domain_markup.contains("Create domain"));
-            assert!(domain_markup.contains(
-                "CREATE IF NOT EXISTS UNPACED DOMAIN analytics PLACEMENT PREFER COLOCATION;"
-            ));
-            assert!(domain_markup.contains("UNPACED"));
-            assert!(domain_markup.contains("Load more"));
-
-            signals.user.update(|draft| {
-                draft.name = "operator".to_string();
-                draft.password = "never-render-me".to_string();
-            });
-            signals.open(CreateKind::User, None, "global-create-button");
-            let user_markup = render();
-            assert!(user_markup.contains("Create user"));
-            assert!(user_markup.contains("********"));
-            assert!(!user_markup.contains("never-render-me"));
-
-            signals
-                .resource
-                .update(|draft| draft.name = "bundle".to_string());
-            signals.open(CreateKind::Resource, Some(scope), "sidebar-create-resource");
-            let (attempt, revision) = signals.begin_submission(false);
-            let resource_markup = render();
-            assert!(resource_markup.contains("Create resource"));
-            assert!(resource_markup.contains("Queued until reconnect"));
-            assert!(resource_markup.contains("CREATE RESOURCE bundle;"));
-
-            signals.failed(attempt, revision, "resource already exists".to_string());
-            let failed_markup = render();
-            assert!(failed_markup.contains("Failed"));
-            assert!(failed_markup.contains("resource already exists"));
-        });
-    }
-}
+mod tests;

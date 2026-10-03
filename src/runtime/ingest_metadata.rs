@@ -6,7 +6,9 @@
 //!   explicit execution timestamps.
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
 
-use nervix_connector::{IngestMetadataRow, SourceMetadataScope};
+use arrow_buffer::BooleanBuffer;
+use nervix_connector::{IngestMetadataRow, NoIngestHeaders, SourceMetadataScope};
+use nervix_models::IngestSourceKind;
 
 use super::*;
 
@@ -35,6 +37,13 @@ impl<'a> IngestHeaderRow<'a> {
             .map(|index| self.values.value(index))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the synchronous header visitor; external Arrow access \
+                      owns its data effects"
+        )
+    )]
     pub(super) fn visit(&self, name: &str, mut visit: impl FnMut(&'a str)) {
         for index in self.start..self.end {
             if self.names.value(index) == name {
@@ -64,6 +73,30 @@ pub(in crate::runtime) enum IngestMetadataKind {
     Kafka,
     Syslog,
     Headers,
+}
+
+impl From<IngestSourceKind> for IngestMetadataKind {
+    /// Kafka and Syslog messages expose their integration metadata; every other source exposes
+    /// transport headers only. A client source's batches carry no headers, so its rows expose an
+    /// empty header list that no program may read.
+    fn from(transport: IngestSourceKind) -> Self {
+        match transport {
+            IngestSourceKind::Kafka => Self::Kafka,
+            IngestSourceKind::Syslog => Self::Syslog,
+            IngestSourceKind::Client
+            | IngestSourceKind::Http
+            | IngestSourceKind::Pulsar
+            | IngestSourceKind::Mqtt
+            | IngestSourceKind::Nats
+            | IngestSourceKind::RabbitMq
+            | IngestSourceKind::RedisPubSub
+            | IngestSourceKind::Prometheus
+            | IngestSourceKind::ZeroMq
+            | IngestSourceKind::Sqs
+            | IngestSourceKind::Endpoint
+            | IngestSourceKind::Websockets => Self::Headers,
+        }
+    }
 }
 
 impl IngestMetadataKind {
@@ -171,7 +204,7 @@ pub(super) struct IngestMetadataBuilders {
 // Counted per thread so a test observes only the groups it opened itself, while the rest of
 // the suite exercises the same builders in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(super) static INGEST_METADATA_BUILDER_SETS_OPENED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(super) static INGEST_METADATA_COLUMN_SETS_BUILT: std::cell::Cell<usize> =
@@ -213,6 +246,11 @@ impl IngestMetadataBuilders {
     // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
     // doubles that per-message function's machine code and measurably reduces ingest throughput.
     #[inline(never)]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the source supplies a transport header visitor; this host \
+                                   appends the bounded row metadata")
+    )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
         let headers = match (&mut self.integration, row) {
             (
@@ -318,6 +356,19 @@ impl IngestMetadataBuilders {
 }
 
 impl IngestFilterMapMetadata {
+    /// The metadata of `rows` messages that arrived without transport headers or integration
+    /// fields, as every row of a client batch does.
+    pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
+        let mut builders = IngestMetadataBuilders::new(IngestMetadataKind::Headers, rows);
+        let row = IngestMetadataRow::Headers {
+            headers: &NoIngestHeaders,
+        };
+        for _ in 0..rows {
+            builders.append(&row)?;
+        }
+        builders.finish()
+    }
+
     pub(super) fn selected_array(&self, array: &ArrayRef) -> IngestMetadataResult<ArrayRef> {
         if self.rows.iter().copied().eq(0..self.rows.len()) && self.rows.len() == array.len() {
             return Ok(array.clone());
@@ -351,7 +402,7 @@ impl IngestFilterMapMetadata {
         })
     }
 
-    pub(super) fn select(&self, keep: &[bool]) -> IngestMetadataResult<Self> {
+    pub(super) fn select(&self, keep: &BooleanBuffer) -> IngestMetadataResult<Self> {
         if keep.len() != self.len() {
             return Err(Report::new(
                 IngestMetadataError::SelectionRowCountMismatch {
@@ -365,8 +416,8 @@ impl IngestFilterMapMetadata {
             rows: Arc::new(
                 self.rows
                     .iter()
-                    .zip(keep)
-                    .filter_map(|(row, keep)| keep.then_some(*row))
+                    .enumerate()
+                    .filter_map(|(index, row)| keep.value(index).then_some(*row))
                     .collect(),
             ),
         })
@@ -440,6 +491,13 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     /// Reads the headers of the messages the selected rows were decoded from. A conditional arm
     /// calls this for the rows it selects only, so each row's headers are looked up by the row's
     /// identity in the batch, which the selection names.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the synchronous header visitor; external Arrow access \
+                      owns its data effects"
+        )
+    )]
     fn inject_with_context(
         &self,
         function: &FunctionName,
@@ -448,21 +506,21 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
-    ) -> Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
+    ) -> error_stack::Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
         let [VmTypedArray::Utf8(names)] = arguments else {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "function '{}' requires one STRING argument",
                     function.as_str()
                 ),
-            });
+            }));
         };
         let metadata_row_count = match self.metadata.as_ref() {
             Some(metadata) => metadata.len(),
             None => self.row_count,
         };
         if !rows.fits(metadata_row_count) || names.len() != rows.len() {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "function '{}' header context has {} rows for a call over {} rows of a batch \
                      selected as {rows:?}",
@@ -470,7 +528,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                     metadata_row_count,
                     names.len()
                 ),
-            });
+            }));
         }
         if let FunctionName::ReadHeader = function {
             let mut values = Vec::with_capacity(names.len());
@@ -505,14 +563,10 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 StdArc::new(builder.finish()),
             )));
         }
-        Err(nervix_vm::RuntimeError::InvalidBatch {
+        Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
             message: format!("function '{}' is not injectable", function.as_str()),
-        })
+        }))
     }
-}
-
-pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    sink.capabilities().writes_headers()
 }
 
 #[cfg(test)]
@@ -525,8 +579,8 @@ mod tests {
         MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,
         RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::{
@@ -536,6 +590,32 @@ mod tests {
             RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema, test_runtime_row,
         },
     };
+
+    #[test]
+    fn a_source_transport_decides_the_metadata_its_messages_expose() {
+        let expected = [
+            (IngestSourceKind::Kafka, IngestMetadataKind::Kafka),
+            (IngestSourceKind::Syslog, IngestMetadataKind::Syslog),
+            (IngestSourceKind::Http, IngestMetadataKind::Headers),
+            (IngestSourceKind::Pulsar, IngestMetadataKind::Headers),
+            (IngestSourceKind::Mqtt, IngestMetadataKind::Headers),
+            (IngestSourceKind::Nats, IngestMetadataKind::Headers),
+            (IngestSourceKind::RabbitMq, IngestMetadataKind::Headers),
+            (IngestSourceKind::RedisPubSub, IngestMetadataKind::Headers),
+            (IngestSourceKind::Prometheus, IngestMetadataKind::Headers),
+            (IngestSourceKind::ZeroMq, IngestMetadataKind::Headers),
+            (IngestSourceKind::Sqs, IngestMetadataKind::Headers),
+            (IngestSourceKind::Endpoint, IngestMetadataKind::Headers),
+            (IngestSourceKind::Websockets, IngestMetadataKind::Headers),
+        ];
+        for (transport, metadata) in expected {
+            assert_eq!(
+                IngestMetadataKind::from(transport),
+                metadata,
+                "{transport:?}"
+            );
+        }
+    }
 
     /// A JSON codec over a one-field `value` schema, for tests that decode payloads into a group.
     fn metering_value_codec() -> Arc<CompiledCodec> {
@@ -638,7 +718,7 @@ mod tests {
         ));
 
         let selection = metadata
-            .select(&[])
+            .select(&BooleanBuffer::new_unset(0))
             .expect_err("selection and metadata row counts must agree");
         assert!(matches!(
             selection.current_context(),
@@ -649,7 +729,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
         let topic = "metering_events";
         let headers = TestIngestHeaders(&[("route", "primary")]);
@@ -662,7 +742,12 @@ mod tests {
         for offset in 0..3i64 {
             let payload = format!(r#"{{"value":{offset}}}"#);
             group
-                .decode_payload(&codec, payload.as_bytes())
+                .decode_payload(
+                    &Executor::default(),
+                    QueueAdmission::RefuseWhenFull,
+                    &codec,
+                    payload.as_bytes(),
+                )
                 .await
                 .expect("each payload must decode into the group's record builder");
             group
@@ -711,7 +796,7 @@ mod tests {
         assert_eq!(offsets.values(), &[0, 1, 2]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -719,9 +804,9 @@ mod tests {
             ("amount", ParseAsType::I64),
             ("raw", ParseAsType::String),
         ]);
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("logic_ingestor"),
+            &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Kafka,
             true,
             &construction(
@@ -770,8 +855,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("filter-map must compile")
-        .expect("program must exist");
+        .expect("filter-map must compile");
 
         let record = test_runtime_row([
             (
@@ -844,7 +928,7 @@ mod tests {
             .expect("Kafka offsets must remain INT64");
         assert_eq!(offsets.values(), &[42, 43]);
         let selected = grouped_metadata
-            .select(&[false, true])
+            .select(&BooleanBuffer::collect_bool(2, |row| row == 1))
             .expect("metadata row selection must succeed");
         let selected_offset = selected
             .field_column("offset")
@@ -903,7 +987,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(1),
         );
         assert!(
-            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(beyond, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a row past the header context is refused"
         );
         let short = injector.inject_with_context(
@@ -915,12 +999,12 @@ mod tests {
             nervix_vm::RowErrorMask::none(1),
         );
         assert!(
-            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(short, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a batch of another size than the header context is refused"
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -964,9 +1048,9 @@ mod tests {
             },
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         };
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("header_ingestor"),
+            &named::<ModelName>("header_ingestor"),
             IngestMetadataKind::Kafka,
             source.reads_headers(),
             &construction(
@@ -987,8 +1071,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("header filter-map must compile")
-        .expect("program must exist");
+        .expect("header filter-map must compile");
         let record = test_runtime_row([
             (
                 "tenant".to_string(),
@@ -1058,10 +1141,13 @@ mod tests {
                 },
             ],
         );
-        let grouped_runtime_metadata =
-            vec![record.metadata().clone(), second_record.metadata().clone()];
+        let grouped_runtime_metadata = RecordMetadataColumns::from_rows([
+            record.metadata().clone(),
+            second_record.metadata().clone(),
+        ]);
         let grouped_keys = vec![None, None];
         let grouped_outcomes = evaluate_filter_map_on_batch(
+            &Executor::default(),
             ModelKind::Ingestor.as_str(),
             &named::<ModelName>("header_ingestor"),
             &program,
@@ -1105,7 +1191,7 @@ mod tests {
             Some(RuntimeValue::I64(1))
         );
 
-        let top_filter = compile_expression_filter_program(
+        let top_filter = compile_scoped_filter_program(
             RuntimeCompileTarget {
                 domain: &domain("default"),
                 identifier: &named("header_ingestor"),
@@ -1118,13 +1204,17 @@ mod tests {
                 schema: input_schema.arrow_schema(),
                 sensitivity: VmSchemaSensitivity::default(),
             },
-            true,
             MessageErrorOperation::FilterWhere,
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
+            },
+            RuntimeFilterScope::Source {
+                namespace: "input",
+                allow_header_reads: true,
+                allow_metadata: true,
             },
         )
         .expect("top FILTER WHERE must compile")

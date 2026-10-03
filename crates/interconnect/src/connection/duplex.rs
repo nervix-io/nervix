@@ -3,8 +3,14 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Opening one ordered frame stream per caller, frame length validation, per-frame
-//!   memory admission, when the peer last accepted a sender's bytes, and the half-close that ends
-//!   a stream.
+//!   memory admission, the decoding of a frame a receive took off the stream, when the peer last
+//!   accepted a sender's bytes, and the half-close that ends a stream.
+//!
+//! Receiving is cancel-safe. A receive that took its frame off the stream waits for the frame's
+//! decoding, and a caller that selects the receive against a timer or a command drops it whenever
+//! another arm wins. The decoding therefore stays with the receiving half, and the next receive
+//! finishes that frame before it reads another, so an abandoned receive loses no frame and
+//! reorders none.
 //!
 //! A decoded frame is handed to its caller together with the charge that covers it. How long a
 //! decoded frame stays resident is the caller's contract, not this module's, so the charge travels
@@ -13,13 +19,7 @@
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** What the frames carry, or why a caller keeps a stream open.
 
-use std::{
-    future::poll_fn,
-    marker::PhantomData,
-    pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{future::poll_fn, marker::PhantomData, pin::Pin, time::Duration};
 
 use arch_into::ArchInto as _;
 use bytes::Bytes;
@@ -30,8 +30,13 @@ use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
-use tokio::time::{Instant, timeout};
-use triomphe::Arc;
+use nervix_primitives::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Instant, timeout},
+};
 
 use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
@@ -54,6 +59,10 @@ const FRAME_HEADER_BYTES: usize = 4;
 const FRAME_CARRY_SLACK_BYTES: u64 = 64 * 1024;
 /// What a reader charges before it has seen how large this stream's frames are.
 const INITIAL_FRAME_CHARGE: u64 = 4 * 1024;
+
+/// The decoding of one frame a receive took off the stream, kept until a receive finishes it.
+type FrameDecoding<T> =
+    Pin<Box<dyn Future<Output = Result<(T, Reservation), Report<TransportError>>> + Send>>;
 
 fn carry_limit(frame_limit: u64) -> u64 {
     frame_limit
@@ -87,7 +96,7 @@ impl FrameReader {
         let charge = executor
             .reserve(class, INITIAL_FRAME_CHARGE.min(carry_limit(frame_limit)))
             .await
-            .map_err(|error| Report::new(TransportError::Decode(error.to_string())))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
         Ok(Self {
             body,
             carry: Vec::new(),
@@ -100,7 +109,7 @@ impl FrameReader {
     /// The next complete frame, or `None` once the peer half-closed its direction.
     pub(crate) async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, Report<TransportError>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(frame) = self.take_buffered_frame()? {
                 return Ok(Some(frame));
             }
@@ -152,7 +161,7 @@ impl FrameReader {
         let charged = target.max(doubled).min(ceiling);
         self.charge
             .grow_to(charged)
-            .map_err(|error| Report::new(TransportError::Decode(error.to_string())))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
         let charged: usize = usize::try_from(charged)
             .assured("a charge bounded by the class limit fits the address space");
         let room = charged
@@ -222,7 +231,7 @@ impl FrameWriter {
                 .await?;
             let mut offset = 0;
             while offset < payload.len() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let remaining = payload
                     .len()
                     .checked_sub(offset)
@@ -251,7 +260,7 @@ impl FrameWriter {
 
     async fn send_all(&mut self, mut body: Bytes) -> Result<(), Report<TransportError>> {
         while !body.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.stream.reserve_capacity(body.len());
             let assigned = poll_fn(|context| self.stream.poll_capacity(context))
                 .await
@@ -360,32 +369,23 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
                 M::CLASS.payload_limit(&self.executor),
             )
             .await
-            .map_err(|error| {
-                Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-            })?;
+            .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let frame = ChargedBytes::from_owned(payload, reservation);
         let bytes = u64::try_from(frame.len())
             .assured("supported targets have a pointer width no larger than u64");
-        self.writer.send_frame(frame).await.map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: M::NAME,
-                reason: error.to_string(),
-            })
-        })?;
+        self.writer
+            .send_frame(frame)
+            .await
+            .map_err(|error| RequestError::stream_with_cause(error, self.node.clone(), M::NAME))?;
         Ok(bytes)
     }
 
     /// Stop submitting. The peer finishes the frames it already has and then ends its own
     /// direction.
     pub fn finish(&mut self) -> Result<(), Report<RequestError>> {
-        self.writer.finish().map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: M::NAME,
-                reason: error.to_string(),
-            })
-        })
+        self.writer
+            .finish()
+            .map_err(|error| RequestError::stream_with_cause(error, self.node.clone(), M::NAME))
     }
 
     /// When the peer last accepted bytes from this sender.
@@ -402,6 +402,8 @@ pub struct DuplexReceiver<M: InterconnectDuplexRequest> {
     reader: FrameReader,
     executor: Executor,
     node: ClusterNodeName,
+    /// The answer an abandoned receive took off the stream, still decoding.
+    decoding: Option<FrameDecoding<M::Response>>,
     _hold: Arc<DuplexHold>,
     response: PhantomData<fn() -> M::Response>,
 }
@@ -411,24 +413,27 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
     ///
     /// This waits as long as the stream stays open. A caller with work outstanding owns the
     /// deadline for that work and applies it here, and [`DuplexSender::progress`] tells it whether
-    /// the peer still accepts what it sends.
+    /// the peer still accepts what it sends. It is cancel-safe: an answer a dropped receive took
+    /// off the stream is the next receive's.
     pub async fn next(&mut self) -> Result<Option<M::Response>, Report<RequestError>> {
-        let frame = self.reader.next_frame().await.map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: M::NAME,
-                reason: error.to_string(),
-            })
-        })?;
-        let Some(frame) = frame else {
-            return Ok(None);
-        };
-        let (response, _reservation) =
-            M::Response::decode_rkyv(self.executor.clone(), M::CLASS, frame)
-                .await
-                .map_err(|error| {
-                    Report::new(RequestError::Decode { request: M::NAME }).attach_printable(error)
-                })?;
+        if self.decoding.is_none() {
+            let frame = self.reader.next_frame().await.map_err(|error| {
+                RequestError::stream_with_cause(error, self.node.clone(), M::NAME)
+            })?;
+            let Some(frame) = frame else {
+                return Ok(None);
+            };
+            let decoding = M::Response::decode_rkyv(self.executor.clone(), M::CLASS, frame);
+            self.decoding = Some(Box::pin(decoding));
+        }
+        let decoding = self
+            .decoding
+            .as_mut()
+            .verified("the branch above starts a decoding whenever no receive left one");
+        let decoded = decoding.await;
+        self.decoding = None;
+        let (response, _reservation) = decoded
+            .map_err(|error| error.change_context(RequestError::Decode { request: M::NAME }))?;
         Ok(Some(response))
     }
 }
@@ -439,6 +444,8 @@ pub struct DuplexItems<T> {
     executor: Executor,
     class: PoolClass,
     request: &'static str,
+    /// The frame an abandoned read took off the stream, still decoding.
+    decoding: Option<FrameDecoding<T>>,
     item: PhantomData<fn() -> T>,
 }
 
@@ -454,6 +461,7 @@ impl<T> DuplexItems<T> {
             executor,
             class,
             request,
+            decoding: None,
             item: PhantomData,
         }
     }
@@ -472,24 +480,33 @@ pub struct ChargedItem<T> {
 
 impl<T: RkyvMessage> DuplexItems<T> {
     /// The next frame and the charge covering it, or `None` once the peer half-closed its
-    /// direction.
+    /// direction. It is cancel-safe: a frame a dropped read took off the stream is the next
+    /// read's.
     pub async fn next(&mut self) -> Result<Option<ChargedItem<T>>, Report<StreamHandlerError>> {
-        let frame = self
-            .reader
-            .next_frame()
-            .await
-            .map_err(|error| Report::new(StreamHandlerError::new(error.to_string())))?;
-        let Some(frame) = frame else {
-            return Ok(None);
-        };
-        let (item, charge) = T::decode_rkyv(self.executor.clone(), self.class, frame)
-            .await
-            .map_err(|error| {
-                Report::new(StreamHandlerError::new(format!(
-                    "{} frame: {error}",
-                    self.request
-                )))
-            })?;
+        if self.decoding.is_none() {
+            let frame = self
+                .reader
+                .next_frame()
+                .await
+                .map_err(StreamHandlerError::with_cause)?;
+            let Some(frame) = frame else {
+                return Ok(None);
+            };
+            let decoding = T::decode_rkyv(self.executor.clone(), self.class, frame);
+            self.decoding = Some(Box::pin(decoding));
+        }
+        let decoding = self
+            .decoding
+            .as_mut()
+            .verified("the branch above starts a decoding whenever no read left one");
+        let decoded = decoding.await;
+        self.decoding = None;
+        let (item, charge) = decoded.map_err(|error| {
+            Report::new(StreamHandlerError::new(format!(
+                "{} frame: {error}",
+                self.request
+            )))
+        })?;
         Ok(Some(ChargedItem { item, charge }))
     }
 }
@@ -543,8 +560,10 @@ impl ClientConnection {
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
                 .set_host(Some(&self.request_host))
-                .map_err(|_| {
-                    Report::new(TransportError::InvalidServerName(self.request_host.clone()))
+                .map_err(|error| {
+                    Report::new(error).change_context(TransportError::InvalidServerName(
+                        self.request_host.clone(),
+                    ))
                 })?;
             request_url.set_path(path);
             let request = Request::builder()
@@ -552,7 +571,9 @@ impl ClientConnection {
                 .version(Version::HTTP_2)
                 .uri(request_url.as_str())
                 .body(())
-                .map_err(|error| Report::new(TransportError::Http(error.to_string())))?;
+                .map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Http)
+                })?;
             let (response, stream) = {
                 let mut sender = sender;
                 sender
@@ -635,6 +656,7 @@ impl TransportState {
                 reader,
                 executor: self.executor.clone(),
                 node: node_id.clone(),
+                decoding: None,
                 _hold: hold,
                 response: PhantomData,
             },
@@ -681,7 +703,7 @@ impl TransportState {
             .await?;
             return Ok(());
         }
-        let handled = tokio::select! {
+        let handled = nervix_primitives::select! {
             handled = self.requests.handle_duplex(
                 &self.executor,
                 peer_node_id,
@@ -713,7 +735,9 @@ impl TransportState {
             .status(StatusCode::OK)
             .version(Version::HTTP_2)
             .body(())
-            .map_err(|error| TransportError::Http(error.to_string()))?;
+            .map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Http)
+            })?;
         let mut writer = FrameWriter::new(
             respond
                 .send_response(headers, false)
@@ -721,12 +745,12 @@ impl TransportState {
             self.options.progress_timeout,
         );
         while let Some(frame) = responses.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {
                     writer.stream.send_reset(Reason::INTERNAL_ERROR);
-                    return Err(Report::new(TransportError::Decode(error.to_string())));
+                    return Err(TransportError::with_cause(error, TransportError::Decode));
                 }
             };
             writer.send_frame(frame).await?;

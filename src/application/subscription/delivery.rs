@@ -7,8 +7,8 @@
 //!   queueing them as its delivery behavior asks, reporting the rows it skipped or dropped, ending
 //!   it with a typed reason when its relay closes, and releasing the relay receiver and the
 //!   interest lease it holds.
-//! - **Depends on.** The runtime's relay receiver, subscription predicate and domain time, the Row
-//!   encoder, the session's subscription lane, the interest lease, and the schedule it reads an
+//! - **Depends on.** The runtime's relay receiver, subscription predicate, domain time and executor,
+//!   the Row encoder, the session's subscription lane, the interest lease, and the schedule it reads an
 //!   end reason from.
 //! - **Must not know.** Requests, replies, or how a transport writes frames.
 //!
@@ -29,9 +29,10 @@ use nervix_client_wire::{
     EncodedFrame, ServerFrame, SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionRowsSkipped, WireEncodeError,
 };
+use nervix_execution::Executor;
 use nervix_models::{DomainName, RelayName, SubscriptionDeliveryBehavior};
+use nervix_primitives::sync::oneshot;
 use nervix_recovery::NoReceiver as _;
-use tokio::sync::oneshot;
 use tracing::debug;
 
 use super::{SkippedRows, interest::SubscriptionInterestLease, select_subscription_rows};
@@ -40,7 +41,6 @@ use crate::{
         session::outbound::{LaneClosed, LaneRefusal, SubscriptionLane},
         session_service::SessionServiceImpl,
     },
-    metrics::RuntimeMetrics,
     runtime::{CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionReceiver},
     subscription_row::{SubscriptionRowEncoder, SubscriptionRowFrame, SubscriptionRowSelection},
 };
@@ -83,6 +83,11 @@ enum DeliveryStop {
 
 /// The part of a generation's delivery that outlives its relay receiver and interest lease.
 struct ActiveDelivery {
+    executor: Executor,
+    clock: Result<
+        crate::runtime::DomainClockLifecycle,
+        Report<crate::runtime::DomainClockAccessError>,
+    >,
     domain: DomainName,
     relay: RelayName,
     predicate: Option<CompiledSubscriptionPredicate>,
@@ -112,11 +117,17 @@ impl SubscriptionDelivery {
         } = self;
         let announcement = wait_for_announcement(&lane, &mut receiver, announced).await;
         let losses = DeliveryLosses {
-            metrics: service.inner.runtime.metrics(),
-            domain: domain.clone(),
-            relay: relay.clone(),
+            dropped: service
+                .inner
+                .runtime
+                .metrics()
+                .session_subscription_dropped_rows(&domain, &relay),
         };
+        let clock = service.inner.runtime.domain_clock_lifecycle(&domain);
+        let executor = service.inner.runtime.executor().clone();
         let mut delivery = ActiveDelivery {
+            executor,
+            clock,
             domain,
             relay,
             predicate,
@@ -157,8 +168,8 @@ async fn wait_for_announcement(
 ) -> Announcement {
     let mut relay_open = true;
     loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             biased;
             _ = lane.withdrawn() => return Announcement::Abandoned,
             released = &mut announced => {
@@ -187,8 +198,8 @@ impl ActiveDelivery {
         receiver: &mut RelaySubscriptionReceiver<RelayRecordBatch>,
     ) -> DeliveryStop {
         loop {
-            tokio::task::consume_budget().await;
-            let batch = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let batch = nervix_primitives::select! {
                 biased;
                 _ = self.sender.lane.withdrawn() => return DeliveryStop::Withdrawn,
                 batch = receiver.recv() => batch,
@@ -206,11 +217,12 @@ impl ActiveDelivery {
     /// longer deliver.
     async fn deliver_batch(&mut self, batch: &RelayRecordBatch) -> Result<(), LaneClosed> {
         let selection = select_subscription_rows(
+            &self.executor,
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,
-            &self.service.inner.runtime,
-            &self.domain,
+            &self.service.inner.subscription_sampler,
+            &self.clock,
         )
         .await;
         if let Some(skipped) = selection.skipped {
@@ -244,7 +256,7 @@ impl ActiveDelivery {
             }
         };
         for frame in frames {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.sender.send_rows(frame).await?;
         }
         Ok(())
@@ -299,9 +311,7 @@ struct SubscriptionSender {
 
 /// Where a dropping subscription records the rows it discards, for the node's operators.
 struct DeliveryLosses {
-    metrics: RuntimeMetrics,
-    domain: DomainName,
-    relay: RelayName,
+    dropped: prometheus::IntCounter,
 }
 
 impl SubscriptionSender {
@@ -401,19 +411,13 @@ impl SubscriptionSender {
             "the count restarts at every report, and no session drops 2^64 rows between two: at a \
              billion rows a second that takes centuries",
         );
-        self.losses
-            .metrics
-            .increment_session_subscription_dropped_rows(
-                &self.losses.domain,
-                &self.losses.relay,
-                rows,
-            );
+        self.losses.dropped.inc_by(rows);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+    use std::{num::NonZeroUsize, time::Duration};
 
     use arrow_array::{RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
@@ -421,8 +425,10 @@ mod tests {
         RowSchema, RowsSkippedCause, ServerEvent, ServerMessage, SubscriptionHandle, VerifiedFrame,
     };
     use nervix_models::{DomainName, RelayName, SchemaField, SubscriptionName};
-    use tokio::time::timeout;
-    use tokio_util::sync::CancellationToken;
+    use nervix_primitives::{
+        sync::{CancellationToken, StdArc},
+        time::timeout,
+    };
 
     use super::*;
     use crate::{
@@ -491,9 +497,12 @@ mod tests {
             behavior,
             dropped_rows: 0,
             losses: DeliveryLosses {
-                metrics: crate::runtime::Runtime::default().metrics(),
-                domain: named::<DomainName>("default"),
-                relay: named::<RelayName>("events"),
+                dropped: crate::runtime::Runtime::default()
+                    .metrics()
+                    .session_subscription_dropped_rows(
+                        &named::<DomainName>("default"),
+                        &named::<RelayName>("events"),
+                    ),
             },
         };
         (sender, frames, outbound)
@@ -521,7 +530,7 @@ mod tests {
         rows.batch().len()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_dropping_subscription_reports_what_it_dropped_before_its_next_rows() {
         let encoder = encoder();
         let (mut sender, mut frames, _outbound) = sender(SubscriptionDeliveryBehavior::Dropping);
@@ -569,7 +578,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn skipped_rows_are_reported_with_their_cause_and_count() {
         let (sender, mut frames, _outbound) = sender(SubscriptionDeliveryBehavior::Blocking);
         let skipped = SkippedRows {

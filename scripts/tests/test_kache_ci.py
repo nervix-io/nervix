@@ -16,44 +16,60 @@ class KacheCiTests(unittest.TestCase):
         self.assertNotIn("actions/cache@", check_workflow)
         self.assertNotIn("actions/cache@", docker_workflow)
         self.assertNotIn("enable-cache: true", docker_workflow)
+        for workflow in (check_workflow, docker_workflow):
+            self.assertIn('KACHE_VERSION: "0.28.1"', workflow)
+            self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow)
 
-        expected_jobs = (
-            check_workflow.split("\n  checks:", maxsplit=1)[1].split(
-                "\n  tests:", maxsplit=1
-            )[0],
-            check_workflow.split("\n  tests:", maxsplit=1)[1],
-            docker_workflow.split("\n  benchmark:", maxsplit=1)[1].split(
-                "\n  benchmark-comment:", maxsplit=1
-            )[0],
-            docker_workflow.split("\n  build-book:", maxsplit=1)[1],
+        import re
+
+        def job_sections(workflow: str) -> dict[str, str]:
+            starts = list(re.finditer(r"^  ([a-z][a-z-]*):\n", workflow, re.MULTILINE))
+            return {
+                match.group(1): workflow[match.start() : starts[index + 1].start() if index + 1 < len(starts) else len(workflow)]
+                for index, match in enumerate(starts)
+            }
+
+        jobs = job_sections(check_workflow) | job_sections(docker_workflow)
+        kache_jobs = (
+            "checks",
+            "tests",
+            "scenarios",
+            "client-conformance",
+            "extra-tests",
+            "shuttle",
+            "turmoil",
+            "benchmark",
+            "build-book",
         )
+        for name in kache_jobs:
+            with self.subTest(job=name):
+                job = jobs[name]
+                configure_index = job.index("bash scripts/configure_kache_remote.sh")
+                setup_index = job.index("uses: kunobi-ninja/kache-action@v1")
+                self.assertLess(configure_index, setup_index)
+                self.assertIn('echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"', job)
+                self.assertIn('github-cache: "false"', job)
+                self.assertIn('sync: "false"', job)
+                self.assertIn('cache-executables: "true"', job)
+                self.assertIn('s3-prefix: "artifacts"', job)
+                self.assertIn("s3-bucket: ${{ vars.KACHE_BUCKET }}", job)
+                self.assertIn("s3-region: ${{ vars.KACHE_BUCKET_REGION }}", job)
+                self.assertIn("KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}", job)
+                self.assertIn("s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}", job)
+                self.assertIn("KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}", job)
+                self.assertIn("KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}", job)
+                self.assertIn("s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}", job)
+                self.assertIn("s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}", job)
+                self.assertIn("python3 scripts/publish_kache_report.py", job)
+                self.assertIn("Upload kache report", job)
+                self.assertIn('max-size: "1TiB"', job)
 
-        for job in expected_jobs:
-            configure_index = job.index("bash scripts/configure_kache_remote.sh")
-            setup_index = job.index("uses: kunobi-ninja/kache-action@v1")
-            self.assertLess(configure_index, setup_index)
-            self.assertNotIn("if: vars.KACHE_S3_BUCKET != ''", job)
-            self.assertIn('echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"', job)
-            self.assertIn("uses: kunobi-ninja/kache-action@v1", job)
-            self.assertIn("github-cache: \"false\"", job)
-            self.assertIn(
-                "continue-on-error: true\n        if: always()\n        run: kache stats",
-                job,
-            )
-            self.assertIn("s3-bucket: ${{ vars.KACHE_S3_BUCKET }}", job)
-            self.assertIn("s3-region: ${{ vars.KACHE_S3_REGION }}", job)
-            self.assertIn(
-                "KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}", job
-            )
-            self.assertIn(
-                "KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}", job
-            )
-            self.assertIn(
-                "s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}", job
-            )
-            self.assertIn(
-                "s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}", job
-            )
+        self.assertNotIn("KACHE_GC_EVICT_SHARED", docker_workflow)
+
+        report_script = Path("scripts/publish_kache_report.py").read_text()
+        self.assertIn('run("kache", "doctor")', report_script)
+        self.assertIn('run("kache", "why-miss", crate)', report_script)
+        self.assertIn('run("kache", "report", "--format", "json"', report_script)
 
     def test_remote_config_is_file_backed_for_the_daemon(self) -> None:
         script = Path("scripts/configure_kache_remote.sh")
@@ -62,8 +78,9 @@ class KacheCiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             config = Path(temporary_directory) / "kache.toml"
             required_environment = {
-                "KACHE_S3_BUCKET": "nervix-ci-kache-us-west-1",
-                "KACHE_S3_REGION": "us-west-1",
+                "KACHE_S3_BUCKET": "kache-ci",
+                "KACHE_S3_REGION": "auto",
+                "KACHE_S3_ENDPOINT": "https://account-id.r2.cloudflarestorage.com",
                 "KACHE_S3_ACCESS_KEY": "test-access-key",
                 "KACHE_S3_SECRET_KEY": "test-secret-key",
             }
@@ -82,8 +99,10 @@ class KacheCiTests(unittest.TestCase):
                 "cache": {
                     "remote": {
                         "type": "s3",
-                        "bucket": "nervix-ci-kache-us-west-1",
-                        "region": "us-west-1",
+                        "bucket": "kache-ci",
+                        "region": "auto",
+                        "endpoint": "https://account-id.r2.cloudflarestorage.com",
+                        "pull_request_prefix": "artifacts-pr",
                     }
                 }
             },
@@ -110,23 +129,36 @@ class KacheCiTests(unittest.TestCase):
 
         self.assertNotIn("useblacksmith/setup-docker-builder", workflow)
         self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
-        self.assertIn("KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}", workflow)
-        self.assertIn("KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}", workflow)
+        self.assertIn("KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}", workflow)
+        self.assertIn("KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}", workflow)
+        self.assertIn("KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}", workflow)
         self.assertIn(
-            "KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}", workflow
+            "KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}", workflow
         )
         self.assertIn(
-            "KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}", workflow
+            "KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}", workflow
         )
 
         self.assertIn('--build-arg "KACHE_S3_ACCESS_KEY=', justfile)
         self.assertIn('--build-arg "KACHE_S3_SECRET_KEY=', justfile)
+        self.assertIn('--build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}"', justfile)
+        self.assertIn(
+            ': "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"', justfile
+        )
         self.assertIn(
             ': "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"', justfile
         )
         self.assertNotIn('if [[ -n "${KACHE_S3_ACCESS_KEY:-}"', justfile)
         self.assertNotIn("${KACHE_S3_REGION:-us-east-1}", justfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
+        self.assertIn("ARG KACHE_VERSION=0.28.1", dockerfile)
+        self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
+        self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
+        self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
+        self.assertIn("ARG KACHE_S3_ENDPOINT", dockerfile)
+        self.assertIn(
+            ': "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"', dockerfile
+        )
         configure_index = dockerfile.index("bash scripts/configure_kache_remote.sh")
         daemon_index = dockerfile.index("kache daemon start")
         self.assertLess(configure_index, daemon_index)
@@ -137,6 +169,31 @@ class KacheCiTests(unittest.TestCase):
         self.assertIn("kache stats", dockerfile)
         self.assertIn("kache save-manifest", dockerfile)
         self.assertIn("kache sync --push", dockerfile)
+
+    def test_remote_endpoint_requires_an_account_url(self) -> None:
+        environment = os.environ | {
+            "KACHE_S3_BUCKET": "kache-ci",
+            "KACHE_S3_REGION": "auto",
+            "KACHE_S3_ACCESS_KEY": "test-access-key",
+            "KACHE_S3_SECRET_KEY": "test-secret-key",
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = Path(temporary_directory) / "kache.toml"
+            for endpoint in (
+                "https://account-id.r2.cloudflarestorage.com/kache-ci",
+                "account-id.r2.cloudflarestorage.com",
+                "https://user:password@example.com",
+                'https://example.com/\n[other]\nvalue = "injected"',
+            ):
+                with self.subTest(endpoint=endpoint):
+                    result = subprocess.run(
+                        ["bash", "scripts/configure_kache_remote.sh", str(config)],
+                        capture_output=True,
+                        env=environment | {"KACHE_S3_ENDPOINT": endpoint},
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("KACHE_S3_ENDPOINT", result.stderr)
 
 
 if __name__ == "__main__":

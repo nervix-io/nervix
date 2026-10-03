@@ -10,9 +10,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 
 use async_trait::async_trait;
@@ -75,6 +72,11 @@ impl ZeroMqSink {
         Report::new(SinkStartError::Initialize { sink: ZEROMQ }).attach_printable(error.to_string())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "formats the typed external ZeroMQ driver failure; no \
+                                   internal runtime ownership is inferred")
+    )]
     fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
         Report::new(SinkPublishError::Publish { sink: ZEROMQ }).attach_printable(error.to_string())
     }
@@ -88,7 +90,7 @@ impl RecordSink for ZeroMqSink {
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.socket.send(record.payload.into()).await {
                 Ok(()) => outcome.deliver(record.id),
                 Err(error) => {

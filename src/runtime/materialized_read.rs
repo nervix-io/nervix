@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "materialized dependencies are read repeatedly by the concrete branch processing \
+                  path"
+    )
+)]
+
 use error_stack::ResultExt as _;
 
 use super::{state_snapshot_exchange::MaterializedSnapshotExchangeError, *};
@@ -114,23 +123,25 @@ impl Runtime {
         let routing = self
             .domain_routing(domain)
             .map(|routing| routing.load_full());
-        let states = self
-            .inner
-            .replicated_materialized_stream_states
-            .iter()
-            .filter(|state| {
-                let placement = state.key();
-                placement.domain == *domain
-                    && placement.kind == ModelKind::Relay
-                    && placement.identifier == ModelName::from(relay)
-            })
-            .map(|state| {
-                (
-                    state.key().clone(),
-                    ReplicatedMaterializedRelayState::read(state.value()),
-                )
-            })
-            .collect::<Vec<_>>();
+        let states = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner.replicated_materialized_stream_states.iter()
+        )
+        .filter(|state| {
+            let placement = state.key();
+            placement.domain == *domain
+                && placement.kind == ModelKind::Relay
+                && placement.identifier == ModelName::from(relay)
+        })
+        .map(|state| {
+            (
+                state.key().clone(),
+                ReplicatedMaterializedRelayState::read(state.value()),
+            )
+        })
+        .collect::<Vec<_>>();
         let mut reports = Vec::new();
         let mut found = false;
         for (placement, state) in states {
@@ -205,11 +216,15 @@ impl Runtime {
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         let placements = self.materialized_record_placements(domain, relay, branch_key)?;
         for placement in &placements {
-            let state = self
-                .inner
-                .replicated_materialized_stream_states
-                .get(placement)
-                .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
+            let state = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+                 dependencies instead of table lookup",
+                self.inner
+                    .replicated_materialized_stream_states
+                    .get(placement)
+            )
+            .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
             let Some(state) = state else {
                 continue;
             };
@@ -318,11 +333,14 @@ impl Runtime {
         routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
     ) -> Option<StdArc<arrow_schema::Schema>> {
-        if let Some(state) = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(placement)
-        {
+        if let Some(state) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner
+                .replicated_materialized_stream_states
+                .get(placement)
+        ) {
             return Some(
                 ReplicatedMaterializedRelayState::read(state.value())
                     .schema()
@@ -488,15 +506,20 @@ impl Runtime {
         if scheduled {
             return true;
         }
-        // Expiring branches are tracked for the whole relay, in the same lifetime as the state.
-        let expiring_placement = RuntimeStatePlacement {
+        // Branch presence is kept for the whole relay, in the same lifetime as the state.
+        let presence_placement = RuntimeStatePlacement {
             branch_key: None,
             ..placement.clone()
         };
-        self.inner
-            .expiring_stream_states
-            .get(&expiring_placement)
-            .is_none_or(|state| state.registry.contains_key(key))
+        let Some(presence) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner.relay_branch_presences.get(&presence_placement)
+        ) else {
+            return true;
+        };
+        presence.contains(key.as_ref())
     }
 
     /// Every materialized record one relay holds on another node, reported the same way as the
@@ -603,23 +626,25 @@ impl Runtime {
                 })
                 .collect());
         }
-        let states = self
-            .inner
-            .replicated_materialized_stream_states
-            .iter()
-            .filter(|state| {
-                let key = state.key();
-                key.domain == *domain
-                    && key.kind == ModelKind::Relay
-                    && key.identifier == ModelName::from(relay)
-            })
-            .map(|state| {
-                (
-                    state.key().clone(),
-                    ReplicatedMaterializedRelayState::read(state.value()),
-                )
-            })
-            .collect::<Vec<_>>();
+        let states = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
+             dependencies instead of table lookup",
+            self.inner.replicated_materialized_stream_states.iter()
+        )
+        .filter(|state| {
+            let key = state.key();
+            key.domain == *domain
+                && key.kind == ModelKind::Relay
+                && key.identifier == ModelName::from(relay)
+        })
+        .map(|state| {
+            (
+                state.key().clone(),
+                ReplicatedMaterializedRelayState::read(state.value()),
+            )
+        })
+        .collect::<Vec<_>>();
         if states.is_empty() {
             let Some(restored) = self
                 .open_stored_materialized_snapshot(Some(&routing), &placement)
@@ -705,7 +730,7 @@ impl Runtime {
         }
 
         for relay_interest in &interest.relays {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(relay_values) = self
                 .load_materialized_relay_values(
                     routing,
@@ -806,7 +831,7 @@ impl Runtime {
         let mut resolved = HashMap::default();
         let mut declared = HashSet::default();
         for dependency in dependencies {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !declared.insert(dependency.relay.clone()) {
                 return Err(Report::new(MaterializedReadError::DuplicateDependency {
                     domain: domain.clone(),
@@ -845,6 +870,7 @@ impl Runtime {
                             continue;
                         }
                         let value = evaluate_constant_expression_vm(
+                            self.executor(),
                             &assignment.value,
                             Some(&routing.udfs),
                             execution_now,
@@ -913,7 +939,7 @@ impl Runtime {
         } = wait;
         let mut required_wait = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let execution_now = domain_clock
                 .snapshot()
                 .change_context(MaterializedReadError::DomainClock {
@@ -966,7 +992,7 @@ impl Runtime {
                         }
                         return Ok(None);
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         _ = changed => {}
                         _ = sleep(self.inner.state_replication_poll_interval) => {}
                         result = shutdown_rx.changed() => {
@@ -1006,13 +1032,12 @@ fn materialized_record_report(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
-    use nervix_models::{Assignment, AssignmentTarget, DomainSchedule, Expression, ParseAsType};
-    use tokio::{
-        sync::watch,
-        time::{Duration, timeout},
-    };
+    use nervix_models::{Assignment, AssignmentTarget, Expression, ParseAsType};
+    use nervix_primitives::{sync::watch, time::timeout};
 
     use super::*;
     use crate::{
@@ -1085,7 +1110,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1128,25 +1153,25 @@ mod tests {
                 )
             })
             .collect();
-        let relay_registries = [(named("input"), RelayRegistry::new())]
+        let relay_services = [(named("input"), test_relay_boundary_services())]
             .into_iter()
             .collect();
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
                 routing: runtime.stage_domain_routing(
                     &domain,
                     DomainRoutingSnapshot {
-                        relay_registries,
+                        relay_services,
                         materialized_stream_specs,
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                branched_ingestors: HashMap::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
@@ -1156,7 +1181,6 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -1342,7 +1366,7 @@ mod tests {
                 timeout(Duration::from_millis(50), &mut resolution)
                     .await
                     .is_err(),
-                "an empty non-owner relay registry must not evict retained branch work"
+                "an empty non-owner relay presence must not evict retained branch work"
             );
             shutdown_tx.send_replace(true);
             assert!(

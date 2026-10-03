@@ -16,7 +16,8 @@ permissions:
   issues: write
 
 env:
-  KACHE_VERSION: "0.19.0"
+  KACHE_VERSION: "0.28.1"
+  KACHE_REMOTE_KEY_LISTING: "false"
 
 jobs:
   meta:
@@ -72,6 +73,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -79,7 +82,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just@latest,toml-cli
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -91,10 +94,11 @@ jobs:
 
       - name: Build and push arch image
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           image_repo="ghcr.io/nervix-io/nervix"
           tag="${image_repo}:${{ needs.meta.outputs.build_id }}-${{ matrix.image }}-${{ matrix.arch }}"
@@ -157,14 +161,14 @@ jobs:
         run: docker logout ghcr.io
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,wild-linker
+          tool: just@latest,toml-cli,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -188,12 +192,18 @@ jobs:
             libcurl4-openssl-dev \
             protobuf-compiler
 
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -204,12 +214,17 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -222,10 +237,17 @@ jobs:
           "${NERVIX_BENCHMARK_IMAGE}"
           "${RUNNER_TEMP}/nervix-benchmarks"
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
 
       - name: Publish benchmark summary
         if: always()
@@ -401,6 +423,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -437,14 +461,14 @@ jobs:
             texlive-xetex
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.98
+        uses: dtolnay/rust-toolchain@1.99
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,trunk
+          tool: just@latest,toml-cli,trunk
 
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the
@@ -462,10 +486,11 @@ jobs:
 
       - name: Configure kache daemon remote
         env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: |
           config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
           bash scripts/configure_kache_remote.sh "${config}"
@@ -476,12 +501,17 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
-          s3-region: ${{ vars.KACHE_S3_REGION }}
-          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
       - name: Compute docs target
         id: docs
@@ -560,7 +590,14 @@ jobs:
               });
             }
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn

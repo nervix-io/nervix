@@ -1,0 +1,31 @@
+# Only these compiled configurations are claimed by the synchronization gate. Primitive provenance
+# in authored macros and inactive cfg continues to be enforced by the mandatory source validator.
+[[configuration]]
+kinds = ["lib", "bin"]
+manifest = "Cargo.toml"
+name = "ordinary"
+packages = []
+
+[[configuration]]
+features = ["testing"]
+manifest = "Cargo.toml"
+name = "testing"
+packages = ["nervix-server"]
+
+[[configuration]]
+features = ["native", "shuttle"]
+manifest = "Cargo.toml"
+name = "shuttle"
+packages = ["nervix-primitives", "nervix-interconnect", "nervix-server"]
+
+[[configuration]]
+features = ["native", "loom"]
+manifest = "Cargo.toml"
+name = "loom"
+packages = ["nervix-primitives", "nervix-server", "nervix-consensus"]
+
+[[configuration]]
+features = ["native", "turmoil"]
+manifest = "Cargo.toml"
+name = "turmoil"
+packages = ["nervix-primitives", "nervix-interconnect"]

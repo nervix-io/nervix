@@ -9,10 +9,9 @@
 //! - **Depends on.** The VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How a document is parsed or a value converted.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{Array, BooleanArray, Int64Array, ListArray, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::execute_program_sync;
 use crate::{
@@ -37,7 +36,7 @@ fn compile_with(
     source: &str,
     input_schema: &StdArc<Schema>,
     outputs: Vec<Field>,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let output_schema = schema(
         input_schema
             .fields()
@@ -125,7 +124,7 @@ fn every_extraction_from_one_document_column_shares_one_scan() {
             Field::new("labelled", DataType::Boolean, true),
             Field::new(
                 "tags",
-                JsonTarget::Vec(triomphe::Arc::new(JsonTarget::Int64)).data_type(),
+                JsonTarget::Vec(nervix_primitives::sync::Arc::new(JsonTarget::Int64)).data_type(),
                 true,
             ),
         ],
@@ -182,12 +181,12 @@ fn every_extraction_from_one_document_column_shares_one_scan() {
     assert_eq!(
         json_defects(&output, 1),
         [JsonDefect::TypeMismatch {
-            path: triomphe::Arc::new(
+            path: nervix_primitives::sync::Arc::new(
                 nervix_models::JsonPath::parse("$.count").expect("the path is valid")
             ),
             place: JsonPlace::Value,
             found: JsonKind::String,
-            expected: triomphe::Arc::new(JsonTarget::Int64),
+            expected: nervix_primitives::sync::Arc::new(JsonTarget::Int64),
         }]
     );
 }
@@ -342,7 +341,7 @@ fn an_extraction_keeps_the_type_nullability_and_sensitivity_contract() {
         "SET amount = JSON_VALUE(input.doc, '$.a' AS I64)",
         vec![Field::new("amount", DataType::Int64, false)],
     );
-    assert_eq!(required.code, "null_for_required_field");
+    assert_eq!(required.current_context().code(), "null_for_required_field");
     compile(
         "SET present = JSON_EXISTS(input.doc, '$.a')",
         &schema(vec![Field::new("doc", DataType::Utf8, false)]),
@@ -353,15 +352,15 @@ fn an_extraction_keeps_the_type_nullability_and_sensitivity_contract() {
         "SET amount = JSON_VALUE(input.doc, '$.a' AS I64)",
         vec![Field::new("amount", DataType::Utf8, true)],
     );
-    assert_eq!(mistyped.code, "type_mismatch");
+    assert_eq!(mistyped.current_context().code(), "type_mismatch");
 
     let not_text = rejected(
         "SET amount = JSON_VALUE(input.number, '$.a' AS I64)",
         vec![Field::new("amount", DataType::Int64, true)],
     );
-    assert_eq!(not_text.code, "type_mismatch");
+    assert_eq!(not_text.current_context().code(), "type_mismatch");
     assert_eq!(
-        not_text.message,
+        not_text.current_context().message,
         "JSON_VALUE document must be STRING, found Int64"
     );
 
@@ -389,7 +388,7 @@ fn an_extraction_keeps_the_type_nullability_and_sensitivity_contract() {
     };
     let leak = compile_sensitive("SET amount = TRY_JSON_VALUE(input.secret, '$.a' AS I64)")
         .expect_err("a value read from a sensitive document stays sensitive");
-    assert_eq!(leak.code, "sensitive_leak");
+    assert_eq!(leak.current_context().code(), "sensitive_leak");
     compile_sensitive("SET amount = leak_sensitive(JSON_VALUE(input.secret, '$.a' AS I64))")
         .expect("an explicit leak removes the sensitivity");
 }

@@ -14,6 +14,13 @@ use meticulous::OptionExt as _;
 ///
 /// Merging is associative up to floating-point rounding, and nothing is ever removed from a merged
 /// aggregate: a window forgets a row by recomputing the aggregate of the rows that survive it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each branch-owned aggregate combines or splits admitted row runs"
+    )
+)]
 pub(in crate::runtime) trait MergeableAggregate: Copy {
     /// The aggregate of no rows, which every merge leaves unchanged.
     const EMPTY: Self;
@@ -57,15 +64,23 @@ impl<A: MergeableAggregate> TwoStacks<A> {
         }
     }
 
-    /// Forget the `count` oldest of the window's `retained` rows. `row_aggregate` answers the
-    /// aggregate of the single retained row at a position, counting from the oldest, and is asked
-    /// only about rows that survive.
-    pub(super) fn retract_oldest(
+    /// Forget the `count` oldest of the window's `retained` rows. When the front is exhausted,
+    /// `runs` yields the surviving typed runs from newest to oldest. `refold_run` appends one
+    /// suffix aggregate per row of that run, newest first, and returns its oldest suffix.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a branch-retained run iterator for \
+                                   rebuilding the aggregate")
+    )]
+    pub(super) fn retract_oldest_runs<R, I>(
         &mut self,
         count: usize,
         retained: usize,
-        mut row_aggregate: impl FnMut(usize) -> A,
-    ) {
+        runs: impl FnOnce() -> I,
+        mut refold_run: impl FnMut(R, A, &mut Vec<A>) -> A,
+    ) where
+        I: IntoIterator<Item = R>,
+    {
         let front_rows = self.front.len();
         if count <= front_rows {
             let kept = front_rows
@@ -77,10 +92,14 @@ impl<A: MergeableAggregate> TwoStacks<A> {
         self.front.clear();
         self.back = A::EMPTY;
         let mut newer = A::EMPTY;
-        for position in (count..retained).rev() {
-            newer = A::merge(row_aggregate(position), newer);
-            self.front.push(newer);
+        for run in runs() {
+            newer = refold_run(run, newer, &mut self.front);
         }
+        assert_eq!(
+            self.front.len(),
+            retained - count,
+            "a refold covers every surviving row"
+        );
     }
 }
 
@@ -150,9 +169,18 @@ mod tests {
             } else {
                 let count = rng.usize(1..=retained.len());
                 let snapshot = retained.iter().copied().collect::<Vec<_>>();
-                stacks.retract_oldest(count, snapshot.len(), |position| {
-                    covered(snapshot[position])
-                });
+                stacks.retract_oldest_runs(
+                    count,
+                    snapshot.len(),
+                    || std::iter::once(count..snapshot.len()),
+                    |run, mut newer, front| {
+                        for position in run.rev() {
+                            newer = Covered::merge(covered(snapshot[position]), newer);
+                            front.push(newer);
+                        }
+                        newer
+                    },
+                );
                 for _ in 0..count {
                     retained.pop_front();
                 }
@@ -166,7 +194,12 @@ mod tests {
     fn retracting_every_row_empties_the_window() {
         let mut stacks = TwoStacks::<Covered>::new();
         stacks.admit(Covered::merge(covered(1), covered(2)));
-        stacks.retract_oldest(2, 2, |_| panic!("no row survives, so none is folded"));
+        stacks.retract_oldest_runs(
+            2,
+            2,
+            std::iter::empty::<std::ops::Range<usize>>,
+            |_, _, _| panic!("no row survives, so none is folded"),
+        );
         assert_eq!(stacks.aggregate(), Covered::EMPTY);
         stacks.admit(covered(3));
         assert_eq!(stacks.aggregate(), covered(3));

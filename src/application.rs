@@ -18,11 +18,20 @@
 //! Separating the use cases from the adapters is a later move; every piece it is split into
 //! inherits the contract above.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "session, transaction, authentication and resource operations belong to the \
+                  control plane and its edges"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc as StdArc,
+    time::Duration,
 };
 
 use admitted_connection::AdmittingListener;
@@ -33,6 +42,8 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use client_consumers::ClientConsumerRouter;
+use client_producers::ClientProducerRouter;
 use domain_clock::{
     DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
     run_domain_clock_authority_reconciliation,
@@ -48,7 +59,7 @@ use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
 use nervix_dns::{DnsConfiguration, DnsResolver};
-use nervix_execution::{Executor, sync::DashMap};
+use nervix_execution::Executor;
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -76,14 +87,20 @@ use nervix_interconnect::{
     MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerResolver,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     RemoteOperationFailure, RemoteOperationSubject, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
-    StateSyncRequest as RemoteStateSyncRequest, StateSyncResponse as RemoteStateSyncResponse,
     StreamHandlerError, StreamingResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
     Transport, TransportIdentity,
 };
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
+    ClusterNodeName, DomainName, DomainStatus, DurationTextError, ModelKind, NodeEndpoint,
+    NodeServiceUrl, UserName, parse_duration_text,
+};
+use nervix_primitives::{
+    collections::DashMap,
+    net::TcpListener,
+    sync::{StdArc, broadcast},
+    time::sleep,
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
@@ -98,15 +115,10 @@ use session_service::{
     apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
-use subscription::SubscriptionInterests;
+use subscription::{SubscriptionInterests, SubscriptionSampler};
 use tls::{
     HttpsListenerCertificates, InterconnectTlsPaths, load_grpc_tls_server_config,
     load_web_console_tls_server_config, reload_interconnect_tls,
-};
-use tokio::{
-    net::TcpListener,
-    sync::broadcast,
-    time::{Duration, sleep},
 };
 use transaction::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
@@ -127,10 +139,14 @@ use crate::{
 mod admitted_connection;
 mod authentication;
 mod background_task;
+mod backup;
+mod client_consumers;
+mod client_producers;
 mod cluster_status;
 mod command_execution;
 mod command_result;
 mod completion;
+mod configured_choices;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
@@ -147,14 +163,18 @@ mod ownership_handoff;
 mod peer_grpc;
 mod relocation;
 mod resource;
+mod restore;
 mod runtime_admission;
 mod schedule_planning;
 mod scheduling;
 mod service_tasks;
 mod session;
+#[cfg(test)]
+pub(crate) use session::{ClockDeliveryOrder, NextClockFrame};
 mod session_service;
 mod shutdown;
 mod startup;
+mod state_replication_requests;
 mod subscription;
 mod termination_signals;
 #[cfg(test)]
@@ -167,6 +187,7 @@ mod wasm_state_reset;
 mod web_console;
 
 pub use command_execution::CommandExecutionPolicy;
+use nervix_primitives::sync::Arc;
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
 pub use shutdown::{
@@ -174,8 +195,7 @@ pub use shutdown::{
     ShutdownRequest, ShutdownRequestOutcome,
 };
 use tonic::transport::Server;
-use tracing::{debug, error, info, warn};
-use triomphe::Arc;
+use tracing::{Instrument as _, debug, error, info, warn};
 use typed_builder::TypedBuilder;
 
 use crate::{
@@ -414,8 +434,8 @@ pub struct Args {
         long,
         env = "NERVIX_DNS_RESOLVER_CONFIG",
         default_value = nervix_dns::SYSTEM_RESOLVER_CONFIGURATION,
-        help = "A resolv.conf-format file naming the name servers, search list and options peer \
-                names resolve with"
+        help = "A resolv.conf-format file naming the name servers, search list and options the \
+                node's resolver uses for peers, connectors and sessions"
     )]
     pub dns_resolver_config: PathBuf,
     #[arg(
@@ -614,7 +634,7 @@ pub struct Application {
 #[derive(Debug, thiserror::Error)]
 enum CliValueError {
     #[error("invalid duration: {source}")]
-    Duration { source: humantime::DurationError },
+    Duration { source: DurationTextError },
     #[error("invalid byte quantity")]
     Bytes,
     #[error("invalid trace sample ratio: {source}")]
@@ -623,9 +643,16 @@ enum CliValueError {
     TraceSampleRatioRange,
 }
 
+/// Reads a duration option. Clap prints only the outermost context of a rejected value, so that
+/// context carries the reason the text names no duration.
 fn parse_human_duration(input: &str) -> error_stack::Result<Duration, CliValueError> {
-    humantime::parse_duration(input)
-        .map_err(|source| Report::new(CliValueError::Duration { source }))
+    match parse_duration_text(input) {
+        Ok(duration) => Ok(duration),
+        Err(report) => {
+            let source = report.current_context().clone();
+            Err(report.change_context(CliValueError::Duration { source }))
+        }
+    }
 }
 
 fn parse_human_bytes(input: &str) -> error_stack::Result<ubyte::ByteUnit, CliValueError> {
@@ -660,6 +687,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 pub async fn run_cli(
     args: Args,
     termination_signals: TerminationSignals,
+    tracing: &TracingGuard,
 ) -> Result<(), Report<AppError>> {
     if let Some(Command::Completions { shell }) = args.subcommand.clone() {
         print_completions(shell);
@@ -668,11 +696,18 @@ pub async fn run_cli(
 
     let application = Application::try_from(args)?;
     termination_signals.supervise(application.shutdown.clone())?;
-    application.run().await
+    application.run_with_tracing(Some(tracing)).await
 }
 
 impl Application {
     pub async fn run(self) -> Result<(), Report<AppError>> {
+        self.run_with_tracing(None).await
+    }
+
+    async fn run_with_tracing(
+        self,
+        tracing: Option<&TracingGuard>,
+    ) -> Result<(), Report<AppError>> {
         let addr = self.addr;
         let grpc_mode = self.grpc_mode;
         let grpc_listen_addr = match grpc_mode {
@@ -820,8 +855,12 @@ impl Application {
             .change_context(AppError::LoadInterconnectTls)?;
         let dns_configuration = self.dns.clone();
         let dns = DnsResolver::load(dns_configuration.clone())
+            .instrument(tracing::info_span!("load_dns_configuration", node_id = %node_id))
             .await
             .change_context(AppError::LoadDnsConfiguration)?;
+        if let Some(tracing) = tracing {
+            tracing.install_dns(&dns);
+        }
         info!(
             resolver_configuration = %dns_configuration.resolver_configuration.display(),
             hosts_file = %dns_configuration.hosts_file.display(),
@@ -920,7 +959,19 @@ impl Application {
             }
         };
         for changes in startup_runtime_changes {
-            if let Err(error) = startup.runtime.apply_changes(changes).await {
+            let revision = match changes.execution_revision() {
+                Ok(revision) => revision,
+                Err(error) => {
+                    let error = Report::new(AppError::ApplyStartupRuntime(format!("{error:#}")));
+                    startup.terminate().await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = startup
+                .runtime
+                .apply_changes(&changes.domain, revision)
+                .await
+            {
                 error!(error = %error, "failed to apply startup runtime changes");
                 let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
                 startup.terminate().await;
@@ -971,7 +1022,27 @@ impl Application {
                 return Err(error);
             }
         };
+        let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
+        let mut recovery_endpoints = BTreeSet::new();
+        for (member, address) in recovered_members {
+            if member == node_id {
+                continue;
+            }
+            let endpoint = match address.parse::<NodeEndpoint>() {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    let report = Report::new(error)
+                        .change_context(AppError::StartCluster)
+                        .attach_printable(format!("persisted Raft endpoint for node '{member}'"));
+                    startup.terminate().await;
+                    return Err(report);
+                }
+            };
+            recovery_endpoints.insert(endpoint);
+        }
+        let has_bootstrap_candidates =
+            cluster_bootstrap_host.is_some() || !recovery_endpoints.is_empty();
         let cluster_result = cluster::start_cluster(cluster::ClusterSettings {
             cluster_id,
             node_id: node_id.clone(),
@@ -980,8 +1051,10 @@ impl Application {
             console_advertise_url: web_console_advertise_url.clone(),
             interconnect_advertise_addr,
             bootstrap_host: cluster_bootstrap_host.clone(),
+            recovery_endpoints,
             interconnect: interconnect.clone(),
             node_unavailability_timeout,
+            fault_injection: fault_injection.clone(),
         })
         .await
         .change_context(AppError::StartCluster);
@@ -1012,8 +1085,8 @@ impl Application {
                     #[cfg(not(feature = "testing"))]
                     drop(context);
                     #[cfg(feature = "testing")]
-                    let local_health_identity =
-                        health_fault_injection.health_response_identity(local_health_identity);
+                    let local_health_identity = health_fault_injection
+                        .health_response_identity(context.peer_node_id(), local_health_identity);
                     local_health_identity
                 }
             }
@@ -1025,6 +1098,18 @@ impl Application {
             completion::register_application_revision_handler(cluster.clone(), &interconnect);
         let startup = startup
             .require_handler_registration(&cluster, application_revision_handler)
+            .await?;
+        let completion_peers_handler = completion::register_completion_peers_handler(
+            cluster.clone(),
+            startup
+                .consensus
+                .as_ref()
+                .verified("startup assigns consensus before registering completion handlers")
+                .observer(),
+            &interconnect,
+        );
+        let startup = startup
+            .require_handler_registration(&cluster, completion_peers_handler)
             .await?;
         let ApplicationStartup {
             db,
@@ -1052,13 +1137,13 @@ impl Application {
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
         let scheduler_delay_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             node_observations
                 .sample_scheduler_delay(scheduler_delay_shutdown)
                 .await;
         }));
         #[cfg(feature = "testing")]
-        fault_injection.register_bulk_executor(node_id.clone(), runtime.executor().clone());
+        fault_injection.register_executor(node_id.clone(), runtime.executor().clone());
         #[cfg(feature = "testing")]
         let scheduler_mode = runtime.scheduler_mode();
 
@@ -1074,7 +1159,7 @@ impl Application {
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             reload_interconnect_tls(
                 interconnect_tls_transport,
                 interconnect_tls_paths,
@@ -1086,15 +1171,15 @@ impl Application {
         if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
-            background_tasks.push(tokio::spawn(async move {
+            background_tasks.push(nervix_primitives::task::spawn(async move {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             let mut initialized = false;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if membership_reconcile_shutdown.is_cancelled() {
                     break;
                 }
@@ -1117,7 +1202,7 @@ impl Application {
                 {
                     warn!(%error, "raft membership reconciliation failed");
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = membership_reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
@@ -1129,10 +1214,10 @@ impl Application {
             let consensus_for_leadership_transfer = consensus.administrator();
             let leadership_transfer_shutdown = shutdown.clone();
             let leadership_transfer_local_node_id = node_id.clone();
-            background_tasks.push(tokio::spawn(async move {
+            background_tasks.push(nervix_primitives::task::spawn(async move {
                 loop {
-                    tokio::task::consume_budget().await;
-                    tokio::select! {
+                    nervix_primitives::task::consume_budget().await;
+                    nervix_primitives::select! {
                         _ = leadership_transfer_shutdown.cancelled() => break,
                         request = leadership_transfer_rx.recv() => {
                             match request {
@@ -1165,13 +1250,13 @@ impl Application {
                 }
             }));
         }
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
-            let reconcile_started = tokio::time::Instant::now();
+            let reconcile_started = nervix_primitives::time::Instant::now();
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 // A pass waits on consensus writes and on requests to peers, and neither completes
                 // once the peers have stopped. The pass therefore ends with drain support rather
                 // than holding terminal teardown until the grace period aborts the whole task.
@@ -1225,7 +1310,13 @@ impl Application {
                                     .is_none() =>
                             {
                                 if let Some(password) = init_default_user_password.clone() {
-                                    match user_credentials(default_user_id.clone(), password).await {
+                                    match user_credentials(
+                                        runtime_for_reconcile.executor(),
+                                        default_user_id.clone(),
+                                        password,
+                                    )
+                                    .await
+                                    {
                                         Ok(user) => {
                                             let user_name = user.name.clone();
                                             if let Err(error) =
@@ -1276,7 +1367,7 @@ impl Application {
                         }
                     }
                     loop {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let Ok(automatic_schedule_input) =
                             consensus_for_reconcile.automatic_schedule_input().await
                         else {
@@ -1293,11 +1384,8 @@ impl Application {
                             .collect::<HashSet<_>>();
                         let health_snapshot = cluster_for_reconcile.peer_health_snapshot();
                         let health_scheduling_revision = health_snapshot.scheduling_revision();
-                        let mut scheduling_availability =
-                            cluster_for_reconcile.gossip_state().await;
-                        scheduling_availability
-                            .dead_node_ids
-                            .extend(health_snapshot.unavailable_nodes());
+                        let scheduling_availability =
+                            cluster_for_reconcile.availability_state().await;
                         let live_node_ids = scheduling_availability.live_node_ids();
                         let placement_candidate_node_ids =
                             scheduling_availability.placement_candidate_node_ids();
@@ -1354,7 +1442,7 @@ impl Application {
                         let mut automatic_decision_selected = false;
                         let mut automatic_decision_published = false;
                         for domain_schedule in current_schedule.domains.values() {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             if active_domains.contains(&domain_schedule.domain)
                                 || committing_domains.contains(&domain_schedule.domain)
                                 || runtime_for_reconcile
@@ -1439,7 +1527,7 @@ impl Application {
                         }
                         if !automatic_decision_selected {
                             for (domain, graph) in active_graphs {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 if committing_domains.contains(&domain)
                                     || runtime_for_reconcile.domain_alter_is_active(&domain)
                                 {
@@ -1559,7 +1647,7 @@ impl Application {
                 let Some(()) = reconcile_shutdown.run_until_cancelled(reconcile_pass).await else {
                     break;
                 };
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
@@ -1569,28 +1657,37 @@ impl Application {
         let cluster_for_health = cluster.clone();
         let mut health_topology = cluster.subscribe_live_node_states().await;
         let local_node_id = node_id;
-        let mut awaiting_initial_bootstrap_peer = cluster_bootstrap_host.is_some();
+        let mut awaiting_initial_bootstrap_peer = has_bootstrap_candidates;
         let health_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if health_shutdown.is_cancelled() {
                     break;
                 }
                 drop(health_topology.borrow_and_update());
                 let gossip = cluster_for_health.gossip_state().await;
-                let live_node_ids = gossip
+                let mut probed_nodes = gossip
                     .live_nodes
-                    .iter()
-                    .map(|node| node.node_id.clone())
-                    .collect::<std::collections::BTreeSet<_>>();
-                // A peer whose interconnect endpoint discovery has not established is neither
-                // observable nor reachable, so it becomes neither a health target nor an outbound
-                // target until a later round publishes one.
+                    .into_iter()
+                    .map(|node| (node.node_id.clone(), node))
+                    .collect::<BTreeMap<_, _>>();
+                let previous_health = cluster_for_health.peer_health_snapshot();
+                for (node_id, node) in cluster_for_health.known_nodes().await {
+                    if !probed_nodes.contains_key(&node_id)
+                        && previous_health.retains_known_node(&node)
+                    {
+                        probed_nodes.insert(node_id, node);
+                    }
+                }
+                let live_node_ids = probed_nodes.keys().cloned().collect::<BTreeSet<_>>();
+                // A peer whose interconnect endpoint has never been discovered is neither
+                // observable nor reachable. A previously established target stays reachable
+                // while application health determines whether a gossip miss is a real failure.
                 let mut reachable_peers = Vec::new();
                 let mut health_endpoints = Vec::new();
-                for node in gossip.live_nodes {
+                for node in probed_nodes.into_values() {
                     if node.node_id == local_node_id {
                         continue;
                     }
@@ -1652,34 +1749,29 @@ impl Application {
                         cluster::PeerHealthProbeResult::new(
                             target,
                             outcome,
-                            std::time::Instant::now(),
+                            nervix_primitives::time::Instant::now(),
                         )
                     }
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                let topology_changed = loop {
-                    tokio::task::consume_budget().await;
-                    tokio::select! {
+                // Let each bounded probe finish even when gossip publishes another update.
+                // Cancelling the round on every update can indefinitely hide an unreachable
+                // peer's one-second timeout. Publication checks the current incarnation and
+                // endpoint, so a result superseded by discovery is still discarded.
+                loop {
+                    nervix_primitives::task::consume_budget().await;
+                    nervix_primitives::select! {
                         _ = health_shutdown.cancelled() => return,
-                        changed = health_topology.changed() => {
-                            changed.assured(
-                                "the cluster handle retains its Chitchat state sender for the server lifetime",
-                            );
-                            break true;
-                        }
                         result = probe_results.next() => match result {
                             Some(result) => {
                                 cluster_for_health.record_peer_health_result(result).await;
                             }
-                            None => break false,
+                            None => break,
                         }
                     }
-                };
-                if topology_changed {
-                    continue;
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = health_shutdown.cancelled() => break,
                     changed = health_topology.changed() => {
                         changed.assured(
@@ -1710,7 +1802,7 @@ impl Application {
         let interconnect_for_schedule = interconnect.clone();
         let schedule_shutdown = shutdown.clone();
         let schedule_runtime_admission = runtime_admission.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let application = RuntimeStateApplication {
                 runtime: &runtime_for_schedule,
                 https_certificates: &certificates_for_schedule,
@@ -1725,8 +1817,8 @@ impl Application {
                 warn!(error = %error, "failed to apply initial cluster schedule");
             }
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = schedule_shutdown.cancelled() => break,
                     changed = schedule_rx.changed() => {
                         if changed.is_err() {
@@ -1758,7 +1850,18 @@ impl Application {
                     cluster.clone(),
                     runtime.metrics(),
                 ),
+                subscription_sampler: SubscriptionSampler::default(),
                 interconnect: interconnect.clone(),
+                client_producers: ClientProducerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
+                client_consumers: ClientConsumerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
                 service_tasks: ServiceTasks::default(),
                 configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -1773,9 +1876,11 @@ impl Application {
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
-                ownership_handoff_operations: tokio::sync::Mutex::new(()),
+                ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
+                retained_backups: Default::default(),
+                restore_archives: Default::default(),
             }),
         };
         #[cfg(feature = "testing")]
@@ -1799,16 +1904,14 @@ impl Application {
                         .resource_store
                         .open_archive(&request.id)
                         .await
-                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        .map_err(StreamHandlerError::with_cause)?;
                     let archive_bytes = reader.archive_bytes();
                     let chunks = stream::unfold(Some(reader), |reader| async move {
                         let mut reader = reader?;
                         match reader.next_chunk().await {
                             Ok(Some(chunk)) => Some((Ok(chunk), Some(reader))),
                             Ok(None) => None,
-                            Err(error) => {
-                                Some((Err(StreamHandlerError::new(error.to_string())), None))
-                            }
+                            Err(error) => Some((Err(StreamHandlerError::with_cause(error)), None)),
                         }
                     });
                     Ok(StreamingResponse::new(archive_bytes, chunks))
@@ -1834,6 +1937,16 @@ impl Application {
                         .map_err(ResourceInterconnectError::replica_publish)
                 }
             })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service
+            .inner
+            .client_producers
+            .serve_links(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service
+            .inner
+            .client_consumers
+            .serve_links(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let describe_ingestor_service = service.clone();
         interconnect
@@ -1880,51 +1993,7 @@ impl Application {
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let state_sync_service = service.clone();
-        interconnect
-            .register_handler::<RemoteStateSyncRequest, _, _>(move |_context, request| {
-                let service = state_sync_service.clone();
-                async move {
-                    let subject = RemoteOperationSubject::state(&request.placement);
-                    let placement =
-                        match crate::runtime::RuntimeStatePlacement::from_remote(request.placement)
-                        {
-                            Ok(placement) => placement,
-                            Err(reason) => {
-                                return RemoteStateSyncResponse {
-                                    result: Err(RemoteOperationFailure::failed(
-                                        subject,
-                                        reason.to_string(),
-                                    )),
-                                };
-                            }
-                        };
-                    if !service
-                        .inner
-                        .runtime
-                        .runtime_state_placement_is_assigned_locally(&placement)
-                    {
-                        return RemoteStateSyncResponse {
-                            result: Err(RemoteOperationFailure::rejected(subject)),
-                        };
-                    }
-                    let snapshot = service
-                        .inner
-                        .runtime
-                        .handle_state_sync_request(&placement, request.after_lsm)
-                        .await
-                        .map_err(|error| error.current_context().as_remote_failure(subject));
-                    RemoteStateSyncResponse {
-                        result: snapshot.map(|snapshot| {
-                            snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
-                                lsm: snapshot.lsm,
-                                payload: snapshot.payload,
-                            })
-                        }),
-                    }
-                }
-            })
-            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service.register_state_replication_interconnect_handlers()?;
 
         let describe_relay_service = service.clone();
         interconnect
@@ -1979,7 +2048,7 @@ impl Application {
                 let service = entity_gate_service.clone();
                 async move {
                     let subject = RemoteOperationSubject::domain(&request.domain);
-                    let deadline = tokio::time::Instant::now()
+                    let deadline = nervix_primitives::time::Instant::now()
                         .checked_add(Duration::from_millis(request.deadline_millis));
                     let result = match deadline {
                         Some(deadline) => service
@@ -2237,8 +2306,8 @@ impl Application {
                                 request.destination_incarnation,
                                 "destination",
                             )?;
-                            let deadline =
-                                tokio::time::Instant::now() + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                            let deadline = nervix_primitives::time::Instant::now()
+                                + FORCED_OWNERSHIP_RECOVERY_BUDGET;
                             service
                                 .inner
                                 .runtime
@@ -2317,7 +2386,7 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let ownership_handoff_reconciliation_service = service.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             ownership_handoff_reconciliation_service
                 .run_ownership_handoff_preparation_reconciliation()
                 .await;
@@ -2325,10 +2394,10 @@ impl Application {
 
         let transaction_service = service.clone();
         let transaction_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut observed_leadership = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let is_leader = transaction_service
                     .inner
                     .consensus
@@ -2351,7 +2420,7 @@ impl Application {
                                 error = %error,
                                 "failed to synchronize registry after leadership state change"
                             );
-                            tokio::select! {
+                            nervix_primitives::select! {
                                 _ = transaction_shutdown.cancelled() => break,
                                 _ = sleep(Duration::from_millis(250)) => {}
                             }
@@ -2362,7 +2431,11 @@ impl Application {
                 if is_leader {
                     transaction_service.reconcile_transactions_once().await;
                 }
-                tokio::select! {
+                // A backup archive outlives leadership on the node that assembled it, so every
+                // node releases the archives whose retry validity ended.
+                transaction_service.sweep_retained_backups();
+                transaction_service.sweep_restore_archives();
+                nervix_primitives::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}
                 }
@@ -2371,7 +2444,7 @@ impl Application {
 
         let clock_authority_service = service.clone();
         let clock_authority_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             run_domain_clock_authority_reconciliation(
                 clock_authority_service,
                 clock_authority_shutdown,
@@ -2382,10 +2455,10 @@ impl Application {
         let runtime_event_service = service.clone();
         let runtime_event_shutdown = shutdown.clone();
         let mut runtime_event_rx = runtime.subscribe_events();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = runtime_event_shutdown.cancelled() => break,
                     received = runtime_event_rx.recv() => match received {
                         Ok(RuntimeEvent::Error(message)) => {
@@ -2394,7 +2467,7 @@ impl Application {
                             node_ids.sort();
                             node_ids.dedup();
                             for node_id in node_ids {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 if node_id == runtime_event_service.inner.consensus.local_node_id().clone() {
                                     continue;
                                 }
@@ -2430,15 +2503,15 @@ impl Application {
 
         let resource_service = service.clone();
         let resource_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if resource_shutdown.is_cancelled() {
                     break;
                 }
                 resource_service.reconcile_resources_once().await;
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = resource_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
@@ -2447,15 +2520,15 @@ impl Application {
 
         let domain_apply_service = service.clone();
         let domain_apply_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
             if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
 
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = domain_apply_shutdown.cancelled() => break,
                     changed = domains_rx.changed() => {
                         if changed.is_err() {
@@ -2471,13 +2544,13 @@ impl Application {
 
         let clock_service = service.clone();
         let clock_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
             let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
             let mut retirements = DomainClockRetirements::default();
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 reconcile_domain_clock_tasks(
                     &clock_service,
                     &clock_shutdown,
@@ -2485,7 +2558,7 @@ impl Application {
                     &mut retirements,
                 )
                 .await;
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = clock_shutdown.cancelled() => break,
                     changed = domain_state_rx.changed() => {
                         if changed.is_err() {
@@ -2504,13 +2577,13 @@ impl Application {
 
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
                 HashMap::new();
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let schedule = kafka_schedule_service
                     .inner
                     .consensus
@@ -2519,7 +2592,7 @@ impl Application {
                 kafka_schedule_service
                     .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
                     .await;
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = kafka_schedule_shutdown.cancelled() => break,
                     changed = schedule_rx.changed() => {
                         if changed.is_err() {
@@ -2539,7 +2612,7 @@ impl Application {
             InterconnectRelayPayloadLane::new();
         let relay_payload_shutdown = shutdown.clone();
         let runtime_for_relay_payloads = runtime.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             InterconnectRelayPayloadLane::run(
                 interconnect_relay_payload_rx,
                 runtime_for_relay_payloads,
@@ -2551,10 +2624,10 @@ impl Application {
         let interconnect_shutdown = shutdown.clone();
         let runtime_for_interconnect = runtime.clone();
         let service_for_interconnect = service.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = interconnect_shutdown.cancelled() => break,
                     message = interconnect_rx.recv() => {
                         let Some(message) = message else {
@@ -2627,10 +2700,10 @@ impl Application {
         let cluster_events = events.clone();
         let mut cluster_event_rx = cluster.subscribe_events();
         let cluster_events_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
                         Ok(message) => cluster_events.relay_info(message),
@@ -2645,10 +2718,10 @@ impl Application {
         let consensus_events = events.clone();
         let mut consensus_event_rx = consensus.observer().subscribe_events();
         let consensus_events_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
                         Ok(message) => consensus_events.relay_info(message),
@@ -2739,7 +2812,7 @@ impl Application {
         };
 
         let public_listeners_shutdown = shutdown_coordinator.clone();
-        let public_listeners = tokio::spawn(async move {
+        let public_listeners = nervix_primitives::task::spawn(async move {
             let (
                 api_result,
                 http_result,
@@ -2831,7 +2904,8 @@ impl Application {
             .change_context(AppError::ShutdownCluster);
         interconnect.shutdown().await;
 
-        let database_owner_outcome = tokio::task::spawn_blocking(move || {
+        let executor = runtime.executor().clone();
+        let database_owner_outcome = ApplicationStartup::close_stores(&executor, move || {
             drop(service);
             drop(runtime);
             drop(consensus);
@@ -2839,11 +2913,10 @@ impl Application {
             drop(interconnect);
             drop(db);
         })
-        .await
-        .map_err(|error| {
-            error!(error = %error, "failed to join database owner shutdown task");
-            Report::new(AppError::OpenRegistry)
-        });
+        .await;
+        if let Err(error) = &database_owner_outcome {
+            error!(error = ?error, "failed to close the node's stores");
+        }
 
         if cluster_shutdown_result.is_err() || database_owner_outcome.is_err() {
             terminal_teardown_outcome =

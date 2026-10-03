@@ -7,8 +7,6 @@
 //! - **Depends on.** The relay Models and the expressions that reference them.
 //! - **Must not know.** How state is stored, snapshotted or evicted.
 
-use std::sync::Arc as StdArc;
-
 use ahash::{HashMap, HashSet};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::Report;
@@ -16,6 +14,7 @@ use nervix_models::{
     DomainName, Expression, MaterializedStateDependency, MaterializedStatePolicy, Model,
     ModelIndex, ModelKind, ModelName, NodeRef, RelayName, RouteConstruction,
 };
+use nervix_primitives::sync::StdArc;
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
     compile_program_with_options_for_bindings_with_sensitivity, lower_set_only_route,
@@ -179,12 +178,13 @@ fn validate_materialized_state_default(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "materialized-state DEFAULT for '{}' is invalid: {}",
-                dependency.relay, error.message
+                dependency.relay, message
             ),
         })
     })?;

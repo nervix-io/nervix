@@ -7,7 +7,10 @@
 //! - **Depends on.** The interconnect to drive each step and the entity gate to hold the entity.
 //! - **Must not know.** Which schedule change asked for the move.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use error_stack::Report;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -28,7 +31,7 @@ use nervix_models::{
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
     OwnershipTransition, ScheduledNode,
 };
-use tokio::time::{Duration, sleep};
+use nervix_primitives::time::sleep;
 use tracing::{debug, info, warn};
 
 use super::{
@@ -38,7 +41,10 @@ use super::{
     transaction::TransactionStepImpactRecorder,
 };
 use crate::{
-    registry::{EntityGatePlan, ownership_handoff_relays_for_schedule},
+    registry::{
+        EntityGatePlan, ExecutionRevision, PlannedClusterRevision,
+        ownership_handoff_relays_for_schedule,
+    },
     runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
 };
 
@@ -46,6 +52,13 @@ pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
     Duration::from_secs(5);
 pub(in crate::application) const OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL: Duration =
     Duration::from_millis(250);
+
+fn ownership_handoff_schedule_fingerprint(
+    schedule: &nervix_models::DomainSchedule,
+) -> OwnershipHandoffResult<[u8; 32]> {
+    ExecutionRevision::ownership_fingerprint(schedule)
+        .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))
+}
 
 pub(in crate::application) struct PlannedOwnershipHandoff {
     operation_id: String,
@@ -55,9 +68,9 @@ pub(in crate::application) struct PlannedOwnershipHandoff {
     preparations: ClusterOwnershipHandoffPreparations,
     gate: ClusterEntityGate,
     pub(in crate::application) moves: Vec<PlannedOwnershipMove>,
-    pub(in crate::application) started_at: tokio::time::Instant,
-    preparation_deadline: tokio::time::Instant,
-    activation_deadline: tokio::time::Instant,
+    pub(in crate::application) started_at: nervix_primitives::time::Instant,
+    preparation_deadline: nervix_primitives::time::Instant,
+    activation_deadline: nervix_primitives::time::Instant,
 }
 
 struct ClusterOwnershipHandoffPreparations {
@@ -223,8 +236,7 @@ impl PlannedOwnershipMove {
         operation_id: &str,
         target_schedule_fingerprint: [u8; 32],
     ) -> OwnershipHandoffResult<bool> {
-        if Runtime::ownership_handoff_schedule_fingerprint(schedule)? != target_schedule_fingerprint
-        {
+        if ownership_handoff_schedule_fingerprint(schedule)? != target_schedule_fingerprint {
             return Ok(false);
         }
         let Some(node) = schedule.nodes.get(&self.entity) else {
@@ -322,40 +334,30 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
         current: &nervix_models::DomainSchedule,
         target: &mut nervix_models::DomainSchedule,
     ) {
-        let base_schedule_fingerprint =
-            match Runtime::ownership_handoff_schedule_fingerprint(current) {
-                Ok(fingerprint) => fingerprint,
-                Err(reason) => {
-                    self.reset_every_move(
-                        current,
-                        target,
-                        OwnershipStateResetCause::InvalidCheckpoint,
-                    );
-                    warn!(
-                        domain = current.domain.as_str(),
-                        error = %reason,
-                        "forced ownership recovery could not fingerprint the committed schedule"
-                    );
-                    return;
-                }
-            };
-        let target_schedule_fingerprint =
-            match Runtime::ownership_handoff_schedule_fingerprint(target) {
-                Ok(fingerprint) => fingerprint,
-                Err(reason) => {
-                    self.reset_every_move(
-                        current,
-                        target,
-                        OwnershipStateResetCause::InvalidCheckpoint,
-                    );
-                    warn!(
-                        domain = current.domain.as_str(),
-                        error = %reason,
-                        "forced ownership recovery could not fingerprint the target schedule"
-                    );
-                    return;
-                }
-            };
+        let base_schedule_fingerprint = match ownership_handoff_schedule_fingerprint(current) {
+            Ok(fingerprint) => fingerprint,
+            Err(reason) => {
+                self.reset_every_move(current, target, OwnershipStateResetCause::InvalidCheckpoint);
+                warn!(
+                    domain = current.domain.as_str(),
+                    error = %reason,
+                    "forced ownership recovery could not fingerprint the committed schedule"
+                );
+                return;
+            }
+        };
+        let target_schedule_fingerprint = match ownership_handoff_schedule_fingerprint(target) {
+            Ok(fingerprint) => fingerprint,
+            Err(reason) => {
+                self.reset_every_move(current, target, OwnershipStateResetCause::InvalidCheckpoint);
+                warn!(
+                    domain = current.domain.as_str(),
+                    error = %reason,
+                    "forced ownership recovery could not fingerprint the target schedule"
+                );
+                return;
+            }
+        };
         struct PreparedForcedMove {
             moved: PlannedOwnershipMove,
             transition_id: String,
@@ -365,7 +367,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
         let moves = planned_ownership_moves(Some(current), Some(target));
         let mut preparations = FuturesUnordered::new();
         for moved in moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(transition) = target
                 .nodes
                 .get(&moved.entity)
@@ -381,8 +383,8 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
             preparations.push(async move {
                 let result = match destination_incarnation {
                     Some(destination_incarnation) => {
-                        let deadline =
-                            tokio::time::Instant::now() + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                        let deadline = nervix_primitives::time::Instant::now()
+                            + FORCED_OWNERSHIP_RECOVERY_BUDGET;
                         let preparation = async {
                             let request = RemotePrepareForcedOwnershipRecoveryRequest {
                                 operation_id: transition_id.clone(),
@@ -411,7 +413,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                                 OwnershipHandoffError::participant(failure.to_string())
                             })
                         };
-                        match tokio::time::timeout_at(deadline, preparation).await {
+                        match nervix_primitives::time::timeout_at(deadline, preparation).await {
                             Ok(result) => result,
                             Err(_) => Err(OwnershipHandoffError::deadline(
                                 "state preparation exceeded its five-second budget",
@@ -431,7 +433,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
             });
         }
         while let Some(preparation) = preparations.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let moved = preparation.moved;
             let node = target
                 .nodes
@@ -730,7 +732,7 @@ impl SessionServiceImpl {
     ) -> OwnershipHandoffResult<()> {
         let current = self.live_node_incarnations().await;
         for moved in &handoff.moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source = *handoff
                 .node_incarnations
                 .get(&moved.former_owner)
@@ -799,16 +801,16 @@ impl SessionServiceImpl {
             .verified("an ownership move can only be derived from a current domain schedule");
         let planned = planned
             .verified("an ownership move can only be derived from a planned domain schedule");
-        let base_schedule_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)
-            .map_err(|reason| {
+        let base_schedule_fingerprint =
+            ownership_handoff_schedule_fingerprint(current).map_err(|reason| {
                 Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
                     operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                     reason: reason.to_string(),
                 })
             })?;
-        let target_schedule_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(planned)
-            .map_err(|reason| {
+        let target_schedule_fingerprint =
+            ownership_handoff_schedule_fingerprint(planned).map_err(|reason| {
                 Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
                     operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -913,7 +915,7 @@ impl SessionServiceImpl {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let started_at = tokio::time::Instant::now();
+        let started_at = nervix_primitives::time::Instant::now();
         let phase_budget = self.inner.runtime.entity_gate_deadline();
         let preparation_deadline = started_at.checked_add(phase_budget).ok_or_else(|| {
             Report::new(DomainAlterError::EntityGate {
@@ -975,8 +977,8 @@ impl SessionServiceImpl {
             target_schedule_fingerprint,
         );
         for moved in &moves {
-            tokio::task::consume_budget().await;
-            let capture = tokio::time::timeout_at(
+            nervix_primitives::task::consume_budget().await;
+            let capture = nervix_primitives::time::timeout_at(
                 preparation_deadline,
                 self.capture_ownership_handoff_state(
                     &coordination,
@@ -1037,7 +1039,7 @@ impl SessionServiceImpl {
             };
 
             preparations.record_attempt(moved);
-            let result = tokio::time::timeout_at(
+            let result = nervix_primitives::time::timeout_at(
                 preparation_deadline,
                 self.prepare_ownership_handoff_state(RemotePrepareOwnershipHandoffStateRequest {
                     coordination: coordination.clone(),
@@ -1303,7 +1305,7 @@ impl SessionServiceImpl {
         handoff: &PlannedOwnershipHandoff,
     ) -> OwnershipHandoffResult<()> {
         for moved in &handoff.moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = RemoteConfirmOwnershipHandoffStateRequest {
                 coordination: handoff.gate.coordination.clone(),
                 operation_id: handoff.operation_id.clone(),
@@ -1328,7 +1330,7 @@ impl SessionServiceImpl {
                 handoff.preparation_deadline,
             )
             .await?;
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.confirm_ownership_handoff_on_node(
                 &moved.destination,
                 request,
@@ -1343,14 +1345,14 @@ impl SessionServiceImpl {
         &self,
         node: &ClusterNodeName,
         request: RemoteConfirmOwnershipHandoffStateRequest,
-        deadline: tokio::time::Instant,
+        deadline: nervix_primitives::time::Instant,
     ) -> OwnershipHandoffResult<()> {
         let confirmation = async {
             if node == self.inner.consensus.local_node_id() {
                 return self.confirm_local_ownership_handoff_state(request).await;
             }
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self.inner.interconnect.request(node, request.clone()).await {
                     Ok(Ok(())) => return Ok(()),
                     Ok(Err(failure)) => {
@@ -1367,7 +1369,7 @@ impl SessionServiceImpl {
                 }
             }
         };
-        match tokio::time::timeout_at(deadline, confirmation).await {
+        match nervix_primitives::time::timeout_at(deadline, confirmation).await {
             Ok(result) => result,
             Err(_) => Err(OwnershipHandoffError::deadline(format!(
                 "timed out confirming ownership handoff participant node '{node}'"
@@ -1394,8 +1396,7 @@ impl SessionServiceImpl {
                     request.domain.as_str()
                 ))
             })?;
-            if Runtime::ownership_handoff_schedule_fingerprint(current)?
-                != request.base_schedule_fingerprint
+            if ownership_handoff_schedule_fingerprint(current)? != request.base_schedule_fingerprint
             {
                 return Err(OwnershipHandoffError::schedule(format!(
                     "domain '{}' changed schedule before ownership handoff publication",
@@ -1496,7 +1497,7 @@ impl SessionServiceImpl {
         preparations.require_discard();
         let attempts = preparations.attempts.values().cloned().collect::<Vec<_>>();
         for moved in attempts {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self
                 .discard_ownership_handoff_preparation_on_node(
                     &preparations.coordination,
@@ -1575,7 +1576,7 @@ impl SessionServiceImpl {
             if let Some(domain_schedule) = schedule.domain(&cleanup.domain) {
                 let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
                 for moved in attempts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let committed = moved.belongs_to_committed_transition(
                         domain_schedule,
                         &cleanup.operation_id,
@@ -1604,11 +1605,11 @@ impl SessionServiceImpl {
         }
 
         while !cleanup.attempts.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
             for moved in attempts {
-                tokio::task::consume_budget().await;
-                let result = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let result = nervix_primitives::select! {
                     _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.discard_ownership_handoff_preparation_on_node(
                         &cleanup.coordination,
@@ -1636,7 +1637,7 @@ impl SessionServiceImpl {
             if cleanup.attempts.is_empty() {
                 return;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
@@ -1649,7 +1650,7 @@ impl SessionServiceImpl {
     ) -> OwnershipHandoffResult<u64> {
         let mut applied = self.inner.consensus.subscribe_applied();
         while self.inner.consensus.current_revision().await < request.authoritative_revision {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             applied.changed().await.assured(
                 "the consensus observer retains its applied-revision sender for the server \
                  lifetime",
@@ -1659,10 +1660,12 @@ impl SessionServiceImpl {
         self.verify_ownership_handoff_coordinator(&request.coordination)
             .await?;
         let schedule = self.inner.consensus.current_schedule().await;
+        let revision_plan = PlannedClusterRevision::between(None, &schedule)
+            .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?;
         let node_incarnations = self.available_node_incarnations().await;
         let discarded = self.inner.runtime.reconcile_prepared_ownership_handoffs(
             &request.coordination,
-            &schedule,
+            &revision_plan,
             &node_incarnations,
         )?;
         Ok(u64::try_from(discarded)
@@ -1834,7 +1837,7 @@ impl SessionServiceImpl {
         }
         let mut failure = None;
         while let Some((node, result)) = requests.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
                 debug!(
                     %node,
@@ -1859,7 +1862,7 @@ impl SessionServiceImpl {
         let mut observed = None;
         let mut followup_at = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.inner.drain_support_shutdown.is_cancelled() {
                 return;
             }
@@ -1870,8 +1873,8 @@ impl SessionServiceImpl {
                 let incarnations = self.available_node_incarnations().await;
                 let observation = (tenure, incarnations);
                 let changed = observed.as_ref() != Some(&observation);
-                let followup_due =
-                    followup_at.is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                let followup_due = followup_at
+                    .is_some_and(|deadline| nervix_primitives::time::Instant::now() >= deadline);
                 if changed || followup_due {
                     match self
                         .reconcile_cluster_ownership_handoff_preparations()
@@ -1883,7 +1886,9 @@ impl SessionServiceImpl {
                                 let followup_delay =
                                     self.inner.runtime.entity_gate_deadline().checked_mul(2);
                                 followup_at = match followup_delay {
-                                    Some(delay) => tokio::time::Instant::now().checked_add(delay),
+                                    Some(delay) => {
+                                        nervix_primitives::time::Instant::now().checked_add(delay)
+                                    }
                                     None => None,
                                 };
                             } else {
@@ -1902,7 +1907,7 @@ impl SessionServiceImpl {
                 observed = None;
                 followup_at = None;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL) => {}
             }
@@ -1929,7 +1934,7 @@ impl SessionServiceImpl {
         &self,
         request: &RemoteActivateOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
-        let deadline = tokio::time::Instant::now()
+        let deadline = nervix_primitives::time::Instant::now()
             .checked_add(request.activation_budget)
             .ok_or_else(|| {
                 OwnershipHandoffError::deadline(
@@ -1962,7 +1967,7 @@ impl SessionServiceImpl {
 
             let mut schedule_rx = self.inner.consensus.subscribe_schedule();
             let target_schedule = loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let schedule = self.inner.consensus.current_schedule().await;
                 let current = schedule.domain(&request.domain).ok_or_else(|| {
                     OwnershipHandoffError::schedule(format!(
@@ -1970,7 +1975,7 @@ impl SessionServiceImpl {
                         request.domain.as_str()
                     ))
                 })?;
-                let fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)?;
+                let fingerprint = ownership_handoff_schedule_fingerprint(current)?;
                 if fingerprint == request.target_schedule_fingerprint {
                     let node = current.nodes.get(&request.entity).ok_or_else(|| {
                         OwnershipHandoffError::schedule(format!(
@@ -2007,12 +2012,13 @@ impl SessionServiceImpl {
                 .activate_persisted_ownership_handoff(
                     self.inner.consensus.local_node_id(),
                     request,
-                    target_schedule,
+                    ExecutionRevision::from_schedule(&target_schedule)
+                        .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?,
                 )
                 .await
         };
 
-        tokio::time::timeout_at(deadline, activation)
+        nervix_primitives::time::timeout_at(deadline, activation)
             .await
             .map_err(|_| {
                 OwnershipHandoffError::deadline(format!(
@@ -2032,7 +2038,7 @@ impl SessionServiceImpl {
         self.verify_planned_ownership_handoff_incarnations(handoff)
             .await?;
         for moved in &handoff.moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source_incarnation = *handoff
                 .node_incarnations
                 .get(&moved.former_owner)
@@ -2043,7 +2049,7 @@ impl SessionServiceImpl {
                 .verified("every planned destination has a bound incarnation");
             let remaining = handoff
                 .activation_deadline
-                .saturating_duration_since(tokio::time::Instant::now());
+                .saturating_duration_since(nervix_primitives::time::Instant::now());
             if remaining.is_zero() {
                 return Err(OwnershipHandoffError::deadline(format!(
                     "timed out waiting for {} '{}' to activate on node '{}'",

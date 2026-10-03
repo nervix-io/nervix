@@ -5,8 +5,8 @@
 //! - **Owns.** The AMQP connection, channel and consumer each source instance reads through, its
 //!   one-delivery prefetch window, AMQP headers as ingest headers, and per-delivery
 //!   acknowledgement and requeue.
-//! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
-//!   Tokio and `lapin`.
+//! - **Depends on.** The connector contract, typed client configuration entries, the crate's
+//!   broker connection, `error-stack`, Tokio and `lapin`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
 use std::borrow::Cow;
@@ -15,31 +15,28 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use lapin::{
-    Acker, Channel, Connection, ConnectionProperties, Consumer,
+    Acker, Channel, Connection, Consumer,
     message::Delivery,
     options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions},
-    tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
 use nervix_connector::{
-    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, ServiceUrl, SourceBatch,
+    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths, read_tls_file,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, QueueName};
 use thiserror::Error;
+
+use crate::connection::RabbitMqBroker;
 
 const RABBITMQ: &str = "rabbitmq";
 
 /// Why a RabbitMQ source could not connect, consume, or settle a delivery.
 #[derive(Debug, Error)]
 pub enum RabbitMqSourceError {
-    #[error("invalid RabbitMQ client configuration")]
-    ClientConfig,
-    #[error("failed to parse RabbitMQ CA certificate")]
-    ParseCaCertificate,
-    #[error("RabbitMQ runtime is unavailable")]
-    RuntimeUnavailable,
+    /// The source could not open a connection; the [`crate::RabbitMqConnectError`] beneath it
+    /// says why.
     #[error("failed to connect RabbitMQ client")]
     Connect,
     #[error("failed to open a RabbitMQ channel")]
@@ -62,11 +59,13 @@ pub enum RabbitMqSourceError {
 
 type RabbitMqSourceResult<T> = Result<T, Report<RabbitMqSourceError>>;
 
-/// What one RabbitMQ source consumes: its resolved client entries, the queue, and the consumer
-/// tag each instance registers under, suffixed with its instance index.
+/// What one RabbitMQ source consumes: its resolved client entries, the node resolver its broker
+/// host resolves through, the queue, and the consumer tag each instance registers under, suffixed
+/// with its instance index.
 #[derive(Clone)]
 pub struct RabbitMqSourcePlan {
     config: Vec<ClientConfigEntry>,
+    dns: DnsResolver,
     queue: QueueName,
     consumer_tag: String,
 }
@@ -80,16 +79,27 @@ struct RabbitMqConsumer {
 }
 
 impl RabbitMqSourcePlan {
-    pub fn new(config: Vec<ClientConfigEntry>, queue: QueueName, consumer_tag: String) -> Self {
+    pub fn new(
+        config: Vec<ClientConfigEntry>,
+        dns: DnsResolver,
+        queue: QueueName,
+        consumer_tag: String,
+    ) -> Self {
         Self {
             config,
+            dns,
             queue,
             consumer_tag,
         }
     }
 
     async fn consume(&self, instance_index: u64) -> RabbitMqSourceResult<RabbitMqConsumer> {
-        let connection = Self::connection_from_config(&self.config).await?;
+        let broker = RabbitMqBroker::from_config(&self.config, self.dns.clone())
+            .change_context(RabbitMqSourceError::Connect)?;
+        let connection = broker
+            .connect()
+            .await
+            .change_context(RabbitMqSourceError::Connect)?;
         let channel = connection.create_channel().await.map_err(|source| {
             Report::new(RabbitMqSourceError::Channel).attach_printable(source.to_string())
         })?;
@@ -118,55 +128,6 @@ impl RabbitMqSourcePlan {
             _channel: channel,
             consumer,
         })
-    }
-
-    async fn connection_from_config(
-        config: &[ClientConfigEntry],
-    ) -> RabbitMqSourceResult<Connection> {
-        let addr = client_config_value(config, "addr", "RabbitMQ")
-            .change_context(RabbitMqSourceError::ClientConfig)?;
-        if ServiceUrl::new(&addr, "RabbitMQ addr")
-            .has_scheme("amqps")
-            .change_context(RabbitMqSourceError::ClientConfig)?
-        {
-            let tls = client_tls_paths(config);
-            let cert_chain = if let Some(ca_file) = tls.ca_file.as_ref() {
-                Some(
-                    String::from_utf8(
-                        read_tls_file(ca_file, "TLS CA certificate")
-                            .change_context(RabbitMqSourceError::ClientConfig)?,
-                    )
-                    .map_err(|source| {
-                        Report::new(RabbitMqSourceError::ParseCaCertificate)
-                            .attach_printable(source.to_string())
-                    })?,
-                )
-            } else {
-                None
-            };
-            Connection::connect_with_config(
-                &addr,
-                ConnectionProperties::default(),
-                OwnedTLSConfig {
-                    identity: None,
-                    cert_chain,
-                },
-                lapin::runtime::default_runtime().map_err(|source| {
-                    Report::new(RabbitMqSourceError::RuntimeUnavailable)
-                        .attach_printable(source.to_string())
-                })?,
-            )
-            .await
-            .map_err(|source| {
-                Report::new(RabbitMqSourceError::Connect).attach_printable(source.to_string())
-            })
-        } else {
-            Connection::connect(&addr, ConnectionProperties::default())
-                .await
-                .map_err(|source| {
-                    Report::new(RabbitMqSourceError::Connect).attach_printable(source.to_string())
-                })
-        }
     }
 }
 
@@ -365,7 +326,7 @@ impl BrokerSourceConnector for RabbitMqSource {
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let settled = position
                 .acker
                 .ack(BasicAckOptions::default())
@@ -394,7 +355,7 @@ impl BrokerSourceConnector for RabbitMqSource {
     /// again rather than holding it against the prefetch window forever.
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let settled = position
                 .acker
                 .nack(BasicNackOptions {
@@ -426,40 +387,76 @@ impl BrokerSourceConnector for RabbitMqSource {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn connection_failures_keep_typed_context() {
-        let unavailable = [ClientConfigEntry {
-            key: "addr".to_string(),
-            value: "amqp://127.0.0.1:1/%2f".to_string(),
-        }];
-        let error = RabbitMqSourcePlan::connection_from_config(&unavailable)
-            .await
-            .expect_err("an unavailable RabbitMQ broker must fail connection");
-        assert!(matches!(
-            error.current_context(),
-            RabbitMqSourceError::Connect
-        ));
+    /// A resolver for literal addresses only: they need no query, so its name server is never
+    /// asked.
+    async fn literal_address_resolver() -> (tempfile::TempDir, DnsResolver) {
+        let files = tempfile::tempdir().expect("a temporary directory can be created");
+        let resolver_configuration = files.path().join("resolv.conf");
+        let hosts_file = files.path().join("hosts");
+        std::fs::write(&resolver_configuration, "options timeout:1 attempts:1\n")
+            .expect("the resolver configuration can be written");
+        std::fs::write(&hosts_file, "").expect("the hosts file can be written");
+        let dns = DnsResolver::load(nervix_dns::DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: nervix_dns::NameServers::Explicit(vec![std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                53,
+            ))]),
+        })
+        .await
+        .expect("the fixture configuration is valid");
+        (files, dns)
+    }
 
-        let root = tempfile::tempdir().expect("temporary RabbitMQ TLS directory should open");
-        let ca = root.path().join("ca.pem");
-        std::fs::write(&ca, [0xff]).expect("the non-UTF-8 RabbitMQ CA fixture should be writable");
-        let invalid_ca = [
-            ClientConfigEntry {
-                key: "addr".to_string(),
-                value: "amqps://127.0.0.1:1/%2f".to_string(),
-            },
-            ClientConfigEntry {
-                key: "tls_ca_file".to_string(),
-                value: ca.to_string_lossy().into_owned(),
-            },
-        ];
-        let error = RabbitMqSourcePlan::connection_from_config(&invalid_ca)
+    #[nervix_primitives::test]
+    async fn failed_connections_keep_their_typed_cause_and_leave_the_source_to_resume() {
+        let (_files, dns) = literal_address_resolver().await;
+        let refusing = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect_err("a non-UTF-8 RabbitMQ CA must fail parsing");
-        assert!(matches!(
-            error.current_context(),
-            RabbitMqSourceError::ParseCaCertificate
-        ));
+            .expect("a loopback port is available");
+        let port = refusing
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port();
+        drop(refusing);
+        let cases = [
+            (format!("amqp://guest:guest@127.0.0.1:{port}/%2f"), false),
+            ("not a url".to_string(), true),
+        ];
+        for (addr, configuration) in cases {
+            let plan = RabbitMqSourcePlan::new(
+                vec![ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: addr.clone(),
+                }],
+                dns.clone(),
+                QueueName::parse("orders").expect("a fixed queue name is valid"),
+                "orders".to_string(),
+            );
+            let mut source = RabbitMqSource::open(&plan, 0)
+                .await
+                .expect("opening a RabbitMQ source connects nothing");
+            let error = source
+                .resume()
+                .await
+                .expect_err("a broker that cannot be reached fails the resume");
+            assert!(matches!(
+                error.current_context(),
+                SourceError::Resume {
+                    connector: RABBITMQ
+                }
+            ));
+            assert!(matches!(
+                error.downcast_ref::<RabbitMqSourceError>(),
+                Some(RabbitMqSourceError::Connect)
+            ));
+            let cause = error
+                .downcast_ref::<crate::RabbitMqConnectError>()
+                .expect("the connection failure stays beneath the source failure");
+            assert_eq!(cause.is_configuration(), configuration, "{addr}");
+            assert!(source.needs_resume(), "{addr}");
+        }
     }
 
     #[test]

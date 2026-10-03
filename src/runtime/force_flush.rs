@@ -8,18 +8,76 @@
 //! the participant clears its outstanding obligation, while dropping an unhandled completion
 //! makes the same generation deliverable again.
 
-use ahash::{HashMap, HashMapExt};
-use parking_lot::Mutex;
-use tokio::sync::watch;
-use triomphe::Arc;
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "force-flush registration resolves retained participants; the generation \
+                  protocol and ACK tracking declare narrower contracts"
+    )
+)]
+
+use std::collections::BTreeMap;
+
+use nervix_primitives::sync::{Arc, atomic::AtomicU8, blocking::Mutex, watch};
 
 use super::*;
 
 #[derive(Debug)]
 struct ForceFlushParticipantState {
+    /// Also retained by the participant that polls, independently of the coordinator borrow.
+    readiness: Arc<ForceFlushReadiness>,
     counters: Option<Arc<NodeQuiesceCounters>>,
     pending_generation: Option<u64>,
     claimed_generation: Option<u64>,
+}
+
+/// An independent polling hint. The coordinator mutex remains the authority for generation and
+/// claim data; this atomic publishes no other location. Watch registration supplies wakeups.
+/// The private byte encoding is idle=0, available=1, closed=2.
+#[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a running source publishes its flush readiness and tracks admitted \
+                  acknowledgement roots"
+    )
+)]
+struct ForceFlushReadiness(AtomicU8);
+
+#[derive(Clone, Copy)]
+enum ForceFlushAvailability {
+    Idle,
+    Available,
+    Closed,
+}
+
+impl ForceFlushAvailability {
+    fn encoding(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Available => 1,
+            Self::Closed => 2,
+        }
+    }
+}
+
+impl ForceFlushReadiness {
+    fn new(state: ForceFlushAvailability) -> Self {
+        Self(AtomicU8::new(state.encoding()))
+    }
+    fn publish(&self, state: ForceFlushAvailability) {
+        self.0.store(state.encoding(), Ordering::Relaxed);
+    }
+    fn pending(&self) -> Result<bool, ()> {
+        match self.0.load(Ordering::Relaxed) {
+            0 => Ok(false),
+            1 => Ok(true),
+            2 => Err(()),
+            _ => unreachable!("only this owner writes its three readiness encodings"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -28,25 +86,40 @@ struct DomainForceFlushState {
     active_generation: Option<u64>,
     next_participant: u64,
     sender: Option<watch::Sender<u64>>,
-    participants: HashMap<u64, ForceFlushParticipantState>,
+    /// Participant-ID order keeps publication reproducible across executions and model replays.
+    participants: BTreeMap<u64, ForceFlushParticipantState>,
 }
 
 /// Coordinates force-flush generations for one runtime domain.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "domain flush generation and participant identity",
+        bound = "one active request generation and one claimed obligation per participant",
+        reason = "the participant retains the generation protocol instead of looking it up for \
+                  every flush"
+    )
+)]
 pub(super) struct DomainForceFlush {
     state: Mutex<DomainForceFlushState>,
+    #[cfg(test)]
+    completion_lock_acquisitions: AtomicUsize,
 }
 
 impl DomainForceFlush {
     pub(super) fn new() -> Arc<Self> {
         let (sender, _) = watch::channel(0_u64);
         Arc::new(Self {
+            #[cfg(test)]
+            completion_lock_acquisitions: AtomicUsize::new(0),
             state: Mutex::new(DomainForceFlushState {
                 generation: 0,
                 active_generation: None,
                 next_participant: 0,
                 sender: Some(sender),
-                participants: HashMap::new(),
+                participants: BTreeMap::new(),
             }),
         })
     }
@@ -62,6 +135,13 @@ impl DomainForceFlush {
             .assured("a domain cannot register 2^64 force-flush participants");
         let participant = state.next_participant;
         let pending_generation = state.active_generation;
+        let readiness = Arc::new(ForceFlushReadiness::new(if state.sender.is_none() {
+            ForceFlushAvailability::Closed
+        } else if pending_generation.is_some() {
+            ForceFlushAvailability::Available
+        } else {
+            ForceFlushAvailability::Idle
+        }));
         if pending_generation.is_some()
             && let Some(counters) = &counters
         {
@@ -70,6 +150,7 @@ impl DomainForceFlush {
         state.participants.insert(
             participant,
             ForceFlushParticipantState {
+                readiness: readiness.clone(),
                 counters,
                 pending_generation,
                 claimed_generation: None,
@@ -83,6 +164,7 @@ impl DomainForceFlush {
             receiver
         };
         DomainForceFlushParticipant {
+            readiness,
             coordinator: coordinator.clone(),
             participant,
             receiver,
@@ -121,6 +203,9 @@ impl DomainForceFlush {
             }
             participant.pending_generation = Some(generation);
             participant.claimed_generation = None;
+            participant
+                .readiness
+                .publish(ForceFlushAvailability::Available);
         }
         if state.participants.is_empty() {
             state.active_generation = None;
@@ -146,6 +231,9 @@ impl DomainForceFlush {
             let mut state = self.state.lock();
             for participant in state.participants.values_mut() {
                 Self::clear_participant_pending(participant);
+                participant
+                    .readiness
+                    .publish(ForceFlushAvailability::Closed);
             }
             state.active_generation = None;
             state.sender.take()
@@ -157,6 +245,10 @@ impl DomainForceFlush {
         coordinator: &Arc<Self>,
         participant: u64,
     ) -> Result<Option<DomainForceFlushCompletion>, ()> {
+        #[cfg(test)]
+        coordinator
+            .completion_lock_acquisitions
+            .fetch_add(1, Ordering::Relaxed);
         let mut state = coordinator.state.lock();
         if state.sender.is_none() {
             return Err(());
@@ -171,6 +263,9 @@ impl DomainForceFlush {
             return Ok(None);
         }
         participant_state.claimed_generation = Some(generation);
+        participant_state
+            .readiness
+            .publish(ForceFlushAvailability::Idle);
         Ok(Some(DomainForceFlushCompletion {
             coordinator: coordinator.clone(),
             participant,
@@ -208,6 +303,9 @@ impl DomainForceFlush {
             && participant.claimed_generation == Some(generation)
         {
             participant.claimed_generation = None;
+            participant
+                .readiness
+                .publish(ForceFlushAvailability::Available);
         }
     }
 
@@ -226,6 +324,7 @@ impl DomainForceFlush {
     }
 
     fn clear_participant_pending(participant: &mut ForceFlushParticipantState) {
+        participant.readiness.publish(ForceFlushAvailability::Idle);
         participant.claimed_generation = None;
         if participant.pending_generation.take().is_some()
             && let Some(counters) = &participant.counters
@@ -238,7 +337,17 @@ impl DomainForceFlush {
 
 /// One live task participating in domain force flushes.
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "domain flush generation and participant identity",
+        bound = "one claimed obligation per participant and generation",
+        reason = "completion and claim release act on the exact retained flush participant"
+    )
+)]
 pub(super) struct DomainForceFlushParticipant {
+    readiness: Arc<ForceFlushReadiness>,
     coordinator: Arc<DomainForceFlush>,
     participant: u64,
     receiver: watch::Receiver<u64>,
@@ -246,6 +355,9 @@ pub(super) struct DomainForceFlushParticipant {
 
 impl DomainForceFlushParticipant {
     pub(super) fn pending_completion(&mut self) -> Result<Option<DomainForceFlushCompletion>, ()> {
+        if !self.readiness.pending()? {
+            return Ok(None);
+        }
         let completion = DomainForceFlush::completion(&self.coordinator, self.participant)?;
         if completion.is_some() {
             self.receiver.borrow_and_update();
@@ -304,6 +416,14 @@ impl Drop for DomainForceFlushCompletion {
 /// An ingestor resolves this pair once and holds it, so cloning it is two refcount bumps and
 /// never a lookup in the shared in-flight maps.
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a running source publishes its flush readiness and tracks admitted \
+                  acknowledgement roots"
+    )
+)]
 pub(in crate::runtime) struct IngestorAckRootTrackers {
     domain: Arc<AckRootTracker>,
     ingestor: Arc<AckRootTracker>,
@@ -313,20 +433,56 @@ impl IngestorAckRootTrackers {
     pub(in crate::runtime) fn tracked_root(&self) -> (AckSet, AckCompletion) {
         AckSet::tracked_roots(vec![self.domain.clone(), self.ingestor.clone()])
     }
+
+    /// Trackers of one ingestor that no runtime shares, for a check that drives its roots alone.
+    #[cfg(test)]
+    pub(in crate::runtime) fn detached() -> Self {
+        Self {
+            domain: Arc::new(AckRootTracker::default()),
+            ingestor: Arc::new(AckRootTracker::default()),
+        }
+    }
+
+    /// The roots of this ingestor a drain still waits for.
+    #[cfg(test)]
+    pub(in crate::runtime) fn ingestor_outstanding(&self) -> usize {
+        self.ingestor.outstanding()
+    }
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "a running source publishes its flush readiness and tracks admitted \
+                      acknowledgement roots"
+        )
+    )]
     pub(in crate::runtime) fn tracked_ack_root(
         &self,
         domain: &DomainName,
     ) -> (AckSet, AckCompletion) {
-        let tracker = self
-            .inner
-            .in_flight_by_domain
-            .entry(domain.clone())
-            .or_insert_with(|| Arc::new(AckRootTracker::default()))
-            .clone();
-        AckSet::tracked_root(tracker)
+        AckSet::tracked_root(self.domain_ack_root_tracker(domain))
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
+    pub(super) fn domain_ack_root_tracker(&self, domain: &DomainName) -> Arc<AckRootTracker> {
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain acknowledgement root \
+             tracking before admitting relay work",
+            self.inner.in_flight_by_domain.entry(domain.clone())
+        )
+        .or_insert_with(|| Arc::new(AckRootTracker::default()))
+        .clone()
     }
 
     pub(in crate::runtime) fn ingestor_ack_root_trackers(
@@ -367,6 +523,14 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(in crate::runtime) fn force_flush_participant(
         &self,
         domain: &DomainName,
@@ -401,6 +565,71 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_and_claimed_force_flush_polls_do_not_acquire_the_coordinator() {
+        let coordinator = DomainForceFlush::new();
+        let mut participant = DomainForceFlush::subscribe(&coordinator, None);
+        for _ in 0..100 {
+            assert!(
+                participant
+                    .pending_completion()
+                    .assured("participant remains open")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            0
+        );
+        coordinator.request();
+        let completion = participant
+            .pending_completion()
+            .assured("participant remains open")
+            .assured("the requested generation has an obligation");
+        for _ in 0..100 {
+            assert!(
+                participant
+                    .pending_completion()
+                    .assured("participant remains open")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            1
+        );
+        drop(completion);
+        let redelivery = participant
+            .pending_completion()
+            .assured("participant remains open")
+            .assured("dropping a claim makes its obligation available again");
+        assert!(redelivery.complete());
+        assert!(
+            participant
+                .pending_completion()
+                .assured("participant remains open")
+                .is_none()
+        );
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            2
+        );
+        coordinator.close();
+        assert!(participant.pending_completion().is_err());
+        assert_eq!(
+            coordinator
+                .completion_lock_acquisitions
+                .load(Ordering::Relaxed),
+            2
+        );
+    }
 
     fn counters() -> Arc<NodeQuiesceCounters> {
         Arc::new(NodeQuiesceCounters::default())
@@ -525,7 +754,7 @@ mod tests {
         assert!(!completion.complete());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn changed_returns_an_already_pending_generation_immediately() {
         let coordinator = DomainForceFlush::new();
         let mut participant = DomainForceFlush::subscribe(&coordinator, None);
@@ -539,7 +768,7 @@ mod tests {
         assert!(completion.complete());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closed_coordinator_rejects_requests_and_new_participants() {
         let coordinator = DomainForceFlush::new();
         coordinator.close();
@@ -549,7 +778,7 @@ mod tests {
         assert!(participant.changed().await.is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn close_clears_obligations_and_wakes_participants() {
         let coordinator = DomainForceFlush::new();
         let counters = counters();
@@ -567,8 +796,9 @@ mod tests {
 mod shuttle_tests {
     use std::{future::Future, task::Poll};
 
+    use nervix_model_harness::shuttle::{check_dfs, check_pct, check_random};
+
     use super::*;
-    use crate::shuttle_test::{check_dfs, check_pct, check_random};
 
     const DFS_ITERATIONS: usize = 1_000;
     const PCT_DEPTH: usize = 3;
@@ -582,7 +812,7 @@ mod shuttle_tests {
 
     async fn announce_after_first_pending<F>(
         future: F,
-        pending: tokio::sync::oneshot::Sender<()>,
+        pending: nervix_primitives::sync::oneshot::Sender<()>,
     ) -> F::Output
     where
         F: Future,
@@ -605,10 +835,10 @@ mod shuttle_tests {
             let counters = counters();
             let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
             let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let (second_claimed, second_is_claimed) = tokio::sync::oneshot::channel();
-            let (release_second, second_is_released) = tokio::sync::oneshot::channel();
+            let (second_claimed, second_is_claimed) = nervix_primitives::sync::oneshot::channel();
+            let (release_second, second_is_released) = nervix_primitives::sync::oneshot::channel();
 
-            let first_task = tokio::spawn(async move {
+            let first_task = nervix_primitives::task::spawn(async move {
                 let completion = first
                     .changed()
                     .await
@@ -617,7 +847,7 @@ mod shuttle_tests {
                 assert!(completion.complete());
                 generation
             });
-            let second_task = tokio::spawn(async move {
+            let second_task = nervix_primitives::task::spawn(async move {
                 let completion = second
                     .changed()
                     .await
@@ -677,12 +907,13 @@ mod shuttle_tests {
             let counters = counters();
             let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
             let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let (first_claimed, first_is_claimed) = tokio::sync::oneshot::channel();
-            let (second_claimed, second_is_claimed) = tokio::sync::oneshot::channel();
-            let (publish_to_first, first_publication) = tokio::sync::oneshot::channel();
-            let (publish_to_second, second_publication) = tokio::sync::oneshot::channel();
+            let (first_claimed, first_is_claimed) = nervix_primitives::sync::oneshot::channel();
+            let (second_claimed, second_is_claimed) = nervix_primitives::sync::oneshot::channel();
+            let (publish_to_first, first_publication) = nervix_primitives::sync::oneshot::channel();
+            let (publish_to_second, second_publication) =
+                nervix_primitives::sync::oneshot::channel();
 
-            let first_task = tokio::spawn(async move {
+            let first_task = nervix_primitives::task::spawn(async move {
                 let stale = first
                     .changed()
                     .await
@@ -703,7 +934,7 @@ mod shuttle_tests {
                 assert_eq!(current.generation(), current_generation);
                 assert!(current.complete());
             });
-            let second_task = tokio::spawn(async move {
+            let second_task = nervix_primitives::task::spawn(async move {
                 let stale = second
                     .changed()
                     .await
@@ -770,8 +1001,8 @@ mod shuttle_tests {
             let coordinator = DomainForceFlush::new();
             let counters = counters();
             let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let (waiting_started, is_waiting) = tokio::sync::oneshot::channel();
-            let waiting = tokio::spawn(async move {
+            let (waiting_started, is_waiting) = nervix_primitives::sync::oneshot::channel();
+            let waiting = nervix_primitives::task::spawn(async move {
                 let completion =
                     announce_after_first_pending(participant.changed(), waiting_started)
                         .await
@@ -785,7 +1016,7 @@ mod shuttle_tests {
                 .assured("changed reports after its first pending poll");
             let publisher = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request() })
+                nervix_primitives::task::spawn(async move { coordinator.request() })
             };
 
             let generation = publisher
@@ -815,18 +1046,19 @@ mod shuttle_tests {
                 .pending_completion()
                 .assured("the anchor remains open while participants subscribe")
                 .assured("the active generation gives the anchor an obligation");
-            let (subscribed, mut subscriptions) = tokio::sync::mpsc::channel(PCT_PARTICIPANTS);
+            let (subscribed, mut subscriptions) =
+                nervix_primitives::sync::mpsc::channel(PCT_PARTICIPANTS);
             let mut releases = Vec::with_capacity(PCT_PARTICIPANTS);
             let mut participants = Vec::with_capacity(PCT_PARTICIPANTS);
 
             for index in 0..PCT_PARTICIPANTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let coordinator = coordinator.clone();
                 let counters = counters.clone();
                 let subscribed = subscribed.clone();
-                let (release, released) = tokio::sync::oneshot::channel();
+                let (release, released) = nervix_primitives::sync::oneshot::channel();
                 releases.push(release);
-                participants.push(tokio::spawn(async move {
+                participants.push(nervix_primitives::task::spawn(async move {
                     let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters));
                     subscribed
                         .send(())
@@ -871,7 +1103,7 @@ mod shuttle_tests {
             drop(subscribed);
 
             for _ in 0..PCT_PARTICIPANTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 subscriptions
                     .recv()
                     .await
@@ -882,26 +1114,26 @@ mod shuttle_tests {
 
             let request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request() })
+                nervix_primitives::task::spawn(async move { coordinator.request() })
             };
             let idle_request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request_if_idle() })
+                nervix_primitives::task::spawn(async move { coordinator.request_if_idle() })
             };
-            let anchor_task = tokio::spawn(async move {
+            let anchor_task = nervix_primitives::task::spawn(async move {
                 let completed = anchor_completion.complete();
                 drop(anchor);
                 completed
             });
 
             for release in releases {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 release
                     .send(())
                     .assured("the participant remains blocked until lifecycle operations start");
             }
             for participant in participants {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 participant
                     .await
                     .assured("the participant lifecycle task does not panic");
@@ -923,27 +1155,27 @@ mod shuttle_tests {
                 DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
             let mut second_closing =
                 DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let first_waiter = tokio::spawn(async move {
+            let first_waiter = nervix_primitives::task::spawn(async move {
                 if let Ok(completion) = first_closing.changed().await {
                     completion.complete();
                 }
             });
-            let second_waiter = tokio::spawn(async move {
+            let second_waiter = nervix_primitives::task::spawn(async move {
                 if let Ok(completion) = second_closing.changed().await {
                     drop(completion);
                 }
             });
             let closing_request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request() })
+                nervix_primitives::task::spawn(async move { coordinator.request() })
             };
             let closing_idle_request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request_if_idle() })
+                nervix_primitives::task::spawn(async move { coordinator.request_if_idle() })
             };
             let close = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.close() })
+                nervix_primitives::task::spawn(async move { coordinator.close() })
             };
 
             first_waiter

@@ -41,6 +41,24 @@ Feature: Web console NSPL REPL
     Then selector ".terminal" contains "SHOW CLUSTER STATUS;"
     And selector ".terminal .term-line" has at most 256 elements
 
+  @client_wire24
+  Scenario: Web console refuses a command past its outstanding requests and recovers once they complete
+    Given a 1 node nervix cluster is started
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console submits "SHOW CLUSTER STATUS;" 256 times
+    Then selector ".terminal" contains "256 requests are already outstanding in the console's session; this one was not sent"
+    When the command response delivery pause on node "{{leader}}" is released
+    Then selector ".terminal" contains "[schedule]"
+    When selector ".prompt-row input" is filled with "LIST DOMAINS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "no domains registered"
+
   @client_wire13
   Scenario: Web console preserves several pending commands across a leader change
     Given a 3 node nervix cluster is started
@@ -249,6 +267,64 @@ Feature: Web console NSPL REPL
         value I64
       );
       """
+
+  @client_wire33
+  Scenario: Web console recovers a reverted command's own outcome after its reply is lost
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA reverted_schema ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "REVERT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then selector ".terminal" contains "finished with outcome REVERTED"
+    When the command response delivery pause on node "{{old_leader}}" is released
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".terminal" contains "transaction reverted: dropped 1 command(s)" exactly 1 times
+
+  @client_wire33
+  Scenario: Web console resolves a Create command held when its transaction finishes during reconnect
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "REVERT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    Given command admission on node "{{old_leader}}" pauses before proposal
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='resource']" is clicked
+    And selector ".create-name" is filled with "unadmitted_bundle"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Submitting"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then selector ".terminal" contains "finished with outcome REVERTED"
+    When the command response delivery pause on node "{{old_leader}}" is released
+    And the command admission pause on node "{{old_leader}}" is released
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".create-status" contains "Failed"
 
   Scenario: Web console autocompletes NSPL commands
     Given a 3 node nervix cluster is started
@@ -893,7 +969,8 @@ Feature: Web console NSPL REPL
     And selector ".terminal" does not contain "expected WHERE"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
+    Then selector ".create-dialog" contains "Create subscription"
+    And selector ".create-selected-relay" contains "notifications"
 
   Scenario: Web console graph relay subscribe streams in a REPL peer tab
     Given a 3 node nervix cluster is started
@@ -914,14 +991,15 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notifications"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    And selector ".subscribe-dialog" contains "user_id"
-    And selector ".subscribe-dialog" contains "I64"
-    And selector ".subscribe-dialog" does not contain "created_at"
-    When selector ".schema-field-button:has-text('user_id')" is clicked
-    Then selector ".subscribe-dialog input" has value "input.user_id"
-    When selector ".subscribe-dialog input" is filled with ""
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    And selector ".create-field-refs [data-value='user_id']" contains "I64"
+    And selector ".create-field-refs" does not contain "created_at"
+    When selector ".create-field-refs [data-value='user_id']" is clicked
+    Then selector ".create-filter" has value "input.user_id"
+    When selector ".create-filter" is filled with ""
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "NOTIFICATIONS"
     And selector ".terminal" does not contain "using domain"
     And selector ".terminal" does not contain "connected to leader"
@@ -931,9 +1009,11 @@ Feature: Web console NSPL REPL
     Then selector ".subscription-tab:has-text('NOTIFICATIONS')" eventually disappears
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    When selector ".subscribe-dialog input" is filled with "WHERE true"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "true"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "NOTIFICATIONS"
     And selector ".terminal" does not contain "parse error"
     When selector ".subscription-tab:has-text('NOTIFICATIONS') .tab-close" is clicked
@@ -954,8 +1034,11 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notifications"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-dialog input" is filled with "WHERE input.user_id = 'wrong type'"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "input.user_id = 'wrong type'"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Failed"
+    When selector ".create-close" is clicked
     Then selector ".terminal" contains "error:"
     And selector ".repl-toolbar" does not contain "NOTIFICATIONS"
 
@@ -984,15 +1067,19 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notifications"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    When selector ".subscribe-dialog input" is filled with "WHERE input.tenant = 'acme'"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "input.tenant = 'acme'"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "NOTIFICATIONS"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    When selector ".subscribe-dialog input" is filled with "WHERE input.tenant = 'beta'"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "input.tenant = 'beta'"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "ACME"
     And selector ".repl-toolbar" contains "BETA"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -1046,8 +1133,10 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "raw_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "raw_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "RAW_METRICS"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1096,7 +1185,9 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1131,7 +1222,9 @@ Feature: Web console NSPL REPL
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When 270 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"
     Then selector ".terminal" contains ":270}"
@@ -1161,7 +1254,9 @@ Feature: Web console NSPL REPL
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When node "{{stopped_node}}" is stopped
     Then selector ".terminal" contains "delivery interrupted"
@@ -1170,6 +1265,145 @@ Feature: Web console NSPL REPL
     When node "{{stopped_node}}" is started
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".repl-toolbar" does not contain "RAW_METRICS"
+
+  @client_wire24
+  Scenario Outline: Web console ends a relay tab the server ended and resubscribes it on request
+    Given a <cluster_size> node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( id I64, secret STRING );
+      CREATE SCHEMA secret_event ( id I64, secret STRING SENSITIVE );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer, secret string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge ended-{{test_id}}.example.com;
+      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_ingestor FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO events SET id = message.id, secret = message.secret UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".graph-hit-layer" contains "events"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION watch TO events;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "EVENTS"
+    When http payload is posted to host "ended-{{test_id}}.example.com" path "/events"
+      """
+      {"id":1,"secret":"public"}
+      """
+    Then selector ".terminal" contains "public"
+    When this NSPL command request is executed on the leader node
+      """
+      ALTER RELAY events SET SCHEMA secret_event;
+      """
+    Then selector ".subscription-tab[data-subscription-state='ended']" contains "EVENTS"
+    And selector ".terminal" contains "was redefined"
+    And selector ".terminal" contains "public"
+    When selector ".subscription-tab[data-subscription-state='ended'] .tab-resubscribe" is clicked
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "EVENTS"
+    When http payload is posted to host "ended-{{test_id}}.example.com" path "/events"
+      """
+      {"id":2,"secret":"hidden"}
+      """
+    Then selector ".terminal" contains '"id":2'
+    And selector ".terminal" does not contain "hidden"
+    When these NSPL commands are executed on the leader node
+      """
+      DROP INGESTOR event_ingestor;
+      DROP RELAY events;
+      """
+    Then selector ".subscription-tab[data-subscription-state='ended']" contains "EVENTS"
+    And selector ".terminal" contains "no longer exists"
+    When selector ".subscription-tab[data-subscription-state='ended'] .tab-resubscribe" is clicked
+    Then selector ".terminal" contains "does not exist in domain"
+    And selector ".subscription-tab[data-subscription-state='ended']" contains "EVENTS"
+    When selector ".subscription-tab:has-text('EVENTS') .tab-close" is clicked
+    Then selector ".subscription-tab:has-text('EVENTS')" eventually disappears
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire24
+  Scenario: Web console restores a relay tab after its transaction finished while it reconnected
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('NSPL REPL')" is clicked
+    And selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "REVERT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
+    And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then selector ".terminal" contains "delivery interrupted"
+    When the command response delivery pause on node "{{old_leader}}" is released
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":7}
+      """
+    Then selector ".terminal" contains ":7}"
+
+  @client_wire24
+  Scenario: Web console restores a relay tab before it attaches its open transaction again
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('NSPL REPL')" is clicked
+    And selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
+    And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then selector ".terminal" contains "delivery interrupted"
+    And selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":8}
+      """
+    Then selector ".terminal" contains ":8}"
+    When selector ".repl-toolbar button:has-text('NSPL REPL')" is clicked
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".prompt-row" contains "{{domain}} tx"
 
   Scenario: Web console keeps relay subscription histories isolated while switching tabs
     Given a 1 node nervix cluster is started
@@ -1204,18 +1438,24 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "go_filtered_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "raw_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "raw_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "RAW_METRICS"
     When selector ".relay-hit:has-text('rust_filtered_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "rust_filtered_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "rust_filtered_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "RUST_FILTERED_METRICS"
     When selector ".relay-hit:has-text('go_filtered_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "go_filtered_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "go_filtered_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "GO_FILTERED_METRICS"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """

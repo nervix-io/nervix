@@ -180,8 +180,8 @@ Feature: Resource lifecycle
       - node-1 topology=alive state=ready
       """
 
-  @command_completion
-  Scenario: Upload remains pending until every live node installs the resource
+  @command_completion @client_wire15
+  Scenario: An uncertain upload completes once across installation and leader change
     Given a 3 node nervix cluster is started
     And resource installation on node "node-3" pauses before promotion
     And node "node-1" has resource directory "lookup_dir" containing
@@ -191,6 +191,8 @@ Feature: Resource lifecycle
       }
       """
     And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "upload_leader"
+    And a node other than placeholder "upload_leader" is saved as placeholder "successor"
     When these NSPL commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
@@ -213,6 +215,8 @@ Feature: Resource lifecycle
       """
     When the background resource upload connection is dropped
     And the resource installation pause on node "node-3" is released
+    And leadership is transferred from node "{{upload_leader}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports leader "{{successor}}"
     Given client "retrying-uploader" is connected to the leader node
     When client "retrying-uploader" selects domain "{{domain}}"
     And client "retrying-uploader" uploads resource "zip_codes" from "{{lookup_dir}}" with identity "delayed-install"

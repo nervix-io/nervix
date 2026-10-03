@@ -9,7 +9,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc as StdArc,
+    time::Duration,
 };
 
 use error_stack::{Report, ResultExt};
@@ -32,13 +32,11 @@ use nervix_models::{
     TransactionResolvedDomainStart, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
-use parking_lot::Mutex as ParkingMutex;
+use nervix_primitives::sync::{
+    OwnedMutexGuard, Semaphore, StdArc, blocking::Mutex as ParkingMutex,
+};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::{
-    sync::{OwnedMutexGuard, Semaphore},
-    time::Duration,
-};
 use tracing::{info, warn};
 
 use super::{
@@ -69,6 +67,7 @@ mod impact;
 mod inspection;
 mod rendering;
 mod request;
+pub(in crate::application) mod restored;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 use inspection::transaction_inspection_status;
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
@@ -227,7 +226,11 @@ pub(in crate::application) fn transaction_planning_error_message(
 fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> String {
     let context = match error.downcast_ref::<TransactionPlanningError>() {
         Some(planning_error) => planning_error.to_string(),
-        None => error.to_string(),
+        None => match error.downcast_ref::<ConsensusTransactionError>() {
+            Some(ConsensusTransactionError::Consensus) => ConsensusError::report_message(error),
+            Some(consensus_error) => consensus_error.to_string(),
+            None => error.to_string(),
+        },
     };
     match error.downcast_ref::<String>() {
         Some(message) => format!("{context}: {message}"),
@@ -237,8 +240,8 @@ fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> S
 
 #[derive(Debug, Error)]
 pub(in crate::application) enum TransactionCommitError {
-    #[error(transparent)]
-    Proposal(#[from] ConsensusTransactionError),
+    #[error("transaction consensus proposal failed")]
+    Proposal,
     #[error("transaction '{id}' is unknown")]
     UnknownTransaction { id: String },
     #[error("transaction '{id}' is still open")]
@@ -271,21 +274,18 @@ pub(in crate::application) enum TransactionCommitError {
 }
 
 impl TransactionCommitError {
-    fn consensus_error(&self) -> Option<&ConsensusError> {
-        match self {
-            Self::Proposal(ConsensusTransactionError::Consensus(error)) => Some(error),
-            _ => None,
+    fn planning_input_conflict<'a>(&'a self, report: &'a Report<Self>) -> Option<&'a str> {
+        if let Self::PlanningInputsChanged { reason, .. } = self {
+            return Some(reason);
         }
-    }
-
-    fn planning_input_conflict(&self) -> Option<&str> {
-        match self {
-            Self::Proposal(ConsensusTransactionError::Mutation(
-                nervix_consensus::TransactionMutationError::StepConflict { reason, .. },
-            )) => Some(reason),
-            Self::PlanningInputsChanged { reason, .. } => Some(reason),
-            _ => None,
+        if let Some(ConsensusTransactionError::Mutation(TransactionMutationError::StepConflict {
+            reason,
+            ..
+        })) = report.downcast_ref::<ConsensusTransactionError>()
+        {
+            return Some(reason);
         }
+        None
     }
 }
 
@@ -670,6 +670,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
+        Statement::Backup(_) => "BACKUP",
+        Statement::Restore(_) => "RESTORE",
         Statement::ResetWasmState(_) => "RESET WASM PROCESSOR STATE",
         Statement::DropNode(_) => "DROP NODE",
         Statement::CordonNode(_) => "CORDON",
@@ -679,6 +681,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::LookupQuery(_) => "LOOKUP",
         Statement::ShowCreate(_)
         | Statement::ShowUdfs(_)
+        | Statement::ShowIngestors(_)
         | Statement::ShowPlacements(_)
         | Statement::ShowRelayMaterializedState(_)
         | Statement::ShowClusterStatus(_)
@@ -762,45 +765,35 @@ impl SessionServiceImpl {
 
     pub(in crate::application) async fn transaction_consensus_error_response(
         &self,
-        error: ConsensusTransactionError,
+        error: Report<ConsensusTransactionError>,
     ) -> CommandResult {
-        let message = error.to_string();
-        match error {
-            ConsensusTransactionError::Consensus(error) => {
-                self.consensus_error_response(&error, message).await
+        match error.current_context() {
+            ConsensusTransactionError::Consensus => {
+                let Some(cause) = error.downcast_ref::<ConsensusError>() else {
+                    return command_error(error.to_string());
+                };
+                self.consensus_error_response(cause, ConsensusError::report_message(&error))
+                    .await
             }
-            _ => command_error(message),
+            ConsensusTransactionError::Mutation(_) | ConsensusTransactionError::InvalidResponse => {
+                command_error(error.to_string())
+            }
         }
     }
 
     /// Answers a commit admission failure, naming a stale preview as its own typed outcome.
     async fn transaction_commit_admission_response(
         &self,
-        error: ConsensusTransactionError,
+        error: Report<ConsensusTransactionError>,
     ) -> CommandResult {
         if let ConsensusTransactionError::Mutation(TransactionMutationError::PreviewStale {
             expected,
             current,
-        }) = &error
+        }) = error.current_context()
         {
             return preview_stale_result(expected, current);
         }
         self.transaction_consensus_error_response(error).await
-    }
-
-    async fn transaction_consensus_report_response(
-        &self,
-        error: Report<ConsensusTransactionError>,
-    ) -> CommandResult {
-        let message = error.to_string();
-        match error.current_context() {
-            ConsensusTransactionError::Consensus(error) => {
-                self.consensus_error_response(error, message).await
-            }
-            ConsensusTransactionError::Mutation(_) | ConsensusTransactionError::InvalidResponse => {
-                command_error(message)
-            }
-        }
     }
 
     pub(in crate::application) async fn command_with_transaction_status(
@@ -1045,7 +1038,7 @@ impl SessionServiceImpl {
         let root_transaction_id = transaction_id;
         let mut attempt_transaction_id = root_transaction_id.clone();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = Box::pin(self.execute_standalone_transaction_attempt(
                 attempt_transaction_id.clone(),
                 request_reference.clone(),
@@ -1231,7 +1224,7 @@ impl SessionServiceImpl {
 
         let mut current = transaction;
         let committing = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match &current.state {
                 TransactionState::Open(_) => {
                     let prepared = match self.prepare_transaction_commit(&current).await {
@@ -1252,7 +1245,7 @@ impl SessionServiceImpl {
                                 }
                                 Ok(None) => return command_error(message),
                                 Err(error) => {
-                                    return self.transaction_consensus_report_response(error).await;
+                                    return self.transaction_consensus_error_response(error).await;
                                 }
                             }
                         }
@@ -1273,7 +1266,7 @@ impl SessionServiceImpl {
                         Ok(transaction) => break transaction,
                         Err(error)
                             if matches!(
-                                &error,
+                                error.current_context(),
                                 ConsensusTransactionError::Mutation(
                                     TransactionMutationError::PreviewStale { .. }
                                         | TransactionMutationError::PlanningInputsChanged { .. }
@@ -1306,15 +1299,15 @@ impl SessionServiceImpl {
         match finished {
             Ok(transaction) => standalone_transaction_result(&transaction),
             Err(error) => {
-                if let Some(ConsensusError::LeadershipLost { leader_id }) = error
-                    .current_context()
-                    .consensus_error()
-                    .or_else(|| error.downcast_ref::<ConsensusError>())
+                if let Some(ConsensusError::LeadershipLost { leader_id }) =
+                    error.downcast_ref::<ConsensusError>()
                 {
                     self.not_leader_response("", leader_id.clone()).await
                 } else {
+                    let message = transaction_commit_error_message(&error);
                     command_error(format!(
-                        "durable command transaction '{transaction_id}' remains applying: {error}"
+                        "durable command transaction '{transaction_id}' remains applying: \
+                         {message}"
                     ))
                 }
             }
@@ -1408,7 +1401,7 @@ impl SessionServiceImpl {
             },
         )?;
         for step in plan.steps() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
                 continue;
             };
@@ -1606,7 +1599,7 @@ impl SessionServiceImpl {
                 })?;
         let mut resolved_starts = BTreeMap::new();
         for step in captured.plan.steps() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let PlannedTransactionStepKind::StartDomain { previous } = &step.kind else {
                 continue;
             };
@@ -1899,7 +1892,7 @@ impl SessionServiceImpl {
                         Ok(Some(transaction)) => transaction,
                         Ok(None) => return command_error(message),
                         Err(error) => {
-                            return self.transaction_consensus_report_response(error).await;
+                            return self.transaction_consensus_error_response(error).await;
                         }
                     }
                 }
@@ -1918,7 +1911,7 @@ impl SessionServiceImpl {
                     .consensus
                     .finish_empty_transaction_commit(id.clone(), current_timestamp())
                     .await
-                    .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
+                    .change_context(TransactionCommitError::Proposal)
             } else {
                 // A replicated commit owns its execution independently of the session. Keep its
                 // model-mutation future off the session's poll stack as well.
@@ -1942,17 +1935,15 @@ impl SessionServiceImpl {
         match finished {
             Ok(transaction) => transaction_commit_result(&transaction),
             Err(error) => {
-                let proposal_error = error
-                    .current_context()
-                    .consensus_error()
-                    .or_else(|| error.downcast_ref::<ConsensusError>());
+                let proposal_error = error.downcast_ref::<ConsensusError>();
                 let mut result =
                     if let Some(ConsensusError::LeadershipLost { leader_id }) = proposal_error {
                         self.not_leader_response("", leader_id.clone()).await
                     } else {
+                        let message = transaction_commit_error_message(&error);
                         command_error(format!(
                             "transaction '{id}' commit remains in progress after an execution \
-                             error: {error}"
+                             error: {message}"
                         ))
                     };
                 if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
@@ -1971,7 +1962,7 @@ impl SessionServiceImpl {
             .inner
             .transaction_executions
             .entry(id.to_string())
-            .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
+            .or_insert_with(|| StdArc::new(nervix_primitives::sync::Mutex::new(())))
             .clone();
         let execution_guard = execution.lock_owned().await;
         self.execute_replicated_commit_locked(id, execution_guard)
@@ -2017,14 +2008,12 @@ impl SessionServiceImpl {
             .synchronize_cluster_schedule(&Box::pin(self.inner.consensus.current_schedule()).await)
             .change_context(TransactionCommitError::SynchronizeRegistry { id: id.to_string() })?;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let leader_id = Box::pin(self.inner.consensus.current_leader()).await;
             if leader_id.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                return Err(Report::new(TransactionCommitError::Proposal(
-                    ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
-                        leader_id,
-                    }),
-                )));
+                return Err(Report::new(ConsensusError::LeadershipLost { leader_id })
+                    .change_context(ConsensusTransactionError::Consensus)
+                    .change_context(TransactionCommitError::Proposal));
             }
             let transaction = Box::pin(self.inner.consensus.current_transaction(id))
                 .await
@@ -2061,7 +2050,7 @@ impl SessionServiceImpl {
                         .finish_empty_transaction_commit(id.to_string(), current_timestamp()),
                 )
                 .await
-                .map_err(|error| Report::new(TransactionCommitError::Proposal(error)));
+                .change_context(TransactionCommitError::Proposal);
             };
             Box::pin(self.recover_transaction_quiescence(&transaction, first_statement)).await?;
 
@@ -2172,28 +2161,31 @@ impl SessionServiceImpl {
                         actual: &actual,
                         outcome: &outcome,
                     }),
+                    None,
                 ))
                 .await;
                 let recorded = outcome.lock().take();
                 let advanced = match recorded {
                     Some(Ok(transaction)) => transaction,
-                    Some(Err(error)) => match error.current_context().planning_input_conflict() {
-                        Some(reason) => {
-                            Box::pin(self.record_transaction_planning_conflict(
-                                &transaction,
-                                actual.apply_to(planned_impact),
-                                reason,
-                            ))
-                            .await?
+                    Some(Err(error)) => {
+                        match error.current_context().planning_input_conflict(&error) {
+                            Some(reason) => {
+                                Box::pin(self.record_transaction_planning_conflict(
+                                    &transaction,
+                                    actual.apply_to(planned_impact),
+                                    reason,
+                                ))
+                                .await?
+                            }
+                            None => return Err(error),
                         }
-                        None => return Err(error),
-                    },
+                    }
                     None if result.is_not_leader() => {
-                        return Err(Report::new(TransactionCommitError::Proposal(
-                            ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
-                                leader_id: Box::pin(self.inner.consensus.current_leader()).await,
-                            }),
-                        )));
+                        return Err(Report::new(ConsensusError::LeadershipLost {
+                            leader_id: Box::pin(self.inner.consensus.current_leader()).await,
+                        })
+                        .change_context(ConsensusTransactionError::Consensus)
+                        .change_context(TransactionCommitError::Proposal));
                     }
                     None if !result.succeeded() => {
                         Box::pin(self.record_transaction_step(
@@ -2272,7 +2264,7 @@ impl SessionServiceImpl {
         }
         let mut completed_model_mutation = false;
         for result in transaction.commit_results() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(statements) = result
                 .first_statement()
                 .checked_add(result.statement_count())
@@ -2382,7 +2374,7 @@ impl SessionServiceImpl {
                 completion,
             })
             .await
-            .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
+            .change_context(TransactionCommitError::Proposal)
     }
 
     async fn record_transaction_planning_conflict(
@@ -2594,7 +2586,7 @@ impl SessionServiceImpl {
                     self.abort_planned_ownership_handoff(domain_id, handoff, Some(&actual))
                         .await;
                 }
-                let Some(reason) = error.current_context().planning_input_conflict() else {
+                let Some(reason) = error.current_context().planning_input_conflict(&error) else {
                     return Err(error);
                 };
                 return self
@@ -2749,7 +2741,7 @@ impl SessionServiceImpl {
                 .inner
                 .transaction_executions
                 .entry(id.clone())
-                .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
+                .or_insert_with(|| StdArc::new(nervix_primitives::sync::Mutex::new(())))
                 .clone();
             let execution_guard = execution.try_lock_owned();
             self.inner.transaction_recovery.considered(id.clone());
@@ -2790,7 +2782,7 @@ impl SessionServiceImpl {
         let mut tombstone_removal_required = false;
 
         for transaction in transactions.values() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match &transaction.state {
                 // A leader-local binding only routes commands. Keeping a socket open and reading
                 // transaction state do not renew this durable administrative deadline.

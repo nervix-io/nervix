@@ -15,8 +15,8 @@ use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
+use nervix_primitives::sync::CancellationToken;
 use thiserror::Error;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     DomainClock, DomainExecutionSnapshot, LogicalDeadline, RelayRecordBatch,
@@ -172,7 +172,7 @@ impl RuntimeWake {
                 Ok(())
             }
             (Some(logical), Some(physical)) => {
-                tokio::select! {
+                nervix_primitives::select! {
                     result = logical.wait() => result,
                     () = PhysicalDeadlineCapability::operational().wait_until(physical) => Ok(()),
                 }
@@ -358,6 +358,11 @@ impl RuntimeInputCollector {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the caller supplies deadline iteration while this retained \
+                               branch task waits on the domain clock")
+)]
 pub(super) async fn wait_for_branch_buffer_deadlines(
     clock: &DomainClock,
     deadlines: Vec<BranchBufferDeadline>,
@@ -437,7 +442,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn immediate_starts_once_and_reaches_the_physical_minimum() {
         let clock = test_domain_clock(&domain("immediate_timing"));
         let snapshot = clock
@@ -448,7 +453,7 @@ mod tests {
             .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
             .assured("the fixture timeout fits the monotonic clock range");
 
-        tokio::time::advance(Duration::from_micros(50)).await;
+        nervix_primitives::time::advance(Duration::from_micros(50)).await;
         timer
             .arm_flush(RuntimeFlushPolicy::Immediate, &clock, &snapshot)
             .assured("an armed timer does not schedule a second deadline");
@@ -458,7 +463,7 @@ mod tests {
                 .assured("the bound clock remains installed")
         );
 
-        tokio::time::advance(Duration::from_micros(50)).await;
+        nervix_primitives::time::advance(Duration::from_micros(50)).await;
         assert!(
             timer
                 .is_due(&clock, &snapshot)
@@ -472,7 +477,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_wake_takes_whichever_coordinate_arrives_first() {
         let clock = test_domain_clock(&domain("wake_timing"));
         let snapshot = clock
@@ -495,7 +500,7 @@ mod tests {
                 .is_reached()
                 .assured("the bound clock remains installed")
         );
-        tokio::time::timeout(Duration::from_secs(2), wake.wait())
+        nervix_primitives::time::timeout(Duration::from_secs(2), wake.wait())
             .await
             .assured("the monotonic deadline arrives long before the logical one")
             .assured("the bound clock remains installed");

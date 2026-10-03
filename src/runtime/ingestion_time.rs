@@ -5,15 +5,15 @@
 //! - **Depends on.** Installed domain clocks, vocabulary and Arrow row views.
 //! - **Must not know.** NSPL parsing, transport intake or progress notification history.
 
+use arrow_array::{Array, TimestampNanosecondArray};
+use arrow_buffer::BooleanBuffer;
 use error_stack::{Report, ResultExt as _};
-use nervix_models::{
-    DomainName, DomainStatus, FieldName, IngestTimestampSource, IngestorName, Timestamp,
-};
+use nervix_models::{DomainName, FieldName, IngestTimestampSource, IngestorName, Timestamp};
 use thiserror::Error;
 
 use super::{
-    Runtime, RuntimeRow, RuntimeValue,
-    domain_clock::{DomainClockAccessError, DomainIngestionSnapshot},
+    RecordMetadataColumns, Runtime, RuntimeRecordBatch,
+    domain_clock::{DomainClockLifecycle, DomainIngestionSnapshot},
 };
 
 #[derive(Debug, Error)]
@@ -64,25 +64,37 @@ impl IngestionTime<'_> {
         self.clock.snapshot.now()
     }
 
-    pub(super) fn select(
+    /// Resolves one timestamp column for the decoded group. A declared field reuses its Arrow
+    /// values buffer; connector-owned ingest instants reuse the metadata's low watermark buffer.
+    pub(super) fn select_column(
         &self,
         source: Option<&IngestTimestampSource>,
-        record: &RuntimeRow,
-    ) -> Result<Timestamp, Report<IngestionTimeError>> {
-        let event = match source {
-            Some(IngestTimestampSource::Now) => self.now(),
+        batch: &RuntimeRecordBatch,
+        metadata: &RecordMetadataColumns,
+    ) -> Result<TimestampNanosecondArray, Report<IngestionTimeError>> {
+        match source {
+            Some(IngestTimestampSource::Now) => {
+                Ok(TimestampNanosecondArray::from(vec![
+                    self.now().unix_nanos();
+                    batch.batch().num_rows()
+                ]))
+            }
             Some(IngestTimestampSource::At(field)) => {
                 let context = || IngestionTimeError::TimestampField {
                     ingestor: self.ingestor.clone(),
                     field: field.clone(),
                 };
-                let value = record
-                    .value(field.as_str())
+                let index = batch
+                    .batch()
+                    .schema_ref()
+                    .index_of(field.as_str())
                     .map_err(|_| Report::new(context()))?;
-                let Some(RuntimeValue::Datetime(value)) = value else {
-                    return Err(Report::new(context()));
-                };
-                Timestamp::try_from(value.to_utc()).change_context(context())?
+                let column = batch.batch().column(index);
+                let timestamps = column
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| Report::new(context()))?;
+                Ok(timestamps.clone())
             }
             None => {
                 if self.clock.window.is_some() {
@@ -91,23 +103,59 @@ impl IngestionTime<'_> {
                         ingestor: self.ingestor.clone(),
                     }));
                 }
-                // A connector's chosen source timestamp remains an external value.
-                record.metadata().ingested_at_low_watermark()
+                Ok(metadata.low_timestamp_column())
             }
-        };
-        if let Some(window) = &self.clock.window
-            && !window.contains(event)
-        {
-            return Err(Report::new(IngestionTimeError::OutsideWindow {
-                domain: self.domain.clone(),
-                ingestor: self.ingestor.clone(),
-            }));
         }
-        Ok(event)
+    }
+
+    /// One admission bitmap for the selected column. A null declared timestamp is invalid
+    /// even in an unpaced domain.
+    pub(super) fn admit_column(&self, events: &TimestampNanosecondArray) -> BooleanBuffer {
+        if let Some(window) = &self.clock.window {
+            return window.admit_column(events);
+        }
+        match events.nulls() {
+            Some(nulls) => nulls.inner().clone(),
+            None => BooleanBuffer::new_set(events.len()),
+        }
+    }
+
+    pub(super) fn rejection(
+        &self,
+        source: Option<&IngestTimestampSource>,
+        missing: bool,
+    ) -> IngestionTimeError {
+        if missing && let Some(IngestTimestampSource::At(field)) = source {
+            return IngestionTimeError::TimestampField {
+                ingestor: self.ingestor.clone(),
+                field: field.clone(),
+            };
+        }
+        IngestionTimeError::OutsideWindow {
+            domain: self.domain.clone(),
+            ingestor: self.ingestor.clone(),
+        }
     }
 }
 
 impl Runtime {
+    #[cfg(test)]
+    pub(super) fn ingestion_time<'a>(
+        &self,
+        domain: &'a DomainName,
+        ingestor: &'a IngestorName,
+    ) -> Result<IngestionTime<'a>, Report<IngestionTimeError>> {
+        let clock =
+            self.domain_clock_lifecycle(domain)
+                .change_context(IngestionTimeError::Clock {
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                })?;
+        clock.ingestion_time(domain, ingestor)
+    }
+}
+
+impl DomainClockLifecycle {
     pub(super) fn ingestion_time<'a>(
         &self,
         domain: &'a DomainName,
@@ -117,20 +165,15 @@ impl Runtime {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
         };
-        let state = self.inner.domains.get(domain).ok_or_else(|| {
-            Report::new(DomainClockAccessError::Missing {
-                domain: domain.clone(),
-            })
-            .change_context(context())
-        })?;
-        if let DomainStatus::Paused = state.status {
-            return Err(Report::new(IngestionTimeError::Paused {
-                domain: domain.clone(),
-                ingestor: ingestor.clone(),
-            }));
-        }
-        let clock = state.clock.bind().change_context(context())?;
-        let snapshot = clock.ingestion_snapshot().change_context(context())?;
+        let snapshot = match self.ingestion_read().change_context(context())? {
+            super::domain_clock::DomainIngestionRead::Paused => {
+                return Err(Report::new(IngestionTimeError::Paused {
+                    domain: domain.clone(),
+                    ingestor: ingestor.clone(),
+                }));
+            }
+            super::domain_clock::DomainIngestionRead::Available(snapshot) => snapshot,
+        };
         Ok(IngestionTime {
             domain,
             ingestor,
@@ -143,13 +186,16 @@ impl Runtime {
 mod tests {
     use std::collections::BTreeMap;
 
+    use arrow_array::TimestampNanosecondArray;
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_models::{DomainClockState, DomainTimeRate};
+    use nervix_models::{DomainClockState, DomainStatus, DomainTimeRate};
 
     use super::*;
     use crate::{
-        runtime::{domain, named, paced_domain_state, unpaced_domain_state},
-        runtime_schema::test_runtime_row,
+        runtime::{
+            DomainClockAccessError, domain, named, paced_domain_state, unpaced_domain_state,
+        },
+        runtime_schema::{RuntimeValue, test_runtime_row},
     };
 
     #[test]
@@ -168,13 +214,15 @@ mod tests {
             .ingestion_time(&domain, &ingestor)
             .assured("fixture clock is installed");
         let record = test_runtime_row([]).with_ingested_at_watermarks(Timestamp::now());
-        assert_eq!(
-            time.select(Some(&IngestTimestampSource::Now), &record)
-                .assured("origin is eligible"),
-            Timestamp::from_unix_nanos(0)
-        );
+        let batch = record.one_row_batch();
+        let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
+        let column = time
+            .select_column(Some(&IngestTimestampSource::Now), &batch, &metadata)
+            .assured("TIMESTAMP NOW has a logical execution snapshot");
+        assert_eq!(column.value(0), 0);
+        assert!(time.admit_column(&column).value(0));
         assert!(matches!(
-            time.select(None, &record)
+            time.select_column(None, &batch, &metadata)
                 .err()
                 .assured("paced intake requires a source")
                 .current_context(),
@@ -200,23 +248,29 @@ mod tests {
         )])
         .with_ingested_at_watermarks(Timestamp::from_unix_nanos(42));
         assert!(time.now() >= before && time.now() <= Timestamp::now());
-        assert_eq!(
-            time.select(Some(&IngestTimestampSource::Now), &record)
-                .assured("unpaced time is eligible"),
-            time.now()
-        );
-        assert_eq!(
-            time.select(
+        let batch = record.one_row_batch();
+        let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
+        let logical = time
+            .select_column(Some(&IngestTimestampSource::Now), &batch, &metadata)
+            .assured("unpaced logical time is available");
+        assert_eq!(logical.value(0), time.now().unix_nanos());
+        let declared = time
+            .select_column(
                 Some(&IngestTimestampSource::At(named("occurred_at"))),
-                &record
+                &batch,
+                &metadata,
             )
-            .assured("external datetime is supported"),
-            external
-        );
+            .assured("the declared DATETIME column exists");
+        assert_eq!(declared.value(0), -123);
+        let connector = time
+            .select_column(None, &batch, &metadata)
+            .assured("the unpaced connector timestamp exists");
+        assert_eq!(connector.value(0), 42);
+        let nullable = TimestampNanosecondArray::from(vec![Some(-123), None, Some(42)]);
+        let accepted = time.admit_column(&nullable);
         assert_eq!(
-            time.select(None, &record)
-                .assured("unpaced connector time is eligible"),
-            Timestamp::from_unix_nanos(42)
+            (0..3).map(|row| accepted.value(row)).collect::<Vec<_>>(),
+            vec![true, false, true]
         );
     }
 

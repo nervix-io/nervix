@@ -2,14 +2,11 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** The `Runtime` handle, the single `Arc` of node state behind it, and the graph each
-//!   domain currently runs.
+//! - **Owns.** The `Runtime` handle and the single `Arc` of node state behind it.
 //! - **Depends on.** Every subsystem whose state the node holds.
 //! - **Must not know.** How any of that state is used; the subsystems own their own behaviour.
 
 use super::{schedule_apply::AppliedRuntimeRecoveryExpansions, *};
-
-pub(in crate::runtime) type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
 
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 
@@ -35,14 +32,12 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) ingestor_quiescence:
         Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
     pub(in crate::runtime) ingestors_paused_for_memory_pressure: AtomicBool,
-    pub(in crate::runtime) ingestor_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
-    pub(in crate::runtime) ingestor_reconnect_backoffs:
-        DashMap<DomainNodeRef, RuntimeReconnectStatus, RandomState>,
+    pub(in crate::runtime) ingestor_statuses:
+        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<RuntimeReconnectStatus>>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
-    pub(in crate::runtime) emitter_transient_errors: DashMap<DomainNodeRef, String, RandomState>,
-    pub(in crate::runtime) emitter_retry_statuses:
-        DashMap<DomainNodeRef, EmitterRetryStatus, RandomState>,
+    pub(in crate::runtime) emitter_statuses:
+        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
         DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     /// One connector instance per named client on this node, keyed by the client it belongs to and
@@ -52,7 +47,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// The graph nodes that have asked a shared client for a connection and not yet been given
     /// one, keyed by the waiting node rather than the client it waits on.
     pub(in crate::runtime) pool_waits:
-        DashMap<DomainNodeRef, shared_clients::PoolWait, RandomState>,
+        DashMap<DomainNodeRef, Arc<shared_clients::PoolWaitSlot>, RandomState>,
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
@@ -69,12 +64,17 @@ pub(in crate::runtime) struct RuntimeInner {
     /// starts and persisted ownership-handoff activation take the same lock so they observe a
     /// schedule that is not half applied.
     pub(in crate::runtime) schedule_application: Mutex<ScheduleApplication>,
+    #[cfg(test)]
+    pub(in crate::runtime) test_applied_schedule: ArcSwapOption<ClusterSchedule>,
     /// The recovery expansion observed by the schedule application owner, published for
     /// transaction reporting without adding another acquisition of the execution-policy lock.
     pub(in crate::runtime) applied_recovery_expansions:
         ArcSwapOption<AppliedRuntimeRecoveryExpansions>,
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
+    /// How many times this node has installed the committed domain states since it started. An
+    /// installation advances it only once every domain it inserts, updates or removes is in place,
+    /// so a reader woken by the count finds those domains.
     pub(in crate::runtime) domain_status_changed: watch::Sender<u64>,
     /// Whether this node still admits new work. A terminating node closes it once, and ingestors
     /// and generators observe the change.
@@ -96,21 +96,26 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by the entity gate deadline task so a failed handoff resumes state timers when
     /// its lease expires.
     pub(in crate::runtime) frozen_ownership_handoff_entities:
-        Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
-    /// Also held by branch tasks waiting for a handoff freeze to end.
-    pub(in crate::runtime) ownership_handoff_freeze_changed: Arc<Notify>,
+        Arc<DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>>,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     pub(in crate::runtime) active_domain_alters:
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
-        DashMap<DomainNodeRef, ScheduledStateIdentity, RandomState>,
-    pub(in crate::runtime) domain_graphs: DashMap<DomainName, SharedActiveGraph, RandomState>,
-    pub(in crate::runtime) endpoint_bindings:
-        DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
-    /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so
-    /// request routing never scans domain executions or their configured routes.
-    pub(in crate::runtime) routed_endpoints:
-        DashMap<HttpRouteKey, RoutedEndpointsByDomain, RandomState>,
+        DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
+    /// The endpoint task of every client ingestor this node executes, kept while the ingestor
+    /// restarts so its producers stay attached.
+    pub(in crate::runtime) client_ingestors:
+        DashMap<DomainNodeRef, client_ingestor::ClientIngestorEndpoint, RandomState>,
+    /// Also held by every reservation taken from it, which returns its bytes when it is dropped,
+    /// possibly after the handle's borrow ended.
+    pub(in crate::runtime) client_producer_budget: client_ingestor::ClientProducerBudget,
+    /// Volatile consumers and assignments for each client emitter executing on this node.
+    pub(in crate::runtime) client_emitters:
+        DashMap<DomainNodeRef, Arc<client_emitter::ClientEmitterEndpoint>, RandomState>,
+    /// The node's independent native-output byte reservation.
+    pub(in crate::runtime) client_emitter_budget: client_emitter::ClientEmitterBudget,
+    /// Endpoint definitions and bound source lifetimes share one immutable publication.
+    pub(in crate::runtime) endpoint_intake_routes: EndpointIntakeRoutes<EndpointIngestBinding>,
     pub(in crate::runtime) relay_boundary_fanouts: RelayBoundaryFanoutMap,
     pub(in crate::runtime) events: RuntimeEvents,
     /// The test harness keeps another handle to the same injected state and arms it while this
@@ -128,19 +133,19 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) remote_ack_watcher_shutdown: CancellationToken,
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
-    pub(in crate::runtime) state_checkpoint_notifications:
-        DashMap<RuntimeStatePlacement, Arc<Notify>, RandomState>,
-    pub(in crate::runtime) pending_state_replica_syncs:
-        DashMap<RuntimeStatePlacement, PendingStateReplicaSync, RandomState>,
-    pub(in crate::runtime) pending_state_checkpoint_announcements:
-        DashMap<RuntimeStatePlacement, PendingStateCheckpointAnnouncement, RandomState>,
-    /// Owns replica synchronization and checkpoint announcement work that outlives the event that
-    /// scheduled it.
+    /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
+    /// when the runtime stops ends every announcer.
     pub(in crate::runtime) state_replication_tasks: TaskTracker,
+    /// The copy of each branch checkpoint this node installed as a replica, taken when it is
+    /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
-    pub(in crate::runtime) replicated_branch_lru_snapshots:
-        DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    /// The branch lifecycle this node holds for each branch-keyed entity, as its owner or as a
+    /// replica, with the catalog of the branch checkpoints it owns for the entity and the owner's
+    /// announcements a replica has not acted on yet. The replica task that keeps an entity current
+    /// retains its handle, and each owned branch state retains its catalog entry.
+    pub(in crate::runtime) replicated_branch_lifecycles:
+        DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchLifecycle>, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_handoffs:
         DashMap<DomainNodeRef, PreparedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) activated_runtime_state_handoffs:
@@ -149,8 +154,8 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeRef, PreparedForcedRuntimeStateRecovery, RandomState>,
     pub(in crate::runtime) prepared_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PreparedRuntimeStateSnapshot, RandomState>,
-    pub(in crate::runtime) expiring_stream_states:
-        DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>,
+    pub(in crate::runtime) relay_branch_presences:
+        DashMap<RuntimeStatePlacement, RelayBranchPresence, RandomState>,
     pub(in crate::runtime) replicated_deduplicator_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>,
     pub(in crate::runtime) replicated_kafka_offset_states:

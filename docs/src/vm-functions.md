@@ -42,11 +42,21 @@ Five rules hold throughout:
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
 | Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
-| Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, and window aggregate lowering and route compilation. |
-| Engines and infrastructure | `nervix-roto` | Compiling a `CREATE UDF`, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
-| Decisions | Registry validation | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, so a statement is rejected with exactly the error execution would report. |
+| Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, window aggregate lowering and route compilation, and where an execution runs: inline, or admitted through the node's bounded executor onto its data or extension workers. |
+| Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program on the node's bulk workers, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
+| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and sink mappings against their declared scopes. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
+
+The VM compiler, batch constructors, runtime, and `FunctionInjector` return `error-stack`
+reports with their semantic `CompileError` or `RuntimeError` context. A compile error retains a
+typed code, its existing stable code spelling through `code()`, the operation span, and a safe
+message. Registry validation adds the owning model and route while retaining the VM report.
+Runtime plan binding likewise adds its operation above the original VM report. Roto UDF setup
+returns `UdfError` reports; its injected calls return VM runtime reports, retaining an underlying
+Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and format conversion
+return their own typed reports to the codec or signaling caller. These reports are batch or setup
+failures; selected-row execution and `SideError` values remain the row-failure channel.
 
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
@@ -310,34 +320,46 @@ their `BuiltinLowering` behind shared pointers. Cloning a program therefore shar
 patterns, sets, matchers, and pattern caches. `CompiledPredicate` wraps a program privately, so a
 general construction program cannot be passed where only a read-only filter is allowed.
 
-The VM has no notion of plan activation. The host holds each program as a
-`triomphe::Arc<CompiledProgram>` inside a published typed processor plan. A prepared artifact lives
-exactly as long as that plan. An unchanged scheduled node reuses the exact plan allocation across a
-domain revision. A change to its topology, schema fingerprint, resolved branch contract or
-processor specification binds a fresh plan before publication. Existing branches adopt it by its
-typed revision identity between batches, while a newly appearing branch starts from the same
-published allocation.
+The VM has no notion of plan activation. The host holds each program as a shared
+`Arc<CompiledProgram>`, the primitive boundary's `nervix_primitives::sync::Arc`, inside a published
+typed processor plan. A prepared artifact lives exactly as long as that plan. An unchanged scheduled
+node reuses the exact plan allocation across a domain revision. A change to its topology, schema
+fingerprint, resolved branch contract or processor specification binds a fresh plan before
+publication. Existing branches adopt it by its typed revision identity between batches, while a
+newly appearing branch starts from the same published allocation.
 
 ### Where Programs Are Compiled
 
 Registry validation compiles or type-infers expressions when a statement is applied and discards
 the result. The exceptions, which are first checked when their domain's execution is built or a
 subscription is created, are listed in
-[Where Expressions Run](./filter-map-functions.md#where-expressions-run). The runtime compiles again
-against runtime schemas:
+[Where Expressions Run](./filter-map-functions.md#where-expressions-run). The decision layer lowers
+the installed revision's expressions into typed plans; node installation binds and compiles those
+programs against runtime schemas. [Execution Plans](./execution-plans.md) describes the complete
+revision and its publication.
 
 | Program | Compiled for execution |
 | --- | --- |
 | Routes of junctions, deduplicators, reorderers, inferencers, correlators, window processors and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Once when the installed typed processor revision is bound, before its domain routing snapshot is published. Every concrete branch shares the plan's programs and prepared artifacts. A valid route that needs no VM program records that prepared absence and uses direct Arrow projection. |
 | `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | Once when the installed typed processor revision is bound, then shared by every concrete branch |
-| Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the ingestor starts |
-| Reingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the reingestor starts |
-| Emitter `FROM ... WHERE`, routes, HTTP `METHOD` and `PATH`, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
+| Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound when the ingestor starts, before its source opens. Every source instance and ingest group shares the bound programs. |
+| Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
+| Emitter `FROM ... WHERE`, routes, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | Lowered once into the domain's typed emitter execution plans, then bound against installed schemas and UDFs when the task starts or swaps. Reconnects reuse the bound programs. |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
-| Generator routes | When the domain's execution is built |
+| Generator routes | Lowered into typed ordered route plans from the committed schedule, then compiled once when the domain's execution is built or the generator is swapped; each concrete branch task retains those compiled programs and the exact materialized source branch. |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
-| `ON MESSAGE ERROR SEND TO ... SET` | Once for each error record it builds |
+| `ON MESSAGE ERROR SEND TO ... SET` | The registry lowers the ordered assignments before installation. The domain execution or its replacement binds the lowered program once. It reads the original eligible input, the exact captured state, the optional partial output and structured error fields for each failed record. A route update installs a new prepared program; delivery never compiles one. |
 | Subscription `WHERE` | When the subscription is created |
+
+An HTTP emitter's route compiles without its `write_header` invocations, which are request fields.
+The emitter compiles its `METHOD`, `PATH` and header writes as one more program: `METHOD` and `PATH`
+are assignments into an internal, write-only request namespace, so neither is an input of the
+program, and the header writes are its invocations. It reads `input` as the original source record
+and, with a codec, `output` and `message` as the finalized record; without a body `message` is the
+source record. It runs once for each admitted batch over only the rows the route kept, with the
+batch's execution snapshot and materialized state, so a filtered record evaluates no request field,
+and a volatile call such as `uuid_v4()` yields the value the retained request resends on every
+retry.
 
 ### The Runtime Bridge
 
@@ -361,14 +383,25 @@ VM applies the `WHERE` itself, and always keeps a row that carries an error in t
 the caller sees every failure. A caller must therefore check `batch.errors()` for each selected row
 before treating that row as a result.
 
+The kept rows are bitmap operations over the batch: the predicate's values under its validity,
+where a null keeps no row, ORed with the bitmap of rows that carry an error when any row does. The
+selection is read from the set bits of that bitmap, and the same bitmap filters every output column
+and invocation argument.
+
 `src/runtime/filter_map.rs` shows the complete handling:
 
-1. It acknowledges each row the `WHERE` dropped.
+1. It acknowledges each row the `WHERE` dropped. The kept rows are set in a bitmap directly from
+   the selection, and the dropped rows are its clear bits.
 2. It turns each row that carries an error into a structured message error. The error holds the
    stable reference, the code, the operation and its index, the fields, and the execution's domain
    time, together with the partial output when the error route reads it.
-3. It passes every remaining row on as output.
-4. A returned `RuntimeError` fails the whole batch through the node's general error handling.
+3. It rejects each row on which a required output field is uninitialized or null. The rows are found
+   once per batch, as the OR of the inverted validity bitmaps of the required columns, and a batch
+   whose required columns hold no null skips the bitmaps on their null counts. Only a rejected row
+   names its fields.
+4. It passes every remaining row on as output. The rows it exports are set in a filter bitmap
+   directly from their indices.
+5. A returned `RuntimeError` fails the whole batch through the node's general error handling.
 
 ## Implementation Map
 
@@ -386,6 +419,9 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/batch.rs`, `operand.rs` | Typed batches and arrays; column versus scalar operands and broadcasting |
 | `crates/nervix-vm/src/error.rs` | `CompileError`, `RuntimeError`, `SideError`, error codes, and sparse `RowErrors` |
 | `crates/nervix-vm/src/numeric.rs` and `numeric/` | Checked numeric lanes, comparisons, math, bit operations, and decimal rounding |
+| `crates/simd-kernels/src/flags.rs` | Packing the checked lanes' per-lane failure bytes into bitmap words at the selected SIMD level |
+| `crates/simd-kernels/src/checked.rs`, `benches/checked_lanes.rs` | Checked integer addition, subtraction and multiplication in vector registers at the selected SIMD level, returning each lane's value together with the failure words, and their measurement beside the lane loop they replaced |
+| `crates/simd-kernels/src/division.rs`, `division/lanes.rs`, `benches/constant_division.rs` | Constant integer divisors prepared once per call, exact reciprocal quotient and remainder kernels, and comparisons with scalar reciprocal and checked division loops |
 | `crates/nervix-vm/src/datetime.rs` and `datetime/` | Fixed-unit datetime kernels, calendar arithmetic, time zones, and formats |
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
@@ -397,11 +433,15 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/benches/` | The Criterion harness, workload shapes, and allocation probe |
 | `crates/nervix-roto/src/lib.rs` | The UDF injector and its watchdog |
 | `src/registry/validation/` | Apply-time compilation, including `window_route.rs` and the sketch budget in `processor/sketch.rs` |
+| `src/registry/entrypoint_plan.rs` | Lowering ingestor and reingestor filters, routes, and branch constructions before a node binds them |
+| `src/registry/message_error_plan.rs` | Resolving the schemas, branch contracts and flush policies of DLQ routes and lowering their ordered assignments from scheduled Models |
+| `src/runtime/entrypoint_routes.rs` | Binding lowered ingestor and reingestor programs to a node's schemas, state, lookups, and UDFs |
+| `src/runtime/message_error_plan.rs` | Binding each error-route VM program once to installed relay services and node-local capabilities |
 | `src/runtime/vm_compile.rs` | Runtime compilation and message-error sites |
-| `src/runtime/vm_input.rs` | Input projection and lookup key execution |
+| `src/runtime/vm_input.rs` | Input projection, lookup key execution, and exporting selected output rows |
 | `src/runtime/filter_map.rs` | Program execution and result handling for routes and filters |
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
-| `src/runtime/message_error.rs` | Structured message errors and error-record programs |
+| `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
@@ -600,7 +640,7 @@ A failure that belongs to the batch is a `RuntimeError`, returned as `Err`:
 - a schema that does not match the program
 - an Arrow kernel error
 - a collection larger than Arrow can address
-- a blocking task that failed
+- an execution the bounded executor did not admit, or that panicked on its worker
 - a formatted datetime column larger than its offsets allow
 - an invalid injected result, such as the wrong type or row count
 
@@ -665,29 +705,44 @@ The VM's entry point alone decides where a program runs:
 
 | Condition | Where it runs |
 | --- | --- |
-| At most `SPAWN_BLOCKING_ROW_THRESHOLD` (1,024) rows, and no injected function asks for the blocking pool | Inline, on the caller's task |
-| More than 1,024 rows | On `tokio::task::spawn_blocking` |
-| Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `SpawnBlocking` | On the blocking pool, whatever the batch size. Every UDF call does this. |
+| At most `INLINE_ROW_LIMIT` (1,024) rows, and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
+| More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
+| Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
-A caller only awaits the result, and chooses no executor.
+A caller hands the entry point the node's `Executor` and awaits the result; it chooses neither
+the class nor the charge. An admitted execution is charged to the relay memory class for the bytes
+the batch's columns hold, the usual order of what the program builds from them, and never more
+than one relay batch may decode into. A batch Arrow cannot measure is charged that bound. A UDF
+runs operator-supplied native code the node cannot bound, so its executions take the extension
+class: one that never returns holds an extension worker and leaves the data workers, which relay
+bodies are encoded and decoded on, their whole capacity.
 
-The VM never yields and has no cancellation point. A program runs every instruction over its batch
-to completion, and the batch's size and the limits above bound that work. Stopping a node or a
-processor therefore takes effect between batches. Host loops call `consume_budget` once per batch
-iteration, not the VM. A blocking task that has started runs to completion even if its awaiting
-future is dropped. A UDF adds its own watchdog, described [below](#extension-boundaries).
+Admission can refuse. A class whose wait queue is full refuses the execution with
+`RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
+`RuntimeError::ExecutionPanicked`. Both are batch errors, which a processor's general error policy
+handles like any other.
+
+An inline execution never yields and has no cancellation point: it runs every instruction over
+its batch to completion, and the batch's size and the limits above bound that work. An admitted
+execution checks between its instructions whether its caller stopped waiting, and returns
+`RuntimeError::ExecutionCancelled` at the next instruction if it did, so it costs at most the
+instruction already running. It keeps its relay charge until it actually exits. Stopping a node
+or a processor otherwise takes effect between batches. Host loops call `consume_budget` once per
+batch iteration, not the VM. A UDF adds its own watchdog, described
+[below](#extension-boundaries).
 
 ## Kernels
 
 ### Kernel Classes
 
-Every kernel falls into one of four classes. The class decides how its cost scales and which claim
+Every kernel falls into one of five classes. The class decides how its cost scales and which claim
 about vector instructions it supports.
 
 | Class | Examples | Claim |
 | --- | --- | --- |
 | Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
-| One pass over value buffers | Checked integer and float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
+| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md) and [08 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-08.md) inspect the generated code |
+| One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
 | Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (sha2 with SHA-NI detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
 | Irregular, per row | Transcendental math, `round(value, digits)`, zoned and calendar datetimes, datetime formatting and parsing, Unicode case mapping and NFC, regular expressions, Aho-Corasick, substring and padding functions, `md5`, IP and URL parsing, JSON path walk and conversion, most list functions, UUIDs | Batch API with optimized substeps; scalar work per row |
 
@@ -719,22 +774,65 @@ List `min` and `max` are the one place that intentionally keeps Arrow's total or
 
 `numeric.rs` computes every lane of a checked operation in one branch-free loop:
 
-- **Failure bitmap.** Each lane returns its value and whether it failed, and the loop packs the
-  failure flags into a bitmap 64 lanes at a time.
+- **Failure bitmap.** Each lane returns its value and whether it failed. A block of up to 1,024
+  lanes runs in one loop that stores each lane's failure as one byte, and one call to
+  `nervix-simd-kernels` packs the block's bytes into its failure words with vector compares and
+  bitmask extraction at the SIMD level the process selected. No lane shifts its failure into a
+  word, so packing does not decide whether the lane loop vectorizes.
+- **Explicit integer lanes.** Integer `+` and `-`, and `*` below 64 bits, run no lane loop of
+  their own. `CheckedInteger` hands the operands' value buffers, and a scalar operand as the value
+  every lane shares, to `CheckedArithmetic` in `nervix-simd-kernels`, which computes a register of
+  lanes at a time and returns each lane's value together with the failure words, so no failure
+  byte is stored or packed. A sum or a difference wraps in its operands' own lanes, and the signs
+  of its operands and result, or the carry out of unsigned lanes, give its failure bit at every
+  width. An 8-, 16-, or 32-bit product widens into two registers of lanes twice as wide, where
+  every product is exact: comparing it against the narrow type's bounds gives the failure bit, and
+  narrowing it back by truncation gives the lane's value. Every lane holds the wrapped value that
+  `overflowing_add`, `overflowing_sub`, or `overflowing_mul` returns. A 64-bit product has no wider
+  lane to be exact in, so it stays on the lane loop.
 - **Failed lanes.** A failed lane becomes null and its value is zeroed, so a wrapped result never
   escapes.
 - **Validity.** A result lane is null wherever any operand lane is null.
 - **No rerun.** The kernel never reruns a batch. The failure bitmap, restricted to lanes whose
   operands are valid, is the only record of a failure.
-- **Scalar operands.** A scalar operand is folded into the lane function.
-- **Inlining.** Each operator passes its own lane function, so the call inlines.
+- **Scalar operands.** A scalar operand is folded into the lane function, or handed to an explicit
+  kernel as the value every lane shares.
+- **Inlining.** Each operator passes its own lane function or kernel operation, so the call
+  inlines.
 
-The datetime kernels share these lanes. Their Euclidean truncation and binning, and their i128
-elapsed-time arithmetic, fail a lane rather than wrap it.
+The datetime kernels share these lanes. Fixed-unit truncation and binning and `to_unix` prepare
+one reciprocal divisor at entry. For a non-power-of-two divisor `d`, the prepared unsigned reciprocal is
+`floor(2^64 / d)`. Discarding its lower `64-w` bits gives `floor(2^w / d)` at a narrower
+operand width `w`; the high half of its product with a dividend gives a
+quotient at most one below the exact quotient. One remainder comparison corrects it. Powers of
+two use a shift and mask. Signs are restored after division of unsigned magnitudes, which keeps
+`MIN` representable and distinguishes truncation toward zero from Euclidean rounding. Binning
+normalizes both its value and origin, then corrects their phase difference by at most one stride.
+It fails a lane if subtracting the distance to the bin start overflows.
+
+Fixed-unit `date_diff` subtracts in `i64` and uses its prepared truncating divisor when the
+difference fits. Otherwise it computes the difference and division in `i128`, then checks the
+result against `i64`. Calendar differences retain their calendar rules. `date_add` and
+`from_unix` use checked `i128` multiplication and addition; `from_unix` performs no division.
+
+Integer column-by-scalar `/` and `%` use the same reciprocal primitive. Division by a column
+retains the checked scalar lane loop. A quotient by zero or `MIN / -1` fails; a remainder fails
+only for zero, so `MIN % -1` remains zero. Operand validity still masks failures, and a null
+scalar produces an all-null column without running division. The constant-lane benchmark
+compares each width's selected kernel, scalar reciprocal and checked lane loop on identical runs;
+`U64` and `I64` remainder retain scalar reciprocal loops because their vector forms measured slower
+on `x86-64-v3`. The
+retained paths and generated instructions are recorded in the
+[SIMD kernels 08 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-08.md).
 
 Floating-point operations fail a lane that produces NaN or infinity. The transcendental functions
 come from the platform math library as opaque calls per lane that no loop vectorizes, so those
-kernels skip runs of null lanes instead. `round(value, digits)` rounds exactly in integer arithmetic
+kernels compute valid lanes only, as the decimal rounding and calendar kernels do. They read
+validity one 64-lane word at a time: a word without a valid lane computes nothing and fails no
+lane, a fully valid word runs the ordinary lane loop over its 64 lanes, and any other word computes
+its valid lanes alone with the failure bytes of its null lanes cleared. The words' failure bytes
+fill the same blocks the other kernels pack, so a null lane never fails, no lane writes a failure
+word, and a word with few valid lanes pays for no packing call of its own. `round(value, digits)` rounds exactly in integer arithmetic
 on the value's significand, and a digit count beyond ±400 rounds as ±400 does. A shift reads its
 count from any integer type and fails a negative one. A count at or beyond the value's width moves
 every bit out, and the lanes stay branch-free.
@@ -748,13 +846,28 @@ These are three different claims, and the implementation makes them separately:
   executes this way, including the irregular ones.
 - **Compiler vectorization.** A buffer loop is written so that LLVM *can* widen it to the vector
   instructions of the CPU the binary targets, and its result is the same whether or not it does.
-  The repository sets no `target-cpu`, so an x86-64 build targets the baseline instruction set.
-  No kernel names an instruction set or an intrinsic. Neither the benchmark report nor this chapter
-  claims that a particular loop is vectorized, because that needs target-specific inspection of the
-  generated instructions, which has not been done.
-- **Explicit SIMD.** Only third-party libraries use explicit SIMD, and they choose instructions at
-  run time: simd-json, base64-simd, faster-hex, and sha2. xxhash chooses when the binary is built.
-  Nervix's own code contains no `std::arch`, `target_feature`, or runtime feature detection.
+  A local build without `RUSTFLAGS` target tuning uses the compiler's baseline target. The Docker
+  image builds its x86-64 payloads for `x86-64-v3` through cargo-sonic. A
+  compiler-vectorized loop needs inspection of the generated instructions for the particular build
+  before claiming a specific instruction set.
+- **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
+  and sha2; xxhash chooses when the binary is built. `nervix-simd-kernels` uses `fearless_simd` to
+  select supported instructions at run time, with a scalar fallback. Outside the VM it serves the
+  schemaful JSON emission classifier and the delivery-latency fold, which reads a batch's ingestion
+  watermarks once to find its latest watermark and bucket every row's latency. Inside the VM it packs
+  the failure bytes of the checked lanes into bitmap words, with the same word at every level, and
+  computes the [explicit integer lanes](#checked-buffer-kernels).
+- **Dispatch.** The kernel crate resolves one `fearless_simd` level per process from the CPU's
+  features, never below what the build's target already guarantees. An x86-64 build selects
+  AVX-512, AVX2, SSE4.2, or SSE2, so the Docker image's `x86-64-v3` payload runs the AVX2 arm, or
+  the AVX-512 arm on a CPU that has it. An AArch64 build runs NEON, and the scalar fallback runs only
+  where no level is available. Each kernel call enters the selected level once through
+  `dispatch!`, which enables that level's target features for small `#[inline(always)]` functions
+  generic over `S: Simd`, and computes its whole run there. Every level gives every lane the same
+  value and failure bit, and the kernel tests compare every level the host offers, and the forced
+  fallback, against a scalar reference. The VM itself names no instruction set: it hands buffers to
+  the kernel crate, its other lane operations remain compiler-vectorized, and it uses no
+  `std::arch` or `target_feature` of its own.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and
@@ -766,8 +879,8 @@ guidance:
 - **Variable-length work.** Ragged lists, text search, and JSON ran at single-digit millions.
 - **Failures.** Dense failures made checked arithmetic about six times slower, because each failed
   row builds an error.
-- **The blocking-pool hop.** Crossing the 1,024-row threshold costs more than executing a small
-  batch.
+- **The executor hop.** Crossing the 1,024-row threshold admits the execution onto the data
+  workers, which costs more than executing a small batch.
 - **Conditional arms.** A regular expression in an arm that selects half the batch costs about
   twelve times one that selects none.
 - **JSON sharing.** Four extractions from one document cost less than a third of four extractions
@@ -775,7 +888,8 @@ guidance:
 
 The timings were taken on one development machine with other builds running, so they are
 diagnostic. Without hardware counters or generated-instruction inspection, they do not establish a
-SIMD speedup.
+SIMD speedup. The [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md)
+records the generated instructions and interleaved Criterion rounds of the explicit integer lanes.
 
 ### Nulls, NaN, Overflow, And Unicode
 
@@ -809,7 +923,7 @@ and leaves the irregular remainder per row, still inside one batch call:
 | Calendar and time-zone logic | Fixed-length units in UTC or at a fixed offset use the vectorizable fixed-unit lanes. A time zone resolves once from the bundled database. Consecutive lanes inside one offset span reuse one zone lookup. | Months, quarters, years, and local days or weeks under an IANA zone compute per row through Jiff's civil calendar, including disambiguation and month-end clamping. |
 | `contains_any` and `IN` | Constant pattern lists build one Aho-Corasick matcher. Small fixed-width sets compare in turn and larger ones hash, with the threshold chosen by benchmark. | Each row is scanned or hashed individually. Per-row pattern sets build a matcher per distinct set per batch. |
 | Lists | Counts read offsets. First, last, and nth are index arithmetic plus one `take`. `min` and `max` over fixed-width lists without null elements compare whole columns one element position at a time. | Ragged-list extrema, `mean`, `distance`, `dot`, `contains`, and `overlap` loop over each row's elements. |
-| Sketches and window structures | Aggregate arguments are evaluated once per batch as Arrow columns. Rows are admitted in runs of one argument batch. Structures merge rather than rescan where the algorithm allows. | Admission into accumulators and sketches is per row. Hashing, t-digest insertion, and Misra-Gries counting are irregular by nature. |
+| Sketches and window structures | Aggregate arguments are evaluated once per batch as Arrow columns. Typed runs fold validity by popcount, exact integer sums by split SIMD lanes, floating sums and centered moments by per-lane folds, and histogram indexes before scattering. Non-finite arguments are classified by column bitmaps. | Candidate deque updates, bucket scatter, BLAKE3 per distinct input, t-digest insertion, and Misra-Gries updates remain irregular. Sketch keys reuse a run buffer. |
 | Encodings and hashes | Base64, hex, and SHA-256 use library SIMD dispatch per value. Output lengths are checked before encoding. | Each value is encoded or hashed separately. `md5` is scalar. |
 | IP addresses and URLs | Constant networks parse once. A containment test is one mask and compare on fixed-width integers. A scalar URL parses once per batch. | Address text and URLs parse per row under the URL Standard. |
 | Roto UDFs | One vectorized call per batch or selection, with column methods over Arrow arrays. | Whatever the UDF body does. Its `get` and builder methods are an explicit per-row path. |
@@ -874,6 +988,13 @@ requires a constant scope, but it is shared and computed once per execution. A p
 before the epoch reaches `uuid_v7()` as it is, and each row that evaluates the call fails rather
 than encoding a different instant. No VM or datetime code calls `SystemTime` or `Instant`.
 
+Processor and materialized relay tasks retain the installed domain clock that supplies each unit's
+snapshot. Filtered subscriptions retain its lifecycle owner so a subscription opened before
+`START DOMAIN` follows the subsequently installed generation. Each subscription generation also
+retains the node's executor and supplies it directly to predicate evaluation, preserving bounded
+admission for extension calls. Batch evaluation reads these publications directly; it does not
+discover its clock through the runtime registry.
+
 ### Deterministic And Volatile Functions
 
 Only `uuid_v4` and `uuid_v7` are `Volatile`. A volatile builtin:
@@ -904,7 +1025,8 @@ The injectors:
 - **UDFs.** `nervix-roto`'s `UdfExecutor` answers UDF calls:
   - It receives one call per batch or selection, and masks rows whose required arguments are null
     or already failed.
-  - It runs every UDF on the blocking pool, and catches panics.
+  - Every execution that calls a UDF runs on the node's extension workers, and a panic there is a
+    batch error.
   - It reports per-row errors as side errors, and fails the batch for a trap, a wrong type or row
     count, an unexplained null, or a call that returns after its 5-second watchdog.
   - The watchdog is checked only after the call returns. It cannot reclaim a worker from native
@@ -915,6 +1037,16 @@ routes are ordinary set-only VM programs over the guest's output, and the host g
 columns with Arrow identity, slice, take, and concatenate. Guest execution, isolation, and state
 belong to [WASM Processor Guests](./wasm-processor-guests.md) and
 [WASM State And Recovery](./wasm-state.md).
+
+`FunctionInjector` and retained window accumulator traits declare recurring compiler contracts,
+so their implementations and dynamic callers retain the VM callback frequency across crate
+metadata. UDF result builders document the retained column and admitted execution bound; external
+Arrow, formatting and operator callback effects are declared at their owning callable. Paired
+Rust API doctests verify that injection accepts the domain timestamp with its selected-row error
+mask and rejects an unrelated scalar time. The annotations do not replace executor admission,
+selected-row validation or the concurrency checks.
+[Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns compiler contract syntax
+and diagnostics.
 
 ## Window Aggregates And Sketches
 
@@ -954,10 +1086,15 @@ For each batch, the task works through these steps:
 
 1. It evaluates the argument program once. A whole-batch failure fails every message in the batch.
 2. It refuses a row whose argument failed, or whose float argument is not finite where the
-   structure requires finite values.
+   structure requires finite values. Each floating argument column supplies a non-finite bitmap.
 3. It checks the state budget, then admits the rest in runs of consecutive rows. A run ends where
    the window's width fills.
-4. For each run, every structure admits the rows from the shared argument columns. Each retained
+4. For each run, every structure reads one typed value slice and validity bitmap from the shared
+   argument columns. Counts use bitmap popcounts; integer sums use exact high and low lane halves;
+   float sums use per-lane TwoSum; moments use a compensated mean pass and a centered second pass,
+   falling back to a weighted mean when summing finite inputs overflows before division, then one
+   Chan merge into the branch's aggregate. Histogram indexes are computed for the run and
+   scattered into bucket counts. Each retained
    row holds its sequence, its timestamp, and a row view of the Arc'd input and argument batches.
 5. It emits while the width is met, and then steps the window. Stepped rows are acknowledged.
 
@@ -967,10 +1104,10 @@ Tumbling and sliding windows use this same path, with different `WIDTH` and `STE
 | --- | --- | --- | --- |
 | `counter` | `COUNT` | Exact 64-bit count | Subtract |
 | `truth_counter` | `COUNT_IF`, `BOOL_AND`, `BOOL_OR` | Exact true and false counts | Subtract |
-| `sum` over integers | `SUM` | Exact 128-bit sum, checked against the argument type at emission | Subtract |
-| `sum` over floats | `SUM` | Knuth two-sum compensated sum in a two-stack window; `F32` accumulates in `F64` | Recomputed from survivors, never subtracted |
-| `moments` | `AVG`, variances, standard deviations | Centered count, mean, and M2 with pairwise merging, in a two-stack window | Recomputed from survivors |
-| `co_moments` | Covariances, `CORR` | Centered co-moments in a two-stack window; `CORR` clamped to `[-1, 1]` | Recomputed from survivors |
+| `sum` over integers | `SUM` | Exact 128-bit sum from high and low 32-bit SIMD halves, checked against the argument type at emission | Subtract the same run kernel's result |
+| `sum` over floats | `SUM` | Per-lane Knuth two-sum in a two-stack window; `F32` accumulates in `F64` | Refold typed surviving runs, never subtract |
+| `moments` | `AVG`, variances, standard deviations | Two-pass centered count, mean, and M2 with one Chan merge per run, in a two-stack window | Refold typed surviving runs |
+| `co_moments` | Covariances, `CORR` | Two-pass centered co-moments with one Chan merge per run; `CORR` clamped to `[-1, 1]` | Refold typed surviving runs |
 | `extremes`, `sequence`, `arg_extremes` | `MIN`/`MAX`, `FIRST`/`LAST`, `ARG_MIN`/`ARG_MAX` | Monotonic candidate deque ordered by value, arrival, or key; ties keep the earliest row | Drop front candidates older than the first survivor |
 | `linear_histogram` | `PERCENTILE_LINEAR_HISTOGRAM` | Fixed-range buckets, answered with a bucket midpoint | Immediately, or after the configured delay on the domain clock |
 | `hll` | `APPROX_COUNT_DISTINCT` | HyperLogLog over the first 8 bytes of a BLAKE3 hash of a type-tagged key, with linear counting at small cardinalities | Rebuilt from survivors |
@@ -982,11 +1119,15 @@ The two-stack window keeps its floating-point statistics exact under sliding:
 - **Front.** A stack whose entries aggregate the oldest retained rows. Its top entry covers the
   oldest front row together with every newer front row, so dropping that row pops one entry.
 - **Back.** One aggregate of every retained row after the front, extended as rows are admitted.
-- **Refold.** A retraction that reaches past the front folds the surviving rows from newest to
-  oldest into a fresh front.
+- **Refold.** A retraction that reaches past the front groups survivors by typed argument run and
+  folds each run from newest to oldest into a fresh front.
 
 Nothing is ever subtracted, so a value that left the window leaves no rounding behind, at amortized
 constant cost per row.
+
+Run boundaries and SIMD lane order determine the association of floating-point additions and Chan
+merges. Their results are associative up to floating-point rounding and can differ slightly when
+batching changes. Integer sums and counts remain bit-identical regardless of run boundaries.
 
 ### Sketch Panes, Merge, And Expiry
 
@@ -1055,6 +1196,12 @@ row views of its input and argument columns. It does not carry the accumulators 
 snapshot codec seals those views as bounded Arrow sections on the bulk executor. Only the
 histogram's delayed removals ride beside them in a typed section, because the retained rows cannot
 reproduce them.
+
+Each delayed removal archives its bucket index as a fixed-width 64-bit count, with checked native
+decoding. The current snapshot frame begins with `NVXWIN64`, and window state uses runtime-state
+kind tag `8`. These identify the current stored and transferred shape before decoding; an
+unrecognized frame fails validation, and stored state outside the current namespace must be
+recreated. The count contract is defined in [Archived Counts](./typed-states.md#archived-counts).
 
 A snapshot from an earlier incarnation of the branch restores an empty window and marks it for
 publication, so a late checkpoint of a previous lifetime cannot restore its panes. Otherwise,
@@ -1170,7 +1317,7 @@ Treat this as the checklist for a new builtin, or for a new family.
 **Limits:**
 
 - Column limits: 2,147,483,647 bytes of text or bytes in one column; 1,024 rows before execution
-  moves to the blocking pool.
+  moves to the node's data workers.
 - Regular expressions: 10 MiB compiled and a 2 MiB search cache per pattern, and 64 field-supplied
   patterns cached per call.
 - Pattern sets: 128 patterns and 64 KiB per constant `contains_any` list, and 64 per-row pattern
@@ -1184,11 +1331,12 @@ The complete user-facing limits are in [Limits](./filter-map-functions.md#limits
 
 **Current boundaries:**
 
-- The data plane compiles its programs from Models rather than receiving validated plans.
-- Routes compile lazily on each branch instance's first batch. A branched processor therefore
-  pays compilation, and holds its routes' prepared patterns and sets, once for every concrete
-  branch it runs, where window and inferencer programs are compiled once per processor.
-- An error-record program compiles once per record it builds.
+- Validation compiles to reject invalid statements, while installation compiles the programs
+  selected by the typed revision against local schemas and capabilities.
+- Branched processor routes compile before publication and share their prepared patterns and
+  sets across concrete branch tasks of the same installed node revision.
+- A message-error route binds once per installed revision; each failed record executes that bound
+  program with its captured inputs.
 - The text functions listed under [Allocation And Result Bounds](#allocation-and-result-bounds)
   build their columns without the size check.
 - A statement that makes a batch's program slow is bounded only by the input and the limits above.

@@ -125,6 +125,47 @@ Feature: NSPL file formatting
         };
       """
 
+  Scenario: HTTP emitters keep their attachment, request expressions and explicit body selection when formatted
+    Given an NSPL file "http_emitters.nspl" containing
+      """
+      create attached emitter deliver_event from outgoing to http api method input.request_method
+        path input.request_path mode ack retry policy backoff 250ms max 30s
+        encode using event_body_codec inherit event_id, payload
+        invoke write_header('Content-Type', 'application/json'), write_header('X-Tenant', input.tenant)
+        flush each 100ms max batch size 1MiB on message error log on general error log;
+      create detached emitter delete_event from outgoing where input.request_method = 'DELETE'
+        to http api method 'DELETE' path concat('/v1/events/', input.event_id)
+        mode ack retry policy backoff 250ms max 30s without body
+        invoke write_header('Idempotency-Key', input.event_id)
+        flush immediate on message error log on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "http_emitters.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "http_emitters.nspl" contains
+      """
+      CREATE ATTACHED EMITTER deliver_event
+        FROM outgoing
+        TO HTTP api METHOD input.request_method PATH input.request_path
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_body_codec
+        INHERIT event_id, payload
+        INVOKE write_header('Content-Type', 'application/json'), write_header('X-Tenant', input.tenant)
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE DETACHED EMITTER delete_event
+        FROM outgoing WHERE input.request_method = 'DELETE'
+        TO HTTP api METHOD 'DELETE' PATH concat('/v1/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          WITHOUT BODY
+        INVOKE write_header('Idempotency-Key', input.event_id)
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    When nervix-nspl-format checks the NSPL file "http_emitters.nspl"
+    Then the formatter exits with code 0
+
   Scenario: A directory is searched recursively for NSPL files
     Given an NSPL file "top.nspl" containing
       """
@@ -176,6 +217,19 @@ Feature: NSPL file formatting
       """
     And the NSPL file "broken.nspl" is unchanged
 
+  Scenario: A duration longer than any clock can hold is reported and left untouched
+    Given an NSPL file "broken.nspl" containing
+      """
+      create paced domain simulation with period 18446744073709551615.5s500000000ns skew 1s;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      expected duration_literal
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
   Scenario: A later statement that cannot be parsed is reported at its own line
     Given an NSPL file "broken.nspl" containing
       """
@@ -191,6 +245,40 @@ Feature: NSPL file formatting
     And the last command error contains
       """
       expected relay_name
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
+  Scenario: An expression a statement embeds is reported at its own offending token
+    Given an NSPL file "broken.nspl" containing
+      """
+      create subscription readings to metrics where input.value = = 1;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:1:61
+      """
+    And the last command error contains
+      """
+      found =
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
+  Scenario: A number split at its dot is not a float in a statement's expression
+    Given an NSPL file "broken.nspl" containing
+      """
+      create subscription readings to metrics where input.value = 1 .5;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:1:63
+      """
+    And the last command error contains
+      """
+      found .
       """
     And the NSPL file "broken.nspl" is unchanged
 
@@ -217,3 +305,199 @@ Feature: NSPL file formatting
       """
       USE demo;
       """
+
+  Scenario: An MQTT topic keeps its exact case through formatting
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create ingestor sensor_readings
+        from mqtt mqtt_main topic 'Sensors' mode no_ack sequential on quiesce drop
+        decode using reading_codec
+        to readings unbranched flush immediate on message error log
+        on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      FROM MQTT mqtt_main TOPIC 'Sensors' MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+      """
+
+  Scenario: A dollar-quoted value ending in part of its delimiter keeps its value
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create user auditor with password $p$it's "quoted"$s$p$;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE USER auditor WITH PASSWORD $s_1$it's "quoted"$s$s_1$;
+      """
+
+  Scenario: A configuration value holding a comma and a line break stays one entry
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create client kafka_main type kafka config { 'bootstrap.servers' = 'localhost:9092', 'sasl.jaas.config' = $v$first,
+      second$v$ };
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      'sasl.jaas.config' = $s$first,
+      second$s$
+      """
+
+  Scenario: A Protobuf message name holding a closing brace keeps its value
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create codec notification_codec from protobuf using resource proto_bundle version 2
+        config { 'file' = 'notification.proto' } message 'nervix.test.Notification}'
+        to schema notification_schema with jaq transformations on ingestion '.';
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      MESSAGE 'nervix.test.Notification}'
+      """
+
+  Scenario: A domain clock period is written as one duration
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create paced domain simulation with period 1500ms skew 250ms;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE PACED DOMAIN simulation WITH PERIOD 1500ms SKEW 250ms;
+      """
+
+  Scenario: A leap second in a start time is written as the instant it reads as
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      start at '2016-12-31T23:59:60.5Z';
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      START AT '2017-01-01T00:00:00.500+00:00' TIME RATE 1;
+      """
+
+  Scenario: An SQS queue longer than a name stays unquoted
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create emitter order_events from orders to sqs sqs_main queue orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      TO SQS sqs_main QUEUE orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo
+      """
+
+  Scenario: An array in a VALUES map is one column value
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create emitter to_ch from notifications
+        to clickhouse clickhouse_client insert to table my_table
+        values { 'tags' = [input.first_tag, input.second_tag] }
+        mode ack retry policy backoff 250ms max 30s
+        batch max messages 500 max size 8MiB
+        flush immediate on message error log on general error log;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      'tags' = [input.first_tag, input.second_tag]
+      """
+
+  Scenario: A carriage return inside a literal survives formatting
+    Given an NSPL file "pipeline.nspl" containing the escaped text
+      """
+      create user auditor with password $p$first line\r\nsecond line$p$;\r\nuse demo;\r\n
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains the escaped text
+      """
+      CREATE USER auditor WITH PASSWORD $s$first line\r\nsecond line$s$;\nUSE demo;\n
+      """
+
+  Scenario: A trailing comment ending in a carriage return is formatted in one pass
+    Given an NSPL file "pipeline.nspl" containing the escaped text
+      """
+      COMMIT; // done \r
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains the escaped text
+      """
+      COMMIT; // done\n
+      """
+
+  Scenario: Clause keywords written as calls and field scopes stay in their expressions
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create junction peaks from sensors where (max(input.readings) > 10) filter where (output.total > 0)
+        unbranched to alerts inherit all flush immediate on message error log;
+      create deduplicator distinct_peaks from sensors deduplicate on max(input.readings), input.id
+        max time 10m unbranched to distinct_readings inherit all flush immediate on message error log;
+      create reorderer peaks_in_order from sensors by max(input.readings) max time 10s unbranched
+        to ordered_readings inherit all flush immediate on message error log;
+      create correlator suffix_matches left from sensors where right(left.name, 2) = right.suffix
+        right from labels where output.id > 0 correlate where left.id = right.id match earliest
+        max time 5s on correlation timeout drop, drop unbranched to matched set id = left.id
+        flush immediate on message error log;
+      alter junction peaks set filter where concat(input.name, replace(input.name, 'a', 'b')) != '',
+        set detached;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE ATTACHED JUNCTION peaks
+        FROM sensors WHERE max(input.readings) > 10
+        FILTER WHERE output.total > 0
+        UNBRANCHED
+        TO alerts
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED DEDUPLICATOR distinct_peaks
+        FROM sensors
+        DEDUPLICATE ON max(input.readings), input.id
+        MAX TIME 10m
+        UNBRANCHED
+        TO distinct_readings
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED REORDERER peaks_in_order
+        FROM sensors
+        BY max(input.readings)
+        MAX TIME 10s
+        UNBRANCHED
+        TO ordered_readings
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED CORRELATOR suffix_matches
+        LEFT FROM sensors WHERE right(left.name, 2) = right.suffix
+        RIGHT FROM labels WHERE output.id > 0
+        CORRELATE WHERE left.id = right.id
+        MATCH EARLIEST
+        MAX TIME 5s
+        ON CORRELATION TIMEOUT DROP, DROP
+        UNBRANCHED
+        TO matched
+          SET id = left.id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) != '', SET DETACHED;
+      """
+    When nervix-nspl-format checks the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0

@@ -1,24 +1,89 @@
+FRAME backup_download_chunk.nxbd
+DOWNLOAD CHUNK bytes=007f80ff
+FRAME backup_download_complete.nxbd
+DOWNLOAD COMPLETE
+FRAME backup_download_failed.nxbd
+DOWNLOAD FAILED failure=NotRetained message=str:6e6f20617263686976652069732072657461696e656420756e6465722074686973207265666572656e6365
+FRAME backup_download_redirect.nxbd
+DOWNLOAD LEADER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
+FRAME backup_download_request.nxbq
+REQUEST DOWNLOAD_BACKUP reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44
+FRAME backup_download_start.nxbd
+DOWNLOAD START total_bytes=18446744073709551615 digest=a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
+FRAME client_attach_domain_clock.nxcm
+REQUEST 16 ATTACH_DOMAIN_CLOCK domain=simulation
 FRAME client_cancel.nxcm
 REQUEST 14 CANCEL target=18446744073709551615
 FRAME client_choice.nxcm
 REQUEST 15 CHOICE target=PlacementPolicy dependencies=[pace:Paced] search=str:636f page_size=2 cursor=choice-page-two
+FRAME client_choice_relay_field.nxcm
+REQUEST 18 CHOICE target=RelayField dependencies=[domain:tenant,model:relay/orders] search=str:616d6f page_size=100 cursor=none
+FRAME client_close_emitter.nxcm
+REQUEST 25 CLOSE_EMITTER consumer=22
+FRAME client_close_ingestor.nxcm
+REQUEST 21 CLOSE_INGESTOR producer=19
 FRAME client_command.nxcm
 REQUEST 1 COMMAND query=str:43524541544520534348454d41206f726465727320282069642055363420293b204352454154452052454c4159206f726465727320534348454d41206f726465727320554e4252414e434845443b domain=tenant reference=0192d4e4-7b36-7c3e.9f00_5b2d8c3a1e44 expected_position=0 expected_preview=none
 FRAME client_command_bare.nxcm
 REQUEST 3 COMMAND query=str: domain=none reference=x expected_position=none expected_preview=none
 FRAME client_commit.nxcm
 REQUEST 2 COMMAND query=str:434f4d4d49543b domain=none reference=rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr expected_position=18446744073709551615 expected_preview=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44/18446744073709551615/a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
+FRAME client_detach_domain_clock.nxcm
+REQUEST 17 DETACH_DOMAIN_CLOCK domain=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+FRAME client_open_emitter.nxcm
+REQUEST 22 OPEN_EMITTER domain=tenant emitter=app_output batches=8 bytes=4194304
+FIELD order_id U64 required public
+FIELD card STRING nullable sensitive
+FRAME client_open_ingestor.nxcm
+REQUEST 19 OPEN_INGESTOR domain=tenant ingestor=orders_in batches=8 bytes=4194304
+FIELD order_id U64 required public
+FIELD card STRING nullable sensitive
+FRAME client_read_emitter_batch.nxcm
+REQUEST 23 READ_EMITTER_BATCH consumer=22
+FRAME client_settle_emitter_batch.nxcm
+REQUEST 24 SETTLE_EMITTER_BATCH consumer=22 reference=b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4 decision=ack
+FRAME client_submit_batch.nxcm
+REQUEST 20 SUBMIT_BATCH producer=19 batch=ffffffff4152524f572d4950432d424f4459
 FRAME client_subscribe.nxcm
 REQUEST 12 SUBSCRIBE domain=tenant statement=str:43524541544520535542534352495054494f4e206c6976652046524f4d206f72646572733b type=Row
 FRAME client_suggest.nxcm
 REQUEST 4 SUGGEST input=str:53484f572052454c415920c2abc3bc6ec3af636f6465c2bb20 cursor=13 domain=tenant page_size=2 continuation=page-two
+FRAME restore_chunk.nxrm
+RESTORE_CHUNK bytes=007f80ff
+FRAME restore_failed.nxrr
+RESTORE_REPLY none FAILED failure=DigestMismatch message=str:746865206172636869766520646f6573206e6f74206861766520697473206465636c6172656420646967657374
+FRAME restore_outcome.nxrr
+RESTORE_REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+RESTORE mode=Apply total_bytes=18446744073709551615 digest=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c captured_at=-9223372036854775808 users=created:18446744073709551615,skipped:0,replaced:7
+RESTORE_DOMAIN source=tenant domain=tenant_copy resource_versions=3 models=18446744073709551615 planned_models=none
+RESTORE_DOMAIN source=analytics domain=analytics resource_versions=0 models=0 planned_models=none
+RESTORE_STEP kind=Users domain=none outcome=Applied
+RESTORE_STEP kind=CreateDomain domain=tenant_copy outcome=Planned
+RESTORE_STEP kind=ImportResources domain=tenant_copy outcome=Failed
+RESTORE_STEP kind=ApplyModels domain=tenant_copy outcome=NotAttempted
+FRAME restore_start.nxrm
+RESTORE_START request=1 reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 statement=str:524553544f524520434c55535445522046524f4d2027636c75737465722e6e76786227204f4e204558495354494e47205553455220534b49503b total_bytes=18446744073709551615 digest=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c
 FRAME server_choice.nxsm
 REPLY 9 CHOICE status=Ready cursor=choice-page-two
 CHOICE value=pace:Paced label=str:5041434544 detail=str:57616c6c20636c6f636b group=str:446f6d61696e20636c6f636b
 CHOICE value=placement:PreferColocation label=str:50524546455220434f4c4f434154494f4e detail=none group=str:506c6163656d656e74
 CHOICE value=domain:tenant label=str:74656e616e74 detail=none group=none
 CHOICE value=resource:bundle label=str:62756e646c65 detail=none group=none
+CHOICE value=resource-version:LATEST label=str:4c4154455354 detail=str:4869676865737420636f6d706c657465642076657273696f6e group=str:5265736f757263652076657273696f6e
+CHOICE value=resource-version:3 label=str:33 detail=str:436f6d706c657465642076657273696f6e group=str:5265736f757263652076657273696f6e
 CHOICE value=model:relay/orders label=str:6f7264657273 detail=str:52454c4159 group=str:4d6f64656c73
+CHOICE value=field:amount label=str:616d6f756e74 detail=str:493634204f5054494f4e414c group=str:52656c6179206669656c64
+FRAME server_command_backup.nxsm
+REPLY 6 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+BACKUP total_bytes=18446744073709551615 digest=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a captured_at=-9223372036854775808 retained_until=9223372036854775807 resources=Omitted users=0
+BACKUP_DOMAIN domain=analytics revision=18446744073709551615 sections=0 section_bytes=18446744073709551615
+BACKUP_DOMAIN domain=tenant revision=1 sections=7 section_bytes=4096
 FRAME server_command_failed.nxsm
 REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
@@ -36,18 +101,86 @@ DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c4159
 DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
 DIAGNOSTIC span=none message=str:
 LEADER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
+FRAME server_command_restore.nxsm
+REPLY 19 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+RESTORE mode=Apply total_bytes=18446744073709551615 digest=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c captured_at=-9223372036854775808 users=created:18446744073709551615,skipped:0,replaced:7
+RESTORE_DOMAIN source=tenant domain=tenant_copy resource_versions=3 models=18446744073709551615 planned_models=none
+RESTORE_DOMAIN source=analytics domain=analytics resource_versions=0 models=0 planned_models=none
+RESTORE_STEP kind=Users domain=none outcome=Applied
+RESTORE_STEP kind=CreateDomain domain=tenant_copy outcome=Planned
+RESTORE_STEP kind=ImportResources domain=tenant_copy outcome=Failed
+RESTORE_STEP kind=ApplyModels domain=tenant_copy outcome=NotAttempted
 FRAME server_command_unknown.nxsm
 REPLY 4 COMMAND outcome_unknown reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
 DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
 DIAGNOSTIC span=none message=str:
 UNKNOWN cause=StillApplying
+FRAME server_domain_clock_already_attached.nxsm
+REPLY 11 DOMAIN_CLOCK_ATTACH already_attached domain=tenant message=str:746869732073657373696f6e20616c726561647920666f6c6c6f77732074686520636c6f636b206f6620646f6d61696e202774656e616e7427
+FRAME server_domain_clock_attach_failed.nxsm
+REPLY 12 DOMAIN_CLOCK_ATTACH failed message=str:73657373696f6e2d73636f70656420616e6420636c69656e742d6c6f63616c2073746174656d656e74732063616e6e6f742062652071756575656420696e2061207472616e73616374696f6e
+FRAME server_domain_clock_attached.nxsm
+REPLY 10 DOMAIN_CLOCK_ATTACH attached domain=tenant message=str:617474616368656420746f2074686520636c6f636b206f6620646f6d61696e202774656e616e7427
+CLOCK generation=18446744073709551615 state=paced period=1 skew=0 origin=9223372036854775807 anchor=-9223372036854775808 rate=f64:0010000000000000
+FRAME server_domain_clock_detached.nxsm
+REPLY 14 DOMAIN_CLOCK_DETACH detached domain=tenant message=str:64657461636865642066726f6d2074686520636c6f636b206f6620646f6d61696e202774656e616e7427
+FRAME server_domain_clock_domain_not_found.nxsm
+REPLY 13 DOMAIN_CLOCK_ATTACH domain_not_found domain=missing message=str:646f6d61696e20276d697373696e672720646f6573206e6f74206578697374
+FRAME server_domain_clock_ended.nxsm
+EVENT DOMAIN_CLOCK_ENDED domain=tenant reason=DomainRemoved
+FRAME server_domain_clock_not_attached.nxsm
+REPLY 15 DOMAIN_CLOCK_DETACH not_attached domain=tenant message=str:746869732073657373696f6e20646f6573206e6f7420666f6c6c6f772074686520636c6f636b206f6620646f6d61696e202774656e616e7427
+FRAME server_domain_clock_stopped.nxsm
+EVENT DOMAIN_CLOCK domain=tenant
+CLOCK generation=0 state=stopped
+FRAME server_domain_clock_ticked.nxsm
+EVENT DOMAIN_CLOCK_TICK domain=tenant generation=7 id=42 boundary=1000 authority_utc=2000 serving_logical=3000
+FRAME server_domain_clock_uninstalled.nxsm
+EVENT DOMAIN_CLOCK domain=tenant
+CLOCK generation=7 state=uninstalled
+FRAME server_domain_clock_unpaced.nxsm
+EVENT DOMAIN_CLOCK domain=tenant
+CLOCK generation=1 state=unpaced
+FRAME server_emitter_batch.nxsm
+REPLY 23 EMITTER_BATCH identity=a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3 reference=b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4 source=orders branch=c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5 body=4152524f572d4950432d4f5554505554 members=2 now=1700000000000000000
+FRAME server_emitter_closed.nxsm
+REPLY 25 EMITTER_CLOSE disposition=Closed message=str:
+FRAME server_emitter_opened.nxsm
+REPLY 22 EMITTER_OPENED domain=tenant emitter=app_output generation=4 contract=0707070707070707070707070707070707070707070707070707070707070707 window=parallel:8 ack_timeout=30000000000 retry=100000000/1000000000 granted=8/4194304 max_batch=1048576/16 message=str:636f6e73756d6572206174746163686564
+FIELD order_id U64 required public
+FIELD card STRING nullable sensitive
+FRAME server_emitter_settled.nxsm
+REPLY 24 EMITTER_SETTLED disposition=Confirmed message=str:
+FRAME server_ingestor_closed.nxsm
+REPLY 21 INGESTOR_CLOSE closed message=str:70726f647563657220313920636c6f736564
+FRAME server_ingestor_opened.nxsm
+REPLY 19 INGESTOR_OPENED domain=tenant ingestor=orders_in generation=18446744073709551615 contract=5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c attachment=0192d4e47b367c3e9f005b2d8c3a1e44 window=parallel:8 ack_timeout=30000000000 retry=100000000/5000000000 granted=8/4194304 max_batch=4194048/65536 admission=Open message=str:70726f647563657220617474616368656420746f20696e676573746f7220276f72646572735f696e27
+FIELD order_id U64 required public
+FIELD card STRING nullable sensitive
+FRAME server_ingestor_refused.nxsm
+REPLY 19 INGESTOR_REFUSED refusal=SchemaMismatch message=str:6669656c6420276361726427206469666665727320696e2073656e7369746976697479
+FRAME server_producer_admission.nxsm
+EVENT PRODUCER_ADMISSION producer=19 admission=Suspended
+FRAME server_producer_ended.nxsm
+EVENT PRODUCER_ENDED producer=19 reason=Relocated message=str:696e676573746f7220276f72646572735f696e27206d6f76656420746f206e6f64652d32
 FRAME server_rejected.nxsm
 REPLY 5 REJECTED InvalidRequest field=SubscribeRequest.subscription_type message=str:60537562736372696265526571756573742e737562736372697074696f6e5f7479706560206973207265717569726564
 FRAME server_rows.nxsm
 EVENT ROWS name=live generation=18446744073709551615
 ROW [tenant=str:61636d65 region=null token=redacted] u8=u8:0 i8=i8:-128 u16=u16:0 i16=i16:-32768 u32=u32:0 i32=i32:-2147483648 u64=u64:0 i64=i64:-9223372036854775808 f32=f32:80000000 f64=f64:fff0000000000000 flag=bool:false text=str: seen_at=datetime:-9223372036854775808 note=null secret=redacted maybe_secret=redacted triple=list[i32:-2147483648,i32:0,i32:2147483647] pairs=list[]
 ROW [tenant=str:61636d65 region=null token=redacted] u8=u8:255 i8=i8:127 u16=u16:65535 i16=i16:32767 u32=u32:4294967295 i32=i32:2147483647 u64=u64:18446744073709551615 i64=i64:9223372036854775807 f32=f32:7fc00001 f64=f64:0000000000000001 flag=bool:true text=str:c3bc6ec3af63c3b864c3a920f09fa6802000 seen_at=datetime:9223372036854775807 note=str:70726573656e74 secret=redacted maybe_secret=redacted triple=list[i32:1,i32:2,i32:3] pairs=list[list[u8:0,u8:255],list[u8:7,u8:8]]
+FRAME server_submission_completed.nxsm
+REPLY 20 SUBMISSION completed message=str:
+FRAME server_submission_failed.nxsm
+REPLY 20 SUBMISSION failed failure=AckTimedOut message=str:6e6f2061636b6e6f776c656467656d656e742070726f67726573732077697468696e20333073
+FRAME server_submission_not_admitted.nxsm
+REPLY 20 SUBMISSION not_admitted refusal=TooManyRows message=str:7468652062617463682068617320373030303020726f77732c206d6f7265207468616e20746865203635353336206f6e65206261746368206d6179206361727279
+FRAME server_submission_unknown.nxsm
+REPLY 20 SUBMISSION unknown cause=OwnerLost message=str:74686520636f6e6e656374696f6e20746f206e6f64652d3220776173206c6f7374
 FRAME server_subscription_ended.nxsm
 EVENT ENDED name=live generation=18446744073709551615 reason=RelayChanged message=str:72656c617920276f72646572732720776173207265646566696e6564
 FRAME server_subscription_opened.nxsm

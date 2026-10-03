@@ -3,16 +3,19 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
-//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client and HTTP-receiver
-//!   regressions with Rust's test runner, and the stand-in nodes and clients those regressions talk
-//!   to.
+//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
+//!   HTTP-receiver and gRPC-receiver regressions with Rust's test runner, and the stand-in nodes and
+//!   clients those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client and HTTP-receiver harness modules, and the
-//!   client wire session protocol the stand-in nodes answer status requests with.
+//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver and
+//!   gRPC-receiver harness modules, and the client wire session protocol the stand-in nodes answer
+//!   status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
 mod cluster_teardown;
+#[path = "common/grpc_receiver.rs"]
+mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
 #[path = "common/node_liveness.rs"]
@@ -26,7 +29,17 @@ mod port_pool;
 #[path = "common/redis_client.rs"]
 mod redis_client;
 #[path = "common/scenario_phase.rs"]
+#[allow(
+    dead_code,
+    reason = "the scenario binary uses the measurement APIs shared by this harness test"
+)]
 mod scenario_phase;
+#[path = "common/scenario_schedule.rs"]
+#[allow(
+    dead_code,
+    reason = "the scenario binary uses the admission APIs shared by this harness test"
+)]
+mod scenario_schedule;
 #[path = "common/status_request.rs"]
 mod status_request;
 #[path = "common/suite_watchdog.rs"]
@@ -38,10 +51,6 @@ mod tests {
         future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
-        sync::{
-            Arc as StdArc, LazyLock,
-            atomic::{AtomicUsize, Ordering},
-        },
         time::Duration,
     };
 
@@ -55,19 +64,22 @@ mod tests {
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
-    use nervix_recovery::NoReceiver as _;
-    use nervix_server::application::AppError;
-    use parking_lot::Mutex;
-    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
-    use tempfile::TempDir;
-    use tokio::{
+    use nervix_primitives::{
         net::TcpListener,
-        sync::{Notify, mpsc, oneshot},
+        stream::wrappers::{ReceiverStream, TcpListenerStream},
+        sync::{
+            Arc, CancellationToken, Notify, StdArc,
+            atomic::{AtomicUsize, Ordering},
+            blocking::{LazyLock, Mutex},
+            mpsc, oneshot,
+        },
         task::JoinHandle,
         time::{Instant, timeout},
     };
-    use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-    use tokio_util::sync::CancellationToken;
+    use nervix_recovery::NoReceiver as _;
+    use nervix_server::application::AppError;
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+    use tempfile::TempDir;
     use tonic::{
         Request, Response, Status, Streaming,
         body::Body,
@@ -75,7 +87,6 @@ mod tests {
         server::{Grpc, NamedService, StreamingService},
         transport::Server,
     };
-    use triomphe::Arc;
 
     use crate::{
         cluster_teardown::{ClusterTeardown, TeardownNode},
@@ -106,6 +117,320 @@ mod tests {
             SuiteTeardown, SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs,
         },
     };
+
+    #[nervix_primitives::test]
+    async fn a_queued_web_console_scenario_does_not_hold_a_run_slot() {
+        use crate::scenario_schedule::{FeatureLimit, ScenarioRunSlots};
+
+        let slots = StdArc::new(ScenarioRunSlots::new(3));
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let waiting = slots.clone();
+        let queued = nervix_primitives::task::spawn(async move {
+            waiting
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |_| {},
+                )
+                .await
+        });
+        nervix_primitives::task::yield_now().await;
+        let unrelated = timeout(
+            Duration::from_millis(100),
+            slots.admit_with(FeatureLimit::Unlimited, "ordinary", |_| {}),
+        )
+        .await;
+        assert!(
+            unrelated.is_ok(),
+            "a feature wait must leave the free run slot available"
+        );
+        drop(first);
+        drop(second);
+        queued
+            .await
+            .expect("queued scenario completes after the feature releases");
+    }
+
+    #[nervix_primitives::test]
+    async fn the_next_limited_scenario_gets_a_slot_beside_bulk_work() {
+        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+
+        let slots = StdArc::new(ScenarioRunSlots::new(1));
+        let current = slots
+            .admit_with(FeatureLimit::Unlimited, "ordinary", |_| {})
+            .await;
+        let (ordinary_waiting, ordinary_started) = oneshot::channel();
+        let ordinary_slots = slots.clone();
+        let ordinary = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(ordinary_waiting);
+            ordinary_slots
+                .admit_with(FeatureLimit::Unlimited, "ordinary", |reason| {
+                    if reason == AdmissionWait::RunSlot {
+                        waiting
+                            .take()
+                            .expect("ordinary waiter reports once")
+                            .send(())
+                            .expect("the test still observes admission");
+                    }
+                })
+                .await
+        });
+        ordinary_started.await.expect("ordinary waiter starts");
+        nervix_primitives::task::yield_now().await;
+
+        let (limited_waiting, limited_started) = oneshot::channel();
+        let limited_slots = slots.clone();
+        let limited = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(limited_waiting);
+            limited_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |reason| {
+                        if reason == AdmissionWait::RunSlot {
+                            waiting
+                                .take()
+                                .expect("limited waiter reports once")
+                                .send(())
+                                .expect("the test still observes admission");
+                        }
+                    },
+                )
+                .await
+        });
+        limited_started
+            .await
+            .expect("limited waiter reaches the slot queue");
+        nervix_primitives::task::yield_now().await;
+        drop(current);
+        let limited_permit = timeout(Duration::from_millis(100), limited)
+            .await
+            .expect("limited work takes the next slot")
+            .expect("limited task completes");
+        assert!(
+            !ordinary.is_finished(),
+            "bulk work must wait for the limited chain"
+        );
+        drop(limited_permit);
+        ordinary.await.expect("bulk work takes the released slot");
+    }
+
+    #[nervix_primitives::test]
+    async fn releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain() {
+        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+
+        let slots = StdArc::new(ScenarioRunSlots::new(2));
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+
+        let (limited_waiting, limited_started) = oneshot::channel();
+        let next_slots = slots.clone();
+        let next = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(limited_waiting);
+            next_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("feature waiter reports once")
+                                .send(())
+                                .expect("the test still observes admission");
+                        }
+                    },
+                )
+                .await
+        });
+        limited_started.await.expect("limited successor starts");
+
+        let (ordinary_waiting, ordinary_started) = oneshot::channel();
+        let ordinary_slots = slots.clone();
+        let ordinary = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(ordinary_waiting);
+            ordinary_slots
+                .admit_with(FeatureLimit::Unlimited, "ordinary", |reason| {
+                    if reason == AdmissionWait::RunSlot {
+                        waiting
+                            .take()
+                            .expect("ordinary waiter reports once")
+                            .send(())
+                            .expect("the test still observes admission");
+                    }
+                })
+                .await
+        });
+        ordinary_started.await.expect("ordinary waiter starts");
+        nervix_primitives::task::yield_now().await;
+
+        drop(first);
+        let next_permit = timeout(Duration::from_millis(100), next)
+            .await
+            .expect("the limited successor takes the released slot")
+            .expect("limited successor task completes");
+        assert!(
+            !ordinary.is_finished(),
+            "bulk work waits while a limited chain has an admitted successor"
+        );
+        drop(next_permit);
+        ordinary.await.expect("bulk work takes the later slot");
+        drop(second);
+    }
+
+    #[nervix_primitives::test]
+    async fn each_web_console_feature_starts_before_one_feature_consumes_the_group() {
+        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+
+        let slots = StdArc::new(ScenarioRunSlots::new(2));
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+
+        let (graph_waiting, graph_queued) = oneshot::channel();
+        let graph_slots = slots.clone();
+        let graph = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(graph_waiting);
+            graph_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("reports once")
+                                .send(())
+                                .expect("observed");
+                        }
+                    },
+                )
+                .await
+        });
+        graph_queued.await.expect("graph successor is queued");
+
+        let (repl_waiting, repl_queued) = oneshot::channel();
+        let repl_slots = slots.clone();
+        let repl = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(repl_waiting);
+            repl_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console NSPL REPL",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("reports once")
+                                .send(())
+                                .expect("observed");
+                        }
+                    },
+                )
+                .await
+        });
+        repl_queued.await.expect("REPL successor is queued");
+
+        let (inspector_waiting, inspector_queued) = oneshot::channel();
+        let inspector_slots = slots.clone();
+        let inspector = nervix_primitives::task::spawn(async move {
+            let mut waiting = Some(inspector_waiting);
+            inspector_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console transaction inspector",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("reports once")
+                                .send(())
+                                .expect("observed");
+                        }
+                    },
+                )
+                .await
+        });
+        inspector_queued
+            .await
+            .expect("inspector successor is queued");
+
+        drop(first);
+        let repl_admission = timeout(Duration::from_millis(100), repl)
+            .await
+            .expect("the REPL takes the first released slot")
+            .expect("REPL admission task completes");
+        drop(second);
+        let inspector_admission = timeout(Duration::from_millis(100), inspector)
+            .await
+            .expect("the inspector takes the second released slot")
+            .expect("inspector admission task completes");
+        assert!(
+            !graph.is_finished(),
+            "a third graph case waits for its turn"
+        );
+        drop(repl_admission);
+        drop(inspector_admission);
+        graph.await.expect("graph successor eventually runs");
+    }
+
+    #[test]
+    fn limited_features_are_taken_up_before_the_bulk() {
+        use crate::scenario_schedule::prioritize_features;
+
+        let mut names = [
+            "Ordinary feature one",
+            "Web console NSPL REPL",
+            "Ordinary feature two",
+            "Web console domain clock",
+            "Coordinated WASM processor state reset",
+        ];
+        prioritize_features(&mut names, |name| Some(name));
+        assert_eq!(
+            &names[..3],
+            &[
+                "Coordinated WASM processor state reset",
+                "Web console NSPL REPL",
+                "Web console domain clock",
+            ]
+        );
+    }
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const TEST_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -209,7 +534,7 @@ mod tests {
                     future::pending::<()>().await;
                 }
                 Self::FloodResponses => loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let notice = ServerNotice {
                         level: NoticeLevel::Info,
                         message: "an event unrelated to the status request".to_string(),
@@ -316,7 +641,7 @@ mod tests {
                     | StandInBehavior::EndSession => {}
                 }
                 let (response_tx, response_rx) = mpsc::channel(4);
-                tokio::spawn(behavior.answer(request.into_inner(), response_tx));
+                nervix_primitives::task::spawn(behavior.answer(request.into_inner(), response_tx));
                 Ok(Response::new(ReceiverStream::new(response_rx)))
             })
         }
@@ -337,7 +662,7 @@ mod tests {
                 .local_addr()
                 .assured("a bound listener has an address");
             let service = StandInService { behavior };
-            let server = tokio::spawn(async move {
+            let server = nervix_primitives::task::spawn(async move {
                 Server::builder()
                     .add_service(service)
                     .serve_with_incoming(TcpListenerStream::new(listener))
@@ -516,6 +841,8 @@ mod tests {
             inspection: None,
             wasm_state: None,
             resource: None,
+            backup: None,
+            restore: None,
         }
     }
 
@@ -624,14 +951,14 @@ mod tests {
                 if let NodeTaskState::Terminal(_) = state {
                     return state;
                 }
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
         .assured("the bounded test task reaches a terminal outcome")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn running_task_reports_the_last_failed_probe_at_the_deadline() {
         let mut task = OwnedNodeTask::spawn(async {
             future::pending::<()>().await;
@@ -677,10 +1004,10 @@ mod tests {
         task.abort();
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn clean_application_exit_before_readiness_is_terminal() {
         let mut task = OwnedNodeTask::spawn(async { Ok(()) });
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         let node = test_node("node-clean");
 
         let error = task
@@ -703,12 +1030,12 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn application_error_before_readiness_is_retained() {
         let mut task = OwnedNodeTask::spawn(async {
             Err(Report::new(AppError::MissingGrpcHttpsListenAddress))
         });
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         let node = test_node("node-error");
 
         let error = task
@@ -740,7 +1067,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn panic_and_cancellation_have_distinct_terminal_outcomes() {
         let mut panicked = OwnedNodeTask::spawn(async {
             panic!("intentional node task panic");
@@ -764,7 +1091,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn readiness_and_status_outcomes_retain_their_typed_cause() {
         let ready = StandInNode::serve(StandInBehavior::Answer(command_result(
             completed(),
@@ -876,7 +1203,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn status_request_ends_at_its_deadline_while_the_connection_is_pending() {
         // A listener that never accepts still completes the TCP handshake, so a TLS connection to
         // it waits for a server hello that never comes.
@@ -897,7 +1224,7 @@ mod tests {
         assert_request_ends_at_its_deadline(&endpoint, StatusOperation::Connect).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn status_request_ends_at_its_deadline_while_session_establishment_is_pending() {
         let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
 
@@ -905,7 +1232,7 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn status_request_ends_at_its_deadline_while_the_response_is_pending() {
         let received = Arc::new(Notify::new());
         let stalled = StandInNode::serve(StandInBehavior::WithholdResponse {
@@ -920,7 +1247,7 @@ mod tests {
             .assured("the stalled stand-in received the status command");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn status_request_ends_at_its_deadline_while_unrelated_responses_remain_ready() {
         let flooding = StandInNode::serve(StandInBehavior::FloodResponses).await;
 
@@ -928,7 +1255,7 @@ mod tests {
             .await;
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn nested_deadline_never_outlives_its_phase() {
         let phase = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         assert_eq!(
@@ -939,7 +1266,7 @@ mod tests {
         let late = STATUS_WAIT_BUDGET
             .checked_sub(Duration::from_secs(1))
             .assured("the status wait budget is longer than one second");
-        tokio::time::advance(late).await;
+        nervix_primitives::time::advance(late).await;
         assert_eq!(
             phase.nested(STATUS_REQUEST_TIMEOUT).budget(),
             Duration::from_secs(1)
@@ -956,7 +1283,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn status_wait_ends_at_its_original_deadline_when_the_final_request_never_replies() {
         // The first requests reply at once with a status the wait does not accept; every later
         // request never replies and ends only at its own deadline, the way a status request to a
@@ -1011,7 +1338,7 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), REPLYING_REQUESTS + 4);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn startup_readiness_failure_reports_the_timed_out_status_operation() {
         let received = Arc::new(Notify::new());
         let stalled = StandInNode::serve(StandInBehavior::WithholdResponse {
@@ -1063,7 +1390,7 @@ mod tests {
         task.abort();
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn status_snapshots_keep_a_healthy_node_while_another_node_stalls() {
         // The healthy node answers only after the stalled node has received its command, so it
         // can report only if both requests are in flight at once.
@@ -1105,7 +1432,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts() {
         let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
         let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
@@ -1160,7 +1487,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn stop_and_drop_paths_use_the_task_inspected_for_diagnostics() {
         let completed_drops = Arc::new(AtomicUsize::new(0));
         let completed_guard = completed_drops.clone();
@@ -1208,7 +1535,7 @@ mod tests {
         running.abort();
         timeout(TEST_TIMEOUT, async {
             while aborted_drops.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -1440,7 +1767,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_single_node_cleanup_keeps_how_its_task_ended() {
         for ending in [
             StandInEnding::StopsWhenAsked,
@@ -1477,7 +1804,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports() {
         let log = Arc::new(CleanupLog::default());
         let mut nodes = stand_in_cluster(
@@ -1512,7 +1839,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three() {
         for node_count in [1_usize, 3] {
             let log = Arc::new(CleanupLog::default());
@@ -1562,7 +1889,7 @@ mod tests {
         Stalls,
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three() {
         let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
         let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
@@ -1639,7 +1966,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn the_finished_phase_is_published_only_once_cleanup_has_completed() {
         let scenario = Arc::new(ActiveScenarioRegistration::start(
             "Harness liveness",
@@ -1668,7 +1995,7 @@ mod tests {
         assert_eq!(published(&scenario).phase, ScenarioPhase::Finished);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn an_active_scenario_publishes_its_phase_and_the_age_of_that_phase() {
         let scenario = ActiveScenarioRegistration::start(
             "Harness liveness",
@@ -1682,7 +2009,7 @@ mod tests {
         assert_eq!(queued.identity.scenario, "phase ages");
 
         // A scenario that has not reached its first step ages in the phase it is waiting in.
-        tokio::time::advance(Duration::from_secs(30)).await;
+        nervix_primitives::time::advance(Duration::from_secs(30)).await;
         let waiting = published(&scenario);
         assert_eq!(waiting.phase, ScenarioPhase::Queued);
         assert_eq!(waiting.phase_age(), Duration::from_secs(30));
@@ -1692,7 +2019,7 @@ mod tests {
         assert_eq!(started.phase, ScenarioPhase::Body);
         assert_eq!(started.phase_age(), Duration::ZERO);
         assert_eq!(started.age(), Duration::from_secs(30));
-        tokio::time::advance(Duration::from_secs(5)).await;
+        nervix_primitives::time::advance(Duration::from_secs(5)).await;
         let running = published(&scenario);
         assert_eq!(running.phase, ScenarioPhase::Body);
         assert_eq!(running.phase_age(), Duration::from_secs(5));
@@ -1708,7 +2035,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn forced_cleanup_aborts_and_joins_the_owned_task_once() {
         let mut not_started = OwnedNodeTask::not_started();
         assert!(matches!(
@@ -1773,7 +2100,7 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn repeated_readiness_failure_spends_one_budget_across_every_attempt() {
         let mut node = StandInStartupNode::new(
             "node-unready",
@@ -1842,7 +2169,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_bound_address_is_retried_until_a_launch_becomes_ready() {
         let mut node = StandInStartupNode::new(
             "node-bound",
@@ -1866,7 +2193,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_last_attempt_still_becomes_ready_with_what_the_budget_left() {
         let mut node = StandInStartupNode::new(
             "node-slow",
@@ -1891,7 +2218,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn an_application_error_ends_the_startup_without_another_launch() {
         let mut node = StandInStartupNode::new(
             "node-registry",
@@ -1911,7 +2238,7 @@ mod tests {
         assert!(error.to_string().contains("failed to open registry"));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_panicking_node_ends_the_startup_without_another_launch() {
         let mut node = StandInStartupNode::new("node-panic", [LaunchBehavior::Panics]);
 
@@ -1931,7 +2258,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_launch_failure_ends_the_startup_before_anything_is_cleaned_up() {
         let mut node = StandInStartupNode::new("node-unlaunchable", [LaunchBehavior::LaunchFails]);
 
@@ -1952,7 +2279,7 @@ mod tests {
         assert!(matches!(attempt.cleanup, AttemptCleanup::NothingLaunched));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn cleanup_that_never_completes_is_aborted_inside_the_same_budget() {
         let mut node = StandInStartupNode::new(
             "node-unstoppable",
@@ -1989,7 +2316,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn exhaustion_reports_every_attempt_with_its_typed_cause() {
         let mut node = StandInStartupNode::new(
             "node-history",
@@ -2030,7 +2357,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn ports_that_cannot_be_reallocated_end_the_startup() {
         let mut node = StandInStartupNode::new("node-portless", [LaunchBehavior::NeverReady])
             .without_spare_ports();
@@ -2050,7 +2377,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn sequential_cluster_construction_stays_inside_its_derived_budget() {
         const CLUSTER_NODES: u32 = 2;
         let construction = PhaseDeadline::after(cluster_startup_budget(CLUSTER_NODES));
@@ -2237,8 +2564,8 @@ mod tests {
     /// so the regressions that drive it run one at a time. Two of them running together would see
     /// each other's scenarios and stop each other's nodes. It is an async mutex because a
     /// regression holds it across the budget it waits out.
-    static WATCHDOG_REGRESSIONS: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
+    static WATCHDOG_REGRESSIONS: LazyLock<nervix_primitives::sync::Mutex<()>> =
+        LazyLock::new(|| nervix_primitives::sync::Mutex::new(()));
 
     /// A suite budget short enough that a regression reaches its expiry at once. Every regression
     /// that spends it runs on a paused clock, so no wall-clock time is spent reaching it.
@@ -2411,7 +2738,7 @@ mod tests {
         timeout
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_run_that_finishes_inside_its_budget_keeps_what_it_produced() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let watchdog = SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW);
@@ -2426,7 +2753,34 @@ mod tests {
         assert_eq!(output, "the writer the run produced");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_suite_timeout_reports_before_it_drops_the_run() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reported = Arc::new(AtomicUsize::new(0));
+        let run_guard = StalledRun {
+            dropped: dropped.clone(),
+        };
+        let reported_in_callback = reported.clone();
+        let dropped_in_callback = dropped.clone();
+        let result = SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)
+            .bound_with_timeout_report(
+                async move {
+                    let _run_guard = run_guard;
+                    future::pending::<()>().await;
+                },
+                move || {
+                    assert_eq!(dropped_in_callback.load(Ordering::Relaxed), 0);
+                    reported_in_callback.store(1, Ordering::Relaxed);
+                },
+            )
+            .await;
+        assert!(matches!(result, SuiteRun::TimedOut(_)));
+        assert_eq!(reported.load(Ordering::Relaxed), 1);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let regression = WatchdogRegression::start(
@@ -2439,7 +2793,7 @@ mod tests {
             ],
         );
         let stalled_before_the_budget = Duration::from_secs(7);
-        tokio::time::advance(stalled_before_the_budget).await;
+        nervix_primitives::time::advance(stalled_before_the_budget).await;
 
         let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
 
@@ -2490,7 +2844,7 @@ mod tests {
         drop(regression);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let regression = WatchdogRegression::start(
@@ -2517,7 +2871,7 @@ mod tests {
         drop(regression);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let regression = WatchdogRegression::start(
@@ -2559,7 +2913,7 @@ mod tests {
         drop(regression);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_cluster_that_outlives_its_scenario_is_named_as_unclaimed() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let mut regression = WatchdogRegression::start(
@@ -2595,7 +2949,7 @@ mod tests {
         drop(regression);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_retried_scenario_publishes_which_attempt_is_running() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let first = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
@@ -2639,7 +2993,7 @@ mod tests {
         // environment is bounded by that value, and only a run that does not receives the policy
         // default. This process may be either kind of run.
         let expected_default = match std::env::var(SUITE_BUDGET_ENV) {
-            Ok(given) => humantime::parse_duration(&given)
+            Ok(given) => nervix_models::parse_duration_text(&given)
                 .assured("the option parsed the same environment value as a duration above"),
             Err(_) => SUITE_BUDGET,
         };
@@ -2653,7 +3007,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let regression = WatchdogRegression::start(
@@ -2684,7 +3038,7 @@ mod tests {
         SuiteOutcome::Failed("3 step(s) failed".to_string()).end_process();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_dependency_stop_that_never_returns_is_abandoned_at_its_budget() {
         let started = Instant::now();
 
@@ -2713,7 +3067,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_dependency_stop_that_finishes_keeps_what_it_reported() {
         let clean = SuiteTeardown::bounded(async { Vec::new() }).await;
         assert!(clean.is_clean(), "{clean}");
@@ -2735,14 +3089,12 @@ mod tests {
 mod http_receiver_tests {
     use std::{
         net::{Ipv4Addr, SocketAddr},
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use meticulous::{OptionExt as _, ResultExt as _};
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpStream,
-    };
+    use nervix_primitives::{net::TcpStream, time::Instant};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::http_receiver::{
         ClientCertificatePolicy, HttpReceiver, RECEIVER_CONNECTION_STOP_BUDGET, ReceiverFault,
@@ -2782,14 +3134,14 @@ mod http_receiver_tests {
             .await
             .assured("the receiver reads what a client writes");
         let mut response = Vec::new();
-        tokio::time::timeout(WITHIN, stream.read_to_end(&mut response))
+        nervix_primitives::time::timeout(WITHIN, stream.read_to_end(&mut response))
             .await
             .assured("the receiver closes a connection its script ends")
             .assured("reading from a loopback connection succeeds");
         response
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_receiver_captures_requests_and_answers_its_script_in_order() {
         let receiver = start(ReceiverTransport::Plain).await;
         receiver.script(script(
@@ -2860,7 +3212,7 @@ mod http_receiver_tests {
         assert_eq!(stop.captured, 4, "{stop}");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_lost_response_is_captured_and_the_connection_closes_without_an_answer() {
         let receiver = start(ReceiverTransport::Plain).await;
         receiver.script(script("lose response"));
@@ -2878,7 +3230,131 @@ mod http_receiver_tests {
         assert!(!receiver.stop().await.was_forced());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn a_scripted_retry_after_date_is_measured_from_when_its_response_is_written() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script("respond 503; after 1s; retry after date in 2s"));
+        let sent_at = chrono::Utc::now();
+
+        let response = reqwest::Client::new()
+            .get(format!("{}/limited", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a scripted request");
+        let received_at = chrono::Utc::now();
+
+        assert_eq!(response.status(), 503);
+        let retry_after = response.headers()["retry-after"]
+            .to_str()
+            .assured("an HTTP date is ASCII");
+        let date = chrono::DateTime::parse_from_rfc2822(retry_after)
+            .assured("the receiver writes an IMF-fixdate");
+        let at_least = sent_at + chrono::TimeDelta::seconds(3);
+        let at_most = received_at + chrono::TimeDelta::seconds(3);
+        // The date is taken once the one-second response delay has passed and is rounded up to a
+        // whole second, so it asks for at least two seconds from then and at most three from when
+        // the response arrived.
+        assert!(
+            date >= at_least,
+            "{retry_after} is before {at_least}, so it asks for less than the scripted delay"
+        );
+        assert!(
+            date <= at_most,
+            "{retry_after} is after {at_most}, so it was not measured from the response"
+        );
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_request_held_until_released_answers_with_the_released_response() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "hold response until released\nhold response until released",
+        ));
+        let client = reqwest::Client::new();
+        let held = nervix_primitives::task::spawn({
+            let client = client.clone();
+            let target = format!("{}/held", receiver.origin());
+            async move { client.get(target).send().await }
+        });
+        receiver
+            .wait_for_requests(1, WITHIN)
+            .await
+            .assured("the held request is captured before it is held");
+        assert!(
+            !held.is_finished(),
+            "nothing answers a held request before the release"
+        );
+
+        receiver.release_held_responses(
+            "respond 202; body released"
+                .parse()
+                .assured("the released response is valid"),
+        );
+        let released = nervix_primitives::time::timeout(WITHIN, held)
+            .await
+            .assured("the release answers the held request")
+            .assured("the held client does not panic")
+            .assured("the released response is complete");
+        assert_eq!(released.status(), 202);
+        assert_eq!(
+            released
+                .text()
+                .await
+                .assured("the released body is complete"),
+            "released"
+        );
+        let later = client
+            .get(format!("{}/later", receiver.origin()))
+            .send()
+            .await
+            .assured("a request held after the release takes the released response at once");
+        assert_eq!(later.status(), 202);
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_target_with_its_own_answer_leaves_the_script_to_other_requests() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script("respond 503"));
+        receiver.answer_requests_for(
+            "/tenants/north?attempt=1".to_string(),
+            "respond 404"
+                .parse()
+                .assured("the targeted response is valid"),
+        );
+        let client = reqwest::Client::new();
+
+        let targeted = client
+            .get(format!("{}/tenants/north?attempt=1", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a targeted request");
+        let scripted = client
+            .get(format!("{}/tenants/south", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a scripted request");
+        let repeated = client
+            .get(format!("{}/tenants/north?attempt=1", receiver.origin()))
+            .send()
+            .await
+            .assured("a targeted answer holds for every request for its target");
+        let standing = client
+            .get(format!("{}/tenants/north", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers with its standing response");
+
+        assert_eq!(targeted.status(), 404);
+        assert_eq!(scripted.status(), 503);
+        assert_eq!(repeated.status(), 404);
+        assert_eq!(standing.status(), 200);
+        assert_eq!(receiver.captured().len(), 4);
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[nervix_primitives::test]
     async fn chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted() {
         let receiver = start(ReceiverTransport::Plain).await;
         receiver.script(script(
@@ -2911,14 +3387,14 @@ mod http_receiver_tests {
         assert!(!receiver.stop().await.was_forced());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn held_responses_and_stalled_bodies_end_within_the_stop_budget() {
         let receiver = start(ReceiverTransport::Plain).await;
         receiver.script(script(
             "hold response\nrespond 200; body partial; stall body",
         ));
         let held_port = receiver.port();
-        let held = tokio::spawn(async move {
+        let held = nervix_primitives::task::spawn(async move {
             let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, held_port))
                 .await
                 .assured("the receiver is listening");
@@ -2944,7 +3420,7 @@ mod http_receiver_tests {
             .await
             .assured("complete headers arrive although the body stalls");
         assert_eq!(stalled.status(), 200);
-        let body = tokio::spawn(stalled.bytes());
+        let body = nervix_primitives::task::spawn(stalled.bytes());
 
         let started = Instant::now();
         let stop = receiver.stop().await;
@@ -2953,19 +3429,193 @@ mod http_receiver_tests {
             started.elapsed() < RECEIVER_CONNECTION_STOP_BUDGET,
             "held connections observe the stop: {stop}"
         );
-        let held = tokio::time::timeout(WITHIN, held)
+        let held = nervix_primitives::time::timeout(WITHIN, held)
             .await
             .assured("the held client sees the connection close")
             .assured("the held client does not panic");
         assert!(held.is_empty(), "a held response writes nothing");
-        let body = tokio::time::timeout(WITHIN, body)
+        let body = nervix_primitives::time::timeout(WITHIN, body)
             .await
             .assured("the stalled body ends when the receiver stops")
             .assured("the stalled body reader does not panic");
         assert!(body.is_err(), "a stalled body never completes");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn requests_awaiting_a_response_are_counted_until_their_final_head_begins() {
+        let concurrent = start(ReceiverTransport::Plain).await;
+        concurrent.answer_unscripted_requests_with(
+            "respond 204; after 300ms"
+                .parse()
+                .assured("the standing response is valid"),
+        );
+        let client = reqwest::Client::new();
+        let (first, second) = tokio::join!(
+            client.get(format!("{}/first", concurrent.origin())).send(),
+            client.get(format!("{}/second", concurrent.origin())).send(),
+        );
+        assert_eq!(first.assured("the first request is answered").status(), 204);
+        assert_eq!(
+            second.assured("the second request is answered").status(),
+            204
+        );
+        assert_eq!(
+            concurrent.most_awaiting_responses(),
+            2,
+            "both delayed requests awaited their responses at once"
+        );
+        assert!(!concurrent.stop().await.was_forced());
+
+        let sequential = start(ReceiverTransport::Plain).await;
+        sequential.answer_unscripted_requests_with(
+            "respond 204; after 100ms"
+                .parse()
+                .assured("the standing response is valid"),
+        );
+        for target in ["/first", "/second", "/third"] {
+            let answered = client
+                .get(format!("{}{target}", sequential.origin()))
+                .send()
+                .await
+                .assured("each request is answered before the next is sent");
+            assert_eq!(answered.status(), 204);
+        }
+        assert_eq!(
+            sequential.most_awaiting_responses(),
+            1,
+            "a client that waits for each final head never has two requests awaiting"
+        );
+        assert!(!sequential.stop().await.was_forced());
+    }
+
+    /// Writes a request on a fresh connection, reads until the end of the response head, and
+    /// closes the connection without reading anything more.
+    async fn read_head_and_leave(receiver: &HttpReceiver, request: &[u8]) -> Vec<u8> {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        stream
+            .write_all(request)
+            .await
+            .assured("the receiver reads what a client writes");
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            let read = nervix_primitives::time::timeout(WITHIN, stream.read(&mut byte))
+                .await
+                .assured("the receiver writes a response head")
+                .assured("reading from a loopback connection succeeds");
+            assert_eq!(read, 1, "the connection stays open until the head ends");
+            head.push(byte[0]);
+        }
+        head
+    }
+
+    #[nervix_primitives::test]
+    async fn a_client_that_leaves_an_unfinished_response_abandons_it() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "hold response\nrespond 200; body partial; stall body\nrespond 200; body bytes \
+             33554432\nrespond 204",
+        ));
+
+        let mut held = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        held.write_all(b"GET /held HTTP/1.1\r\nHost: receiver\r\n\r\n")
+            .await
+            .assured("the receiver reads what a client writes");
+        receiver
+            .wait_for_requests(1, WITHIN)
+            .await
+            .assured("the held request is captured before it is held");
+        drop(held);
+        receiver
+            .wait_for_abandoned_responses(1, WITHIN)
+            .await
+            .assured("a client that leaves a held response abandons it");
+
+        let stalled = read_head_and_leave(
+            &receiver,
+            b"GET /stalled HTTP/1.1\r\nHost: receiver\r\n\r\n",
+        )
+        .await;
+        assert!(stalled.starts_with(b"HTTP/1.1 200 "));
+        receiver
+            .wait_for_abandoned_responses(2, WITHIN)
+            .await
+            .assured("a client that leaves at the head of a stalled body abandons it");
+
+        // The body is many times what a loopback connection buffers, so the receiver can finish
+        // writing it only if the client reads it.
+        let oversized =
+            read_head_and_leave(&receiver, b"GET /large HTTP/1.1\r\nHost: receiver\r\n\r\n").await;
+        let oversized = String::from_utf8(oversized).assured("the response head is ASCII");
+        assert!(
+            oversized.contains("content-length: 33554432\r\n"),
+            "{oversized}"
+        );
+        receiver
+            .wait_for_abandoned_responses(3, WITHIN)
+            .await
+            .assured("a client that leaves at the head of a large body abandons it");
+
+        let complete = exchange(
+            &receiver,
+            b"GET /complete HTTP/1.1\r\nHost: receiver\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(complete.starts_with(b"HTTP/1.1 204 "));
+        let unmet = receiver
+            .wait_for_abandoned_responses(4, Duration::ZERO)
+            .await
+            .expect_err("a response the client read to its end is not abandoned");
+        assert!(
+            unmet.to_string().contains("abandoned 3 of the 4"),
+            "{unmet}"
+        );
+        assert_eq!(
+            receiver.most_awaiting_responses(),
+            1,
+            "each request was captured after the previous one ended"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!(
+            stop.faults, 0,
+            "abandoning a response is not a fault: {stop}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_wait_for_a_request_line_ends_once_that_request_is_captured() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        let client = reqwest::Client::new();
+        for target in ["/first", "/second"] {
+            client
+                .get(format!("{}{target}", receiver.origin()))
+                .send()
+                .await
+                .assured("the receiver answers every request");
+        }
+
+        let captured = receiver
+            .wait_for_request_line("GET /second", WITHIN)
+            .await
+            .assured("the second request was captured");
+        assert_eq!(captured.len(), 2);
+        let missing = receiver
+            .wait_for_request_line("GET /never", Duration::from_millis(100))
+            .await
+            .expect_err("no request for /never was sent");
+        assert!(
+            missing.to_string().contains("request line 'GET /never'"),
+            "{missing}"
+        );
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[nervix_primitives::test]
     async fn requests_beyond_the_receiver_bounds_are_faults_not_captures() {
         let receiver = start(ReceiverTransport::Plain).await;
 
@@ -3010,7 +3660,7 @@ mod http_receiver_tests {
         assert_eq!(stop.faults, 2, "{stop}");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others() {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
             certificate_hosts: vec!["127.0.0.1".to_string()],
@@ -3060,7 +3710,7 @@ mod http_receiver_tests {
         assert!(!receiver.stop().await.was_forced());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks() {
         let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
             certificate_hosts: vec!["localhost".to_string()],
@@ -3112,19 +3762,26 @@ mod http_receiver_tests {
             "respond 200",
             "respond 204; header X-A: b; body text; interim 100; after 250ms; extra headers 129",
             "respond 200; stall body",
+            "respond 200; body bytes 67108864",
+            "respond 429; retry after date in 3s",
             "lose response",
             "hold response",
+            "hold response until released",
             "raw HTTP/1.1 999 Odd\\r\\n\\r\\n",
         ] {
             assert!(line.parse::<ReceiverResponse>().is_ok(), "{line}");
         }
         let refused = [
             ("answer 200", "UnknownForm"),
+            ("hold response until later", "UnknownForm"),
             ("respond 20", "Status"),
             ("respond 099", "Status"),
             ("respond 200; header nocolon", "Header"),
             ("respond 200; after soon", "Duration"),
+            ("respond 503; retry after date in soon", "Duration"),
+            ("respond 503; retry after date in 2days", "RetryAfterDelay"),
             ("respond 200; extra headers many", "Count"),
+            ("respond 200; body bytes 67108865", "BodySize"),
             ("respond 200; teapot", "UnknownClause"),
             ("raw trailing\\", "Escape"),
         ];
@@ -3140,28 +3797,304 @@ mod http_receiver_tests {
     }
 }
 
+mod grpc_receiver_tests {
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+    use meticulous::ResultExt as _;
+    use nervix_primitives::net::TcpStream;
+    use nervix_recovery::Discarded as _;
+
+    use crate::{
+        grpc_receiver::{GrpcAnswer, GrpcReceiver, MAX_REQUEST_MESSAGE_BYTES},
+        http_receiver::RECEIVER_CONNECTION_STOP_BUDGET,
+    };
+
+    /// How long a regression waits for something the receiver does promptly on an idle machine.
+    const WITHIN: Duration = Duration::from_secs(10);
+    const METHOD: &str = "/nervix.test.Receiver/Call";
+
+    async fn start() -> GrpcReceiver {
+        GrpcReceiver::start(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .assured("a loopback receiver binds an ephemeral port")
+    }
+
+    /// An HTTP/2 connection to `receiver`, driven by a task of its own until either side ends it.
+    async fn connect(receiver: &GrpcReceiver) -> h2::client::SendRequest<Bytes> {
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        let (send_request, connection) = h2::client::handshake(stream)
+            .await
+            .assured("the receiver completes an HTTP/2 handshake");
+        nervix_primitives::task::spawn(async move {
+            connection
+                .await
+                .discarded("a regression reads how the connection ended from its calls");
+        });
+        send_request
+    }
+
+    /// One gRPC message with `flag` as its compressed flag.
+    fn message(flag: u8, bytes: &[u8]) -> Bytes {
+        let length = u32::try_from(bytes.len()).assured("a regression message is small");
+        let mut framed = vec![flag];
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(bytes);
+        Bytes::from(framed)
+    }
+
+    /// How one call ended.
+    #[derive(Debug, PartialEq, Eq)]
+    enum CallEnd {
+        /// The receiver answered with this `grpc-status`.
+        Status(String),
+        /// The receiver closed the connection or reset the call without answering.
+        NoAnswer,
+    }
+
+    /// Makes one call whose whole request is `body` and reads how the receiver ended it.
+    async fn call(send_request: &mut h2::client::SendRequest<Bytes>, body: Bytes) -> CallEnd {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1{METHOD}"))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .assured("the regression request is well formed");
+        let mut ready = send_request
+            .clone()
+            .ready()
+            .await
+            .assured("the connection accepts another call");
+        let (response, mut stream) = ready
+            .send_request(request, false)
+            .assured("the connection accepts another call");
+        stream
+            .send_data(body, true)
+            .assured("an open call accepts its request");
+        let response = nervix_primitives::time::timeout(WITHIN, response)
+            .await
+            .assured("the receiver ends every call it does not hold");
+        let Ok(response) = response else {
+            return CallEnd::NoAnswer;
+        };
+        if let Some(status) = response.headers().get("grpc-status") {
+            return CallEnd::Status(status.to_str().assured("a status is ASCII").to_string());
+        }
+        let mut body = response.into_body();
+        while let Some(chunk) = body.data().await {
+            if chunk.is_err() {
+                return CallEnd::NoAnswer;
+            }
+        }
+        match body.trailers().await {
+            Ok(Some(trailers)) => match trailers.get("grpc-status") {
+                Some(status) => {
+                    CallEnd::Status(status.to_str().assured("a status is ASCII").to_string())
+                }
+                None => CallEnd::NoAnswer,
+            },
+            Ok(None) | Err(_) => CallEnd::NoAnswer,
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn the_grpc_receiver_captures_calls_and_answers_its_script_in_order() {
+        let receiver = start().await;
+        assert_eq!(
+            receiver.origin(),
+            format!("http://127.0.0.1:{}", receiver.port()),
+            "a client dials the receiver's loopback port without TLS"
+        );
+        receiver.script([
+            GrpcAnswer::Status(tonic::Code::Unavailable),
+            GrpcAnswer::Accept,
+        ]);
+        let mut connection = connect(&receiver).await;
+
+        let first = call(&mut connection, message(0, b"first")).await;
+        let second = call(&mut connection, message(1, b"second")).await;
+        let unscripted = call(&mut connection, message(0, b"third")).await;
+
+        assert_eq!(first, CallEnd::Status("14".to_string()));
+        assert_eq!(second, CallEnd::Status("0".to_string()));
+        assert_eq!(
+            unscripted,
+            CallEnd::Status("0".to_string()),
+            "a call beyond the script is accepted"
+        );
+        let captured = receiver.captured();
+        assert_eq!(captured.len(), 3);
+        for call in &captured {
+            assert_eq!(call.path, METHOD);
+            assert_eq!(
+                call.header_values("content-type"),
+                vec![b"application/grpc".as_slice()]
+            );
+        }
+        assert_eq!(
+            captured
+                .iter()
+                .map(|call| (call.compressed, call.message.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (false, b"first".to_vec()),
+                (true, b"second".to_vec()),
+                (false, b"third".to_vec()),
+            ],
+            "every message is captured exactly as it arrived, compressed flag included"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!((stop.captured, stop.faults), (3, 0));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one() {
+        let receiver = start().await;
+        receiver.script([GrpcAnswer::LoseResponse]);
+        let mut connection = connect(&receiver).await;
+
+        let lost = call(&mut connection, message(0, b"lost")).await;
+        let mut reconnected = connect(&receiver).await;
+        let resent = call(&mut reconnected, message(0, b"lost")).await;
+
+        assert_eq!(lost, CallEnd::NoAnswer);
+        assert_eq!(resent, CallEnd::Status("0".to_string()));
+        let captured = receiver.captured();
+        assert_eq!(
+            captured.len(),
+            2,
+            "the call whose answer was lost is still captured"
+        );
+        assert_eq!(
+            captured[0], captured[1],
+            "a resent call captures as the same call"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+    }
+
+    #[nervix_primitives::test]
+    async fn held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops() {
+        let receiver = start().await;
+        receiver.script([GrpcAnswer::HoldResponse, GrpcAnswer::HoldResponse]);
+        let connection = connect(&receiver).await;
+        let request = || {
+            http::Request::builder()
+                .method("POST")
+                .uri(format!("http://127.0.0.1{METHOD}"))
+                .header("content-type", "application/grpc")
+                .body(())
+                .assured("the regression request is well formed")
+        };
+
+        // The client gives up on the first held call, as a request deadline does.
+        let mut ready = connection
+            .clone()
+            .ready()
+            .await
+            .assured("the connection accepts a call");
+        let (_held, mut held_stream) = ready
+            .send_request(request(), false)
+            .assured("the connection accepts a call");
+        held_stream
+            .send_data(message(0, b"held"), true)
+            .assured("an open call accepts its request");
+        receiver
+            .wait_for_calls(1, WITHIN)
+            .await
+            .assured("the receiver captures a held call before holding it");
+        held_stream.send_reset(h2::Reason::CANCEL);
+        let second = nervix_primitives::task::spawn({
+            let mut connection = connection.clone();
+            async move { call(&mut connection, message(0, b"held until stop")).await }
+        });
+        receiver
+            .wait_for_calls(2, WITHIN)
+            .await
+            .assured("a reset call leaves its connection serving the next one");
+
+        let stop = receiver.stop().await;
+
+        assert!(
+            !stop.was_forced() && stop.elapsed < RECEIVER_CONNECTION_STOP_BUDGET,
+            "a held call observes the stop rather than waiting to be aborted: {stop}"
+        );
+        assert_eq!(
+            second.await.assured("the held call's task ends"),
+            CallEnd::NoAnswer
+        );
+        drop(connection);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture() {
+        let receiver = start().await;
+        let mut connection = connect(&receiver).await;
+        let above_limit = u32::try_from(MAX_REQUEST_MESSAGE_BYTES + 1)
+            .assured("the message limit fits a gRPC length prefix");
+        let mut declared_above_limit = vec![0];
+        declared_above_limit.extend_from_slice(&above_limit.to_be_bytes());
+        let mut trailing = message(0, b"one").to_vec();
+        trailing.push(0);
+        let malformed = [
+            Bytes::from_static(&[0, 0, 0]),
+            Bytes::from(declared_above_limit),
+            message(0, b"four").slice(..7),
+            Bytes::from(trailing),
+            message(7, b"flag"),
+        ];
+
+        for body in malformed {
+            let ended = call(&mut connection, body).await;
+            assert_eq!(
+                ended,
+                CallEnd::Status("13".to_string()),
+                "a malformed request is answered with INTERNAL"
+            );
+        }
+
+        let error = receiver
+            .wait_for_calls(1, Duration::from_millis(50))
+            .await
+            .expect_err("no malformed request is captured");
+        assert!(
+            error.to_string().contains("unknown compressed flag 7"),
+            "the wait reports the latest fault: {error}"
+        );
+        let stop = receiver.stop().await;
+        assert_eq!((stop.captured, stop.faults), (0, 5));
+    }
+}
+
 mod redis_client_tests {
     use std::{net::Ipv4Addr, time::Duration};
 
     use meticulous::ResultExt as _;
-    use redis::{AsyncCommands as _, Value};
-    use tokio::{
-        io::AsyncWriteExt as _,
+    use nervix_primitives::{
         net::TcpListener,
         sync::oneshot,
         time::{sleep, timeout},
     };
+    use redis::{AsyncCommands as _, Value};
+    use tokio::io::AsyncWriteExt as _;
 
     use crate::redis_client::{REDIS_REQUEST_BUDGET, TestRedisClient};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn redis_harness_connections_fail_when_the_broker_never_answers() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .assured("the regression can bind an ephemeral loopback port");
         let address = listener.local_addr().assured("the listener has an address");
         let (stop, stopped) = oneshot::channel();
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (stream, _) = listener.accept().await.assured("the client connects");
             stopped.await.assured("the test stops its silent endpoint");
             drop(stream);
@@ -3180,7 +4113,7 @@ mod redis_client_tests {
         assert!(error.to_string().contains("timed out"), "{error}");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn redis_harness_requests_allow_delayed_handshake_and_publish_replies() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -3188,11 +4121,11 @@ mod redis_client_tests {
         let address = listener
             .local_addr()
             .assured("the bound listener has an address");
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener.accept().await.assured("the client connects");
             let mut decoder = Default::default();
             for _ in 0..2 {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let command = redis::parse_redis_value_async(&mut decoder, &mut stream)
                     .await
                     .assured("the Redis client sends a complete setup command");

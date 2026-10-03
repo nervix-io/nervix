@@ -19,7 +19,7 @@ use nervix_client_core::{
     SubscriptionEvent,
     wire::{CellView, CellsView, RowBatchView},
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,
@@ -37,6 +37,7 @@ pub enum EventKind {
     Ended = 4,
     Interrupted = 5,
     ConsumerOverflow = 6,
+    RestorationFailed = 7,
 }
 
 /// What a cell holds, with the header's values.
@@ -45,6 +46,21 @@ pub enum CellState {
     Value,
     Null,
     Redacted,
+}
+
+impl CellState {
+    /// Reads a state a host passed as a byte.
+    pub(crate) fn from_host(state: u8) -> Result<Self, Failure> {
+        match state {
+            1 => Ok(Self::Value),
+            2 => Ok(Self::Null),
+            3 => Ok(Self::Redacted),
+            _ => Err(Failure::invalid_argument(
+                "states",
+                "holds a byte that is not an nx_cell_state",
+            )),
+        }
+    }
 }
 
 impl From<CellState> for u8 {
@@ -164,6 +180,7 @@ impl Event {
             SubscriptionEvent::RowsSkipped(_) => EventKind::RowsSkipped,
             SubscriptionEvent::Ended(_) => EventKind::Ended,
             SubscriptionEvent::Interrupted(_) => EventKind::Interrupted,
+            SubscriptionEvent::RestorationFailed(_) => EventKind::RestorationFailed,
             SubscriptionEvent::ConsumerOverflow(_) => EventKind::ConsumerOverflow,
         }
     }
@@ -176,6 +193,7 @@ impl Event {
             SubscriptionEvent::RowsSkipped(skipped) => skipped.skipped_rows.get(),
             SubscriptionEvent::Ended(_)
             | SubscriptionEvent::Interrupted(_)
+            | SubscriptionEvent::RestorationFailed(_)
             | SubscriptionEvent::ConsumerOverflow(_) => 0,
         }
     }
@@ -191,6 +209,7 @@ impl Event {
             | SubscriptionEvent::RowsSkipped(_)
             | SubscriptionEvent::Ended(_)
             | SubscriptionEvent::Interrupted(_)
+            | SubscriptionEvent::RestorationFailed(_)
             | SubscriptionEvent::ConsumerOverflow(_) => {
                 Err(Failure::new(FailureKind::Type, "the event carries no rows"))
             }

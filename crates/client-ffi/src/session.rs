@@ -1,24 +1,32 @@
 //! A session a host holds: `nx_session` and the commands it prepares, `nx_execution`.
 //!
-//! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, running a
-//!   blocking call on the host's thread, and preparing, executing and waiting for events.
-//! - **Depends on.** The Rust session client, cancellation, and the outcome and event handles.
+//! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, sharing it
+//!   with the producers, consumers and deliveries opened on it, running a blocking call on the
+//!   host's thread, preparing and executing commands, waiting for subscription and domain clock
+//!   events, and reading the clock of a domain the session follows.
+//! - **Depends on.** The Rust session client, cancellation, and the outcome, event, clock event
+//!   and domain clock handles.
 //! - **Must not know.** Which host is calling, or how it schedules its threads.
 //!
-//! A host thread blocks in [`Session::block_on`] while the runtime's own threads drive the
+//! A host thread blocks in [`SessionRuntime::block_on`] while the runtime's own threads drive the
 //! exchange, so no host code ever runs on a runtime thread and no runtime thread ever waits for a
-//! host.
+//! host. The session ends when the host has freed it and released every producer, consumer and
+//! delivery opened on it, in whichever order, because each of them keeps the runtime its own
+//! calls block on.
 
-use std::future::Future;
+use std::{future::Future, ptr};
 
+use meticulous::OptionExt as _;
 use nervix_client_core::{
     AutocompleteOutcome, Client, ConnectOptions, DomainName, ExecutionHandle,
 };
-use tokio::runtime::Runtime;
+use nervix_primitives::{sync::Arc, unmodeled::runtime::Runtime};
 
 use crate::{
     abi,
     cancel::Cancel,
+    clock_event::ClockEvent,
+    domain_clock::DomainClock,
     event::Event,
     failure::{Failure, FailureKind},
     outcome::Outcome,
@@ -35,10 +43,18 @@ pub struct Credentials<'a> {
     pub password: &'a str,
 }
 
-/// An open session and the runtime it runs on.
+/// An open session, as the host holds it.
 pub struct Session {
-    runtime: Runtime,
-    client: Client,
+    shared: Arc<SessionRuntime>,
+}
+
+/// The runtime a session runs on and the client it drives, shared by the session and by every
+/// producer, consumer and delivery opened on it.
+pub(crate) struct SessionRuntime {
+    /// Taken only when the last holder drops the session.
+    runtime: Option<Runtime>,
+    /// Taken only when the last holder drops the session.
+    client: Option<Client>,
 }
 
 /// One command, with the durable execution identity it keeps across every attempt.
@@ -74,7 +90,7 @@ impl Session {
         if let Some(credentials) = credentials {
             options = options.with_basic_auth(credentials.username, credentials.password);
         }
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = nervix_primitives::unmodeled::runtime::Builder::new_multi_thread()
             .worker_threads(RUNTIME_THREADS)
             .thread_name("nervix-client")
             .enable_all()
@@ -91,23 +107,23 @@ impl Session {
                 Err(error) => Err(Failure::from(error)),
             }
         };
-        let client = Self::run(&runtime, cancel, connecting)?;
-        Ok(Self { runtime, client })
+        let client = SessionRuntime::run(&runtime, cancel, connecting)?;
+        let shared = SessionRuntime {
+            runtime: Some(runtime),
+            client: Some(client),
+        };
+        Ok(Self {
+            shared: Arc::new(shared),
+        })
     }
 
-    /// Runs `work` on the session's runtime, blocking the calling thread until it finishes or
-    /// `cancel` ends it.
-    fn run<T>(
-        runtime: &Runtime,
-        cancel: Option<&Cancel>,
-        work: impl Future<Output = Result<T, Failure>>,
-    ) -> Result<T, Failure> {
-        runtime.block_on(async {
-            match cancel {
-                Some(cancel) => cancel.bound(work).await,
-                None => work.await,
-            }
-        })
+    /// The runtime and client this session shares with what is opened on it.
+    pub(crate) fn shared(&self) -> &Arc<SessionRuntime> {
+        &self.shared
+    }
+
+    fn client(&self) -> &Client {
+        self.shared.client()
     }
 
     fn block_on<T>(
@@ -115,13 +131,13 @@ impl Session {
         cancel: Option<&Cancel>,
         work: impl Future<Output = Result<T, Failure>>,
     ) -> Result<T, Failure> {
-        Self::run(&self.runtime, cancel, work)
+        self.shared.block_on(cancel, work)
     }
 
     /// Captures `query` and a fresh execution identity before anything is sent.
     pub fn prepare(&self, query: &str, cancel: Option<&Cancel>) -> Result<Execution, Failure> {
         let preparing = async {
-            let handle = self.client.prepare_execution(query).await;
+            let handle = self.client().prepare_execution(query).await;
             Ok(Execution { handle })
         };
         self.block_on(cancel, preparing)
@@ -135,7 +151,7 @@ impl Session {
         cancel: Option<&Cancel>,
     ) -> Result<Outcome, Failure> {
         let executing = async {
-            match self.client.execute_prepared(&execution.handle).await {
+            match self.client().execute_prepared(&execution.handle).await {
                 Ok(outcome) => Ok(Outcome::new(outcome)),
                 Err(error) => Err(Failure::from(error)),
             }
@@ -146,15 +162,35 @@ impl Session {
         }
     }
 
-    /// Waits for the next event of any subscription the session holds.
+    /// Waits for the next event of any subscription the session holds, continuing across a lost
+    /// session as [`nervix_client_core::Client::next_subscription`] does.
     pub fn next_event(&self, cancel: Option<&Cancel>) -> Result<Event, Failure> {
         let waiting = async {
-            match self.client.next_subscription().await {
+            match self.client().next_subscription().await {
                 Ok(event) => Event::new(event),
                 Err(error) => Err(Failure::from(error)),
             }
         };
         self.block_on(cancel, waiting)
+    }
+
+    /// Waits for the next event about the domain clocks the session follows.
+    pub fn next_clock_event(&self, cancel: Option<&Cancel>) -> Result<ClockEvent, Failure> {
+        let waiting = async {
+            match self.client().next_domain_clock_event().await {
+                Ok(event) => Ok(ClockEvent::new(event)),
+                Err(report) => Err(Failure::from(report)),
+            }
+        };
+        self.block_on(cancel, waiting)
+    }
+
+    /// The clock of `domain` as the session last received it, as
+    /// [`nervix_client_core::Client::domain_clock`] reads it, or `None` when the session follows
+    /// no clock of that domain. It reads state the client already holds, so it never blocks.
+    pub fn domain_clock(&self, domain: &DomainName) -> Option<DomainClock> {
+        let clock = self.client().domain_clock(domain)?;
+        Some(DomainClock::new(clock))
     }
 
     /// Reads one bounded completion page from the current session context.
@@ -167,7 +203,7 @@ impl Session {
         cancel: Option<&Cancel>,
     ) -> Result<AutocompleteOutcome, Failure> {
         let suggesting = async {
-            self.client
+            self.client()
                 .suggest(
                     input.to_string(),
                     cursor,
@@ -179,10 +215,61 @@ impl Session {
         };
         self.block_on(cancel, suggesting)
     }
+}
 
+impl SessionRuntime {
+    /// Runs `work` on `runtime`, blocking the calling thread until it finishes or `cancel` ends
+    /// it.
+    fn run<T>(
+        runtime: &Runtime,
+        cancel: Option<&Cancel>,
+        work: impl Future<Output = Result<T, Failure>>,
+    ) -> Result<T, Failure> {
+        runtime.block_on(async {
+            match cancel {
+                Some(cancel) => cancel.bound(work).await,
+                None => work.await,
+            }
+        })
+    }
+
+    fn runtime(&self) -> &Runtime {
+        self.runtime
+            .as_ref()
+            .assured("the runtime is taken only when the last holder drops the session")
+    }
+
+    pub(crate) fn client(&self) -> &Client {
+        self.client
+            .as_ref()
+            .assured("the client is taken only when the last holder drops the session")
+    }
+
+    /// Runs `work` on the session's runtime, blocking the calling thread until it finishes or
+    /// `cancel` ends it.
+    pub(crate) fn block_on<T>(
+        &self,
+        cancel: Option<&Cancel>,
+        work: impl Future<Output = Result<T, Failure>>,
+    ) -> Result<T, Failure> {
+        Self::run(self.runtime(), cancel, work)
+    }
+
+    /// Drops `value` inside the session's runtime, so a handle whose drop releases its server
+    /// attachment can start that release without blocking the calling thread.
+    pub(crate) fn release<T>(&self, value: T) {
+        let entered = self.runtime().enter();
+        drop(value);
+        drop(entered);
+    }
+}
+
+impl Drop for SessionRuntime {
     /// Ends the session without blocking the calling thread, which may be a host's finalizer.
-    fn close(self) {
-        let Self { runtime, client } = self;
+    fn drop(&mut self) {
+        let (Some(runtime), Some(client)) = (self.runtime.take(), self.client.take()) else {
+            return;
+        };
         let entered = runtime.enter();
         drop(client);
         drop(entered);
@@ -277,12 +364,9 @@ unsafe fn write_connected(
 /// thread is using it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_session_free(session: *mut Session) {
-    if session.is_null() {
-        return;
-    }
-    // SAFETY: the header requires an unreleased session no other thread uses.
-    let session = unsafe { Box::from_raw(session) };
-    session.close();
+    // SAFETY: the header requires an unreleased session no other thread uses. The session ends
+    // once nothing opened on it holds it either.
+    unsafe { abi::release(session) };
 }
 
 /// # Safety
@@ -417,5 +501,82 @@ unsafe fn write_next_event(
     let event = session.next_event(cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(out, event.into_shared()) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `session` is live, a non-null `cancel` is a live token, and a non-null `out` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_session_next_clock_event(
+    session: *const Session,
+    cancel: *const Cancel,
+    out: *mut *mut ClockEvent,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_next_clock_event(session, cancel, out) })
+}
+
+/// # Safety
+///
+/// As [`nx_session_next_clock_event`].
+unsafe fn write_next_clock_event(
+    session: *const Session,
+    cancel: *const Cancel,
+    out: *mut *mut ClockEvent,
+) -> Result<(), Failure> {
+    abi::require_out(out, "out")?;
+    // SAFETY: the caller guarantees a live session and a live token or null.
+    let (session, cancel) = unsafe { (abi::handle(session, "session")?, cancel.as_ref()) };
+    let event = session.next_clock_event(cancel)?;
+    // SAFETY: `out` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(out, event.into_shared()) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `session` is live, `domain` addresses `domain_len` readable bytes, and a non-null `out` is
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_session_domain_clock(
+    session: *const Session,
+    domain: *const u8,
+    domain_len: usize,
+    out: *mut *mut DomainClock,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_domain_clock(session, domain, domain_len, out) })
+}
+
+/// # Safety
+///
+/// As [`nx_session_domain_clock`].
+unsafe fn write_domain_clock(
+    session: *const Session,
+    domain: *const u8,
+    domain_len: usize,
+    out: *mut *mut DomainClock,
+) -> Result<(), Failure> {
+    abi::require_out(out, "out")?;
+    // SAFETY: the caller guarantees a live session and a readable domain name.
+    let (session, domain) = unsafe {
+        (
+            abi::handle(session, "session")?,
+            abi::text(domain, domain_len, "domain")?,
+        )
+    };
+    let domain = match DomainName::try_from(domain) {
+        Ok(domain) => domain,
+        Err(error) => return Err(Failure::invalid_argument("domain", &error.to_string())),
+    };
+    // A domain whose clock the session does not follow reads as no clock, which the header
+    // writes as NULL.
+    let clock = match session.domain_clock(&domain) {
+        Some(clock) => clock.into_shared(),
+        None => ptr::null_mut(),
+    };
+    // SAFETY: `out` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(out, clock) };
     Ok(())
 }

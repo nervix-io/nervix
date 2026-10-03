@@ -1,3 +1,6 @@
+use arrow_buffer::BooleanBufferBuilder;
+use error_stack::ResultExt as _;
+
 use super::*;
 
 pub(super) struct VmInputProjectionSources<'a> {
@@ -86,6 +89,11 @@ impl SharedVmInputColumns {
     ///
     /// Routes may request the same name with a different Arrow type or nullability, so the
     /// resolved field is part of the identity rather than the name alone.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "external Arrow access and the admitted expression executor \
+                                   own their generic effects")
+    )]
     pub(super) fn column(
         &mut self,
         field: &arrow_schema::Field,
@@ -153,11 +161,8 @@ pub(super) fn project_vm_input_batch(
             shared.as_deref_mut(),
         )?);
     }
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|source| {
-        Report::new(RuntimeSchemaError::VmOperation {
-            operation: RuntimeVmOperation::BuildInputBatch,
-            source,
-        })
+    VmTypedBatch::try_new(schema.clone(), columns).change_context(RuntimeSchemaError::VmOperation {
+        operation: RuntimeVmOperation::BuildInputBatch,
     })
 }
 
@@ -307,6 +312,13 @@ pub(super) fn branch_key_input_column(
     )
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) fn runtime_values_input_column<'a>(
     values: impl Iterator<Item = Option<&'a RuntimeValue>>,
     len: usize,
@@ -387,7 +399,15 @@ pub(super) fn lookup_generated_input_field<'a>(
         })
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn compute_lookup_hash_map_columns(
+    executor: &Executor,
     program: &CompiledProgramWithMaterializedInterest,
     inputs: &FilterMapBatchInputs<'_>,
     execution_now: Timestamp,
@@ -445,6 +465,7 @@ pub(super) async fn compute_lookup_hash_map_columns(
             None,
         )?;
         let result = execute_program_with_selection_in_context(
+            executor,
             &call.key_program,
             &vm_batch,
             &VmExecutionContext {
@@ -453,11 +474,8 @@ pub(super) async fn compute_lookup_hash_map_columns(
             },
         )
         .await
-        .map_err(|source| {
-            Report::new(RuntimeSchemaError::VmOperation {
-                operation: RuntimeVmOperation::ExecuteKeyProjection,
-                source,
-            })
+        .change_context(RuntimeSchemaError::VmOperation {
+            operation: RuntimeVmOperation::ExecuteKeyProjection,
         })?;
         let key_column = result
             .batch
@@ -538,15 +556,16 @@ pub(super) fn vm_output_value(
 pub(super) fn vm_typed_batch_to_runtime_batch(
     batch: &VmTypedBatch,
 ) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
-    let record_batch = batch.to_record_batch().map_err(|source| {
-        Report::new(RuntimeSchemaError::VmOperation {
+    let record_batch = batch
+        .to_record_batch()
+        .change_context(RuntimeSchemaError::VmOperation {
             operation: RuntimeVmOperation::BuildInputBatch,
-            source,
-        })
-    })?;
+        })?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
 }
 
+/// Exports the rows `selected_rows` names, in batch order. Their bits are set directly in a bitmap
+/// over the batch, one write per selected row, and a row outside the batch is reported.
 pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     batch: &VmTypedBatch,
     selected_rows: &[usize],
@@ -554,9 +573,19 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     if selected_rows.len() == batch.row_count() {
         return vm_typed_batch_to_runtime_batch(batch);
     }
-    let selected = selected_rows.iter().copied().collect::<HashSet<_>>();
-    let predicate =
-        BooleanArray::from_iter((0..batch.row_count()).map(|row| Some(selected.contains(&row))));
+    let row_count = batch.row_count();
+    let mut selected = BooleanBufferBuilder::new(row_count);
+    selected.append_n(row_count, false);
+    for &row in selected_rows {
+        if row >= row_count {
+            return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                row,
+                rows: row_count,
+            }));
+        }
+        selected.set_bit(row, true);
+    }
+    let predicate = BooleanArray::new(selected.finish(), None);
     let columns = batch
         .columns()
         .iter()
@@ -725,6 +754,42 @@ mod tests {
             }
         );
         assert_eq!(expected, &ParseAsType::Datetime);
+    }
+
+    #[test]
+    fn selected_rows_export_in_batch_order_and_report_a_row_outside_the_batch() {
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "value",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let batch = VmTypedBatch::try_new(
+            schema,
+            vec![VmTypedArray::Int64(
+                arrow_array::Int64Array::from_iter_values(0..130),
+            )],
+        )
+        .expect("the test schema and typed column have the same shape");
+
+        let exported = vm_typed_batch_selected_rows_to_runtime_batch(&batch, &[129, 3, 64])
+            .expect("rows inside the batch export");
+        let values = exported
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("the exported column keeps its I64 type");
+        assert_eq!(values.values().as_ref(), &[3, 64, 129]);
+
+        let error = vm_typed_batch_selected_rows_to_runtime_batch(&batch, &[5, 130])
+            .expect_err("a row outside the batch must not be dropped silently");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RowOutOfBounds {
+                row: 130,
+                rows: 130
+            }
+        ));
     }
 
     #[test]

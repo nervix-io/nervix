@@ -1,18 +1,18 @@
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
+use nervix_primitives::sync::{Mutex, blocking::OnceLock};
 pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-    KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
-    MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR,
-    POSTGRES_TLS_ADDR, PULSAR_ADDR, PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, REDIS_ADDR,
+    KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
+    MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
+    NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, PULSAR_ADMIN_ADDR,
+    PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR,
     RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
 };
 use nervix_test_environment::{ContainerMode, DependencyEnvironment, configure_process_lifecycle};
-use tokio::sync::Mutex;
 
 static SUITE_DEPENDENCIES: OnceLock<Mutex<DependencyEnvironment>> = OnceLock::new();
 
@@ -179,6 +179,16 @@ impl TestDependencies {
             )
         })?;
         suite.lock().await.otel_collector_contains(needle).await
+    }
+
+    pub(crate) async fn otel_collector_logs(&self) -> io::Result<String> {
+        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
+            io::Error::other(
+                "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
+                 running'",
+            )
+        })?;
+        suite.lock().await.otel_collector_logs().await
     }
 
     pub(crate) async fn shutdown_suite() -> Vec<String> {

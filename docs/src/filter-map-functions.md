@@ -47,7 +47,7 @@ Use the smallest extension tier that fits the operation:
 | Tier | Trust required | Statefulness | Unit of work | Execution | Failure containment |
 | --- | --- | --- | --- | --- | --- |
 | Builtins | None beyond Nervix itself | Stateless | One expression call | Async-safe runtime execution | Per-row error channel |
-| Roto UDFs | Operator-trusted native code | Stateless | Vectorized column function with 1–8 arguments | Blocking worker pool | Per-row errors, whole-batch errors, and a post-return watchdog |
+| Roto UDFs | Operator-trusted native code | Stateless | Vectorized column function with 1–8 arguments | The node's extension workers | Per-row errors, whole-batch errors, and a post-return watchdog |
 | WASM processors | Isolation suitable for third-party code | Branch-local guest state | Batch-and-route processor with guest-owned emission | One guest instance per branch | Message errors, global errors, and guest traps |
 
 Tenant-supplied or potentially non-terminating logic belongs on the WASM processor path. Roto UDF
@@ -103,11 +103,14 @@ Several builtins run on libraries that choose SIMD instructions at run time from
 node's CPU offers: JSON extraction finds a document's structure that way, base64 and hexadecimal
 encoding and decoding process their octets that way, `sha256` uses the SHA instructions of x86-64
 CPUs that have them, and substring searches such as `contains_any` and regular expressions scan
-text that way. `xxh3_64` uses the SIMD instructions of the CPU target the binary is built for. The
-checked numeric kernels and the other passes over value buffers are written as loops the compiler
-can turn into vector instructions for that target, and Nervix makes no claim about which of them it
-does. None of these choices changes a result. The one exception is the transcendental functions,
-whose last places come from the platform's C math library; see [Numeric Functions](#numeric-functions).
+text that way. `xxh3_64` uses the SIMD instructions of the CPU target the binary is built for.
+Integer `+` and `-`, and `*` over every integer type but `I64` and `U64`, run on Nervix's own
+kernels, which also choose vector instructions at run time from the ones the node's CPU offers.
+The other checked numeric kernels and passes over value buffers are written as loops the compiler
+can turn into vector instructions for the CPU target the binary is built for, and Nervix makes no
+claim about which of them it does. None of these choices changes a result. The one exception is the
+transcendental functions, whose last places come from the platform's C math library; see
+[Numeric Functions](#numeric-functions).
 
 The compiler applies three optimizations that preserve results in the same way:
 
@@ -222,10 +225,13 @@ names:
 | Literal | Type | Form |
 | --- | --- | --- |
 | Integer | `I64` | Decimal digits, such as `42`. A value above the largest `I64` is rejected. There is no negative literal: `-5` applies unary minus to `5` |
-| Float | `F64` | Decimal digits with a fraction, such as `2.5`. An exponent, a leading `.`, and a trailing `.` are not float literals; write `'1e5' AS F64` |
+| Float | `F64` | Decimal digits with a fraction, written as one word, such as `2.5`. An exponent, a leading `.`, a trailing `.`, and a space beside the `.`, as in `2 .5`, are not float literals; write `'1e5' AS F64` |
 | String | `STRING` | `'text'`, `"text"`, or dollar-quoted `$$text$$` and `$tag$text$tag$`, where the tag is letters, digits, and underscores. A quoted string cannot hold its own quote or a line break; a dollar-quoted string can hold anything but its closing delimiter, line breaks included. No escape sequence is interpreted, so `'a\nb'` is four characters |
 | Boolean | `BOOL` | `TRUE`, `FALSE`, in any letter case |
 | Null | the type its destination supplies | `NULL`, only as the whole value of an assignment to an optional field or as a result of a conditional whose other results give it a type |
+
+A literal reads the same wherever its expression is written: in a statement, in a web console form,
+and in `nervix-cli subscribe --where`.
 
 There is no `DATETIME`, `BYTES`, NaN, or infinity literal. Convert a string instead:
 `'2024-02-29T12:00:00Z' AS DATETIME`, `hex_decode('00ff')`, `'NaN' AS F64`, or `'inf' AS F64`. A
@@ -274,6 +280,24 @@ These words are reserved in expressions, including after a field scope such as `
 `JSON_VALUE`, `TRY_JSON_VALUE`, `JSON_EXISTS`, `AND`, `OR`, `NOT`, `TRUE`, `FALSE`, `NULL`, `IF`,
 `CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`, `DISTINCT`, `FROM`, and `UDF`. A schema
 may declare one of these field names, but an NSPL expression cannot reference it.
+
+### Expressions Inside Statements
+
+A statement reads an expression it embeds up to the keyword that begins its next clause, such as
+`TO`, `MAX TIME`, or a correlator's `RIGHT FROM`, so an expression needs no parentheses to end. A
+builtin or a field scope whose name is also such a keyword belongs to the expression wherever it is
+written: followed by `(` it is a call, and followed by `.` it is the scope of a field, never the
+start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the first `max` is a call
+and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
+before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
+expression.
+
+A statement reads the expression it embeds from its own words, with the same lexer and grammar that
+read an expression in a web console form, in `nervix-cli subscribe --where`, and through the client
+library. Keywords, literals, comments, and spacing therefore mean the same wherever an expression is
+written: text one of them accepts reads as the same expression in all of them, and text one of them
+rejects all of them reject. A rejected expression is reported at the word of the statement where it
+went wrong, with the message a web console form shows for the same text.
 
 ## Logical Operators
 
@@ -1837,9 +1861,12 @@ only when the window emits. `SUM` over floating-point values carries the roundin
 addition beside the running total, and an `F32` `SUM` accumulates in `F64` and rounds to `F32` when
 it emits. `AVG`, the variances, standard deviations, covariances, and `CORR` convert each argument
 to the nearest `F64` and keep centered moments, so a variance is never the difference of two large
-sums of squares. Stepping a window never subtracts a floating-point value from a statistic: the
-statistic of the rows that remain is rebuilt from the rows themselves, so a value that left the
-window, however large, leaves no rounding behind.
+sums of squares. Admission computes a compensated mean and then centered second moments over each
+typed run; one merge combines that run with the retained aggregate. Floating-point results can
+vary slightly with run and SIMD lane grouping because addition and merging round in a different
+order. Integer sums and counts are independent of grouping. Stepping a window never subtracts a
+floating-point value from a statistic: the statistic of the rows that remain is rebuilt from the
+rows themselves, so even a large value that left the window leaves no rounding behind.
 
 **Errors.** A row is refused at admission, and never changes the window, when an argument
 expression fails for it, when a floating-point argument of `SUM`, `AVG`, a variance, standard
@@ -1881,8 +1908,10 @@ and `min` and `max` numeric literals with `min` below `max`. A negative number i
 unary minus, which is not a literal, so `min` and `max` are zero or above. `delay` is a duration
 literal such as `'2s'`: a row that stepping removes from the window stays counted until the
 watermark or the domain clock passes its removal time plus `delay`, and `'0s'` removes it at once.
-An invalid delay is rejected with `invalid PERCENTILE_LINEAR_HISTOGRAM delay duration`. Each branch
-holds eight bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
+A delay that names no duration, or whose spans could add up to 18446744073709551615 seconds, is
+rejected when the window processor is created, with
+`invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '<delay>': <reason>`. Each branch holds eight
+bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
 
 ### Approximate Sketches
 
@@ -1960,8 +1989,8 @@ Two measured facts, from the [VM batch-size sweep](nspl-overview.md) and from th
 workloads below, shape what an expression costs:
 
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
-  Batches above 1,024 messages execute on the blocking worker pool, whose hand-off costs more than
-  a small batch does to execute.
+  Batches above 1,024 messages execute on the node's data workers, whose admission and hand-off
+  cost more than a small batch does to execute.
 - An expression costs what its functions do for the messages that evaluate them. Inside a
   conditional arm, some operations run only for the messages that select the arm, so their cost
   follows the share of messages it selects:
@@ -1985,7 +2014,7 @@ not guarantees; the ratios between rows are what carries over.
 | Checked integer arithmetic, dense failures | 51.07 µs | 20 million |
 | Arithmetic, 1 message | 3.44 µs | 0.29 million |
 | Arithmetic, 8 messages | 3.38 µs | 2.4 million |
-| Arithmetic, 1,025 messages, on the blocking pool | 25.17 µs | 41 million |
+| Arithmetic, 1,025 messages, on the data workers | 14.40 µs | 71 million |
 | Arithmetic over a sliced batch | 10.39 µs | 99 million |
 | List function over ragged `VEC` values | 384.74 µs | 2.7 million |
 | `contains_any` with a per-message set, 32-byte ASCII text | 117.76 µs | 8.7 million |

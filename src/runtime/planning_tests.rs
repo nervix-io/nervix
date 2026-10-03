@@ -9,13 +9,14 @@ use std::num::NonZeroU32;
 use nervix_models::{
     BranchSelection, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema, CreateWasmProcessor,
-    CreateWindowProcessor, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, ParseAsType, ProcessorOutputs, RelayBranching, SchemaField,
-    WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, ZeroMqIngestMode,
+    CreateWindowProcessor, DurationTextError, EmitSink, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy,
+    WindowBound, ZeroMqIngestMode,
 };
+use nervix_primitives::sync::Arc;
 use nonzero_ext::nonzero;
-use triomphe::Arc;
 
 use super::*;
 
@@ -792,6 +793,106 @@ fn planning_parsers_preserve_typed_contract_failures() {
 }
 
 #[test]
+fn planning_parsers_keep_why_duration_text_is_too_long() {
+    let processor = named::<ModelName>("orders_processor");
+    let relay = named::<RelayName>("orders");
+    let too_long = Some(&DurationTextError::TooLong);
+
+    let window_duration = parse_optional_window_duration(
+        &processor,
+        WindowDurationSetting::Width,
+        Some(TOO_LONG_DURATION_TEXT),
+    )
+    .expect_err("a window width longer than a duration must fail");
+    assert!(matches!(
+        window_duration.current_context(),
+        PlanningError::InvalidWindowDuration {
+            node,
+            setting: WindowDurationSetting::Width,
+        } if node == &processor
+    ));
+    assert_eq!(
+        window_duration.downcast_ref::<DurationTextError>(),
+        too_long
+    );
+
+    let output = BranchedProcessorOutputSpec {
+        relay: relay.clone(),
+        construction: RouteConstruction::default(),
+        flush_policy: Some(FlushPolicy::Each {
+            interval: TOO_LONG_DURATION_TEXT.to_string(),
+            max_batch_size: "1MiB".to_string(),
+        }),
+        message_error_policy: MessageErrorPolicy::Log,
+    };
+    let flush_interval = materialize_output(
+        ModelKind::Deduplicator,
+        &processor,
+        &output,
+        FlushPolicyRequirement::Required,
+    )
+    .expect_err("a flush interval longer than a duration must fail");
+    assert!(matches!(
+        flush_interval.current_context(),
+        PlanningError::InvalidFlushInterval {
+            kind: ModelKind::Deduplicator,
+            node,
+            route,
+        } if node == &processor && route == &relay
+    ));
+    assert_eq!(flush_interval.downcast_ref::<DurationTextError>(), too_long);
+
+    let collect_interval = parse_input_collect_policy(
+        ModelKind::Junction,
+        &processor,
+        &relay,
+        &nervix_models::InputCollectPolicy {
+            collect_for: TOO_LONG_DURATION_TEXT.to_string(),
+            max_batch_size: None,
+        },
+    )
+    .expect_err("a collection interval longer than a duration must fail");
+    assert!(matches!(
+        collect_interval.current_context(),
+        PlanningError::InvalidCollectInterval {
+            kind: ModelKind::Junction,
+            node,
+            relay: error_relay,
+        } if node == &processor && error_relay == &relay
+    ));
+    assert_eq!(
+        collect_interval.downcast_ref::<DurationTextError>(),
+        too_long
+    );
+
+    let max_time = parse_max_time(ModelKind::Deduplicator, &processor, TOO_LONG_DURATION_TEXT)
+        .expect_err("a retention time longer than a duration must fail");
+    assert!(matches!(
+        max_time.current_context(),
+        PlanningError::InvalidMaxTime {
+            kind: ModelKind::Deduplicator,
+            node,
+        } if node == &processor
+    ));
+    assert_eq!(max_time.downcast_ref::<DurationTextError>(), too_long);
+
+    let branch_ttl = parse_branch_ttl_setting(
+        Some(TOO_LONG_DURATION_TEXT),
+        ModelKind::Deduplicator,
+        &processor,
+    )
+    .expect_err("a branch TTL longer than a duration must fail");
+    assert!(matches!(
+        branch_ttl.current_context(),
+        PlanningError::InvalidBranchTtl {
+            kind: ModelKind::Deduplicator,
+            node,
+        } if node == &processor
+    ));
+    assert_eq!(branch_ttl.downcast_ref::<DurationTextError>(), too_long);
+}
+
+#[test]
 fn window_materialization_classifies_output_contract_failures() {
     let missing_output = materialize_nodes(
         &[window_node(BranchedProcessorOutputsSpec {
@@ -879,68 +980,14 @@ fn inferencer_materialization_requires_an_input_and_schema() {
 }
 
 #[test]
-fn relay_template_resolution_classifies_each_missing_owner() {
+fn relay_template_resolution_fails_for_a_relay_without_boundary_services() {
     let node = named::<ModelName>("orders_junction");
     let relay = named::<RelayName>("orders");
-    let relay_ids = || std::iter::once(relay.clone()).collect();
+    let relay_ids = std::iter::once(relay.clone()).collect();
 
-    let missing_model = resolve_branch_relay_templates(
-        ModelKind::Junction,
-        &node,
-        relay_ids(),
-        &ModelIndex::default(),
-        &HashMap::default(),
-        &HashMap::default(),
-    )
-    .expect_err("an unconfigured relay must fail planning");
-    assert!(matches!(
-        missing_model.current_context(),
-        PlanningError::MissingRelayModel {
-            kind: ModelKind::Junction,
-            node: error_node,
-            route,
-        } if error_node == &node && route == &relay
-    ));
-
-    let model_index = [Model::Relay(CreateRelay {
-        name: relay.clone(),
-        schema: named("orders_schema"),
-        buffer: nonzero!(1usize),
-        branching: RelayBranching::unbranched(),
-        materialized_state: None,
-    })]
-    .into_iter()
-    .collect::<ModelIndex>();
-    let missing_registry = resolve_branch_relay_templates(
-        ModelKind::Junction,
-        &node,
-        relay_ids(),
-        &model_index,
-        &HashMap::default(),
-        &HashMap::default(),
-    )
-    .expect_err("a relay without a registry must fail planning");
-    assert!(matches!(
-        missing_registry.current_context(),
-        PlanningError::MissingRelayRegistry {
-            kind: ModelKind::Junction,
-            node: error_node,
-            route,
-        } if error_node == &node && route == &relay
-    ));
-
-    let relay_registries = [(relay.clone(), RelayRegistry::new())]
-        .into_iter()
-        .collect();
-    let missing_services = resolve_branch_relay_templates(
-        ModelKind::Junction,
-        &node,
-        relay_ids(),
-        &model_index,
-        &relay_registries,
-        &HashMap::default(),
-    )
-    .expect_err("a relay without boundary services must fail planning");
+    let missing_services =
+        resolve_branch_relay_templates(ModelKind::Junction, &node, relay_ids, &HashMap::default())
+            .expect_err("a relay without boundary services must fail planning");
     assert!(matches!(
         missing_services.current_context(),
         PlanningError::MissingRelayServices {
@@ -976,8 +1023,6 @@ fn processor_instance_materialization_requires_an_input_relay() {
     };
     let error = materialize_processor_instance_template(
         &node,
-        &ModelIndex::default(),
-        &HashMap::default(),
         &HashMap::default(),
         &HashMap::default(),
         None,
@@ -1138,13 +1183,17 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("orders", &["tenant"])),
-                    decode_using_codec: named("orders_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("orders_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
@@ -1221,11 +1270,6 @@ fn branched_node_specs_capture_downstream_processing_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.identifier, named("orders_ingestor"));
-    assert_eq!(spec.root_relay, named("orders"));
-    assert_eq!(spec.branch.as_ref(), Some(&named("by_orders")));
     assert_eq!(specs.processors.len(), 2);
     let dedup_orders = &specs.processors[0];
     assert_eq!(dedup_orders.spec.processor, named("dedup_orders"));
@@ -1279,13 +1323,17 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("metrics", &["host"])),
-                    decode_using_codec: named("metrics_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("metrics_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
@@ -1338,9 +1386,6 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.root_relay, named("metrics"));
     assert_eq!(specs.processors.len(), 2);
     let window = specs
         .processors
@@ -1390,13 +1435,17 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("features", &["tenant"])),
-                    decode_using_codec: named("features_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("features_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
@@ -1450,9 +1499,6 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.root_relay, named("features"));
     assert_eq!(specs.processors.len(), 2);
     let inferencer = specs
         .processors
@@ -1496,7 +1542,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
 }
 
 #[test]
-fn branched_node_specs_capture_reingestor_entrypoint_tree() {
+fn branched_node_specs_capture_the_processor_behind_a_reingestor() {
     let specs = branched_node_specs_from_models(
         [
             branch_model("tenant", "tenant_orders", &["tenant"]),
@@ -1542,12 +1588,6 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.kind, ModelKind::Reingestor);
-    assert_eq!(spec.identifier, named("tenant_partition"));
-    assert_eq!(spec.root_relay, named("tenant_orders"));
-    assert_eq!(spec.branch.as_ref(), Some(&named("by_tenant_orders")));
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(
@@ -1579,13 +1619,17 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("orders", &["tenant"])),
-                    decode_using_codec: named("orders_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("orders_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
@@ -1669,7 +1713,6 @@ fn branched_node_specs_capture_processor_output_route_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
     assert_eq!(specs.processors.len(), 3);
     let splitter = specs
         .processors
@@ -1723,13 +1766,17 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("left_stream", &["tenant"])),
-                    decode_using_codec: named("notification_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("notification_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -1746,13 +1793,17 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("right_stream", &["tenant"])),
-                    decode_using_codec: named("notification_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("notification_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -1801,7 +1852,6 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 2);
     assert_eq!(
         specs
             .processors
@@ -1853,13 +1903,17 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(branched_by("orders", &["tenant"])),
-                    decode_using_codec: named("orders_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("orders_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -1913,7 +1967,6 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
     let orders_filter = specs
         .processors
         .iter()
@@ -1961,13 +2014,17 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                             max_batch_size: "1MiB".to_string(),
                         })
                         .with_branch(OutputBranch::Unbranched),
-                    decode_using_codec: named("orders_codec"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::ZeroMq {
+                                client: named("zmq_client"),
+                                mode: ZeroMqIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: named("orders_codec"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_client"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -1996,11 +2053,6 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(specs.entrypoints[0].identifier, named("orders_ingestor"));
-    assert_eq!(specs.entrypoints[0].root_relay, named("orders"));
-    assert_eq!(specs.entrypoints[0].branch, None);
-    assert_eq!(specs.entrypoints[0].branch_ttl, None);
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].branch_ttl, None);
@@ -2046,7 +2098,6 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
         .into_iter(),
     );
 
-    assert!(specs.entrypoints.is_empty());
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].spec.input_relays, vec![named("orders")]);
@@ -2102,40 +2153,6 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
     assert_eq!(
         specs.processors[0].spec.error_policies.message,
         MessageErrorPolicy::Log
-    );
-}
-
-#[test]
-fn branched_node_specs_include_reingestor_with_declared_branching() {
-    let specs = branched_node_specs_from_models(
-        [
-            branch_model("tenant", "tenant_notifications", &["tenant"]),
-            PlannedModel {
-                kind: ModelKind::Reingestor,
-                identifier: named("tenant_partition"),
-                model: nervix_models::Model::Reingestor(CreateReingestor {
-                    name: named("tenant_partition"),
-                    from: ProcessorInputs::single(named("notifications")),
-                    output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        })
-                        .with_branch(branched_by("tenant_notifications", &["tenant"])),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                }),
-            },
-        ]
-        .into_iter(),
-    );
-
-    assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(specs.entrypoints[0].identifier, named("tenant_partition"));
-    assert_eq!(
-        specs.entrypoints[0].root_relay,
-        named("tenant_notifications")
     );
 }
 

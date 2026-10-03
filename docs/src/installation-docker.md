@@ -75,6 +75,12 @@ docker run --detach \
 Start the other two nodes. Both discover the cluster through `nervix-1` on the private Docker
 network:
 
+Keep each node's named data volume across restarts. Once the three nodes have joined, their Raft
+membership retains the advertised interconnect names. If `nervix-1` stops while the other nodes
+continue, it uses those names to find a survivor when it restarts; it does not need a second
+configured bootstrap host. The joining nodes still use `NERVIX_CLUSTER_BOOTSTRAP_HOST` for their
+first contact with a fresh cluster.
+
 ```bash
 docker run --detach \
   --name nervix-2 \
@@ -155,9 +161,9 @@ membership. The CLI follows leader redirects through the three published gRPC po
 
 Each node advertises its container name, such as `nervix-1:47395`, and finds its peers by those
 names through Docker's embedded DNS, which Docker names in the container's `/etc/resolv.conf`. A
-node resolves peer names with its own asynchronous resolver from that file and `/etc/hosts`, read
-once at startup; [Peer Name Resolution](interconnect.md#peer-name-resolution) describes the options
-that point it at other files or name servers, and what it does not support.
+node resolves peer names, and the hosts its connectors reach, with its own asynchronous resolver
+from that file and `/etc/hosts`, read once at startup; [Name Resolution](name-resolution.md)
+describes the options that point it at other files or name servers, and what it does not support.
 
 `docker stop` sends each node `SIGTERM`, which starts graceful shutdown, and kills a container only
 if its node is still running when the stop timeout ends. A node ends its own shutdown within its

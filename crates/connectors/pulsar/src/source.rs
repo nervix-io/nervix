@@ -21,6 +21,7 @@ use nervix_connector::{
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, PulsarSubscriptionName, TopicName};
+use nervix_primitives::time::{Instant, sleep_until};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
     SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
@@ -28,7 +29,6 @@ use pulsar::{
     proto::MessageIdData,
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
 use tracing::warn;
 
 const PULSAR: &str = "pulsar";
@@ -358,8 +358,8 @@ impl BrokerSourceConnector for PulsarSource {
                 .change_context(SourceError::Read { connector: PULSAR }));
         };
         while messages.len() < request.max_messages.get() {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = sleep_until(deadline) => break,
                 next = consumer.next() => {
                     match next {
@@ -381,7 +381,7 @@ impl BrokerSourceConnector for PulsarSource {
                 .change_context(SourceError::Acknowledge { connector: PULSAR }));
         };
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             consumer
                 .ack_with_id(&position.topic, position.message_id.clone())
                 .await
@@ -401,7 +401,7 @@ impl BrokerSourceConnector for PulsarSource {
                 .change_context(SourceError::Reject { connector: PULSAR }));
         };
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             consumer
                 .nack_with_id(&position.topic, position.message_id.clone())
                 .await

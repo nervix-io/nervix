@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** A command's typed disposition, its message and diagnostics, the outcomes of the
 //!   statements of a multi-statement command, and the transaction binding, admitted operation,
-//!   typed transaction or WASM-state inspection and typed resource description a command reports.
+//!   typed transaction or WASM-state inspection, typed resource description and backup archive
+//!   summary a command reports.
 //! - **Depends on.** The vocabulary for transaction status, admission, preview identity and
 //!   inspections, cluster node names and service URLs, and consensus for the ways a reused
 //!   execution reference can conflict and for the diagnostics its durable records keep.
@@ -18,8 +19,9 @@ use nervix_consensus::{
     TransactionDiagnostic,
 };
 use nervix_models::{
-    ClusterNodeName, NodeServiceUrl, ResourceDescription, TransactionInspection,
-    TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
+    BackupArchiveSummary, ClusterNodeName, NodeServiceUrl, ResourceDescription, RestoreReport,
+    TransactionInspection, TransactionOperationAdmission, TransactionPreviewIdentity,
+    TransactionStatus,
 };
 
 /// What became of a command, or of one statement of a multi-statement command.
@@ -147,6 +149,11 @@ pub(in crate::application) struct CommandResult {
     pub(in crate::application) wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
     /// The versions, entries and bindings a resource description read.
     pub(in crate::application) resource: Option<Box<ResourceDescription>>,
+    /// The archive a completed backup assembled and retains for download.
+    pub(in crate::application) backup: Option<Box<BackupArchiveSummary>>,
+    /// What a restore applied, the step it failed at if one failed, or for a dry run what it
+    /// would apply.
+    pub(in crate::application) restore: Option<Box<RestoreReport>>,
 }
 
 impl CommandResult {
@@ -162,6 +169,8 @@ impl CommandResult {
             inspection: None,
             wasm_state: None,
             resource: None,
+            backup: None,
+            restore: None,
         }
     }
 

@@ -16,6 +16,7 @@ use nervix_models::{
     BranchName, BranchSelection, CorrelationTimeoutAction, CreateBranch, CreateSchema, DomainName,
     FieldName, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
     ProcessorOutputs, RelayBranching, RelayName, ResolvedBranching, SchemaName,
+    parse_duration_text,
 };
 use nervix_vm::{
     CompileOptions, OutputMode, compile_program_with_options_for_bindings_with_sensitivity,
@@ -55,7 +56,7 @@ fn parse_branch_ttl(
     identifier: &ModelName,
     ttl: &str,
 ) -> Result<Duration, Report<RegistryError>> {
-    humantime::parse_duration(ttl).map_err(|error| {
+    parse_duration_text(ttl).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -270,10 +271,11 @@ pub(in crate::registry) fn ensure_output_branch(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("branch SET compile failed: {}", error.message),
+            reason: format!("branch SET compile failed: {}", message),
         })
     })?;
     Ok(())
@@ -1107,14 +1109,14 @@ mod tests {
         KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, ParseAsType,
         PlacementPolicy, ProcessorInputs, SchemaField, WireSchemaField, WireSchemaName,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::registry::{
         storage::Registry,
         test_fixtures::{
-            branch, branch_for_relay, branch_name_for_relay, branch_schema,
+            TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_name_for_relay, branch_schema,
             branch_schema_with_types, branched_by, client_model, codec, deduplicator,
             ingestor_with_params, junction, named, processor, reingestor, relay, relay_branched_by,
             relay_branched_by_relay_branch, relay_branched_like, scheduled_node, schema,
@@ -1122,6 +1124,30 @@ mod tests {
             with_processor_branching,
         },
     };
+
+    #[test]
+    fn branch_ttl_says_why_its_text_names_no_duration() {
+        let domain = named::<DomainName>("default");
+        let identifier = named::<ModelName>("by_tenant");
+        for (ttl, why) in [
+            ("oops", "expected number at 0"),
+            (
+                TOO_LONG_DURATION_TEXT,
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let error = parse_branch_ttl(&domain, &identifier, ttl)
+                .expect_err("the branch TTL names no duration");
+            let expected = format!("invalid branch ttl '{ttl}': {why}");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    RegistryError::InvalidModel { reason, .. } if reason == &expected
+                ),
+                "{error:?}"
+            );
+        }
+    }
 
     #[test]
     fn branch_schema_rejects_nested_bytes_with_field_identity() {
@@ -1471,22 +1497,26 @@ mod tests {
                                 }],
                             },
                         ),
-                        decode_using_codec: named("event_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::Kafka {
-                            client: named("broker_in_2"),
-                            topic: named("notifications"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                            instances: nonzero!(1u64),
-                            mode: KafkaIngestMode::AckSequential {
-                                timeout: "30s".to_string(),
-                                retry_policy: nervix_models::RetryPolicy {
-                                    backoff: "200ms".to_string(),
-                                    max_backoff: "5s".to_string(),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Kafka {
+                                    client: named("broker_in_2"),
+                                    topic: named("notifications"),
+                                    offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
+                                    instances: nonzero!(1u64),
+                                    mode: KafkaIngestMode::AckSequential {
+                                        timeout: "30s".to_string(),
+                                        retry_policy: nervix_models::RetryPolicy {
+                                            backoff: "200ms".to_string(),
+                                            max_backoff: "5s".to_string(),
+                                        },
+                                    },
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
+                                codec: named("event_codec"),
                             },
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     }),

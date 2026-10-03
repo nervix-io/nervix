@@ -151,7 +151,7 @@ impl SessionServiceImpl {
     /// into one.
     pub(super) fn register_wasm_state_reset_service(
         &self,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) -> error_stack::Result<(), AppError> {
         self.register_guest_wasm_state_reset_coordinator(shutdown);
         let service = self.clone();
@@ -208,15 +208,15 @@ impl SessionServiceImpl {
     pub(super) fn register_wasm_state_reset_test_coordinator(
         &self,
         fault_injection: &crate::fault_injection::FaultInjection,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) {
         let mut reset_requests = fault_injection
             .register_wasm_state_reset_coordinator(self.inner.consensus.local_node_id().clone());
         let service = self.clone();
         self.inner.service_tasks.spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                let request = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let request = nervix_primitives::select! {
                     _ = shutdown.cancelled() => break,
                     request = reset_requests.recv() => request,
                 };
@@ -321,16 +321,16 @@ impl SessionServiceImpl {
     /// has the same durability and replica guarantees as an operator's.
     fn register_guest_wasm_state_reset_coordinator(
         &self,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) {
         let service = self.clone();
         self.inner.service_tasks.spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 for request in service.inner.runtime.take_guest_wasm_state_resets() {
                     service.coordinate_guest_wasm_state_reset(request).await;
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = shutdown.cancelled() => break,
                     () = service.inner.runtime.guest_wasm_state_reset_requested() => {}
                 }
@@ -432,7 +432,7 @@ impl SessionServiceImpl {
                 .await?;
         }
         let purpose = EntityGatePurpose::WasmStateReset(plan.scope);
-        let deadline = tokio::time::Instant::now()
+        let deadline = nervix_primitives::time::Instant::now()
             .checked_add(self.inner.runtime.entity_gate_deadline())
             .assured("the configured entity-gate duration stays within the monotonic clock");
         let gate = self
@@ -699,11 +699,9 @@ impl SessionServiceImpl {
                         plan.scope,
                     )
                     .await?;
-                    return Err(
-                        Report::new(error).change_context(WasmStateResetError::Publish {
-                            processor: processor.clone(),
-                        }),
-                    );
+                    return Err(error.change_context(WasmStateResetError::Publish {
+                        processor: processor.clone(),
+                    }));
                 }
             } else {
                 plan.published = true;
@@ -772,11 +770,11 @@ impl SessionServiceImpl {
                     plan.scope,
                     WasmStateResetPhase::Ready,
                 ) {
-                    return Err(Report::new(error).change_context(
-                        WasmStateResetError::CommittedNotUsable {
+                    return Err(
+                        error.change_context(WasmStateResetError::CommittedNotUsable {
                             processor: processor.clone(),
-                        },
-                    ));
+                        }),
+                    );
                 }
             }
         }
@@ -1061,15 +1059,12 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
         let state = self.inner.consensus.current_runtime_state().await;
         self.inner
-            .runtime
-            .apply_cluster_state(
+            .runtime_admission
+            .apply_planned_cluster_state(
+                &self.inner.runtime,
                 self.inner.consensus.local_node_id(),
-                state.revision,
-                &state.domains,
-                &state.domain_clock_authorities,
-                &state.schedule,
+                &state,
             )
             .await
-            .map_err(Report::new)
     }
 }

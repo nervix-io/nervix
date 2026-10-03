@@ -13,9 +13,10 @@ JIT-compiled code, not a sandbox for third-party programs.
 See [Choosing An Extension Tier](filter-map-functions.md#choosing-an-extension-tier) before choosing
 between builtins, Roto UDFs, and WASM processors.
 
-Roto execution is synchronous. Nervix therefore schedules every UDF-bearing expression on its
-blocking worker pool, including small Arrow batches and UDFs used while constructing branch keys,
-so native UDF work does not occupy an asynchronous runtime worker.
+Roto execution is synchronous. Nervix therefore runs every UDF-bearing expression on the node's
+extension workers, including small Arrow batches and UDFs used while constructing branch keys, so
+native UDF work never occupies an asynchronous runtime worker or the data workers that relay bodies
+are encoded and decoded on.
 
 The Roto language itself — syntax, types, functions, and `test` blocks — is covered by the
 generated [Roto Language Reference](roto-language-reference.md), downloaded from upstream at the
@@ -93,6 +94,12 @@ sensitivity of their arguments.
 Roto `test` blocks execute during `CREATE UDF`. If any test rejects, creation fails with
 `Roto test block failed` and the UDF is not persisted.
 
+The web console's **Create → Roto UDF** form edits ordered arguments and the result with the exact
+schema types, optional flags, volatility, and a source editor that keeps the function and its test
+blocks verbatim. It renders the completed Model as canonical NSPL and shows **Completed** only
+after compilation and all Roto tests succeed. A rejected test leaves the entered declaration and
+source in the form for correction.
+
 ## Nulls, errors, and volatility
 
 `OPTIONAL` controls boundary nullability; it does not change the Roto column type.
@@ -107,15 +114,17 @@ Roto `test` blocks execute during `CREATE UDF`. If any test rejects, creation fa
 - A Roto trap, invalid result type or row count, or watchdog expiry is a whole-batch error.
 
 The watchdog detects an overrun after native code returns; Roto provides no in-process
-preemption. A non-terminating UDF occupies one blocking worker permanently. The watchdog converts a
-late completion into a whole-batch error, but it cannot reclaim a worker from native code that
-never returns.
+preemption. A non-terminating UDF occupies one extension worker permanently. The watchdog converts
+a late completion into a whole-batch error, but it cannot reclaim a worker from native code that
+never returns. A node whose extension workers are all held, and whose wait queue for them is full,
+refuses further UDF-bearing executions, which the owning processor's general error policy handles;
+the node's relay, control and bulk work keeps its own workers throughout.
 
-Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. Size the
-deployment's blocking-worker capacity for the maximum concurrent UDF-bearing expressions plus
-other blocking runtime work. The pool is process-wide and is not an NSPL setting. Limit concurrent
-UDF-bearing paths or isolate them onto separate Nervix processes when one workload could exhaust
-the pool. See [Capacity Planning For Branched Graphs](capacity-planning.md).
+Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. The
+extension class runs one job per available CPU but one, shared with JAQ transformations, and is not
+an NSPL setting. Limit concurrent UDF-bearing paths or isolate them onto separate Nervix processes
+when one workload could hold every extension worker. See
+[Capacity Planning For Branched Graphs](capacity-planning.md).
 
 Non-terminating or third-party code must stay on the isolated WASM processor path.
 

@@ -24,11 +24,12 @@
 use std::num::NonZeroUsize;
 
 use ahash::RandomState;
-use dashmap::mapref::entry::Entry;
 use meticulous::OptionExt as _;
-use nervix_execution::sync::DashMap;
 use nervix_models::{DomainName, RelayName};
-use triomphe::Arc;
+use nervix_primitives::{
+    collections::{DashMap, dash_map::Entry},
+    sync::Arc,
+};
 
 use crate::{cluster::ClusterHandle, metrics::RuntimeMetrics};
 
@@ -192,7 +193,7 @@ impl Drop for SubscriptionInterestLease {
             return;
         }
         self.interests.count_down(&self.key);
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let Ok(runtime) = nervix_primitives::runtime::Handle::try_current() else {
             return;
         };
         let interests = self.interests.clone();
@@ -208,8 +209,8 @@ mod tests {
     use std::time::Duration;
 
     use meticulous::ResultExt as _;
+    use nervix_primitives::time::timeout;
     use nervix_recovery::Discarded as _;
-    use tokio::time::timeout;
 
     use super::*;
     use crate::application::test_fixtures::{TestService, build_test_service, named};
@@ -222,7 +223,7 @@ mod tests {
             .await
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_advertisement_follows_the_lease_count_whatever_order_writes_finish_in() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let interests = service.inner.subscription_interests.clone();
@@ -265,7 +266,7 @@ mod tests {
         );
         timeout(Duration::from_secs(30), async {
             while advertised(&interests).await {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

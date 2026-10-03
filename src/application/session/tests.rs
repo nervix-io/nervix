@@ -4,30 +4,46 @@
 //! - **Owns.** Assertions that a reply larger than a frame arrives whole as transfer parts, that a
 //!   reply larger than the transfer limit is refused whole, that a cancellation of a request that
 //!   is not in flight says so, that registration refuses a duplicate or excess request rather
-//!   than queueing it, and that a subscription statement the parser rejects is refused with the
-//!   stage and the diagnostic located in that statement.
+//!   than queueing it while a submitted batch stays outside the in-flight limit, that a subscription statement the parser rejects is refused with the
+//!   stage and the diagnostic located in that statement, and that a domain clock attachment
+//!   delivers its changes between its replies and ends when its domain leaves the node. An attach
+//!   is answered only once its node has installed the committed domains, and the wait for them
+//!   ends with the session.
 //! - **Depends on.** The session engine and the session test fixtures.
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CancelRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest,
-    LeaderRedirect as WireLeaderRedirect, ReplyBody, RequestId, RequestRejection, ServerFrame,
-    ServerMessage, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeRequest,
-    SubscriptionType, TransferAssembly, VerifiedFrame,
+    AttachDomainClockRequest, CancelRequest, ClientFrame, ClientMessage, ClientRequest,
+    CommandDisposition as WireCommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachDisposition, DomainClockAttachmentEndReason, DomainClockDetachDisposition,
+    EmitterOpenRefusal, LeaderRedirect as WireLeaderRedirect, OpenEmitterDisposition,
+    OpenEmitterRequest, OpenIngestorDisposition, OpenIngestorRequest, ReplyBody, RequestId,
+    RequestRejection, ServerEvent, ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits,
+    SubscribeDisposition, SubscribeRequest, SubscriptionType, TransferAssembly, VerifiedFrame,
 };
-use nervix_models::{DomainName, TransactionPosition, UserName};
-use tokio::{sync::mpsc, task::JoinHandle};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio_util::sync::CancellationToken;
+use nervix_models::{
+    ClientConsumerLimits, ClientProducerLimits, ClientProducerRefusal, DomainClockObservation,
+    DomainClockObservedState, DomainClockState, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, PacedDomainClock, ParseAsType,
+    PlacementPolicy, SchemaField, Timestamp, TransactionPosition, UserName,
+};
+use nervix_primitives::{
+    stream::wrappers::UnboundedReceiverStream,
+    sync::{CancellationToken, mpsc},
+    task::JoinHandle,
+};
 
-use super::{InboundFrame, MAX_IN_FLIGHT_REQUESTS, SessionShared, SessionTransport, outbound};
+use super::{
+    InFlightKind, InFlightRequests, InboundFrame, MAX_IN_FLIGHT_REQUESTS, SessionShared,
+    SessionTransport, outbound, producers::SessionProducers,
+};
 use crate::application::{
     command_result::CommandDisposition,
     session_service::SessionServiceImpl,
@@ -69,7 +85,7 @@ impl SessionUnderTest {
         let (inbound, inbound_rx) = mpsc::unbounded_channel();
         let (outbound_tx, outbound) = outbound::channel(CancellationToken::new());
         let service = service.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             service
                 .run_session(
                     named::<UserName>("default"),
@@ -115,8 +131,8 @@ impl SessionUnderTest {
         let mut assembly = None;
         let mut frames = 0_usize;
         loop {
-            tokio::task::consume_budget().await;
-            let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
+            nervix_primitives::task::consume_budget().await;
+            let frame = nervix_primitives::time::timeout(REPLY_TIMEOUT, self.outbound.next())
                 .await
                 .assured("the session answers within the deadline")
                 .assured("the session sends until the test closes it");
@@ -156,7 +172,7 @@ impl SessionUnderTest {
             .send(InboundFrame::Closed)
             .assured("the session reads until the test closes it");
         drop(self.outbound);
-        tokio::time::timeout(REPLY_TIMEOUT, self.task)
+        nervix_primitives::time::timeout(REPLY_TIMEOUT, self.task)
             .await
             .assured("the session ends once its client closes")
             .assured("the session does not panic");
@@ -179,7 +195,83 @@ fn describe_two_operation_transaction(session: &SessionUnderTest) {
     session.command(4, "DESCRIBE TRANSACTION FORMAT JSON;", Some(2));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
+async fn endpoint_opens_remain_retryable_until_committed_state_is_admitted() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    let fields = vec![SchemaField {
+        name: named("value"),
+        ty: ParseAsType::F64,
+        optional: false,
+        sensitive: false,
+    }];
+    let batches = NonZeroU32::new(1).assured("one is non-zero");
+    let bytes = NonZeroU64::new(1024).assured("1024 is non-zero");
+    let producer = ClientRequest::OpenIngestor(OpenIngestorRequest {
+        domain: named("default"),
+        ingestor: named("input"),
+        expected_fields: fields.clone(),
+        limits: ClientProducerLimits { batches, bytes },
+    });
+    let consumer = ClientRequest::OpenEmitter(OpenEmitterRequest {
+        domain: named("default"),
+        emitter: named("output"),
+        expected_fields: fields,
+        limits: ClientConsumerLimits { batches, bytes },
+    });
+    assert!(!service.inner.runtime_admission.is_admitted());
+    for (id, request) in [(1, producer.clone()), (2, consumer.clone())] {
+        session.send(&ClientMessage {
+            request_id: request_id(id),
+            request,
+        });
+        let (body, _) = session.reply(request_id(id)).await;
+        match body {
+            ReplyBody::OpenIngestor(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenIngestorDisposition::Refused(ClientProducerRefusal::EndpointUnavailable)
+            ),
+            ReplyBody::OpenEmitter(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenEmitterDisposition::Refused(EmitterOpenRefusal::EndpointUnavailable)
+            ),
+            outcome => panic!("expected a typed endpoint refusal, received {outcome:?}"),
+        }
+    }
+    let admitted = service
+        .inner
+        .runtime_admission
+        .runtime_state(&service.inner.consensus, &CancellationToken::new())
+        .await;
+    assert!(admitted.is_some());
+    assert!(service.inner.runtime_admission.is_admitted());
+    for (id, request) in [(3, producer), (4, consumer)] {
+        session.send(&ClientMessage {
+            request_id: request_id(id),
+            request,
+        });
+        let (body, _) = session.reply(request_id(id)).await;
+        match body {
+            ReplyBody::OpenIngestor(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenIngestorDisposition::Refused(ClientProducerRefusal::DomainStopped)
+            ),
+            ReplyBody::OpenEmitter(outcome) => assert_eq!(
+                outcome.disposition,
+                OpenEmitterDisposition::Refused(EmitterOpenRefusal::DomainStopped)
+            ),
+            outcome => panic!("expected a committed domain refusal, received {outcome:?}"),
+        }
+    }
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
 async fn a_reply_larger_than_a_frame_arrives_whole_in_transfer_parts() {
     let TestService {
         service,
@@ -211,7 +303,7 @@ async fn a_reply_larger_than_a_frame_arrives_whole_in_transfer_parts() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reply_larger_than_the_transfer_limit_is_refused_whole() {
     let TestService {
         service,
@@ -233,7 +325,7 @@ async fn a_reply_larger_than_the_transfer_limit_is_refused_whole() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn cancelling_a_request_that_is_not_in_flight_says_so() {
     let TestService {
         service,
@@ -263,7 +355,7 @@ async fn cancelling_a_request_that_is_not_in_flight_says_so() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     let TestService {
         service,
@@ -272,7 +364,7 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     } = build_test_service(true).await;
     let (outbound, _frames) = outbound::channel(CancellationToken::new());
     let subscriptions = SessionSubscriptions::for_user(named::<UserName>("default"));
-    let (selection, _) = tokio::sync::watch::channel(None);
+    let (selection, _) = nervix_primitives::sync::watch::channel(None);
     let shared = SessionShared {
         service: service.clone(),
         transport: SessionTransport::Grpc,
@@ -280,15 +372,17 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
             outbound,
             limits: SessionLimits::DEFAULT,
         },
-        in_flight: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
-        view: parking_lot::RwLock::new(subscriptions.view()),
+        in_flight: nervix_primitives::sync::blocking::Mutex::new(InFlightRequests::default()),
+        view: nervix_primitives::sync::blocking::RwLock::new(subscriptions.view()),
         selection,
+        producers: SessionProducers::default(),
+        consumers: super::consumers::SessionConsumers::default(),
     };
 
     shared
-        .register(request_id(1))
+        .register(request_id(1), InFlightKind::Request)
         .assured("the first request registers");
-    let Err(duplicate) = shared.register(request_id(1)) else {
+    let Err(duplicate) = shared.register(request_id(1), InFlightKind::Request) else {
         panic!("a request identity already in flight is refused");
     };
     assert_eq!(duplicate.rejection, RequestRejection::DuplicateRequestId);
@@ -296,27 +390,45 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     for id in 2..=MAX_IN_FLIGHT_REQUESTS {
         let id = u64::try_from(id).assured("the in-flight limit fits in u64");
         shared
-            .register(request_id(id))
+            .register(request_id(id), InFlightKind::Request)
             .assured("requests up to the limit register");
     }
     let beyond = u64::try_from(MAX_IN_FLIGHT_REQUESTS)
         .assured("the in-flight limit fits in u64")
         .checked_add(1)
         .assured("one past the limit fits in u64");
-    let Err(refused) = shared.register(request_id(beyond)) else {
+    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request) else {
         panic!("a request beyond the in-flight limit is refused");
+    };
+    assert_eq!(refused.rejection, RequestRejection::TooManyRequestsInFlight);
+
+    // A submitted batch is bounded by its producer's credit, not by the in-flight limit, and a
+    // duplicate identity is refused for it as for any request.
+    let submission = beyond
+        .checked_add(1)
+        .assured("two past the limit fits in u64");
+    shared
+        .register(request_id(submission), InFlightKind::Submission)
+        .assured("a submission registers while requests fill the limit");
+    let Err(duplicate) = shared.register(request_id(submission), InFlightKind::Submission) else {
+        panic!("a submission identity already in flight is refused");
+    };
+    assert_eq!(duplicate.rejection, RequestRejection::DuplicateRequestId);
+    assert!(shared.finish(request_id(submission)));
+    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request) else {
+        panic!("an answered submission frees no place a request counts");
     };
     assert_eq!(refused.rejection, RequestRejection::TooManyRequestsInFlight);
 
     assert!(shared.finish(request_id(1)));
     shared
-        .register(request_id(beyond))
+        .register(request_id(beyond), InFlightKind::Request)
         .assured("an answered request frees its place");
 
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_redirect_while_no_leader_is_known_names_none() {
     let TestService {
         service,
@@ -354,7 +466,7 @@ async fn a_redirect_while_no_leader_is_known_names_none() {
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_token() {
     let TestService {
         service,
@@ -390,6 +502,365 @@ async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_
     let start: usize = span.start().arch_into();
     let end: usize = span.end().arch_into();
     assert_eq!(statement.get(start..end), Some("42"));
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+/// A message of a session about a domain clock: the reply to a request, or a clock frame.
+#[derive(Debug)]
+enum ClockMessage {
+    Reply(RequestId, ReplyBody),
+    Frame(ServerEvent),
+}
+
+impl SessionUnderTest {
+    fn attach_clock(&self, id: u64, domain: &str) {
+        self.send(&ClientMessage {
+            request_id: request_id(id),
+            request: ClientRequest::AttachDomainClock(AttachDomainClockRequest {
+                domain: named::<DomainName>(domain),
+            }),
+        });
+    }
+
+    fn detach_clock(&self, id: u64, domain: &str) {
+        self.send(&ClientMessage {
+            request_id: request_id(id),
+            request: ClientRequest::DetachDomainClock(DetachDomainClockRequest {
+                domain: named::<DomainName>(domain),
+            }),
+        });
+    }
+
+    /// The next reply or clock frame the session sends, skipping every other event.
+    async fn next_clock_message(&mut self) -> ClockMessage {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let frame = nervix_primitives::time::timeout(REPLY_TIMEOUT, self.outbound.next())
+                .await
+                .assured("the session sends within the deadline")
+                .assured("the session sends until the test closes it");
+            let frame = VerifiedFrame::<ServerFrame>::verify(frame.into_bytes(), &self.limits)
+                .assured("the session sends verified frames");
+            match ServerMessage::decode(&frame).assured("a server frame decodes") {
+                ServerMessage::Reply(reply) => {
+                    return ClockMessage::Reply(reply.request_id, reply.body);
+                }
+                ServerMessage::Event(
+                    event @ (ServerEvent::DomainClockObserved(_)
+                    | ServerEvent::DomainClockAttachmentEnded(_)),
+                ) => return ClockMessage::Frame(event),
+                ServerMessage::Event(_) | ServerMessage::TransferPart(_) => {}
+            }
+        }
+    }
+
+    /// The reply to `id`, which must be the next reply or clock frame the session sends.
+    async fn next_clock_reply(&mut self, id: u64) -> ReplyBody {
+        match self.next_clock_message().await {
+            ClockMessage::Reply(request, body) if request == request_id(id) => body,
+            other => panic!("request {id} is answered before any other clock message: {other:?}"),
+        }
+    }
+
+    /// The clock frame the session sends next, before any reply.
+    async fn next_clock_frame(&mut self) -> ServerEvent {
+        match self.next_clock_message().await {
+            ClockMessage::Frame(event) => event,
+            other => panic!("a clock frame comes next: {other:?}"),
+        }
+    }
+
+    /// Whether the session sends no reply and no clock frame for [`UNANSWERED_WINDOW`].
+    async fn sends_no_clock_message(&mut self) -> bool {
+        let message =
+            nervix_primitives::time::timeout(UNANSWERED_WINDOW, self.next_clock_message()).await;
+        message.is_err()
+    }
+}
+
+/// How long a test watches for an answer that must not arrive at all while its precondition holds,
+/// such as the answer to an attach before its node installed the committed domains. A longer
+/// window only strengthens the assertion.
+const UNANSWERED_WINDOW: Duration = Duration::from_millis(500);
+
+fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
+    let clock = match status {
+        DomainStatus::Stopped => None,
+        DomainStatus::Running | DomainStatus::Paused => Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(5),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::ONE,
+        )),
+    };
+    DomainState {
+        id: named("clocked"),
+        config: DomainConfig {
+            pace: DomainPace::Paced {
+                period: "1s".parse().assured("one second is a valid period"),
+                skew: "10ms".parse().assured("ten milliseconds is a valid skew"),
+            },
+            placement: PlacementPolicy::Neutral,
+        },
+        status,
+        start_version,
+        last_start: DomainStartPoint::Resume,
+        clock,
+    }
+}
+
+fn clocked_observation(state: &DomainState) -> DomainClockObservation {
+    let observed = match (&state.status, &state.clock, state.config.pace) {
+        (DomainStatus::Stopped, _, _) => DomainClockObservedState::Stopped,
+        (_, Some(mapping), DomainPace::Paced { period, skew }) => {
+            DomainClockObservedState::Paced(PacedDomainClock {
+                period,
+                skew,
+                mapping: mapping.clone(),
+            })
+        }
+        (_, _, _) => DomainClockObservedState::Uninstalled,
+    };
+    DomainClockObservation {
+        generation: state.start_version,
+        state: observed,
+    }
+}
+
+fn install(service: &SessionServiceImpl, states: &[DomainState]) {
+    let domains = states
+        .iter()
+        .map(|state| (state.id.clone(), state.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    service.inner.runtime.sync_domains(&domains);
+}
+
+#[nervix_primitives::test]
+async fn a_session_follows_a_domain_clock_until_it_detaches_or_the_domain_leaves_the_node() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    let running = clocked_domain(1, DomainStatus::Running);
+    install(&service, std::slice::from_ref(&running));
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.attach_clock(1, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(1).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached {
+            domain: named("clocked"),
+            clock: clocked_observation(&running),
+        }
+    );
+    session.attach_clock(2, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(2).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::AlreadyAttached(named("clocked"))
+    );
+    session.attach_clock(3, "elsewhere");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(3).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::DomainNotFound(named("elsewhere"))
+    );
+
+    let stopped = clocked_domain(1, DomainStatus::Stopped);
+    install(&service, std::slice::from_ref(&stopped));
+    let ServerEvent::DomainClockObserved(observed) = session.next_clock_frame().await else {
+        panic!("stopping the domain delivers its stopped clock");
+    };
+    assert_eq!(observed.domain, named::<DomainName>("clocked"));
+    assert_eq!(observed.clock, clocked_observation(&stopped));
+
+    session.detach_clock(4, "clocked");
+    let ReplyBody::DomainClockDetach(outcome) = session.next_clock_reply(4).await else {
+        panic!("a detach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockDetachDisposition::Detached(named("clocked"))
+    );
+    let restarted = clocked_domain(2, DomainStatus::Running);
+    install(&service, std::slice::from_ref(&restarted));
+    session.attach_clock(5, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(5).await else {
+        panic!("nothing about a detached clock precedes the next reply");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached {
+            domain: named("clocked"),
+            clock: clocked_observation(&restarted),
+        }
+    );
+
+    install(&service, &[]);
+    let ServerEvent::DomainClockAttachmentEnded(ended) = session.next_clock_frame().await else {
+        panic!("removing the domain ends the attachment");
+    };
+    assert_eq!(ended.domain, named::<DomainName>("clocked"));
+    assert_eq!(ended.reason, DomainClockAttachmentEndReason::DomainRemoved);
+    session.detach_clock(6, "clocked");
+    let ReplyBody::DomainClockDetach(outcome) = session.next_clock_reply(6).await else {
+        panic!("a detach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockDetachDisposition::NotAttached(named("clocked"))
+    );
+
+    install(&service, std::slice::from_ref(&restarted));
+    session.attach_clock(7, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(7).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert!(matches!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached { .. }
+    ));
+    install(&service, &[]);
+    assert!(matches!(
+        session.next_clock_frame().await,
+        ServerEvent::DomainClockAttachmentEnded(_)
+    ));
+    install(&service, std::slice::from_ref(&restarted));
+    session.attach_clock(8, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(8).await else {
+        panic!("a clock the server ended can be attached again");
+    };
+    assert!(matches!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached { .. }
+    ));
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
+async fn an_attach_answers_once_its_node_has_installed_the_committed_domains() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.attach_clock(1, "clocked");
+    assert!(
+        session.sends_no_clock_message().await,
+        "a node that has installed no committed domains cannot tell whether one exists, so it \
+         does not answer"
+    );
+    let running = clocked_domain(1, DomainStatus::Running);
+    install(&service, std::slice::from_ref(&running));
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(1).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached {
+            domain: named("clocked"),
+            clock: clocked_observation(&running),
+        }
+    );
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
+async fn an_attach_waiting_for_the_committed_domains_ends_with_its_session() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.attach_clock(1, "clocked");
+    assert!(
+        session.sends_no_clock_message().await,
+        "a node that has installed no committed domains does not answer an attach"
+    );
+    // The session ends while its ordered lane waits in the attach, and the lane stops with it.
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
+async fn a_session_holding_a_transaction_refuses_domain_clock_requests() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    install(&service, &[clocked_domain(1, DomainStatus::Running)]);
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    session.command(1, "BEGIN;", None);
+    let (begun, _) = session.reply(request_id(1)).await;
+    assert!(matches!(begun, ReplyBody::Command(_)));
+
+    session.attach_clock(2, "clocked");
+    let (body, _) = session.reply(request_id(2)).await;
+    let ReplyBody::DomainClockAttach(outcome) = body else {
+        panic!("an attach request is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, DomainClockAttachDisposition::Failed);
+    assert_eq!(outcome.message, super::SESSION_LOCAL_IN_TRANSACTION);
+    session.detach_clock(3, "clocked");
+    let (body, _) = session.reply(request_id(3)).await;
+    let ReplyBody::DomainClockDetach(outcome) = body else {
+        panic!("a detach request is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, DomainClockDetachDisposition::Failed);
+    assert_eq!(outcome.message, super::SESSION_LOCAL_IN_TRANSACTION);
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
+async fn a_domain_clock_statement_sent_as_a_command_is_refused_in_favour_of_its_request() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.command(1, "ATTACH DOMAIN CLOCK;", None);
+    let (body, _) = session.reply(request_id(1)).await;
+    let ReplyBody::Command(outcome) = body else {
+        panic!("a command is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, WireCommandDisposition::Failed);
+    assert_eq!(
+        outcome.message,
+        "ATTACH DOMAIN CLOCK is a session-local command; send an attach domain clock request"
+    );
+
+    session.command(2, "DETACH DOMAIN CLOCK;", None);
+    let (body, _) = session.reply(request_id(2)).await;
+    let ReplyBody::Command(outcome) = body else {
+        panic!("a command is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, WireCommandDisposition::Failed);
+    assert_eq!(
+        outcome.message,
+        "DETACH DOMAIN CLOCK is a session-local command; send a detach domain clock request"
+    );
 
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");

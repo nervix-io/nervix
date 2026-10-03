@@ -421,13 +421,11 @@ impl RelayProcessorTemplate {
         RelayProcessorOutputNode {
             relay: output.output_relay.clone(),
             construction: output.construction.clone(),
-            branch: None,
             flush_policy: output.flush_policy,
             message_error_policy: output.message_error_policy.clone(),
             pending: Vec::new(),
             flush_timer: BranchBufferTimer::default(),
             compiled_program: output.compiled_program.clone(),
-            compiled_branch_program: None,
         }
     }
 
@@ -443,6 +441,14 @@ impl RelayProcessorTemplate {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(super) async fn instantiate(
         &self,
         runtime: &Runtime,
@@ -697,7 +703,7 @@ impl BranchInstanceTemplate {
         domain: &DomainName,
     ) -> error_stack::Result<(), WasmInstanceError> {
         for processor in self.processors.values_mut() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let RelayProcessorOperationTemplate::WasmProcessor {
                 resource,
                 resource_version,
@@ -722,6 +728,14 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(super) async fn instantiate(
         &self,
         runtime: &Runtime,
@@ -739,7 +753,6 @@ impl BranchInstanceTemplate {
                         runtime: runtime.clone(),
                         domain: domain.clone(),
                         relay: relay.clone(),
-                        registry: template.registry.clone(),
                         services: template.services.clone(),
                         key: key.clone(),
                     }),
@@ -752,7 +765,7 @@ impl BranchInstanceTemplate {
         let materialized_states = HashMap::default();
         let mut processors = HashMap::default();
         for (processor, template) in &self.processors {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let node = template
                 .instantiate(runtime, domain, &key, incarnation, &self.revision)
                 .await?;
@@ -836,6 +849,13 @@ impl BranchInstanceTemplate {
         let domain_clock = runtime
             .bind_domain_clock(domain)
             .change_context(ProcessorTemplateError::BindDomainClock)?;
+        let mut processor_dirty = HashMap::default();
+        for (identifier, processor) in &processors {
+            processor_dirty.insert(
+                identifier.clone(),
+                runtime.branch_metrics_mark(domain, processor.kind, &processor.processor),
+            );
+        }
         Ok(Mutex::new(BranchRuntime {
             key,
             runtime: runtime.clone(),
@@ -852,6 +872,8 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
+                source_dirty: runtime.branch_metrics_mark(domain, self.source_kind, &self.source),
+                processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,
                 processor_inputs,
@@ -863,17 +885,18 @@ impl BranchInstanceTemplate {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_models::{
         ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
         WasmProcessorLimits, WasmRejectedStatePolicy,
     };
     use nonzero_ext::nonzero;
-    use tokio::time::Duration;
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_template_refresh_is_not_junction_specific() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -969,7 +992,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_template_refresh_keeps_the_guest_and_updates_its_routes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1069,7 +1092,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
         let runtime = Runtime::default();
         let domain = domain("default");

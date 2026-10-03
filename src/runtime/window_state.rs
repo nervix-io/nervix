@@ -7,17 +7,20 @@
 //!   state placement.
 //! - **Must not know.** NSPL text, connector protocols, control-plane transactions, or ACK state.
 
-use std::{io::Write as _, sync::Arc as StdArc};
+use std::io::Write as _;
 
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
+use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::StdArc;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
     WindowAccumulatorPlan, WindowProcessorError, WindowProcessorState,
+    branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, RestoredMaterializedSnapshot,
         SealedSource, decode_aligned_rkyv,
@@ -35,9 +38,10 @@ pub(super) struct WindowEntrySnapshot {
     pub(super) arguments: crate::runtime_schema::RuntimeRow,
 }
 
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) struct LinearHistogramDelayedRemovalSnapshot {
     pub(super) expires_at: Timestamp,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub(super) bucket: usize,
 }
 
@@ -71,6 +75,12 @@ pub(super) struct ReplicatedWindowProcessorState {
     pub(super) placement: RuntimeStatePlacement,
     /// Absent until the branch task first publishes, which restores as an empty window.
     pub(super) generations: PublishedGenerations<Option<WindowPublishedSnapshot>>,
+    /// What each replica reported holding of the published window, and the offer of the newest
+    /// published window to the replicas that lack it.
+    replication: CheckpointReplication,
+    /// The entry of the entity's branch checkpoint catalog that every published window is recorded
+    /// in, absent for a state that only encodes or checks a checkpoint.
+    catalog: Option<CatalogRegistration>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +89,7 @@ pub(super) enum WindowPublishedSnapshot {
     Sealed(Vec<u8>),
 }
 
-const WINDOW_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXWINSN";
+const WINDOW_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXWIN64";
 const WINDOW_SNAPSHOT_FRAME_BYTES: usize = WINDOW_SNAPSHOT_MAGIC.len() + 4;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -107,7 +117,7 @@ pub(super) enum WindowSnapshotSection {
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub(super) enum WindowSnapshotIssue {
-    #[error("the sealed header is missing or truncated")]
+    #[error("the sealed header is invalid or truncated; recreate the stored window state")]
     Header,
     #[error("the header exceeds its bulk limit")]
     HeaderLimit,
@@ -224,7 +234,7 @@ pub(super) async fn encode_window_processor_snapshot(
     let mut accumulators = Vec::with_capacity(snapshot.accumulators.len());
     let mut typed_sections = Vec::new();
     for (demand, accumulator) in snapshot.accumulators.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match accumulator {
             WindowAccumulatorSnapshot::Retained => {
                 accumulators.push(WindowAccumulatorDescriptor::Retained);
@@ -245,7 +255,7 @@ pub(super) async fn encode_window_processor_snapshot(
                     .attach_printable(error)
                 })?;
                 for removals in delayed_removals.chunks(chunk_rows) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let section = WindowDelayedRemovalSection {
                         demand,
                         removals: removals.to_vec(),
@@ -453,7 +463,7 @@ pub(super) async fn decode_window_processor_snapshot(
     let mut offset = argument_end;
     let typed_limit = executor.limits().snapshot_record_bytes.as_u64();
     for _ in 0..header.typed_sections {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let length_end = offset
             .checked_add(4)
             .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
@@ -558,7 +568,7 @@ pub(super) async fn decode_window_processor_snapshot(
     let mut entries = Vec::with_capacity(input.records.len());
     for (index, (input, arguments)) in input.records.into_iter().zip(arguments.records).enumerate()
     {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if arguments.branch.is_some() {
             return Err(invalid(WindowSnapshotIssue::ArgumentBranch));
         }
@@ -603,7 +613,25 @@ impl ReplicatedWindowProcessorState {
         Ok(Self {
             placement,
             generations,
+            replication: CheckpointReplication::new(),
+            catalog: None,
         })
+    }
+
+    /// This state as the state of a branch this node owns, with every window it publishes recorded
+    /// in `catalog`, so the entity's replicas learn of it.
+    pub(super) fn cataloged(mut self, catalog: &BranchCheckpointCatalog) -> Self {
+        let revision = self.generations.load().revision;
+        self.catalog = Some(catalog.register(
+            self.placement.branch_key.clone(),
+            self.placement.state,
+            revision,
+        ));
+        self
+    }
+
+    pub(super) fn replication(&self) -> &CheckpointReplication {
+        &self.replication
     }
 
     /// Build the live window a branch task owns from the window published last.
@@ -661,8 +689,12 @@ impl ReplicatedWindowProcessorState {
         let snapshot = state
             .to_snapshot()
             .change_context(RuntimePersistenceError::WindowSnapshot)?;
-        self.generations
+        let revision = self
+            .generations
             .publish(Some(WindowPublishedSnapshot::Live(snapshot)));
+        if let Some(catalog) = &self.catalog {
+            catalog.record(revision);
+        }
         Ok(())
     }
 
@@ -724,7 +756,7 @@ impl ReplicatedWindowProcessorState {
 mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch};
     use nervix_models::ParseAsType;
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{
@@ -732,7 +764,35 @@ mod tests {
         runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue},
     };
 
-    #[tokio::test]
+    #[test]
+    fn bolero_window_archive_counts_round_trip() {
+        use meticulous::ResultExt as _;
+        use nervix_arbitrary::Entropy;
+
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(32)
+            .for_each(|bytes: &[u8]| {
+                let mut entropy = Entropy::new(bytes);
+                let generated = entropy.any_u64();
+                let expires_at = Timestamp::from_unix_nanos(entropy.any_i64());
+                for bucket in [0, u64::from(u32::MAX) + 1, u64::MAX, generated] {
+                    let bucket = usize::try_from(bucket)
+                        .assured("the native test and fuzz targets address 64 bits");
+                    let value = LinearHistogramDelayedRemovalSnapshot { expires_at, bucket };
+                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&value)
+                        .assured("the bounded current typed snapshot section encodes");
+                    let decoded = rkyv::from_bytes::<
+                        LinearHistogramDelayedRemovalSnapshot,
+                        rkyv::rancor::Error,
+                    >(&encoded)
+                    .assured("a current typed snapshot section reads back its own encoding");
+                    assert_eq!(decoded, value);
+                }
+            });
+    }
+
+    #[nervix_primitives::test]
     async fn window_snapshot_seals_and_restores_shared_arrow_columns() {
         let plan = window_plan(
             "SET count = COUNT(input.latency)",
@@ -807,15 +867,25 @@ mod tests {
         );
         let mut malformed = payload;
         malformed[0] = b'X';
+        let Err(error) =
+            decode_window_processor_snapshot(&malformed, &executor, &plan, &input_schema, 7).await
+        else {
+            panic!("a damaged current snapshot header must fail before section decoding");
+        };
+        assert!(matches!(
+            error.current_context(),
+            WindowSnapshotError::Invalid {
+                issue: WindowSnapshotIssue::Header
+            }
+        ));
         assert!(
-            decode_window_processor_snapshot(&malformed, &executor, &plan, &input_schema, 7)
-                .await
-                .is_err(),
-            "an invalid snapshot magic must fail to load"
+            error
+                .to_string()
+                .contains("recreate the stored window state")
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn empty_window_snapshot_preserves_typed_delayed_removals() {
         let plan = window_plan(
             "SET count = COUNT(input.latency)",

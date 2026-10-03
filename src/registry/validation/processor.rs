@@ -15,6 +15,7 @@ use nervix_models::{
     CreateGenerator, CreateInferencer, CreateLookup, CreateSchema, CreateWindowProcessor,
     DomainName, Expression, FieldName, FlushPolicy, ModelIndex, ModelKind, ModelName, NodeRef,
     ProcessorOutput, ProcessorOutputs, RelayName, RouteConstruction, SchemaField, SchemaName,
+    parse_duration_text,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
@@ -39,10 +40,9 @@ use crate::registry::{
         },
         materialized_state::referenced_materialized_stream_bindings,
         schema::{
-            arrow_data_type_for_parse_as, arrow_schema_for_internal_schema,
-            ensure_equal_internal_schema, ensure_internal_schema_compatibility,
-            readonly_binding_for_internal_schema, schema_sensitivity_for_internal_schema,
-            writable_binding_for_internal_schema,
+            arrow_schema_for_internal_schema, ensure_equal_internal_schema,
+            ensure_internal_schema_compatibility, readonly_binding_for_internal_schema,
+            schema_sensitivity_for_internal_schema, writable_binding_for_internal_schema,
         },
         vm::{BRANCH_NAMESPACE, INNER_OUTPUT_NAMESPACE, udf_compile_options},
         window_route::validate_window_route_types,
@@ -129,7 +129,7 @@ fn ensure_input_collect_policy(
     let Some(policy) = policy else {
         return Ok(());
     };
-    let duration = humantime::parse_duration(&policy.collect_for).map_err(|error| {
+    let duration = parse_duration_text(&policy.collect_for).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -369,13 +369,13 @@ fn effective_wasm_output_filter_map_schema(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
-
     Ok(output_schema.clone())
 }
 
@@ -551,12 +551,13 @@ fn validate_window_route_where(
         udf_compile_options(models, CompileOptions::default()),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "window output '{}' WHERE compile failed: {}",
-                output.relay, error.message
+                output.relay, message
             ),
         })
     })?;
@@ -572,15 +573,13 @@ pub(in crate::registry) fn parse_window_bound_duration(
     let Some(duration) = duration else {
         return Ok(());
     };
-    humantime::parse_duration(duration)
-        .map(|_| ())
-        .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!("invalid window {bound_name} duration '{duration}': {error}"),
-            })
+    parse_duration_text(duration).map(|_| ()).map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("invalid window {bound_name} duration '{duration}': {error}"),
         })
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -656,7 +655,7 @@ pub(in crate::registry) fn ensure_processor_output_flush_policies(
         else {
             continue;
         };
-        humantime::parse_duration(interval).map_err(|error| {
+        parse_duration_text(interval).map_err(|error| {
             Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -897,13 +896,13 @@ fn validate_where_program_for_scoped_internal_schemas(
         udf_compile_options(models, compile_options),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("{clause_name} compile failed: {}", error.message),
+            reason: format!("{clause_name} compile failed: {}", message),
         })
     })?;
-
     Ok(())
 }
 
@@ -982,10 +981,11 @@ pub(in crate::registry) fn effective_processor_output_filter_map_schema(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
 
@@ -1092,10 +1092,11 @@ pub(in crate::registry) fn ensure_deduplicator_key_compiles(
         udf_compile_options(models, CompileOptions::default()).udf_signatures,
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("DEDUPLICATE ON compile failed: {}", error.message),
+            reason: format!("DEDUPLICATE ON compile failed: {}", message),
         })
     })?;
     if key_types.len() != deduplicator.deduplicate_on.len() {
@@ -1116,7 +1117,7 @@ pub(in crate::registry) fn validate_correlator(
     left_schemas: &[(&RelayName, &CreateSchema)],
     right_schemas: &[(&RelayName, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
-    humantime::parse_duration(&correlator.max_time).map_err(|error| {
+    parse_duration_text(&correlator.max_time).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -1218,10 +1219,11 @@ fn validate_correlate_where_for_internal_schemas(
         udf_compile_options(models, CompileOptions::default()),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("CORRELATE WHERE compile failed: {}", error.message),
+            reason: format!("CORRELATE WHERE compile failed: {}", message),
         })
     })?;
 
@@ -1331,13 +1333,13 @@ pub(in crate::registry) fn validate_correlator_output(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "correlator TO output '{}' compile failed: {}",
-                output.relay.as_str(),
-                error.message
+                output.relay, message
             ),
         })
     })?;
@@ -1477,12 +1479,13 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
             udf_compile_options(models, CompileOptions::default()).udf_signatures,
         )
         .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
+            let message = error.current_context().message.clone();
+            error.change_context(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
                     "inference input '{}' compile failed: {}",
-                    mapping.tensor, error.message
+                    mapping.tensor, message
                 ),
             })
         })?;
@@ -1493,7 +1496,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
                 reason: format!("inference input '{}' produced no value", mapping.tensor),
             }));
         };
-        let expected_type = arrow_data_type_for_parse_as(&mapping.schema.message_type());
+        let expected_type = mapping.schema.message_type().arrow_data_type();
         if inferred.data_type != expected_type || inferred.nullable {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
@@ -1583,10 +1586,11 @@ pub(in crate::registry) fn validate_inferencer_output_filter_map(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
 
@@ -1732,12 +1736,13 @@ pub(in crate::registry) fn validate_generator_output(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "generator output '{}' compile failed: {}",
-                output.relay, error.message
+                output.relay, message
             ),
         })
     })?;
@@ -1747,7 +1752,10 @@ pub(in crate::registry) fn validate_generator_output(
 #[cfg(test)]
 #[path = "processor/bytes_tests.rs"]
 mod bytes_tests;
-
+#[cfg(test)]
+mod duration_tests;
+#[cfg(test)]
+mod vm_report_tests;
 #[cfg(test)]
 mod tests {
     use std::fs;

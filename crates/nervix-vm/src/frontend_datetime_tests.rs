@@ -400,7 +400,7 @@ fn calendar_zone_and_format_failures_name_what_the_call_accepts() {
     // Row failures of `parse_datetime` quote positions and directives, never the text.
     let unreadable = UnreadableText::Mismatch {
         position: 4,
-        expected: TextExpectation::Literal(triomphe::Arc::from("-")),
+        expected: TextExpectation::Literal(nervix_primitives::sync::Arc::from("-")),
     };
     assert_eq!(
         crate::SideErrorReason::UnreadableDatetime(unreadable).to_string(),

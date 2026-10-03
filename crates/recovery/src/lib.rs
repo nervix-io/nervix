@@ -111,35 +111,27 @@ impl<T, E> NoReceiver for Result<T, E> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io,
-        sync::{Arc, Mutex},
-    };
+    use std::io;
 
+    use nervix_primitives::sync::{StdArc, blocking::Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
 
     /// Collects everything a scoped subscriber writes so a test can assert on what was reported.
     #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+    struct CapturedLogs(StdArc<Mutex<Vec<u8>>>);
 
     impl CapturedLogs {
         fn contents(&self) -> String {
-            let bytes = match self.0.lock() {
-                Ok(bytes) => bytes.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
-            };
+            let bytes = self.0.lock().clone();
             String::from_utf8_lossy(&bytes).into_owned()
         }
     }
 
     impl io::Write for CapturedLogs {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            match self.0.lock() {
-                Ok(mut bytes) => bytes.extend_from_slice(buf),
-                Err(poisoned) => poisoned.into_inner().extend_from_slice(buf),
-            }
+            self.0.lock().extend_from_slice(buf);
             Ok(buf.len())
         }
 

@@ -20,10 +20,14 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ClusterNodeIdentity, Timestamp};
+use crate::{ClusterNodeIdentity, Timestamp, parse_duration_text};
 
 mod admission;
+mod observation;
 pub use admission::DomainAdmissionWindow;
+pub use observation::{
+    DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, PacedDomainClock,
+};
 
 #[derive(Debug, Error)]
 pub enum DomainClockError {
@@ -234,6 +238,11 @@ where
 pub struct DomainClockPeriod(NonZeroU64);
 
 impl DomainClockPeriod {
+    /// Every positive nanosecond count is a period, so this conversion cannot fail.
+    pub const fn from_nanos(nanos: NonZeroU64) -> Self {
+        Self(nanos)
+    }
+
     pub const fn as_nanos(self) -> u64 {
         self.0.get()
     }
@@ -262,10 +271,9 @@ impl FromStr for DomainClockPeriod {
     type Err = DomainClockError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let duration =
-            humantime::parse_duration(value).map_err(|_| DomainClockError::InvalidPeriod {
-                value: value.to_string(),
-            })?;
+        let duration = parse_duration_text(value).map_err(|_| DomainClockError::InvalidPeriod {
+            value: value.to_string(),
+        })?;
         Self::try_from(duration).map_err(|_| DomainClockError::InvalidPeriod {
             value: value.to_string(),
         })
@@ -296,6 +304,11 @@ pub struct DomainClockSkew(u64);
 impl DomainClockSkew {
     pub const ZERO: Self = Self(0);
 
+    /// Every nanosecond count is a skew, so this conversion cannot fail.
+    pub const fn from_nanos(nanos: u64) -> Self {
+        Self(nanos)
+    }
+
     pub const fn as_nanos(self) -> u64 {
         self.0
     }
@@ -320,10 +333,9 @@ impl FromStr for DomainClockSkew {
     type Err = DomainClockError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let duration =
-            humantime::parse_duration(value).map_err(|_| DomainClockError::InvalidSkew {
-                value: value.to_string(),
-            })?;
+        let duration = parse_duration_text(value).map_err(|_| DomainClockError::InvalidSkew {
+            value: value.to_string(),
+        })?;
         Self::try_from(duration).map_err(|_| DomainClockError::InvalidSkew {
             value: value.to_string(),
         })
@@ -420,6 +432,16 @@ impl DomainClockState {
         let Some(logical_delta) = target_logical.duration_since(current_logical) else {
             return Ok(Duration::ZERO);
         };
+        self.wall_duration_for_logical_delta(logical_delta)
+    }
+
+    /// Converts a logical duration to physical time, rounding up so a cadence never fires early.
+    /// This form also works when an origin is too close to the timestamp limit to represent the
+    /// next logical boundary.
+    pub fn wall_duration_for_logical_delta(
+        &self,
+        logical_delta: Duration,
+    ) -> Result<Duration, Report<DomainClockError>> {
         if logical_delta.is_zero() {
             return Ok(Duration::ZERO);
         }

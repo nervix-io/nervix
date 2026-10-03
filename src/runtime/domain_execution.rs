@@ -5,7 +5,16 @@
 //! - **Depends on.** Vocabulary, installed plans and runtime infrastructure.
 //! - **Must not know.** Parsing or control-plane placement and transaction decisions.
 //!
-//! Existing model-backed execution fields violate the data-plane plan boundary.
+//! The installed revision owns the planned nodes, placement and executable decisions together.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "domain execution creation and routing publication install retained branch \
+                  services"
+    )
+)]
 
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
@@ -31,10 +40,10 @@ pub(super) enum DomainRoutingError {
 /// field that can change together during a schedule apply lives in this one value, so readers
 /// observe either the preceding revision or its complete replacement.
 #[derive(Clone)]
-#[cfg_attr(test, derive(Default))]
+#[cfg_attr(any(test, feature = "benchmarks"), derive(Default))]
 pub(crate) struct DomainRoutingSnapshot {
     pub(super) passive_only: bool,
-    pub(super) relay_registries: HashMap<RelayName, RelayRegistry>,
+    pub(super) message_error_plans: Arc<BoundMessageErrorRoutes>,
     pub(super) relay_schemas: HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) lookups: HashMap<LookupName, Arc<LookupRuntime>>,
@@ -81,6 +90,12 @@ impl DomainRouting {
         self.published.clone()
     }
 
+    /// The revision lifecycle code is staging, which is the published revision until it is first
+    /// mutated.
+    pub(super) fn staged(&self) -> StdArc<DomainRoutingSnapshot> {
+        self.current.clone()
+    }
+
     pub(super) fn publish(&mut self) {
         self.published.store(self.current.clone());
     }
@@ -106,12 +121,11 @@ impl std::ops::DerefMut for DomainRouting {
 }
 
 pub(super) struct DomainExecution {
-    pub(super) schedule: DomainSchedule,
+    pub(super) revision: Arc<ExecutionRevision>,
     pub(super) start_version: u64,
     pub(super) domain_clock: DomainClock,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) routing: DomainRouting,
-    pub(super) branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
@@ -125,7 +139,6 @@ pub(super) struct DomainExecution {
     pub(super) relay_state_tasks: HashMap<RelayName, RelayStateTask>,
     /// The single buffer-and-fan-out task for every relay owned by this cluster node.
     pub(super) relay_owner_tasks: HashMap<RelayName, RelayOwnerTask>,
-    pub(super) clients: HashMap<ClientName, Arc<Model>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
 }
 
@@ -167,7 +180,7 @@ impl DomainExecution {
 
 #[derive(Debug)]
 pub(crate) struct LookupRuntime {
-    pub(super) model: CreateLookup,
+    pub(super) plan: LookupResourcePlan,
     pub(super) schema: Arc<CompiledSchema>,
     pub(super) batch: Arc<RuntimeRecordBatch>,
     pub(super) entries: Arc<HashMap<String, usize>>,
@@ -176,8 +189,10 @@ pub(crate) struct LookupRuntime {
 
 #[derive(Debug, Clone)]
 pub(super) struct ObservedDomainTick {
+    pub(super) generation: u64,
     pub(super) tick_id: u64,
-    pub(super) wall_clock: Timestamp,
+    pub(super) logical_boundary: Timestamp,
+    pub(super) authority_utc: Timestamp,
 }
 
 #[derive(Debug)]
@@ -188,18 +203,29 @@ pub(super) struct RuntimeDomainState {
     pub(super) last_start: nervix_models::DomainStartPoint,
     pub(super) clock_authority: DomainClockAuthority,
     pub(super) clock: DomainClockLifecycle,
-    pub(super) progress: parking_lot::Mutex<Option<ObservedDomainTick>>,
+    pub(super) progress: watch::Sender<Option<ObservedDomainTick>>,
 }
 
 impl Runtime {
     /// Resolves the stable publication handle for a domain. Data-plane tasks call this once when
     /// they are created and retain a `DomainRoutingCache`; lifecycle and observability callers may
     /// resolve it directly because they are not batch paths.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(crate) fn domain_routing(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
-        self.inner
-            .domain_routings
-            .get(domain)
-            .map(|routing| routing.value().clone())
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain domain routing on the \
+             execution owner",
+            self.inner.domain_routings.get(domain)
+        )
+        .map(|routing| routing.value().clone())
     }
 
     pub(super) fn stage_domain_routing(
@@ -213,12 +239,33 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub(crate) fn domain_routing_cache(&self, domain: &DomainName) -> Option<DomainRoutingCache> {
         self.domain_routing(domain).map(DomainRoutingCache::new)
     }
 
     pub(crate) fn subscribe_domain_state(&self) -> watch::Receiver<u64> {
         self.inner.domain_status_changed.subscribe()
+    }
+
+    /// Waits until this node has installed the cluster's committed domains since it started.
+    ///
+    /// Until then the node holds no domain, so a domain it lacks may still be one the cluster has,
+    /// as right after a restart. From then on, a domain the node lacks is one the committed state
+    /// it installed does not hold.
+    pub(crate) async fn committed_domains_installed(&self) {
+        let mut installations = self.inner.domain_status_changed.subscribe();
+        let installed = installations
+            .wait_for(|installations| *installations > 0)
+            .await;
+        installed.assured("the runtime holds the sender of its own domain installations");
     }
 
     pub(crate) fn has_domain_clock_authority(
@@ -234,8 +281,10 @@ impl Runtime {
         })
     }
 
+    /// Installs `domains` as a committed revision would, each with the same assigned test clock
+    /// authority, for tests of the runtime and of the edges that observe it.
     #[cfg(test)]
-    pub(super) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
+    pub(crate) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
         let authority = DomainClockAuthority::assigned(
             nervix_models::DomainClockAuthorityRevision::INITIAL,
             nervix_models::ClusterNodeIdentity::new(
@@ -270,6 +319,9 @@ impl Runtime {
                 self.inner.domain_instantiation_errors.remove(&domain);
                 self.inner.in_flight_by_domain.remove(&domain);
                 self.inner
+                    .frozen_ownership_handoff_entities
+                    .retain(|key, _| key.domain != domain);
+                self.inner
                     .in_flight_by_ingestor
                     .retain(|key, _| key.domain != domain);
                 self.inner.generator_activity_by_domain.remove(&domain);
@@ -294,7 +346,7 @@ impl Runtime {
                     last_start: state.last_start.clone(),
                     clock_authority: authority.clone(),
                     clock,
-                    progress: parking_lot::Mutex::new(None),
+                    progress: watch::channel(None).0,
                 }
             });
             let generation_changed = entry.start_version != state.start_version;
@@ -305,7 +357,7 @@ impl Runtime {
             entry.clock_authority = authority.clone();
             entry.clock.synchronize(state, &authority);
             if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
-                *entry.progress.lock() = None;
+                entry.progress.send_replace(None);
             }
         }
         self.inner.domain_status_changed.send_modify(|version| {
@@ -318,17 +370,16 @@ impl Runtime {
     pub(in crate::runtime) async fn rebuild_domain_execution(
         &self,
         domain: &DomainName,
-        graph: Option<ActiveGraph>,
+        revision: Option<Arc<ExecutionRevision>>,
     ) -> Result<(), RuntimeError> {
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
             self.stop_domain_execution(domain, existing).await;
         }
 
-        let Some(graph) = graph else {
+        let Some(revision) = revision else {
             self.withdraw_undeclared_relay_subscriptions(domain, |_| false);
-            self.clear_domain_graph_handle(domain).await;
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         };
         let stopped = self
@@ -337,8 +388,7 @@ impl Runtime {
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
         if stopped || !self.inner.domains.contains_key(domain) {
-            self.clear_domain_graph_handle(domain).await;
-            self.clear_expiring_stream_states_for_domain(domain);
+            self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         }
         let domain_clock =
@@ -347,86 +397,52 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-        let scheduled_nodes = graph.unplaced_schedule_nodes();
-        let scheduled_node_map = scheduled_nodes
-            .iter()
-            .cloned()
-            .map(|node| (node.identity(), node))
-            .collect::<ScheduledNodes>();
-        self.install_state_identities_from_graph(domain, &scheduled_nodes);
-
-        let domain_graph = self.domain_graph_handle(domain).await;
+        self.install_state_identities_from_unplaced_revision(domain, &revision);
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
-        let mut transports = HashMap::new();
-        let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
-        let mut reingestor_specs = Vec::<ReingestorInputSpec>::new();
+        let mut reingestor_inputs = Vec::new();
         let tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
-        let mut reingestor_tasks = HashMap::new();
-        let branched_specs = branched_node_specs_from_scheduled_nodes(&scheduled_node_map);
-        let branch_relays = branch_relays_from_branched_specs(&branched_specs);
-        let model_index = graph
-            .nodes()
-            .into_iter()
-            .map(|node| (*node.config).clone())
-            .collect::<ModelIndex>();
+        let branched_specs = &revision.processors;
+        let activation_plan = &revision.activation;
+        let resource_plans = &revision.resources;
         let udf_executor = self
-            .compile_domain_udfs(
-                domain,
-                model_index
-                    .models()
-                    .filter_map(|model| {
-                        if let Model::Udf(udf) = model {
-                            Some(udf.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            )
+            .compile_domain_udfs(domain, resource_plans.udfs.clone())
             .await
-            .map_err(|error| RuntimeError::BuildDomainExecution {
+            .map_err(|error| RuntimeError::CompileDomainUdfs {
                 domain: domain.as_str().to_string(),
-                reason: format!("failed to compile domain UDFs: {error}"),
+                report: error,
             })?;
-
-        let activation_plan =
-            DomainActivationPlan::from_scheduled_nodes(domain, &scheduled_node_map)
-                .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let entrypoints = &revision.entrypoints;
+        let emitter_plans = &revision.emitters;
+        let branch_relays = branch_relays_from_plans(branched_specs, entrypoints);
         let ActivatedDomainSurfaces {
             codecs,
             signaling_protocols,
             endpoint_routes,
         } = self
-            .activate_domain_surfaces(domain, &activation_plan)
+            .activate_domain_surfaces(domain, activation_plan)
             .await?;
 
-        for node in graph.nodes() {
-            if node.config.kind() == ModelKind::Client {
-                transports.insert(ClientName::from(&node.identifier), node.config.clone());
-            }
-        }
-
         for relay in activation_plan.relays.values() {
-            let expiring_state = if branch_relays.contains(&relay.name) {
-                let state = self
-                    .expiring_stream_state(domain, &relay.name)
+            // A branch relay shares its presence with the relay's state placement, which outlives
+            // this execution; any other relay starts from a presence of its own.
+            let branch_presence = if branch_relays.contains(&relay.name) {
+                self.relay_branch_presence(domain, &relay.name)
                     .map_err(|error| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: error.to_string(),
-                    })?;
-                Some(state)
+                    })?
             } else {
-                None
+                Arc::new(BranchPresence::new())
             };
             let fanout = self
                 .relay_boundary_fanout_with_capacity(
@@ -436,17 +452,13 @@ impl Runtime {
                     RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
                 )
                 .await;
-            let registry = match expiring_state.as_ref() {
-                Some(state) => state.registry.clone(),
-                None => RelayRegistry::new(),
-            };
             relay_builders.insert(
                 relay.name.clone(),
                 RelayBoundaryBuilder {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    registry,
+                    branch_presence,
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -465,115 +477,52 @@ impl Runtime {
             }
         }
 
-        for node in graph.nodes() {
-            match node.config.as_ref() {
-                Model::Lookup(lookup) => {
-                    let Some(codec) = codecs.get(&lookup.decode_using_codec).cloned() else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing compiled codec '{}'",
-                                lookup.decode_using_codec.as_str()
-                            ),
-                        });
-                    };
-                    let runtime = self
-                        .load_lookup_runtime(domain, lookup.clone(), codec)
-                        .await
-                        .map_err(|error| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: error.to_string(),
-                        })?;
-                    lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
-                }
-                Model::Generator(generator) => {
-                    let Some(source_schema) =
-                        relay_schemas.get(&generator.materialized_relay).cloned()
-                    else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing generator materialized relay schema '{}'",
-                                generator.materialized_relay
-                            ),
-                        });
-                    };
-                    let source_branching = relay_branchings
-                        .get(&generator.materialized_relay)
-                        .cloned()
-                        .assured("the generator's validated source relay has branch routing");
-                    let source_branch_schema = RuntimeVmSchema::from_branching(&source_branching);
-                    let mut routes = Vec::new();
-                    for output in generator.output_routes.outputs() {
-                        let Some(output_schema) = relay_schemas.get(&output.relay).cloned() else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing generator output relay schema '{}'",
-                                    output.relay
-                                ),
-                            });
-                        };
-                        let program = compile_generator_set_program(
-                            domain,
-                            generator,
-                            output,
-                            GeneratorSetProgramSchemas {
-                                output: RuntimeVmSchema {
-                                    schema: output_schema.arrow_schema(),
-                                    sensitivity: output_schema.vm_sensitivity(),
-                                },
-                                source: RuntimeVmSchema {
-                                    schema: source_schema.arrow_schema(),
-                                    sensitivity: source_schema.vm_sensitivity(),
-                                },
-                                branch: source_branch_schema.clone(),
-                            },
-                            Some(&udf_executor),
-                        )?;
-                        routes.push((output.clone(), program, output_schema));
-                    }
-                    generator_specs.push((generator.clone(), source_branching, routes));
-                }
-                Model::Emitter(emitter) => {
-                    let mut inputs = Vec::with_capacity(emitter.from.relays().len());
-                    for input_relay in emitter.from.relays() {
-                        let Some(relay) = relay_builders.get_mut(input_relay) else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing emitter input relay '{}'",
-                                    input_relay.as_str()
-                                ),
-                            });
-                        };
-                        inputs.push((
-                            input_relay.clone(),
-                            relay.runtime_consumer_fan_in_for_mode(emitter.mode),
-                        ));
-                    }
-                    emitter_specs.push((emitter.clone(), inputs));
-                }
-                Model::Reingestor(reingestor) => {
-                    for from_relay in reingestor.from.relays() {
-                        let Some(relay) = relay_builders.get_mut(from_relay) else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing reingestor input relay '{}'",
-                                    from_relay.as_str()
-                                ),
-                            });
-                        };
-                        let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                        reingestor_specs.push(ReingestorInputSpec {
-                            reingestor: reingestor.clone(),
-                            from_relay: from_relay.clone(),
-                            receiver,
-                        });
-                    }
-                }
-                _ => {}
+        for lookup in resource_plans.lookups.values() {
+            let Some(codec) = codecs.get(&lookup.codec).cloned() else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing compiled codec '{}'", lookup.codec),
+                });
+            };
+            let runtime = self
+                .load_lookup_runtime(lookup.clone(), codec)
+                .await
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
+        }
+
+        for emitter in emitter_plans.emitters() {
+            let mut inputs = Vec::with_capacity(emitter.inputs.len());
+            for input in &emitter.inputs {
+                let Some(relay) = relay_builders.get_mut(&input.relay) else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("missing emitter input relay '{}'", input.relay),
+                    });
+                };
+                inputs.push((
+                    input.relay.clone(),
+                    relay.runtime_consumer_fan_in_for_mode(emitter.mode),
+                ));
+            }
+            emitter_specs.push((emitter.as_ref().clone(), inputs));
+        }
+        for plan in entrypoints.reingestors() {
+            for input in &plan.inputs {
+                let relay = relay_builders.get_mut(&input.relay).verified(
+                    "the entrypoint plan resolved every input relay against the activation plan \
+                     these relay boundaries were built from",
+                );
+                reingestor_inputs.push(PlannedReingestorInput {
+                    plan: plan.clone(),
+                    input: input.clone(),
+                    consumer: ReingestorInputConsumer::Registered(
+                        relay.runtime_consumer_fan_in_for_mode(plan.mode),
+                    ),
+                });
             }
         }
 
@@ -600,10 +549,6 @@ impl Runtime {
             processor_input_specs.push((node_spec.clone(), inputs));
         }
 
-        let relay_registries = relay_builders
-            .iter()
-            .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
-            .collect::<HashMap<_, _>>();
         let relay_services = relay_builders
             .into_iter()
             .map(|(identifier, relay)| {
@@ -615,6 +560,7 @@ impl Runtime {
                         relay.detached_runtime_consumer_count,
                         relay.remote_runtime_consumers,
                         None,
+                        relay.branch_presence,
                     )),
                 )
             })
@@ -622,50 +568,17 @@ impl Runtime {
         let relay_owner_tasks = relay_services
             .iter()
             .map(|(relay, services)| {
-                let registry = relay_registries.get(relay).cloned().verified(
-                    "the registries were built from the same relay set as the services this loop \
-                     walks",
-                );
                 (
                     relay.clone(),
                     self.spawn_relay_owner_task(
                         domain,
                         relay,
-                        registry,
                         services.clone(),
                         RelayRetention::default(),
                     ),
                 )
             })
             .collect();
-
-        let mut branched_entrypoints = HashMap::new();
-        let mut branched_entrypoint_senders = HashMap::new();
-        for spec in &branched_specs.entrypoints {
-            if spec.kind != ModelKind::Reingestor {
-                continue;
-            }
-            let template = materialize_ingestor_route_template(
-                spec,
-                &model_index,
-                &relay_registries,
-                &relay_services,
-            )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-            let Some(runtime) =
-                self.start_branched_entrypoint_runtime(domain, &spec.identifier, Some(template))
-            else {
-                continue;
-            };
-            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            branched_entrypoints
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(runtime);
-        }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
         let processor_specs = processor_input_specs
@@ -678,9 +591,7 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
-                model_index: &model_index,
                 relay_schemas: &relay_schemas,
-                relay_registries: &relay_registries,
                 relay_services: &relay_services,
                 relay_branchings: &relay_branchings,
                 materialized_stream_specs: &materialized_stream_specs,
@@ -694,6 +605,21 @@ impl Runtime {
             domain: domain.as_str().to_string(),
             reason: format!("failed to bind published processor plans: {reason:#}"),
         })?;
+        let message_error_plans = Arc::new(
+            BoundMessageErrorRoutes::bind(
+                revision.message_errors.clone(),
+                MessageErrorRouteBindingContext {
+                    relay_services: &relay_services,
+                    materialized_stream_specs: &materialized_stream_specs,
+                    lookups: &lookup_runtimes,
+                    udfs: &udf_executor,
+                },
+            )
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to bind message-error routes: {reason:#}"),
+            })?,
+        );
 
         for (node_spec, inputs) in processor_input_specs {
             let entity = NodeRef {
@@ -724,55 +650,19 @@ impl Runtime {
             relay_branchings: &relay_branchings,
             materialized_relay_specs: &materialized_stream_specs,
             lookups: &lookup_runtimes,
+            udfs: Some(&udf_executor),
         };
 
-        for (generator, source_branching, route_specs) in generator_specs {
-            let source_schema = relay_schemas
-                .get(&generator.materialized_relay)
-                .cloned()
-                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing generator materialized relay schema '{}'",
-                        generator.materialized_relay
-                    ),
-                })?;
-            let mut routes = Vec::with_capacity(route_specs.len());
-            for (output, program, output_schema) in route_specs {
-                let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing generator output relay '{}'", output.relay),
-                    });
-                };
-                let Some(output_services) = relay_services.get(&output.relay).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing generator output relay services '{}'",
-                            output.relay
-                        ),
-                    });
-                };
-                routes.push(GeneratorTaskRouteSpec::new(
-                    output,
-                    program,
-                    output_schema,
-                    output_registry,
-                    output_services,
-                ));
-            }
-            let entity = NodeRef {
-                kind: ModelKind::Generator,
-                identifier: ModelName::from(&generator.name),
-            };
+        for generator in resource_plans.generators.values() {
+            let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("generator binding failed: {report:#}"),
+            })?;
+            let entity = NodeRef::new(ModelKind::Generator, &generator.name);
             generator_tasks.insert(
                 entity,
-                self.spawn_generator_task(
-                    domain,
-                    &shutdown_tx,
-                    GeneratorTaskSpec::new(generator, source_schema, source_branching, routes),
-                )?,
+                self.spawn_generator_task(domain, &shutdown_tx, spec)?,
             );
         }
 
@@ -790,30 +680,25 @@ impl Runtime {
                         codecs: &codecs,
                         deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
                     },
-                    &transports,
                     emitter,
                     inputs,
                 )?,
             );
         }
 
-        for spec in reingestor_specs {
-            let entity = NodeRef {
-                kind: ModelKind::Reingestor,
-                identifier: ModelName::from(&spec.reingestor.name),
-            };
-            reingestor_tasks
-                .entry(entity)
-                .or_insert_with(Vec::new)
-                .push(self.spawn_reingestor_task(
-                    domain,
-                    &shutdown_tx,
-                    &branched_entrypoint_senders,
-                    spec.reingestor,
-                    spec.from_relay,
-                    spec.receiver,
-                )?);
-        }
+        let ReingestorRuntimes {
+            branched_entrypoints,
+            tasks: reingestor_tasks,
+        } = self
+            .start_reingestor_runtimes(
+                execution_build_deps,
+                &shutdown_tx,
+                RelayRuntimeHandles {
+                    services: &relay_services,
+                },
+                reingestor_inputs,
+            )
+            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
 
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -822,7 +707,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), scheduled_nodes, Vec::new()),
+                revision,
                 start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
@@ -830,7 +715,7 @@ impl Runtime {
                     domain,
                     DomainRoutingSnapshot {
                         passive_only: false,
-                        relay_registries,
+                        message_error_plans,
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,
@@ -843,7 +728,6 @@ impl Runtime {
                         processor_plans,
                     },
                 ),
-                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs.entrypoints),
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,
@@ -853,11 +737,9 @@ impl Runtime {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks,
-                clients: transports,
                 tasks,
             },
         );
-        domain_graph.store(Some(StdArc::new(graph)));
 
         Ok(())
     }
@@ -872,11 +754,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        CodecWireFormat, CreateCodec, CreateEndpoint, CreateRelay, CreateSchema,
+        AckMode, BranchSelection, CodecWireFormat, CreateBranch, CreateCodec, CreateEndpoint,
+        CreateGenerator, CreateLookup, CreateReingestor, CreateRelay, CreateSchema,
         CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainClockState, DomainConfig,
-        DomainPace, DomainState, DomainStatus, DomainTick, DomainTimeRate, EndpointType, JsonType,
-        MaterializedRelayState, Model, ParseAsType, RelayBranching, SchemaField,
-        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
+        DomainPace, DomainState, DomainStatus, DomainTick, DomainTimeRate, EndpointType,
+        FlushPolicy, JsonType, MaterializedRelayState, MessageErrorPolicy, Model, OutputBranch,
+        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+        SchemaField, SchemaFingerprint, SignalingProtocolOnConnect, SignalingWireFormat, Timestamp,
+        WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -919,6 +804,23 @@ mod tests {
         assert_eq!(
             second_revision.materialized_stream_owner_nodes.get(&relay),
             Some(&Some(second_owner))
+        );
+    }
+
+    #[test]
+    fn committed_domains_are_installed_once_the_first_committed_state_is_applied() {
+        use futures_util::FutureExt as _;
+
+        let runtime = Runtime::new();
+        let mut installed = std::pin::pin!(runtime.committed_domains_installed());
+        assert!(
+            (&mut installed).now_or_never().is_none(),
+            "a node that has installed nothing waits"
+        );
+        runtime.sync_committed_domains(&BTreeMap::new(), &BTreeMap::new());
+        assert!(
+            installed.now_or_never().is_some(),
+            "installing the committed state releases the wait, even when it holds no domain"
         );
     }
 
@@ -1004,7 +906,7 @@ mod tests {
                 .get(&domain("paced"))
                 .expect("domain should remain")
                 .progress
-                .lock()
+                .borrow()
                 .as_ref()
                 .map(|progress| progress.tick_id),
             Some(1)
@@ -1046,7 +948,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn execution_rejects_an_uninstalled_paced_clock() {
         let runtime = Runtime::new();
         let clock_domain = domain("paced");
@@ -1060,8 +962,11 @@ mod tests {
             .build_passive_execution_from_schedule(&clock_domain, &schedule)
             .await;
 
-        let Err(RuntimeError::BuildDomainExecution { domain, reason }) = result else {
+        let Err(report) = result else {
             panic!("execution must reject a paced domain without an installed mapping");
+        };
+        let RuntimeError::BuildDomainExecution { domain, reason } = report.current_context() else {
+            panic!("clock binding must report the failed domain execution");
         };
         assert_eq!(domain, clock_domain.as_str());
         assert!(
@@ -1070,7 +975,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn execution_rejects_a_mapping_without_a_committed_authority() {
         let runtime = Runtime::new();
         let clock_domain = domain("paced");
@@ -1091,8 +996,11 @@ mod tests {
             .build_passive_execution_from_schedule(&clock_domain, &schedule)
             .await;
 
-        let Err(RuntimeError::BuildDomainExecution { domain, reason }) = result else {
+        let Err(report) = result else {
             panic!("execution must reject a paced clock without its committed authority");
+        };
+        let RuntimeError::BuildDomainExecution { domain, reason } = report.current_context() else {
+            panic!("clock binding must report the failed domain execution");
         };
         assert_eq!(domain, clock_domain.as_str());
         assert!(
@@ -1101,7 +1009,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn passive_execution_keeps_a_stopped_clock_unreadable() {
         let runtime = Runtime::new();
         let clock_domain = domain("stopped");
@@ -1127,7 +1035,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn passive_execution_installs_planned_surfaces_without_admitting_endpoint_traffic() {
         let runtime = Runtime::new();
         let domain = domain("stopped_surfaces");
@@ -1210,13 +1118,291 @@ mod tests {
             vec!["events.example.com".to_string()]
         );
         runtime.publish_routed_endpoints(&domain, &execution);
-        assert!(runtime.inner.routed_endpoints.is_empty());
+        assert!(
+            runtime
+                .resolve_endpoint("events.example.com", "/ingest")
+                .is_none()
+        );
 
         execution.routing.passive_only = false;
         runtime.publish_routed_endpoints(&domain, &execution);
-        assert_eq!(runtime.inner.routed_endpoints.len(), 1);
+        assert!(
+            runtime
+                .resolve_endpoint("events.example.com", "/ingest")
+                .is_some()
+        );
         execution.routing.deactivate();
-        runtime.withdraw_routed_endpoints(&domain, &execution);
-        assert!(runtime.inner.routed_endpoints.is_empty());
+        runtime
+            .inner
+            .endpoint_intake_routes
+            .withdraw_domain(&domain);
+        assert!(
+            runtime
+                .resolve_endpoint("events.example.com", "/ingest")
+                .is_none()
+        );
+    }
+
+    fn tenant_schema(name: &str) -> CreateSchema {
+        CreateSchema {
+            name: named(name),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }
+    }
+
+    fn tenant_relay(name: &str, branching: RelayBranching) -> Model {
+        Model::Relay(CreateRelay {
+            name: named(name),
+            schema: named("payload"),
+            buffer: nonzero!(4usize),
+            branching,
+            materialized_state: None,
+        })
+    }
+
+    /// A reingestor copying `incoming` into `outgoing`, whose route leaves its records unbranched.
+    fn repartitioning_reingestor() -> Model {
+        Model::Reingestor(CreateReingestor {
+            name: named("repartition"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: with_inherit_all(ProcessorOutputs::single(named("outgoing")))
+                .with_flush_policy(FlushPolicy::Immediate)
+                .with_branch(OutputBranch::Unbranched),
+            mode: AckMode::Attached,
+            materialized_state: Vec::new(),
+            filter_where: None,
+        })
+    }
+
+    #[nervix_primitives::test]
+    async fn a_graph_build_starts_each_planned_reingestor_input() {
+        let runtime = Runtime::new();
+        let domain = domain("graph_reingestor");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let models = [
+            Model::Schema(tenant_schema("payload")),
+            tenant_relay("incoming", RelayBranching::unbranched()),
+            tenant_relay("outgoing", RelayBranching::unbranched()),
+            repartitioning_reingestor(),
+        ];
+        let graph = ActiveGraph::from_scheduled_models(&DomainSchedule::new(
+            domain.clone(),
+            models.into_iter().map(scheduled_model),
+            Vec::new(),
+        ))
+        .assured("two relays and the reingestor between them form a graph");
+
+        runtime
+            .rebuild_domain_execution(
+                &domain,
+                Some(
+                    ExecutionRevision::from_graph(&domain, &graph)
+                        .assured("the fixture graph has complete execution plans"),
+                ),
+            )
+            .await
+            .assured("a valid graph builds its domain execution");
+
+        {
+            let execution = runtime
+                .inner
+                .executions
+                .get(&domain)
+                .assured("the build installs the execution");
+            let repartition = named::<ModelName>("repartition");
+            assert!(
+                execution
+                    .revision
+                    .entrypoints
+                    .reingestor(&named("repartition"))
+                    .is_some()
+            );
+            assert_eq!(execution.branched_entrypoints[&repartition].len(), 1);
+            assert_eq!(
+                execution.reingestor_tasks[&NodeRef::new(ModelKind::Reingestor, repartition)].len(),
+                1
+            );
+        }
+        runtime
+            .rebuild_domain_execution(&domain, None)
+            .await
+            .assured("removing the graph stops the execution");
+        assert!(!runtime.inner.executions.contains_key(&domain));
+    }
+
+    #[nervix_primitives::test]
+    async fn an_unplaced_graph_binds_a_generator_from_its_materialized_source_plan() {
+        let runtime = Runtime::new();
+        let domain = domain("graph_generator");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let Model::Relay(mut source) = tenant_relay("notifications", RelayBranching::unbranched())
+        else {
+            unreachable!("the relay fixture returns a relay");
+        };
+        source.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+        let generator = Model::Generator(CreateGenerator {
+            name: named("synth"),
+            materialized_relay: source.name.clone(),
+            branched_by: BranchSelection::unbranched(),
+            each: "100ms".parse().assured("the fixture cadence is positive"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                relay: named("generated"),
+                construction: nervix_nspl::parse_route_construction(
+                    "SET tenant = relay_state.notifications.tenant",
+                )
+                .assured("the fixture route is valid NSPL"),
+                flush_policy: Some(FlushPolicy::Immediate),
+                message_error_policy: MessageErrorPolicy::Log,
+                branch: None,
+            }]),
+        });
+        let graph = ActiveGraph::from_scheduled_models(&DomainSchedule::new(
+            domain.clone(),
+            [
+                Model::Schema(tenant_schema("payload")),
+                Model::Relay(source),
+                tenant_relay("generated", RelayBranching::unbranched()),
+                generator,
+            ]
+            .into_iter()
+            .map(scheduled_model),
+            Vec::new(),
+        ))
+        .assured("the generator references the materialized source and output relay");
+
+        runtime
+            .rebuild_domain_execution(
+                &domain,
+                Some(
+                    ExecutionRevision::from_graph(&domain, &graph)
+                        .assured("the fixture graph has complete execution plans"),
+                ),
+            )
+            .await
+            .assured("the generator route binds from its planned source and output schemas");
+        let execution = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .assured("the running domain has an execution");
+        assert!(execution.generator_tasks.contains_key(&NodeRef::new(
+            ModelKind::Generator,
+            named::<GeneratorName>("synth")
+        )));
+        drop(execution);
+        runtime
+            .rebuild_domain_execution(&domain, None)
+            .await
+            .assured("removing the graph stops its generator task");
+    }
+
+    #[nervix_primitives::test]
+    async fn an_unplaced_lookup_graph_reports_a_missing_resource_store_before_activation() {
+        let runtime = Runtime::new();
+        let domain = domain("graph_lookup");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let graph = ActiveGraph::from_scheduled_models(&DomainSchedule::new(
+            domain.clone(),
+            [
+                Model::Schema(tenant_schema("payload")),
+                Model::WireJsonSchema(CreateWireSchema {
+                    name: named("payload_wire"),
+                    strictness: Default::default(),
+                    fields: vec![WireSchemaField {
+                        name: named("tenant"),
+                        ty: JsonType::String,
+                        optional: false,
+                    }],
+                }),
+                Model::Codec(CreateCodec {
+                    name: named("payload_codec"),
+                    wire_format: CodecWireFormat::Json {
+                        wire_schema: named("payload_wire"),
+                    },
+                    schema: named("payload"),
+                    encoding_rules: Vec::new(),
+                }),
+                Model::Lookup(CreateLookup {
+                    name: named("tenants"),
+                    key_field: named("tenant"),
+                    resource: named("tenant_bundle"),
+                    resource_version: 3,
+                    path: "tenants.jsonl".to_string(),
+                    decode_using_codec: named("payload_codec"),
+                }),
+            ]
+            .into_iter()
+            .map(scheduled_model),
+            Vec::new(),
+        ))
+        .assured("the lookup codec and key are declared");
+
+        let error = runtime
+            .rebuild_domain_execution(
+                &domain,
+                Some(
+                    ExecutionRevision::from_graph(&domain, &graph)
+                        .assured("the fixture graph has complete execution plans"),
+                ),
+            )
+            .await
+            .expect_err("a lookup cannot load before its resource store is attached");
+        assert!(error.to_string().contains("resource store is not attached"));
+        assert!(!runtime.inner.executions.contains_key(&domain));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_build_rejects_a_route_its_relay_is_not_branched_for() {
+        let domain = domain("branch_mismatch");
+        let branched = ScheduledNode::new(
+            tenant_relay("outgoing", RelayBranching::branched_by(named("by_tenant"))),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
+        .with_resolved_branching(Some(ResolvedBranching::branched(
+            named("by_tenant"),
+            tenant_schema("tenant_key"),
+        )));
+        let schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                scheduled_model(Model::Schema(tenant_schema("payload"))),
+                scheduled_model(Model::Schema(tenant_schema("tenant_key"))),
+                scheduled_model(Model::Branch(CreateBranch {
+                    name: named("by_tenant"),
+                    schema: named("tenant_key"),
+                    ttl: "5m".to_string(),
+                    eviction: None,
+                })),
+                scheduled_model(tenant_relay("incoming", RelayBranching::unbranched())),
+                branched,
+                scheduled_model(repartitioning_reingestor()),
+            ],
+            Vec::new(),
+        );
+
+        let error = ExecutionRevision::from_schedule(&schedule)
+            .err()
+            .assured("an unbranched route to a branched relay does not plan");
+
+        assert!(matches!(
+            error.current_context(),
+            crate::registry::ExecutionRevisionError::Entrypoints { domain: failed }
+                if failed == &domain
+        ));
+        assert!(format!("{error:#}").contains("outgoing"));
     }
 }

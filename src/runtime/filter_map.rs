@@ -5,7 +5,17 @@
 //! - **Depends on.** Compiled programs, Arrow batches and explicit execution timestamps.
 //! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
 
+use arrow_buffer::BooleanBufferBuilder;
+
 use super::*;
+
+/// What one expression program runs against: the node's bounded executor, which admits the program
+/// when it leaves the caller's task, and the domain time it reads.
+#[derive(Clone, Copy)]
+pub(super) struct ProgramRun<'a> {
+    pub(super) executor: &'a Executor,
+    pub(super) now: Timestamp,
+}
 
 #[cfg(test)]
 pub(super) async fn execute_filter_map_on_record(
@@ -18,9 +28,10 @@ pub(super) async fn execute_filter_map_on_record(
     execution_now: Timestamp,
 ) -> PlannedGeneralResult<Option<RuntimeRow>> {
     let keys = vec![branch_key.cloned()];
-    let metadata = vec![record.metadata().clone()];
+    let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
     let carrier = record.one_row_batch();
     let outcome = evaluate_filter_map_on_batch(
+        &Executor::default(),
         "subscription",
         processor,
         filter_map,
@@ -58,13 +69,21 @@ pub(super) async fn execute_filter_map_on_record(
 /// outcome came from, so a group never has to be evaluated a row at a time.
 pub(super) struct FilterMapOutcomeInputs<'a> {
     pub(super) carrier: &'a RuntimeRecordBatch,
-    pub(super) record_metadata: &'a [RuntimeRecordMetadata],
+    pub(super) record_metadata: &'a RecordMetadataColumns,
     pub(super) keys: &'a [Option<BranchKey>],
     pub(super) filter_map_metadata: Option<&'a IngestFilterMapMetadata>,
     pub(super) side_inputs: &'a HashMap<String, RuntimeValue>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn evaluate_filter_map_on_batch(
+    executor: &Executor,
     processor_kind: &str,
     processor: impl Into<ModelName>,
     filter_map: &CompiledProgramWithMaterializedInterest,
@@ -113,6 +132,10 @@ pub(super) async fn evaluate_filter_map_on_batch(
         }));
     }
     let executed = execute_filter_map_program_on_batch(
+        ProgramRun {
+            executor,
+            now: execution_now,
+        },
         processor_kind,
         processor,
         filter_map,
@@ -123,7 +146,6 @@ pub(super) async fn evaluate_filter_map_on_batch(
             side_inputs,
             ingest_metadata: filter_map_metadata,
         },
-        execution_now,
         (0..row_count).map(|_| AckSet::empty()).collect(),
         None,
     )
@@ -151,7 +173,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         // The metadata entry is read only to prove the selected row is inside the input; the
         // outcome slot is what this loop writes.
-        let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.get(input_row))
+        let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.row(input_row))
         else {
             return Err(Report::new(PlannedGeneralError {
                 acks: Vec::new(),
@@ -196,7 +218,9 @@ pub(super) async fn evaluate_filter_map_on_batch(
                 RuntimeRow::new(
                     output_batch.clone(),
                     output_row,
-                    record_metadata[input_row].clone(),
+                    record_metadata
+                        .row(input_row)
+                        .verified("selected input rows were checked against metadata above"),
                 )
                 .map_err(|error| {
                     Report::new(PlannedGeneralError {
@@ -223,7 +247,7 @@ impl InferencerFilterMapTensors<'_> {
                 .map(|declaration| {
                     arrow_schema::Field::new(
                         &declaration.tensor,
-                        crate::runtime_schema::arrow_data_type(&declaration.schema.message_type()),
+                        declaration.schema.message_type().arrow_data_type(),
                         false,
                     )
                 })
@@ -319,13 +343,20 @@ pub(super) fn expression_reads_sensitive_source(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn plan_filter_map_messages(
+    run: ProgramRun<'_>,
     processor_kind: &str,
     processor: impl Into<ModelName>,
     operation: MessageErrorOperation,
     program: &CompiledProgramWithMaterializedInterest,
     mut batch: RelayRecordBatch,
-    execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
 ) -> Result<FilterMapPlan, PlannedGeneralError> {
     let processor = processor.into();
@@ -337,6 +368,7 @@ pub(super) async fn plan_filter_map_messages(
         _ => operation.as_ref(),
     };
     let lookup_columns = match compute_lookup_hash_map_columns(
+        run.executor,
         program,
         &FilterMapBatchInputs {
             carrier: &batch.batch,
@@ -345,7 +377,7 @@ pub(super) async fn plan_filter_map_messages(
             side_inputs,
             ingest_metadata: None,
         },
-        execution_now,
+        run.now,
         None,
     )
     .await
@@ -407,10 +439,11 @@ pub(super) async fn plan_filter_map_messages(
     let mut acks = std::mem::take(&mut batch.acks);
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
     let result = match execute_program_with_selection_in_context(
+        run.executor,
         &program.compiled,
         &vm_batch,
         &VmExecutionContext {
-            now: execution_now,
+            now: run.now,
             injector: None,
         },
     )
@@ -431,18 +464,9 @@ pub(super) async fn plan_filter_map_messages(
         }
     };
 
-    let mut selected_rows = vec![false; acks.len()];
-    for row in result.selected_rows.iter() {
-        if row < selected_rows.len() {
-            selected_rows[row] = true;
-        }
-    }
-    for (row, selected) in selected_rows.iter().enumerate() {
-        if !selected {
-            acks[row].ack_success();
-        }
-    }
+    acknowledge_dropped_rows(&result.selected_rows, &mut acks);
 
+    let invalid_outputs = InvalidOutputRows::new(&result.batch);
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
@@ -491,14 +515,14 @@ pub(super) async fn plan_filter_map_messages(
                     record,
                     acks: std::mem::take(&mut acks[input_row]),
                 },
-                program.structured_side_error(execution_now, reason, side_error.span, operation),
+                program.structured_side_error(run.now, reason, side_error.span, operation),
                 partial_output.and_then(Result::ok),
                 state_snapshot.clone(),
-                execution_now,
+                run.now,
             ));
             continue;
         }
-        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             let record =
                 batch
@@ -520,7 +544,7 @@ pub(super) async fn plan_filter_map_messages(
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 structured_message_error(
-                    execution_now,
+                    run.now,
                     MessageErrorCode::Evaluation,
                     format!(
                         "{} '{}' failed to materialize {} output row: {}",
@@ -535,7 +559,7 @@ pub(super) async fn plan_filter_map_messages(
                 ),
                 None,
                 state_snapshot.clone(),
-                execution_now,
+                run.now,
             ));
             continue;
         }
@@ -558,10 +582,9 @@ pub(super) async fn plan_filter_map_messages(
                         error
                     ),
                 })?;
-        let output_metadata = success_input_rows
-            .iter()
-            .map(|input_row| metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let output_metadata = metadata.take(&success_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         let output_acks = success_input_rows
             .iter()
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
@@ -588,6 +611,27 @@ pub(super) async fn plan_filter_map_messages(
     })
 }
 
+/// Acknowledges every row of `acks` that the program's `WHERE` dropped. The kept rows are set in
+/// a bitmap directly from the selection, so the dropped rows are its clear bits, and a selection
+/// of every row drops none.
+fn acknowledge_dropped_rows(selection: &nervix_vm::RowSelection, acks: &mut [AckSet]) {
+    let nervix_vm::RowSelection::Selected(rows) = selection else {
+        return;
+    };
+    let mut kept = BooleanBufferBuilder::new(acks.len());
+    kept.append_n(acks.len(), false);
+    for &row in rows {
+        // A row outside the batch holds no ACK here to keep.
+        if row < acks.len() {
+            kept.set_bit(row, true);
+        }
+    }
+    let dropped = !&kept.finish();
+    for row in dropped.set_indices() {
+        acks[row].ack_success();
+    }
+}
+
 pub(super) struct EmitterFilterMapPlan {
     pub(super) batch: Option<RelayRecordBatch>,
     pub(super) headers: Option<Vec<EmitterHeaders>>,
@@ -595,7 +639,14 @@ pub(super) struct EmitterFilterMapPlan {
     pub(super) message_errors: Vec<PlannedMessageError>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the VM iterator maps selected output rows to the admitted input batch"
+    )
+)]
 pub(super) async fn plan_emitter_filter_map_batch(
+    executor: &Executor,
     emitter: &EmitterName,
     program: &CompiledEmitterFilterMapProgram,
     mut input: RelayRecordBatch,
@@ -604,6 +655,10 @@ pub(super) async fn plan_emitter_filter_map_batch(
 ) -> Result<EmitterFilterMapPlan, PlannedGeneralError> {
     let acks = std::mem::take(&mut input.acks);
     let body_result = execute_filter_map_program_on_batch(
+        ProgramRun {
+            executor,
+            now: execution_now,
+        },
         "emitter",
         emitter,
         &program.body,
@@ -614,7 +669,6 @@ pub(super) async fn plan_emitter_filter_map_batch(
             side_inputs,
             ingest_metadata: None,
         },
-        execution_now,
         acks,
         None,
     )
@@ -622,18 +676,9 @@ pub(super) async fn plan_emitter_filter_map_batch(
     let mut acks = body_result.acks;
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
 
-    let mut selected_rows = vec![false; acks.len()];
-    for row in body_result.selected_rows.iter() {
-        if row < selected_rows.len() {
-            selected_rows[row] = true;
-        }
-    }
-    for (row, selected) in selected_rows.iter().enumerate() {
-        if !selected {
-            acks[row].ack_success();
-        }
-    }
+    acknowledge_dropped_rows(&body_result.selected_rows, &mut acks);
 
+    let invalid_outputs = InvalidOutputRows::new(&body_result.batch);
     let mut successful_output_rows = Vec::new();
     let mut successful_input_rows = Vec::new();
     let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
@@ -719,7 +764,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                     continue;
                 }
             };
-        let invalid_fields = invalid_output_fields(&body_result.batch, output_row);
+        let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             let source_record = source_record("FILTER-MAP validation error")?;
             let partial_output = program
@@ -774,10 +819,9 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 emitter.as_str()
             ),
         })?;
-        let metadata = successful_input_rows
-            .iter()
-            .map(|input_row| input.metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let metadata = input.metadata.take(&successful_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         let output_acks = successful_input_rows
             .iter()
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
@@ -825,21 +869,29 @@ impl VmUninitializedInput {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn execute_prepared_filter_map(
+    run: ProgramRun<'_>,
     processor_kind: &str,
     processor: impl Into<ModelName>,
     program: &CompiledProgramWithMaterializedInterest,
     vm_batch: VmTypedBatch,
-    execution_now: Timestamp,
     acks: Vec<AckSet>,
     injector: Option<Arc<Box<dyn VmFunctionInjector>>>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
     let processor = processor.into();
     let result = match execute_program_with_selection_in_context(
+        run.executor,
         &program.compiled,
         &vm_batch,
         &VmExecutionContext {
-            now: execution_now,
+            now: run.now,
             injector,
         },
     )
@@ -874,20 +926,28 @@ pub(super) struct FilterMapBatchInputs<'a> {
     pub(super) ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn execute_filter_map_program_on_batch(
+    run: ProgramRun<'_>,
     processor_kind: &str,
     processor: impl Into<ModelName>,
     program: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapBatchInputs<'_>,
-    execution_now: Timestamp,
     acks: Vec<AckSet>,
     mut shared: Option<&mut SharedBatchColumns>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
     let processor = processor.into();
     let lookup_columns = match compute_lookup_hash_map_columns(
+        run.executor,
         program,
         &inputs,
-        execution_now,
+        run.now,
         shared.as_mut().map(|shared| &mut shared.lookups),
     )
     .await
@@ -947,11 +1007,14 @@ pub(super) async fn execute_filter_map_program_on_batch(
         }
     };
     execute_prepared_filter_map(
+        ProgramRun {
+            executor: run.executor,
+            now: run.now,
+        },
         processor_kind,
         processor,
         program,
         vm_batch,
-        execution_now,
         acks,
         inputs.ingest_metadata.map(|metadata| {
             IngestHeaderFunctionInjector::from_metadata(
@@ -963,14 +1026,21 @@ pub(super) async fn execute_filter_map_program_on_batch(
     .await
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) async fn evaluate_output_branch_program(
+    run: ProgramRun<'_>,
     node: impl Into<ModelName>,
     program: &CompiledBranchProgram,
     input: &RuntimeRecordBatch,
     output: &RuntimeRecordBatch,
     keys: &[Option<BranchKey>],
     side_inputs: &HashMap<String, RuntimeValue>,
-    execution_now: Timestamp,
 ) -> PlannedGeneralResult<Vec<PlannedGeneralResult<Option<BranchKey>>>> {
     let node = node.into();
     let row_count = output.batch().num_rows();
@@ -988,6 +1058,7 @@ pub(super) async fn evaluate_output_branch_program(
     }
     let namespace_batches = [("input", input), ("output", output), ("message", output)];
     let lookup_columns = compute_lookup_hash_map_columns(
+        run.executor,
         &program.program,
         &FilterMapBatchInputs {
             carrier: output,
@@ -996,7 +1067,7 @@ pub(super) async fn evaluate_output_branch_program(
             side_inputs,
             ingest_metadata: None,
         },
-        execution_now,
+        run.now,
         None,
     )
     .await
@@ -1038,10 +1109,11 @@ pub(super) async fn evaluate_output_branch_program(
         })
     })?;
     let result = execute_program_with_selection_in_context(
+        run.executor,
         &program.program.compiled,
         &vm_input,
         &VmExecutionContext {
-            now: execution_now,
+            now: run.now,
             injector: None,
         },
     )
@@ -1338,6 +1410,13 @@ pub(super) fn append_filter_map_datetime(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow access and the admitted expression executor own their generic \
+                  effects"
+    )
+)]
 pub(super) fn append_filter_map_nested_value(
     builder: &mut dyn ArrayBuilder,
     data_type: &ArrowDataType,
@@ -1488,9 +1567,9 @@ mod tests {
         FieldPath, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
         ProcessorInputs, RetryPolicy, Timestamp,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
-    use triomphe::Arc;
 
     use super::*;
     use crate::{
@@ -1530,7 +1609,7 @@ mod tests {
         .verified("INHERIT ALL requires a filter-map program")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_batch_validates_every_sidecar_length() {
         let schema = test_schema(&[("value", ParseAsType::I64)]);
         let program = validation_filter_map_program(&schema);
@@ -1539,16 +1618,18 @@ mod tests {
         let empty_carrier = carrier
             .slice(0, 0)
             .verified("a zero-length slice starts within the one-row batch");
-        let metadata = [row.metadata().clone()];
+        let metadata = RecordMetadataColumns::from_rows([row.metadata().clone()]);
+        let empty_metadata = RecordMetadataColumns::from_rows([]);
         let keys = [None];
         let side_inputs = HashMap::default();
         let outcomes = evaluate_filter_map_on_batch(
+            &Executor::default(),
             "junction",
             named::<ModelName>("validate_filter_map"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &empty_carrier,
-                record_metadata: &[],
+                record_metadata: &empty_metadata,
                 keys: &[],
                 filter_map_metadata: None,
                 side_inputs: &side_inputs,
@@ -1560,12 +1641,13 @@ mod tests {
         assert!(outcomes.is_empty());
 
         let error = evaluate_filter_map_on_batch(
+            &Executor::default(),
             "junction",
             named::<ModelName>("validate_filter_map"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
-                record_metadata: &[],
+                record_metadata: &empty_metadata,
                 keys: &keys,
                 filter_map_metadata: None,
                 side_inputs: &side_inputs,
@@ -1578,6 +1660,7 @@ mod tests {
         assert!(error.current_context().reason.contains("runtime metadata"));
 
         let error = evaluate_filter_map_on_batch(
+            &Executor::default(),
             "junction",
             named::<ModelName>("validate_filter_map"),
             &program,
@@ -1597,6 +1680,7 @@ mod tests {
 
         let empty_ingest_metadata = ingest_metadata_for_test(IngestMetadataKind::Headers, &[]);
         let error = evaluate_filter_map_on_batch(
+            &Executor::default(),
             "junction",
             named::<ModelName>("validate_filter_map"),
             &program,
@@ -1846,7 +1930,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_can_read_branch_namespace() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -1904,12 +1988,15 @@ mod tests {
         .expect("batch should build");
 
         let plan = plan_filter_map_messages(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::now(),
+            },
             "deduplicator",
             &named::<ModelName>("project_notifications"),
             MessageErrorOperation::Set,
             &program,
             batch,
-            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -1941,7 +2028,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn projection_can_read_branch_namespace() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2001,12 +2088,15 @@ mod tests {
         .expect("batch should build");
 
         let plan = plan_filter_map_messages(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::now(),
+            },
             "processor",
             &named::<ModelName>("project_notifications"),
             MessageErrorOperation::Set,
             &program,
             batch,
-            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -2042,7 +2132,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
         let schema = test_schema(&[(
             "vector",
@@ -2090,12 +2180,15 @@ mod tests {
         .expect("array input batch should build");
 
         let plan = plan_filter_map_messages(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::now(),
+            },
             "junction",
             &named::<ModelName>("copy_vectors"),
             MessageErrorOperation::Set,
             &program,
             batch,
-            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -2109,7 +2202,7 @@ mod tests {
         assert_eq!(row_value(&record, "vector"), Some(expected));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ordered_set_error_reports_operation_index_and_previous_partial_value() {
         let input_schema = test_schema(&[
             ("amount", ParseAsType::I64),
@@ -2164,12 +2257,15 @@ mod tests {
         .expect("input batch should build");
 
         let plan = plan_filter_map_messages(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::now(),
+            },
             "junction",
             &named::<ModelName>("calculate_amount"),
             MessageErrorOperation::Set,
             &program,
             batch,
-            Timestamp::now(),
             &HashMap::default(),
         )
         .await
@@ -2250,7 +2346,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2292,13 +2388,22 @@ mod tests {
             ),
             materialized_state: Vec::new(),
         };
+        let route = EmitterExecutionPlan::route(
+            &emitter,
+            input_schema.arrow_schema().as_ref(),
+            output_schema.arrow_schema().as_ref(),
+        )
+        .expect("emitter route must lower");
         let program = compile_emitter_filter_map_program(
             &domain("default"),
-            &emitter,
-            input_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
-            output_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
+            &emitter.name,
+            route.as_ref(),
+            RuntimeVmSchemaPair {
+                input: input_schema.arrow_schema(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: output_schema.arrow_schema(),
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
@@ -2312,22 +2417,13 @@ mod tests {
         *unsupported_emitter.sink = EmitSink::ZeroMq {
             client: named("zeromq_main"),
         };
-        let error = compile_emitter_filter_map_program(
-            &domain("default"),
+        let error = EmitterExecutionPlan::route(
             &unsupported_emitter,
-            input_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
-            output_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
-            RuntimeVmCompileContext {
-                available_materialized_streams: &HashMap::default(),
-                available_lookups: &HashMap::default(),
-                current_branching: &ResolvedBranching::unbranched(),
-                udfs: None,
-            },
+            input_schema.arrow_schema().as_ref(),
+            output_schema.arrow_schema().as_ref(),
         )
         .expect_err("ZeroMQ emitters must reject write_header");
-        assert!(error.to_string().contains("ZEROMQ emitters do not support"));
+        assert!(error.to_string().contains("ZEROMQ emitter"));
         let messages = [true, false]
             .into_iter()
             .map(|active| {
@@ -2353,6 +2449,7 @@ mod tests {
             RelayRecordBatch::from_messages(input_schema, messages).expect("batch must build");
 
         let plan = plan_emitter_filter_map_batch(
+            &Executor::default(),
             &emitter.name,
             &program,
             batch,
@@ -2384,7 +2481,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn subscription_predicate_reports_a_typed_evaluation_error() {
         use crate::runtime::subscription_predicate::SubscriptionPredicateExecutionError;
 
@@ -2409,6 +2506,7 @@ mod tests {
         ]);
 
         let error = execute_subscription_predicate_on_record(
+            &Executor::default(),
             &predicate,
             &record,
             Timestamp::from_unix_nanos(1),
@@ -2430,7 +2528,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn subscription_predicate_evaluates_only_selected_arrow_row() {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let where_clause = expression("input.value = (3 AS U32)");
@@ -2471,6 +2569,7 @@ mod tests {
             .expect("second Arrow row should be addressable");
 
         let selected = execute_subscription_predicate_on_record(
+            &Executor::default(),
             &predicate,
             &selected,
             Timestamp::from_unix_nanos(1),
@@ -2481,7 +2580,7 @@ mod tests {
         assert!(selected);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2588,9 +2687,9 @@ mod tests {
                 },
             ],
         }));
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("logic_ingestor"),
+            &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Headers,
             true,
             &construction(
@@ -2616,8 +2715,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("filter-map must compile")
-        .expect("program must exist");
+        .expect("filter-map must compile");
 
         let record = test_runtime_row([
             (
@@ -2698,7 +2796,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn large_vm_batches_preserve_results_through_public_vm_api() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2713,7 +2811,7 @@ mod tests {
             None,
         )
         .expect("reorderer key program should compile");
-        let records = (0..=VM_SPAWN_BLOCKING_ROW_THRESHOLD)
+        let records = (0..=VM_INLINE_ROW_LIMIT)
             .map(|sequence| {
                 test_runtime_row([
                     (
@@ -2724,7 +2822,7 @@ mod tests {
                         "sequence".to_string(),
                         RuntimeValue::U32(
                             u32::try_from(sequence)
-                                .assured("the VM blocking threshold fits a u32 test field"),
+                                .assured("the VM inline row limit fits a u32 test field"),
                         ),
                     ),
                     (
@@ -2738,6 +2836,7 @@ mod tests {
             .expect("VM input batch should build");
 
         let output = execute_program_with_selection_in_context(
+            &Executor::default(),
             &program.program,
             &input,
             &VmExecutionContext {
@@ -2748,9 +2847,6 @@ mod tests {
         .await
         .expect("large VM batch should execute");
 
-        assert_eq!(
-            output.batch.row_count(),
-            VM_SPAWN_BLOCKING_ROW_THRESHOLD + 1
-        );
+        assert_eq!(output.batch.row_count(), VM_INLINE_ROW_LIMIT + 1);
     }
 }

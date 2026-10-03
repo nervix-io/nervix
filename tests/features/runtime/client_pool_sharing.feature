@@ -68,6 +68,7 @@ Feature: Shared database client pools
       """
     And Postgres never reports more than 2 connections for application "nervix_shared_{{test_id}}"
 
+  @retained_task_handles
   Scenario: A borrower waiting on a full pool reports the wait and recovers
     Given Postgres table "contended_pool_out_{{test_id}}" exists
     When these NSPL commands are executed
@@ -124,6 +125,7 @@ Feature: Shared database client pools
       {"postgres_user_id":2,"postgres_action":"open"}
       """
 
+  @retained_task_handles
   Scenario: A pool outlives one user and closes with the last
     Given Postgres table "retired_pool_out_{{test_id}}" exists
     When these NSPL commands are executed

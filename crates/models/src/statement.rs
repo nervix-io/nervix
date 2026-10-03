@@ -22,7 +22,7 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    AlterSchema, AlterWireSchema, AvroType, BranchKeyFingerprint, BranchName, CborType,
+    AlterSchema, AlterWireSchema, AvroType, Backup, BranchKeyFingerprint, BranchName, CborType,
     ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, CommandExecutionReference,
     ConsumerGroupName, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
     CreateJsonWireSchema, CreateSchema, CreateUdf, DeduplicatorName, DomainClockPeriod,
@@ -30,7 +30,7 @@ use crate::{
     FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
     ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
     QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
-    ResetWasmState, ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName,
+    ResetWasmState, ResourceName, Restore, SchemaFingerprint, SchemaName, SignalingProtocolName,
     SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
     UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
     WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
@@ -49,6 +49,8 @@ pub enum Statement {
     RebindResource(RebindResource),
     ResetWasmState(ResetWasmState),
     UploadResource(UploadResource),
+    Backup(Backup),
+    Restore(Restore),
     StartDomain(StartDomain),
     StopDomain(StopDomain),
     Create(CreateStatement<Box<Model<RequestedResourceVersion>>>),
@@ -91,6 +93,7 @@ pub enum Statement {
     LookupQuery(LookupQuery),
     ShowCreate(ShowCreate),
     ShowUdfs(ShowUdfs),
+    ShowIngestors(ShowIngestors),
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
@@ -136,6 +139,8 @@ impl Statement {
             | Self::CreateUser(_)
             | Self::CreateResource(_)
             | Self::UploadResource(_)
+            | Self::Backup(_)
+            | Self::Restore(_)
             | Self::StartDomain(_)
             | Self::StopDomain(_)
             | Self::DropNode(_)
@@ -163,6 +168,7 @@ impl Statement {
             | Self::LookupQuery(_)
             | Self::ShowCreate(_)
             | Self::ShowUdfs(_)
+            | Self::ShowIngestors(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowClusterStatus(_)
@@ -372,6 +378,13 @@ pub struct ShowUdfs;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowPlacements;
+
+/// Lists the ingestors of the selected domain with their source, schema or codec, execution owner
+/// and state, and the producers each client ingestor has attached.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowIngestors;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -784,7 +797,17 @@ fn format_relocation_members(members: &[RelocationMember]) -> String {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumIter,
+    EnumString,
+    IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum SubscriptionDeliveryBehavior {
@@ -1304,7 +1327,7 @@ declare_models! {
 impl Model {
     pub fn executes_on_every_cluster_node(&self) -> bool {
         if let Self::Ingestor(ingestor) = self {
-            ingestor.source.executes_on_every_cluster_node()
+            ingestor.input.executes_on_every_cluster_node()
         } else {
             false
         }
@@ -1486,18 +1509,6 @@ impl CodecWireFormat {
         }
     }
 
-    pub fn supports_decoding(&self) -> bool {
-        match self {
-            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
-            Self::JaqNative {
-                transformations, ..
-            }
-            | Self::Protobuf(CodecProtobufConfig {
-                transformations, ..
-            }) => transformations.on_ingestion.is_some(),
-        }
-    }
-
     /// How this format frames the member values of one batch into a single payload.
     pub fn batch_container(&self) -> CodecBatchContainer<'_> {
         match self {
@@ -1536,6 +1547,21 @@ impl CodecWireFormat {
             | Self::Protobuf(CodecProtobufConfig {
                 transformations, ..
             }) => transformations.on_emitting.is_some(),
+        }
+    }
+}
+
+impl<Version> CodecWireFormat<Version> {
+    /// Whether this codec can decode incoming payloads, independent of resource version state.
+    pub fn supports_decoding(&self) -> bool {
+        match self {
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
+            Self::JaqNative {
+                transformations, ..
+            }
+            | Self::Protobuf(CodecProtobufConfig {
+                transformations, ..
+            }) => transformations.on_ingestion.is_some(),
         }
     }
 }
@@ -1670,16 +1696,20 @@ pub struct CreateEmitter {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EmitterBody {
-    Codec { codec: CodecName },
+    Codec {
+        codec: CodecName,
+    },
     WithoutBody,
     Values,
+    /// Native Arrow columns constructed against the declared client output schema.
+    Client,
 }
 
 impl EmitterBody {
     pub fn codec(&self) -> Option<&CodecName> {
         match self {
             Self::Codec { codec } => Some(codec),
-            Self::WithoutBody | Self::Values => None,
+            Self::WithoutBody | Self::Values | Self::Client => None,
         }
     }
 }
@@ -1826,7 +1856,10 @@ impl CreateEmitter {
                 }
             }
             AlterEmitterOperation::SetClient { client } => {
-                *self.sink.client_mut() = client.clone();
+                let Some(current) = self.sink.client_mut() else {
+                    return Err(Report::new(AlterEmitterError::ClientUnsupported));
+                };
+                *current = client.clone();
             }
             AlterEmitterOperation::SetEncodeUsing { codec } => {
                 self.body = EmitterBody::Codec {
@@ -1852,13 +1885,28 @@ impl CreateEmitter {
                 self.mode = *mode;
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
-                if !self.sink.accepts_publishing_mode(mode) {
+                let selected = match (self.sink.as_ref(), mode) {
+                    (
+                        EmitSink::Client { .. },
+                        EmitterPublishingMode::BrokerAck {
+                            window,
+                            ack_timeout,
+                            retry_policy,
+                        },
+                    ) => EmitterPublishingMode::ClientAck {
+                        window: *window,
+                        ack_timeout: ack_timeout.clone(),
+                        retry_policy: retry_policy.clone(),
+                    },
+                    _ => mode.clone(),
+                };
+                if !self.sink.accepts_publishing_mode(&selected) {
                     return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
                         sink: self.sink.transport_label().to_string(),
                         mode: mode.kind_label().to_string(),
                     }));
                 }
-                self.publishing_mode = mode.clone();
+                self.publishing_mode = selected;
             }
             AlterEmitterOperation::SetBatch { policy } => {
                 self.batch = Some(*policy);
@@ -1991,6 +2039,8 @@ pub enum AlterEmitterError {
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
+    #[error("CLIENT emitters do not name an external client")]
+    ClientUnsupported,
     #[error("HTTP emitters select an absent body with SET TO HTTP ... WITHOUT BODY")]
     HttpDropEncode,
     #[error("COMMIT policy is only supported by Iceberg emitters")]
@@ -2231,6 +2281,10 @@ const SQS_MESSAGE_SIZE_MAXIMUM: crate::PayloadSizeLimit =
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
+    /// The session consumer of this emitter's native Arrow output.
+    Client {
+        schema: SchemaName,
+    },
     Http {
         client: ClientName,
         method: crate::Expression,
@@ -2325,6 +2379,7 @@ pub enum EmitSink {
 /// The sink transport class used by capability decisions before an emitter is fully parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EmitSinkKind {
+    Client,
     Http,
     Kafka,
     Pulsar,
@@ -2347,6 +2402,7 @@ pub enum EmitSinkKind {
 impl EmitSinkKind {
     pub const fn capabilities(self) -> SinkCapabilities {
         match self {
+            Self::Client => SinkCapabilities::without_headers(),
             Self::Http | Self::Kafka | Self::Pulsar | Self::RabbitMq | Self::Nats | Self::Sqs => {
                 SinkCapabilities::with_headers()
             }
@@ -2368,6 +2424,7 @@ impl EmitSinkKind {
 impl EmitSink {
     pub const fn transport_kind(&self) -> EmitSinkKind {
         match self {
+            Self::Client { .. } => EmitSinkKind::Client,
             Self::Http { .. } => EmitSinkKind::Http,
             Self::Kafka { .. } => EmitSinkKind::Kafka,
             Self::Pulsar { .. } => EmitSinkKind::Pulsar,
@@ -2396,8 +2453,9 @@ impl EmitSink {
         self.into()
     }
 
-    pub fn client(&self) -> &ClientName {
+    pub fn client(&self) -> Option<&ClientName> {
         match self {
+            Self::Client { .. } => None,
             Self::Http { client, .. }
             | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
@@ -2414,7 +2472,7 @@ impl EmitSink {
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
-            | Self::Iceberg { client, .. } => client,
+            | Self::Iceberg { client, .. } => Some(client),
         }
     }
 
@@ -2439,6 +2497,7 @@ impl EmitSink {
 
     pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
         match self {
+            Self::Client { .. } => matches!(mode, EmitterPublishingMode::ClientAck { .. }),
             Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } => {
                 matches!(
                     mode,
@@ -2475,8 +2534,9 @@ impl EmitSink {
         }
     }
 
-    fn client_mut(&mut self) -> &mut ClientName {
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
         match self {
+            Self::Client { .. } => None,
             Self::Http { client, .. }
             | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
@@ -2493,7 +2553,7 @@ impl EmitSink {
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
-            | Self::Iceberg { client, .. } => client,
+            | Self::Iceberg { client, .. } => Some(client),
         }
     }
 
@@ -2512,6 +2572,7 @@ impl EmitSink {
 
     pub fn expected_client_type(&self) -> &'static str {
         match self {
+            Self::Client { .. } => "CLIENT",
             Self::Http { .. } => "HTTP",
             Self::Kafka { .. } => "KAFKA",
             Self::Pulsar { .. } => "PULSAR",
@@ -2588,6 +2649,7 @@ impl EmitSink {
 
     pub fn requires_codec(&self) -> bool {
         match self {
+            Self::Client { .. } => false,
             Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
@@ -2611,7 +2673,8 @@ impl EmitSink {
     /// Whether an emitter publishing to this sink may omit the batching clause.
     pub const fn batch_requirement(&self) -> crate::EmitterBatchRequirement {
         match self {
-            Self::ClickHouse { .. }
+            Self::Client { .. }
+            | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
             | Self::MongoDb { .. } => crate::EmitterBatchRequirement::Required,
@@ -2638,7 +2701,8 @@ impl EmitSink {
     pub const fn requires_batch_transformation(&self) -> bool {
         match self {
             Self::Sentry { .. } => true,
-            Self::Http { .. }
+            Self::Client { .. }
+            | Self::Http { .. }
             | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
@@ -2660,6 +2724,7 @@ impl EmitSink {
     /// The largest batch payload the destination protocol itself admits, where it fixes one.
     pub const fn batch_size_maximum(&self) -> Option<crate::PayloadSizeLimit> {
         match self {
+            Self::Client { .. } => None,
             Self::Sqs { .. } => Some(SQS_MESSAGE_SIZE_MAXIMUM),
             Self::Http { .. }
             | Self::Kafka { .. }
@@ -2687,7 +2752,8 @@ impl EmitSink {
                 max_commit_size,
                 ..
             } => Some((commit_each.as_str(), max_commit_size.as_str())),
-            Self::Http { .. }
+            Self::Client { .. }
+            | Self::Http { .. }
             | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
@@ -2868,22 +2934,44 @@ pub enum ClientPoolBoundsError {
 ///
 /// The two counts only mean anything together: a minimum above its maximum asks for a maintained
 /// size the ceiling forbids. [`ClientPoolBounds::new`] is the one place that ordering is decided,
-/// so every holder of a pair already knows its minimum is reachable.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+/// so every holder of a pair already knows its minimum is reachable. The serde and archived forms
+/// are decoded through it too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
 pub struct ClientPoolBounds {
     minimum: u32,
     maximum: NonZeroU32,
+}
+
+impl<'de> Deserialize<'de> for ClientPoolBounds {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// The two counts as the serde form carries them, before they are paired.
+        #[derive(Deserialize)]
+        struct Counts {
+            minimum: u32,
+            maximum: NonZeroU32,
+        }
+
+        let Counts { minimum, maximum } = Counts::deserialize(deserializer)?;
+        Self::new(minimum, maximum)
+            .map_err(|report| <D::Error as serde::de::Error>::custom(report.current_context()))
+    }
+}
+
+impl<D> RkyvDeserialize<ClientPoolBounds, D> for ArchivedClientPoolBounds
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<ClientPoolBounds, D::Error> {
+        let minimum: u32 = self.minimum.deserialize(deserializer)?;
+        let maximum: NonZeroU32 = self.maximum.deserialize(deserializer)?;
+        ClientPoolBounds::new(minimum, maximum).map_err(|report| {
+            <D::Error as rkyv::rancor::Source>::new(report.current_context().clone())
+        })
+    }
 }
 
 impl ClientPoolBounds {
@@ -3129,9 +3217,9 @@ impl ResolvedBranching {
 pub struct CreateIngestor {
     pub name: IngestorName,
     pub output_routes: ProcessorOutputs,
-    pub decode_using_codec: CodecName,
+    /// What the ingestor reads, and how what it reads becomes records of its input schema.
+    pub input: crate::IngestorInput,
     pub timestamp_source: Option<IngestTimestampSource>,
-    pub source: IngestSource,
     pub general_error_policy: GeneralErrorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<crate::Expression>,
@@ -3163,13 +3251,41 @@ impl CreateIngestor {
     ) -> error_stack::Result<(), AlterIngestorError> {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
-                self.source = source.clone();
+                let crate::IngestorInput::Transport(input) = &mut self.input else {
+                    return Err(Report::new(AlterIngestorError::InputKindChange {
+                        current: self.input.kind().as_ref().to_string(),
+                        requested: crate::IngestorInputKind::Transport.as_ref().to_string(),
+                    }));
+                };
+                input.source = source.clone();
             }
-            AlterIngestorOperation::SetQuiesce { quiesce } => {
-                self.source.set_quiesce(quiesce.clone())?;
+            AlterIngestorOperation::SetClientSource { source } => {
+                let crate::IngestorInput::Client(current) = &mut self.input else {
+                    return Err(Report::new(AlterIngestorError::InputKindChange {
+                        current: self.input.kind().as_ref().to_string(),
+                        requested: crate::IngestorInputKind::Client.as_ref().to_string(),
+                    }));
+                };
+                *current = source.clone();
             }
+            AlterIngestorOperation::SetQuiesce { quiesce } => match &mut self.input {
+                crate::IngestorInput::Transport(input) => {
+                    input.source.set_quiesce(quiesce.clone())?;
+                }
+                crate::IngestorInput::Client(_) => {
+                    if !self.input.supports_quiesce(quiesce) {
+                        return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
+                            transport: self.input.source_label().to_string(),
+                            mode: quiesce.kind_label().to_string(),
+                        }));
+                    }
+                }
+            },
             AlterIngestorOperation::SetDecodeUsing { codec } => {
-                self.decode_using_codec = codec.clone();
+                let crate::IngestorInput::Transport(input) = &mut self.input else {
+                    return Err(Report::new(AlterIngestorError::CodecWithoutTransport));
+                };
+                input.codec = codec.clone();
             }
             AlterIngestorOperation::SetTimestamp { source } => {
                 self.timestamp_source = Some(source.clone());
@@ -3241,6 +3357,7 @@ pub struct AlterIngestor {
 )]
 pub enum AlterIngestorOperation {
     SetSource { source: IngestSource },
+    SetClientSource { source: crate::ClientIngestSource },
     SetQuiesce { quiesce: IngestQuiesceMode },
     SetDecodeUsing { codec: CodecName },
     SetTimestamp { source: IngestTimestampSource },
@@ -3268,6 +3385,13 @@ pub enum AlterIngestorError {
     CannotDropLastRoute,
     #[error("{transport} ingestors do not support ON QUIESCE {mode}")]
     UnsupportedQuiesceMode { transport: String, mode: String },
+    #[error(
+        "SET FROM cannot change a {current} source into a {requested} source; drop the ingestor \
+         and create it again"
+    )]
+    InputKindChange { current: String, requested: String },
+    #[error("a CLIENT ingestor decodes no payloads, so it has no codec to SET DECODE USING")]
+    CodecWithoutTransport,
 }
 
 #[derive(
@@ -4102,6 +4226,7 @@ pub enum IngestSource {
 /// The source transport class used by capability decisions before an ingestor is fully parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IngestSourceKind {
+    Client,
     Http,
     Kafka,
     Pulsar,
@@ -4118,6 +4243,83 @@ pub enum IngestSourceKind {
 }
 
 impl IngestSourceKind {
+    /// The transport sources the web console's visual editor offers. A client source takes
+    /// batches applications publish rather than a transport, and is created in NSPL.
+    pub const ALL: [Self; 13] = [
+        Self::Http,
+        Self::Kafka,
+        Self::Pulsar,
+        Self::Mqtt,
+        Self::Nats,
+        Self::RabbitMq,
+        Self::RedisPubSub,
+        Self::Prometheus,
+        Self::ZeroMq,
+        Self::Sqs,
+        Self::Endpoint,
+        Self::Websockets,
+        Self::Syslog,
+    ];
+
+    pub const fn form_key(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Http => "http",
+            Self::Kafka => "kafka",
+            Self::Pulsar => "pulsar",
+            Self::Mqtt => "mqtt",
+            Self::Nats => "nats",
+            Self::RabbitMq => "rabbitmq",
+            Self::RedisPubSub => "redis-pubsub",
+            Self::Prometheus => "prometheus",
+            Self::ZeroMq => "zeromq",
+            Self::Sqs => "sqs",
+            Self::Endpoint => "endpoint",
+            Self::Websockets => "websockets",
+            Self::Syslog => "syslog",
+        }
+    }
+
+    pub const fn form_label(self) -> &'static str {
+        match self {
+            Self::Client => "Client batches",
+            Self::Http => "HTTP polling",
+            Self::Kafka => "Kafka",
+            Self::Pulsar => "Pulsar",
+            Self::Mqtt => "MQTT",
+            Self::Nats => "NATS",
+            Self::RabbitMq => "RabbitMQ",
+            Self::RedisPubSub => "Redis Pub/Sub",
+            Self::Prometheus => "Prometheus",
+            Self::ZeroMq => "ZeroMQ",
+            Self::Sqs => "SQS",
+            Self::Endpoint => "Endpoint",
+            Self::Websockets => "WebSocket client",
+            Self::Syslog => "Syslog",
+        }
+    }
+
+    /// The configured client type a source may read. Endpoint ingestion names an endpoint instead,
+    /// and a client source reads the batches producers submit.
+    pub const fn client_type_label(self) -> Option<&'static str> {
+        match self {
+            Self::Client => None,
+            Self::Http => Some("HTTP"),
+            Self::Kafka => Some("KAFKA"),
+            Self::Pulsar => Some("PULSAR"),
+            Self::Mqtt => Some("MQTT"),
+            Self::Nats => Some("NATS"),
+            Self::RabbitMq => Some("RABBITMQ"),
+            Self::RedisPubSub => Some("REDIS"),
+            Self::Prometheus => Some("PROMETHEUS"),
+            Self::ZeroMq => Some("ZEROMQ"),
+            Self::Sqs => Some("SQS"),
+            Self::Endpoint => None,
+            Self::Websockets => Some("WEBSOCKETS"),
+            Self::Syslog => Some("SYSLOG"),
+        }
+    }
+
     pub const fn reads_headers(self) -> bool {
         match self {
             Self::Endpoint
@@ -4132,7 +4334,8 @@ impl IngestSourceKind {
             | Self::Prometheus
             | Self::ZeroMq
             | Self::Websockets
-            | Self::Syslog => false,
+            | Self::Syslog
+            | Self::Client => false,
         }
     }
 }
@@ -4401,10 +4604,21 @@ pub struct RetryPolicy {
     pub max_backoff: String,
 }
 
+/// How many acknowledgements an acknowledging mode keeps outstanding at once: one for
+/// `ACK SEQUENTIAL`, and up to `max` for `ACK PARALLEL MAX <max>`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
-pub enum EmitterAckWindow {
+pub enum AckWindow {
     Sequential,
     Parallel { max: NonZeroU64 },
 }
@@ -4413,11 +4627,16 @@ pub enum EmitterAckWindow {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EmitterPublishingMode {
+    ClientAck {
+        window: AckWindow,
+        ack_timeout: String,
+        retry_policy: RetryPolicy,
+    },
     NoAck {
         retry_policy: RetryPolicy,
     },
     BrokerAck {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
@@ -4425,17 +4644,17 @@ pub enum EmitterPublishingMode {
         retry_policy: RetryPolicy,
     },
     MqttQos1 {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
     MqttQos2 {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
     NatsJetStream {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
@@ -4453,7 +4672,8 @@ pub enum EmitterPublishingMode {
 impl EmitterPublishingMode {
     pub fn retry_policy(&self) -> &RetryPolicy {
         match self {
-            Self::NoAck { retry_policy }
+            Self::ClientAck { retry_policy, .. }
+            | Self::NoAck { retry_policy }
             | Self::BrokerAck { retry_policy, .. }
             | Self::MqttQos0 { retry_policy }
             | Self::MqttQos1 { retry_policy, .. }
@@ -4467,7 +4687,8 @@ impl EmitterPublishingMode {
 
     pub fn ack_timeout(&self) -> Option<&str> {
         match self {
-            Self::BrokerAck { ack_timeout, .. }
+            Self::ClientAck { ack_timeout, .. }
+            | Self::BrokerAck { ack_timeout, .. }
             | Self::MqttQos1 { ack_timeout, .. }
             | Self::MqttQos2 { ack_timeout, .. }
             | Self::NatsJetStream { ack_timeout, .. } => Some(ack_timeout),
@@ -4481,6 +4702,7 @@ impl EmitterPublishingMode {
 
     pub fn kind_label(&self) -> &'static str {
         match self {
+            Self::ClientAck { .. } => "ACK",
             Self::NoAck { .. } => "NO_ACK",
             Self::BrokerAck { .. } => "ACK",
             Self::MqttQos0 { .. } => "QOS 0",
@@ -4809,6 +5031,7 @@ pub struct CreateRelay {
     pub name: RelayName,
     pub schema: SchemaName,
     #[serde(default = "default_relay_buffer")]
+    #[rkyv(with = crate::CountAsU64)]
     pub buffer: NonZeroUsize,
     pub branching: RelayBranching,
     #[serde(default)]
@@ -4871,9 +5094,16 @@ pub struct AlterRelay {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum AlterRelayOperation {
-    SetCapacity { capacity: NonZeroUsize },
-    SetSchema { schema: SchemaName },
-    SetBranching { branching: RelayBranching },
+    SetCapacity {
+        #[rkyv(with = crate::CountAsU64)]
+        capacity: NonZeroUsize,
+    },
+    SetSchema {
+        schema: SchemaName,
+    },
+    SetBranching {
+        branching: RelayBranching,
+    },
     SetMaterializedState,
     DropMaterializedState,
 }
@@ -4925,10 +5155,23 @@ impl RelayBranching {
     }
 }
 
+/// The materialized state a relay keeps, spelled in `AsRefStr` as the keyword phrase that follows
+/// `WITH MATERIALIZED STATE`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    EnumIter,
 )]
 pub enum MaterializedRelayState {
+    #[strum(serialize = "LAST BY TIMESTAMP")]
     LastByTimestamp,
 }
 
@@ -5390,10 +5633,11 @@ impl ScheduledNode {
             components.push(OwnershipStateComponent::MaterializedRelay);
         }
         if let Model::Ingestor(ingestor) = self.config.as_ref()
+            && let crate::IngestorInput::Transport(input) = &ingestor.input
             && let IngestSource::Kafka {
                 offset_mode: KafkaOffsetMode::Domain,
                 ..
-            } = &ingestor.source
+            } = &input.source
         {
             components.push(OwnershipStateComponent::KafkaOffsets);
         }
@@ -6210,6 +6454,25 @@ mod tests {
         TableName,
     };
 
+    /// The archived layout of pool bounds, so a test can archive a pair the constructor refuses.
+    #[derive(rkyv::Archive, rkyv::Serialize)]
+    struct ArchivedPoolBounds {
+        minimum: u32,
+        maximum: std::num::NonZeroU32,
+    }
+
+    #[test]
+    fn decoders_refuse_a_minimum_above_the_maximum() {
+        let json = r#"{"minimum":5,"maximum":3}"#;
+        assert!(serde_json::from_str::<ClientPoolBounds>(json).is_err());
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&ArchivedPoolBounds {
+            minimum: 5,
+            maximum: nonzero!(3_u32),
+        })
+        .assured("the fields archive");
+        assert!(rkyv::from_bytes::<ClientPoolBounds, rkyv::rancor::Error>(&archived).is_err());
+    }
+
     #[test]
     fn branch_selection_displays_its_named_or_unbranched_declaration() {
         let name =
@@ -6554,15 +6817,17 @@ mod tests {
                         max_batch_size: "1MiB".to_string(),
                     },
                 )]),
-                decode_using_codec: named("codec"),
-                timestamp_source: None,
-                source: IngestSource::Endpoint {
-                    endpoint: named("public_http"),
-                    mode: EndpointIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::EndpointBuffer {
-                        max_size: "1MiB".to_string(),
+                input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                    source: IngestSource::Endpoint {
+                        endpoint: named("public_http"),
+                        mode: EndpointIngestMode::NoAckSequential,
+                        quiesce: IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
                     },
-                },
+                    codec: named("codec"),
+                }),
+                timestamp_source: None,
                 general_error_policy: GeneralErrorPolicy::Log,
 
                 filter_where: None,
@@ -6586,12 +6851,14 @@ mod tests {
                         max_batch_size: "1MiB".to_string(),
                     },
                 )]),
-                decode_using_codec: named("codec"),
+                input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                    source: IngestSource::Syslog {
+                        client: named("syslog_listener"),
+                        quiesce: IngestQuiesceMode::Suspend,
+                    },
+                    codec: named("codec"),
+                }),
                 timestamp_source: None,
-                source: IngestSource::Syslog {
-                    client: named("syslog_listener"),
-                    quiesce: IngestQuiesceMode::Suspend,
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
@@ -7086,7 +7353,7 @@ mod tests {
                 ],
             })
             .expect("emitter alter should apply");
-        assert_eq!(emitter.sink.client(), &named("sink_b"));
+        assert_eq!(emitter.sink.client(), Some(&named("sink_b")));
         assert_eq!(emitter.flush_policy, FlushPolicy::Immediate);
         assert_eq!(emitter.mode, AckMode::Detached);
         assert_eq!(
@@ -7156,7 +7423,7 @@ mod tests {
             .apply_alter(&replacement)
             .expect("complete HTTP replacement");
         assert_eq!(emitter.body, EmitterBody::WithoutBody);
-        assert_eq!(emitter.sink.client(), &named("other_api"));
+        assert_eq!(emitter.sink.client(), Some(&named("other_api")));
         let stored = serde_json::to_vec(&emitter).expect("current emitter should serialize");
         let restored: CreateEmitter =
             serde_json::from_slice(&stored).expect("current emitter should deserialize");
@@ -7611,15 +7878,17 @@ mod tests {
         let mut ingestor = CreateIngestor {
             name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: named("event_codec"),
-            timestamp_source: None,
-            source: IngestSource::Endpoint {
-                endpoint: named("ingress_a"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress_a"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            },
+                codec: named("event_codec"),
+            }),
+            timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };
@@ -7666,16 +7935,18 @@ mod tests {
             .expect("ingestor alter should apply");
 
         assert_eq!(
-            ingestor.source,
-            IngestSource::Endpoint {
-                endpoint: named("ingress_b"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            ingestor.input,
+            crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress_b"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            }
+                codec: named("event_codec_v2"),
+            })
         );
-        assert_eq!(ingestor.decode_using_codec, named("event_codec_v2"));
         assert_eq!(
             ingestor.timestamp_source,
             Some(super::IngestTimestampSource::Now)
@@ -7712,15 +7983,17 @@ mod tests {
         let base = CreateIngestor {
             name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: named("event_codec"),
-            timestamp_source: None,
-            source: IngestSource::Endpoint {
-                endpoint: named("ingress"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            },
+                codec: named("event_codec"),
+            }),
+            timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };

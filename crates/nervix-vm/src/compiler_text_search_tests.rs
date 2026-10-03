@@ -6,9 +6,8 @@
 //! - **Depends on.** The VM compiler and semantic NSPL expression parser.
 //! - **Must not know.** Runtime Arrow buffer layout.
 
-use std::sync::Arc;
-
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::*;
 use crate::{test_support::parse_program, text_search::ContainsAnyCall};
@@ -16,8 +15,8 @@ use crate::{test_support::parse_program, text_search::ContainsAnyCall};
 fn compile_assignment(
     expression: &str,
     result_type: DataType,
-) -> Result<CompiledProgram, CompileError> {
-    let input = Arc::new(Schema::new(vec![
+) -> error_stack::Result<CompiledProgram, CompileError> {
+    let input = StdArc::new(Schema::new(vec![
         Field::new("text", DataType::Utf8, true),
         Field::new("pattern", DataType::Utf8, true),
         Field::new("number", DataType::Int64, true),
@@ -32,7 +31,7 @@ fn compile_assignment(
     fields.push(Field::new("result", result_type, true));
     compile_program_for_bindings(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
     )
 }
@@ -73,7 +72,11 @@ fn text_search_rejects_wrong_types_and_arity() {
         let error = compile_assignment(expression, DataType::Utf8)
             .err()
             .verified("wrong argument contracts must be rejected");
-        assert_ne!(error.code, "unknown_function", "{expression}");
+        assert_ne!(
+            error.current_context().code(),
+            "unknown_function",
+            "{expression}"
+        );
     }
 }
 

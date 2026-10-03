@@ -13,6 +13,10 @@ const _: () = assert!(
     "command state storage splits its reservation evenly between payload and journal",
 );
 
+/// The working memory one password hash or verification allocates: Argon2id's default memory cost,
+/// which a node hashes every password with.
+const CREDENTIAL_WORKING_BYTES: ByteUnit = ByteUnit::Mebibyte(19);
+
 /// A bounded share of CPU admission onto the blocking pool in production, or onto the simulated
 /// scheduler in the Turmoil test build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,9 +25,21 @@ pub enum CpuClass {
     /// bulk work cannot take the slot a heartbeat, a vote, an acknowledgement or an administrative
     /// reply needs. The slot is not a reserved thread; see the crate documentation.
     Control,
-    /// Per-message data-plane work: relay body encoding and decoding, validation and hashing.
+    /// Password hashing and verification. Anyone who can reach a listener can make a node verify a
+    /// password, so this work holds only its own workers and budget: a burst of attempts never
+    /// takes what a heartbeat, a batch or a transfer needs, and saturated data, extension or bulk
+    /// work never keeps an operator from authenticating.
+    Credentials,
+    /// Per-message data-plane work the node bounds itself: relay body encoding and decoding,
+    /// validation and hashing, expression programs over large batches, branch preparation and
+    /// model inference.
     Data,
-    /// Whole-transfer work: resource archives, snapshots and other large read results.
+    /// Operator-supplied code the node runs but cannot bound: user-defined function calls and
+    /// codec transformations. Its share of admission is its own, so a program that never returns
+    /// holds only this class's workers and leaves the data class its whole capacity.
+    Extension,
+    /// Whole-transfer work: resource archives, snapshots and other large read results, and the
+    /// whole-file compilations and hashes that are not per message.
     Bulk,
 }
 
@@ -47,6 +63,7 @@ pub enum MemoryClass {
     Commands,
     Relay,
     Bulk,
+    Credentials,
 }
 
 impl MemoryClass {
@@ -56,6 +73,7 @@ impl MemoryClass {
             Self::Commands => "commands",
             Self::Relay => "relay",
             Self::Bulk => "bulk",
+            Self::Credentials => "credentials",
         }
     }
 }
@@ -71,7 +89,9 @@ impl WorkerClassName {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cpu(CpuClass::Control) => "control_cpu",
+            Self::Cpu(CpuClass::Credentials) => "credentials_cpu",
             Self::Cpu(CpuClass::Data) => "data_cpu",
+            Self::Cpu(CpuClass::Extension) => "extension_cpu",
             Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
             Self::Storage(StorageClass::Consensus) => "consensus_storage",
             Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
@@ -95,7 +115,9 @@ impl From<StorageClass> for WorkerClassName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerCounts {
     pub control_cpu: NonZeroUsize,
+    pub credentials_cpu: NonZeroUsize,
     pub data_cpu: NonZeroUsize,
+    pub extension_cpu: NonZeroUsize,
     pub bulk_cpu: NonZeroUsize,
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
@@ -105,15 +127,17 @@ pub struct WorkerCounts {
 }
 
 impl Default for WorkerCounts {
-    /// One reserved control and consensus worker each, data and bulk concurrency at the greater of
-    /// one and the available CPU count minus one, and two workers for ordinary filesystem work.
+    /// One reserved control and consensus worker each, one credentials worker, data, extension and
+    /// bulk concurrency at the greater of one and the available CPU count minus one, and two workers
+    /// for ordinary filesystem work.
     fn default() -> Self {
-        let available = match std::thread::available_parallelism() {
+        let available = match nervix_primitives::thread::available_parallelism() {
             Ok(available) => available.get(),
             Err(_) => 1,
         };
         // One CPU is reserved for control and consensus work; a single-CPU node still runs one
-        // data and one bulk worker, because refusing to run either is not a useful bound.
+        // data, one extension and one bulk worker, because refusing to run any is not a useful
+        // bound.
         let data = match available.checked_sub(1) {
             Some(remaining) => match NonZeroUsize::new(remaining) {
                 Some(data) => data,
@@ -123,7 +147,10 @@ impl Default for WorkerCounts {
         };
         Self {
             control_cpu: NonZeroUsize::MIN,
+            // A node verifies one password at a time, which is what its credentials budget holds.
+            credentials_cpu: NonZeroUsize::MIN,
             data_cpu: data,
+            extension_cpu: data,
             bulk_cpu: data,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
@@ -132,24 +159,27 @@ impl Default for WorkerCounts {
     }
 }
 
-/// The transient interconnection memory a node divides among its classes.
+/// The transient memory a node divides among its classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryBudgets {
     pub management: ByteUnit,
     pub commands: ByteUnit,
     pub relay: ByteUnit,
     pub bulk: ByteUnit,
+    pub credentials: ByteUnit,
 }
 
 impl Default for MemoryBudgets {
-    /// 256 MiB in total: 8 MiB reserved for management, 24 MiB for commands and replication,
-    /// 192 MiB for relay work and 32 MiB for bulk buffers.
+    /// 275 MiB in total: 8 MiB reserved for management, 24 MiB for commands and replication,
+    /// 192 MiB for relay work, 32 MiB for bulk buffers and 19 MiB for the one password hash a node
+    /// computes at a time.
     fn default() -> Self {
         Self {
             management: ByteUnit::Mebibyte(8),
             commands: ByteUnit::Mebibyte(24),
             relay: ByteUnit::Mebibyte(192),
             bulk: ByteUnit::Mebibyte(32),
+            credentials: CREDENTIAL_WORKING_BYTES,
         }
     }
 }
@@ -186,6 +216,9 @@ pub struct OperationLimits {
     pub snapshot_record_bytes: ByteUnit,
     /// How deeply a decoder may nest before it refuses the input.
     pub decoder_depth: NonZeroU32,
+    /// The working memory one password hash or verification may allocate. A stored hash whose
+    /// parameters need more is refused rather than verified outside the credentials budget.
+    pub credential_working_bytes: ByteUnit,
 }
 
 impl Default for OperationLimits {
@@ -203,6 +236,7 @@ impl Default for OperationLimits {
             snapshot_section_bytes: ByteUnit::Mebibyte(8),
             snapshot_record_bytes: ByteUnit::Mebibyte(1),
             decoder_depth: NonZeroU32::new(64).unwrap_or(NonZeroU32::MIN),
+            credential_working_bytes: CREDENTIAL_WORKING_BYTES,
         }
     }
 }
@@ -264,6 +298,7 @@ pub(crate) struct ValidatedBudgets {
     pub(crate) commands: u32,
     pub(crate) relay: u32,
     pub(crate) bulk: u32,
+    pub(crate) credentials: u32,
 }
 
 /// A node whose limits contradict each other never starts, so no operation discovers the
@@ -398,6 +433,12 @@ impl ExecutionConfig {
                     self.budgets.bulk,
                     "sealed snapshot section beside one body chunk",
                     bulk_required,
+                )?,
+                credentials: permits(
+                    MemoryClass::Credentials.as_str(),
+                    self.budgets.credentials,
+                    "password hash",
+                    self.limits.credential_working_bytes.as_u64(),
                 )?,
             },
             limits: self.limits,

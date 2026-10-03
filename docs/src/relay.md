@@ -22,6 +22,19 @@ Branching is defined by a schema name on a named branch:
 - `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
+The web console's **Create** menu also has a branch form. Its schema picker searches internal
+schemas in the captured domain, including schemas staged earlier in the attached transaction; the
+form requires a TTL and accepts the optional positive LRU instance limit. Registry validation
+remains authoritative for whether the selected schema can serve as a branch key.
+`SHOW CREATE BRANCH <name>` returns the stored branch's canonical declaration.
+
+The same menu has a relay form. It selects the relay's schema and branch from server-backed lists
+of the captured domain, including models staged earlier in the attached transaction, and requires
+an explicit **UNBRANCHED** or **BRANCHED BY** choice. Capacity starts from the default relay buffer,
+and materialized state is none or `LAST BY TIMESTAMP`. `SHOW CREATE RELAY <name>` returns the
+stored relay's canonical declaration, which always states its capacity. See
+[Web Console](client-tools-web-console.md).
+
 Relays select an explicit branch or declare unbranched execution:
 
 ```nspl
@@ -86,7 +99,7 @@ not expose the branch scope.
 
 ## Internal Payload Model
 
-After schema application, Nervix does not keep an internal per-message document format on relays. The runtime payload on a relay is an Apache Arrow record batch plus the schema and per-row runtime metadata needed for ACKs and watermark-based logic.
+After schema application, Nervix does not keep an internal per-message document format on relays. The runtime payload on a relay is an Apache Arrow record batch plus the schema, the row-aligned ACK state, and each row's low and high ingestion watermarks. The watermarks travel beside the batch in two Arrow buffers of Unix-nanosecond timestamps, which watermark-based logic and [delivery latency](metrics-and-observability.md#delivery-latency) read without converting each row.
 
 Apache Arrow is used here for two practical reasons:
 
@@ -102,9 +115,20 @@ Operationally that means:
 - batches remain branch-local until a `REINGESTOR` or `EMITTER` boundary changes the routing behavior
 - a producer on a nonowner cluster node serializes a batch once and holds one fixed ingress slot
   until the owner admits it into the relay buffer
-- the owner serializes an admitted batch once for each remote consuming cluster node; every local
-  runtime consumer on that node shares the delivery, and a session subscription on the same node
-  piggybacks on it
+- the owner serializes an admitted batch at most once for its remote runtime consumers and once for
+  remote session subscriptions, and shares each serialized body across the destination nodes; every
+  local runtime consumer on a node shares that node's delivery, and a session subscription on a node
+  that also hosts a runtime consumer piggybacks on it
+- a delivery that reaches a node after its attached consumer moved away fails its attached
+  acknowledgements, so the source redelivers the record along the owner's current routes; see
+  [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
+- an owner batch that starts fan-out while a schedule swap fences its consumer routes fails its
+  record acknowledgements and is retried by its source after the swap; fan-out already holding a
+  dispatch permit finishes before those routes change
+- an acknowledgement a receiver returns after the sending node restarted names that node's earlier
+  run, so the restarted node rejects it and its own records stay pending until their own
+  acknowledgements resolve; see
+  [Acknowledgement Registrations](interconnect.md#acknowledgement-registrations)
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 
@@ -118,6 +142,10 @@ state, when enabled, is the only replicated part of the relay; it is not a secon
 backpressure boundary, not a per-producer, per-consumer, or per-branch capacity. If downstream
 runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
 buffer and the fixed dispatch slots leading to it are occupied.
+
+The capacity is a positive integer, through `18446744073709551615` on native 64-bit targets.
+Creation and `ALTER RELAY ... SET CAPACITY` retain the exact accepted value in storage, replicated
+commands, and `SHOW CREATE` after a node or full-cluster restart.
 
 At most the following batches can be admitted or in dispatch for one relay:
 
@@ -219,10 +247,13 @@ the logical definition and owner buffer-utilization metrics. An ordinary relay r
 `replicas: -`. Traffic metrics remain on the producing or consuming runtime-node edge.
 
 `DESCRIBE RELAY <relay> WHERE (...)` is answered only by the current relay owner and reports
-owner-authoritative concrete-branch existence and buffer metrics. Relay presence and metrics are
-not replicated. A planned owner move drains admitted work before cutover; an owner failure loses
-buffered batches, presence, and relay metrics. Materialized records survive when a current state
-replica can become owner. Prometheus exports aggregate relay metrics without branch-key labels;
+owner-authoritative concrete-branch existence and buffer metrics. A branch exists from the moment
+the owner accepts a batch for it until the owner evicts or expires it. Relay presence and metrics
+are not replicated. A planned owner move drains admitted work before cutover; an owner failure loses
+buffered batches, presence, and relay metrics. A new owner, whether on another node or after the
+relay's execution is rebuilt on the same one, reports a branch only after it accepts a batch for
+that branch itself. Materialized records survive when a current state replica can become owner.
+Prometheus exports aggregate relay metrics without branch-key labels;
 see [Metrics And Observability](metrics-and-observability.md).
 
 ## Other Replicated Runtime State

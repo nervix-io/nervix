@@ -38,7 +38,6 @@ mod interest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -52,6 +51,7 @@ use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
 };
+use nervix_execution::Executor;
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
@@ -59,11 +59,17 @@ use nervix_models::{
     SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_primitives::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        oneshot,
+    },
+    task::JoinHandle,
+};
 use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
-use tokio::{sync::oneshot, task::JoinHandle};
-use triomphe::Arc;
 
 use self::delivery::SubscriptionDelivery;
 pub(in crate::application) use self::interest::SubscriptionInterests;
@@ -82,15 +88,13 @@ use super::{
 use crate::{
     runtime::{
         BranchKey, CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionDefinition,
-        Runtime, RuntimeError, SubscriptionPredicateCompileContext, compile_subscription_predicate,
-        execute_subscription_predicate_on_record, scheduled_relay_owner_nodes,
+        RuntimeError, SubscriptionPredicateCompileContext, compile_subscription_predicate,
+        execute_subscription_predicate_on_record,
     },
     runtime_schema,
     subscription_row::{SubscriptionBranchSchema, SubscriptionRowOpening, subscription_row_schema},
     task_shutdown::JoinShutdown,
 };
-
-static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum SessionCommandPlanError {
@@ -581,7 +585,7 @@ impl SessionSubscriptions {
             subscription.withdrawal.withdraw();
         }
         for (_, subscription) in subscriptions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             subscription.withdraw().await;
         }
     }
@@ -609,17 +613,27 @@ struct SubscriptionSelection {
 /// Which rows of one relay batch pass a subscription's filter and sampling.
 ///
 /// The filter reads the domain's execution time once for the batch. A row the filter cannot
-/// evaluate is skipped and counted, and the first failure is reported for the batch.
+/// evaluate is skipped and counted, and the first failure is reported for the batch. Sampling
+/// takes its draws from the node's `sampler`.
 async fn select_subscription_rows(
+    executor: &Executor,
     batch: &RelayRecordBatch,
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
-    runtime: &Runtime,
-    domain: &DomainName,
+    sampler: &SubscriptionSampler,
+    clock: &Result<
+        crate::runtime::DomainClockLifecycle,
+        Report<crate::runtime::DomainClockAccessError>,
+    >,
 ) -> SubscriptionSelection {
     let row_count = batch.record_batch().num_rows();
     let now = match predicate {
-        Some(_) => match runtime.domain_execution_snapshot(domain) {
+        Some(_) => match match clock {
+            Ok(clock) => clock
+                .execution_snapshot()
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        } {
             Ok(snapshot) => Some(snapshot.now()),
             Err(error) => {
                 let skipped = NonZeroU64::new(
@@ -645,12 +659,14 @@ async fn select_subscription_rows(
     let mut failed_rows = 0_u64;
     let mut first_failure = None;
     for row in 0..row_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let (Some(predicate), Some(now)) = (predicate, now) {
             let passed = match batch.runtime_row(row) {
-                Ok(record) => execute_subscription_predicate_on_record(predicate, &record, now)
-                    .await
-                    .map_err(|error| error.to_string()),
+                Ok(record) => {
+                    execute_subscription_predicate_on_record(executor, predicate, &record, now)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
                 Err(error) => Err(error.to_string()),
             };
             match passed {
@@ -671,7 +687,7 @@ async fn select_subscription_rows(
             .branch_keys()
             .get(row)
             .verified("a relay batch carries one branch key per row");
-        if !subscription_sample_passes(batch_sample_rate, key.as_ref()) {
+        if !sampler.passes(batch_sample_rate, key.as_ref()) {
             continue;
         }
         rows.push(row);
@@ -812,28 +828,44 @@ fn parse_subscription_batch_sample_rate(
     }
 }
 
-fn subscription_sample_passes(batch_sample_rate: Option<f64>, key: Option<&BranchKey>) -> bool {
-    let Some(rate) = batch_sample_rate else {
-        return true;
-    };
-    if rate >= 1.0 {
-        return true;
-    }
-    if rate <= 0.0 {
-        return false;
-    }
+/// The pseudo-random draws `BATCH SAMPLE RATE` takes, shared by every subscription on one node.
+///
+/// A draw hashes the next value of the node's draw sequence with the row's branch key. Every
+/// subscription on the node takes its draws from the same sequence, so two subscriptions sampling
+/// one relay draw independently rather than choosing the same rows. The node's session service
+/// owns the sampler, and the sequence starts again when the node does.
+#[derive(Debug, Default)]
+pub(in crate::application) struct SubscriptionSampler {
+    draws: AtomicU64,
+}
 
-    let counter = SESSION_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut hasher = Hasher::new();
-    hasher.update(&counter.to_le_bytes());
-    if let Some(key) = key {
-        hasher.update(key.as_str().as_bytes());
+impl SubscriptionSampler {
+    /// Whether a selected row of branch `key` passes sampling at `batch_sample_rate`. A missing
+    /// rate and the rates 1 and 0 decide without taking a draw.
+    fn passes(&self, batch_sample_rate: Option<f64>, key: Option<&BranchKey>) -> bool {
+        let Some(rate) = batch_sample_rate else {
+            return true;
+        };
+        if rate >= 1.0 {
+            return true;
+        }
+        if rate <= 0.0 {
+            return false;
+        }
+
+        // The sequence wraps after 2^64 draws, which only repeats a hash input.
+        let sequence = self.draws.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = Hasher::new();
+        hasher.update(&sequence.to_le_bytes());
+        if let Some(key) = key {
+            hasher.update(key.as_str().as_bytes());
+        }
+        let hash = hasher.finalize();
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&hash.as_bytes()[..8]);
+        let draw = u64::from_le_bytes(bytes).approx_into::<f64>() / u64::MAX.approx_into::<f64>();
+        draw < rate
     }
-    let hash = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&hash.as_bytes()[..8]);
-    let draw = u64::from_le_bytes(bytes).approx_into::<f64>() / u64::MAX.approx_into::<f64>();
-    draw < rate
 }
 
 pub(in crate::application) fn parse_subscription_literal(
@@ -961,7 +993,7 @@ impl SessionServiceImpl {
             .collect::<FuturesUnordered<_>>();
         let mut errors = BTreeMap::new();
         while let Some((node_id, result)) = checks.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
                 errors.insert(node_id.clone(), error);
             }
@@ -1022,7 +1054,12 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Vec::new();
         };
-        scheduled_relay_owner_nodes(domain_schedule, relay)
+        domain_schedule
+            .scheduled::<CreateRelay>(relay.clone())
+            .and_then(|scheduled| scheduled.node.execution_node())
+            .cloned()
+            .into_iter()
+            .collect()
     }
 
     async fn process_pending_session_commands(
@@ -1336,7 +1373,7 @@ impl SessionServiceImpl {
             lease,
             service: self.clone(),
         };
-        let delivery_task = tokio::spawn(generation.run(announced));
+        let delivery_task = nervix_primitives::task::spawn(generation.run(announced));
 
         Ok(OpenedSubscription {
             opened,
@@ -1437,7 +1474,7 @@ impl SessionServiceImpl {
         }
 
         for operation in request.operations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = match operation {
                 CommandExecutionTransactionOperation::Queue(statement) => {
                     self.queue_identified_transaction_statement(
@@ -1505,7 +1542,7 @@ impl SessionServiceImpl {
         let mut transaction = None;
 
         for operation in operations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = match operation {
                 SessionCommandOperation::Begin { domain } => {
                     match self.resolve_transaction_domain(domain.as_ref()).await {
@@ -1592,12 +1629,13 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use nervix_client_wire::{
         RowSchema, ServerEvent, ServerMessage, SubscriptionEndReason, VerifiedFrame,
     };
     use nervix_models::{SchemaField, SubscriptionDeliveryBehavior};
-    use tokio::time::{Duration, timeout};
-    use tokio_util::sync::CancellationToken;
+    use nervix_primitives::{sync::CancellationToken, time::timeout};
 
     use super::{
         super::{
@@ -1704,7 +1742,7 @@ mod tests {
                 handle,
                 domain,
                 withdrawal,
-                delivery: tokio::spawn(generation.run(announced)),
+                delivery: nervix_primitives::task::spawn(generation.run(announced)),
             },
             announce,
         }
@@ -1889,7 +1927,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test(start_paused = true)]
     async fn subscription_interest_request_preserves_the_remote_target() {
         let TestService {
             service,
@@ -1933,15 +1971,67 @@ mod tests {
         assert!(parse_subscription_batch_sample_rate(Some("bad")).is_err());
     }
 
-    #[test]
-    fn subscription_sampling_respects_extreme_rates() {
+    /// The decisions `sampler` makes for `rows` consecutive rows of one branch at `rate`.
+    fn sample_rows(sampler: &SubscriptionSampler, rate: f64, rows: usize) -> Vec<bool> {
         let key = string_branch_key("tenant", "acme");
-        assert!(subscription_sample_passes(None, key.as_ref()));
-        assert!(subscription_sample_passes(Some(1.0), key.as_ref()));
-        assert!(!subscription_sample_passes(Some(0.0), key.as_ref()));
+        let mut decisions = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            decisions.push(sampler.passes(Some(rate), key.as_ref()));
+        }
+        decisions
     }
 
-    #[tokio::test]
+    #[test]
+    fn subscription_sampling_decides_extreme_rates_without_a_draw() {
+        let sampler = SubscriptionSampler::default();
+        let key = string_branch_key("tenant", "acme");
+        assert!(sampler.passes(None, key.as_ref()));
+        assert!(sampler.passes(Some(1.0), key.as_ref()));
+        assert!(!sampler.passes(Some(0.0), key.as_ref()));
+        assert_eq!(sampler.draws.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn subscription_sampling_passes_about_its_rate_of_rows() {
+        let sampler = SubscriptionSampler::default();
+        let decisions = sample_rows(&sampler, 0.25, 10_000);
+        let mut passed = 0_usize;
+        for decision in decisions {
+            if decision {
+                passed += 1;
+            }
+        }
+        assert!(
+            (2_000..=3_000).contains(&passed),
+            "{passed} of 10000 rows passed a 0.25 sample"
+        );
+    }
+
+    #[test]
+    fn subscriptions_on_one_node_share_its_draws_and_nodes_do_not() {
+        let node = SubscriptionSampler::default();
+        let mut first_subscription = Vec::new();
+        let mut second_subscription = Vec::new();
+        // Two subscriptions to one relay each sample every row of it.
+        for _ in 0..64 {
+            first_subscription.extend(sample_rows(&node, 0.5, 1));
+            second_subscription.extend(sample_rows(&node, 0.5, 1));
+        }
+        assert_ne!(
+            first_subscription, second_subscription,
+            "subscriptions on one node draw independently rather than choosing the same rows"
+        );
+
+        let other_node = SubscriptionSampler::default();
+        let started_node = SubscriptionSampler::default();
+        assert_eq!(
+            sample_rows(&other_node, 0.5, 64),
+            sample_rows(&started_node, 0.5, 64),
+            "the draws of this node never advance another node's sequence"
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn announced_subscriptions_track_names_generations_and_withdrawal() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let (delivery, _frames) = session_delivery();
@@ -2000,7 +2090,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2055,7 +2145,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_unannounced_subscription_releases_everything_and_sends_nothing() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2099,7 +2189,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn deleting_a_blocking_subscription_whose_client_reads_nothing_releases_its_relay() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2136,13 +2226,13 @@ mod tests {
         }
         let held_schema = schema.clone();
         let held = events.clone();
-        let held_publisher = tokio::spawn(async move {
+        let held_publisher = nervix_primitives::task::spawn(async move {
             held.publish_for_test(user_id_batch(&held_schema, 999))
                 .await
         });
         timeout(WAIT, async {
             while events.waiting_publishers() == 0 {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -2172,7 +2262,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_closed_relay_ends_the_subscription_with_a_typed_reason_as_its_last_frame() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2216,7 +2306,7 @@ mod tests {
 
         timeout(WAIT, async {
             while subscriptions.contains_name(&named("live_events")) {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

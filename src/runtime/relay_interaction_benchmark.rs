@@ -1,29 +1,36 @@
-//! Opaque drivers for measuring relay-interaction scheduling in isolation.
+//! Opaque drivers for measuring relay-interaction scheduling, and the delivery a node input
+//! records for each batch it accepts, in isolation.
 //!
 //! This module only exists with the `benchmarks` feature. Its public surface deliberately exposes
 //! benchmark operations and observations instead of Nervix runtime carriers or channels.
 
-use std::{num::NonZeroUsize, sync::OnceLock, time::Duration};
+use std::{num::NonZeroUsize, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    CreateSchema, DomainClockAuthority, DomainConfig, DomainName, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, FieldName, ParseAsType, PlacementPolicy, RelayName, SchemaName,
-    Timestamp,
+    ClusterNodeName, CreateSchema, DomainClockAuthority, DomainConfig, DomainName, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind, ModelName, ParseAsType,
+    PlacementPolicy, RelayName, SchemaName, Timestamp,
 };
-use tokio::sync::{mpsc, watch};
+use nervix_primitives::{
+    sync::{mpsc, watch},
+    unmodeled::sync::OnceLock,
+};
 
 use super::{
-    DomainClockLifecycle, NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
-    RuntimeInputCollectPolicy, RuntimeWake,
+    DomainClockLifecycle, NodeQuiesceCounters, RelayBroadcast, RelayMessage, RelayRecordBatch,
+    RelayRuntimeFanIn, RuntimeInputCollectPolicy, RuntimeWake,
     force_flush::DomainForceFlush,
     relay_interaction::{
         RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
     },
 };
 use crate::{
+    metrics::{NodeInputMetricsHandle, RuntimeMetrics},
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecordMetadata, RuntimeValue, compile_schema},
+    runtime_schema::{
+        CompiledSchema, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, compile_schema,
+    },
 };
 
 /// The externally observable result of one benchmark driver step.
@@ -56,8 +63,8 @@ pub struct RelayInteractionBenchmark {
     sources: Vec<RelayBroadcast<RelayRecordBatch>>,
     shutdown_tx: watch::Sender<bool>,
     commands: mpsc::Sender<BenchmarkCommand>,
-    force_flush: triomphe::Arc<DomainForceFlush>,
-    quiesce_counters: triomphe::Arc<NodeQuiesceCounters>,
+    force_flush: nervix_primitives::sync::Arc<DomainForceFlush>,
+    quiesce_counters: nervix_primitives::sync::Arc<NodeQuiesceCounters>,
     batch: RelayRecordBatch,
 }
 
@@ -76,7 +83,7 @@ impl RelayInteractionBenchmark {
             source_count,
             capacity_per_source,
             Some(RuntimeInputCollectPolicy {
-                interval: tokio::time::Duration::from_secs(3_600),
+                interval: std::time::Duration::from_secs(3_600),
                 max_batch_size: None,
             }),
         )
@@ -131,7 +138,7 @@ impl RelayInteractionBenchmark {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (commands, command_rx) = mpsc::channel(1);
         let force_flush = DomainForceFlush::new();
-        let quiesce_counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let quiesce_counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let participant = DomainForceFlush::subscribe(&force_flush, Some(quiesce_counters.clone()));
         let interaction = RelayInteraction::with_commands(
             inputs,
@@ -227,11 +234,11 @@ impl RelayInteractionBenchmark {
     }
 }
 
-fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
-    static SCHEMA: OnceLock<triomphe::Arc<CompiledSchema>> = OnceLock::new();
+fn benchmark_schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
+    static SCHEMA: OnceLock<nervix_primitives::sync::Arc<CompiledSchema>> = OnceLock::new();
     SCHEMA
         .get_or_init(|| {
-            triomphe::Arc::new(compile_schema(&CreateSchema {
+            nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
                 name: SchemaName::parse("relay_interaction_benchmark").assured(
                     "the name is built here from fixed text that satisfies the identifier grammar",
                 ),
@@ -270,4 +277,91 @@ fn benchmark_batch() -> RelayRecordBatch {
         .assured("the single I64 value is built here against the schema declared beside it");
     RelayRecordBatch::single(schema, None, record, AckSet::empty())
         .assured("the single I64 value is built here against the schema declared beside it")
+}
+
+/// A node input with branch-local series beside its global ones, and one relay batch it accepts,
+/// prepared for measuring what recording that batch's delivery costs.
+pub struct DeliveryObservationBenchmark {
+    input: NodeInputMetricsHandle,
+    batch: RelayRecordBatch,
+    delivered_at: Timestamp,
+}
+
+impl DeliveryObservationBenchmark {
+    /// A batch of `rows` rows ingested `spacing` apart, the newest `spacing` before delivery. A
+    /// zero spacing ingests every row one millisecond before delivery, as one ingest group is.
+    pub fn new(rows: usize, spacing: Duration) -> Self {
+        let domain = DomainName::parse("relay_interaction_benchmark")
+            .assured("the fixed benchmark domain satisfies the identifier grammar");
+        let node = ModelName::parse("delivery_benchmark")
+            .assured("the fixed benchmark node satisfies the identifier grammar");
+        let relay = RelayName::parse("benchmark_source")
+            .assured("the fixed benchmark relay satisfies the identifier grammar");
+        let physical_node = ClusterNodeName::parse("node-1")
+            .assured("the fixed benchmark node name satisfies the cluster name grammar");
+        let input = RuntimeMetrics::default().resolve_node_input_metrics(
+            &domain,
+            ModelKind::Junction,
+            &node,
+            &relay,
+            Some(&physical_node),
+            Some(r#"{"tenant":"acme"}"#),
+        );
+        let delivered_at = Timestamp::from_unix_nanos(1_790_000_000_000_000_000);
+        Self {
+            input,
+            batch: delivery_batch(rows, spacing, delivered_at),
+            delivered_at,
+        }
+    }
+
+    /// Records the batch's delivery once: its traffic, its latest watermark, and the delivery
+    /// latency of every row.
+    pub fn observe(&self) {
+        self.input
+            .observe_delivery(&self.batch.delivery_observation(self.delivered_at));
+    }
+}
+
+fn delivery_batch(rows: usize, spacing: Duration, delivered_at: Timestamp) -> RelayRecordBatch {
+    let schema = benchmark_schema();
+    let mut builder = schema.batch_builder(rows);
+    for row in 0..rows {
+        let value = i64::try_from(row).assured("a benchmark batch holds fewer than 2^63 rows");
+        builder
+            .append(Some(&RuntimeValue::I64(value)))
+            .assured("the I64 value is built here against the schema declared beside it");
+        builder
+            .finish_row()
+            .assured("the I64 value is built here against the schema declared beside it");
+    }
+    let batch = nervix_primitives::sync::Arc::new(
+        builder
+            .finish()
+            .assured("the I64 values are built here against the schema declared beside them"),
+    );
+    let mut messages = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let rank = u32::try_from(row + 1).assured("a benchmark batch holds fewer than 2^32 rows");
+        let age = spacing
+            .checked_mul(rank)
+            .assured("a benchmark batch spans far less than the Duration range")
+            .max(Duration::from_millis(1));
+        let watermark = delivered_at
+            .checked_sub(age)
+            .assured("a benchmark batch is far younger than the Unix nanosecond range");
+        let record = RuntimeRow::new(
+            batch.clone(),
+            row,
+            RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
+        )
+        .assured("the row index is inside the batch built above");
+        messages.push(RelayMessage {
+            key: None,
+            record,
+            acks: AckSet::empty(),
+        });
+    }
+    RelayRecordBatch::from_messages(schema, messages)
+        .assured("every message shares the unbranched key and the schema declared above")
 }

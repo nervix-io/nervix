@@ -1,5 +1,5 @@
 [package]
-description = "Client session against a Nervix server: connection, statements, transactions, subscriptions and resource upload"
+description = "Client session against a Nervix server: connection, statements, transactions, subscriptions, resource upload and backup download"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-client-core"
@@ -9,37 +9,43 @@ version.workspace = true
 workspace = true
 
 [features]
+# Encode Arrow record batches as the canonical stream a producer submits.
+arrow = [
+  "dep:arrow-array",
+  "dep:arrow-ipc",
+  "dep:arrow-schema",
+  "nervix-models/arrow",
+]
 autocomplete = []
 default = []
 shuttle = [
-  "dep:shuttle-tokio",
-  "dep:shuttle-tokio-stream",
-  "shuttle-tokio/shuttle",
-  "shuttle-tokio-stream/shuttle",
+  "dep:shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
 ]
 
 [dependencies]
 ahash = { workspace = true }
 arch-into = { workspace = true }
+arrow-array = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
 error-stack = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
 nervix-client-wire = { workspace = true, features = ["grpc"] }
+nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
-parking_lot = { workspace = true }
 rustls = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "fs",
-  "io-util",
-  "rt",
-  "rt-multi-thread",
-  "sync",
-], optional = true }
-shuttle-tokio-stream = { workspace = true, optional = true }
+shuttle = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
@@ -50,19 +56,19 @@ tokio = { workspace = true, features = [
   "rt-multi-thread",
   "sync",
 ] }
-tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+nervix-model-harness = { workspace = true }
+nervix-test-environment = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
   "net",
   "rt-multi-thread",
   "sync",
+  "test-util",
   "time",
 ] }
-tokio-stream = { workspace = true, features = ["net"] }

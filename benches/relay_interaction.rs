@@ -1,20 +1,19 @@
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arch_into::ArchInto as _;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use nervix_primitives::time::Instant;
 use nervix_server::runtime::relay_interaction_benchmark::{
-    RelayInteractionBenchmark, RelayInteractionBenchmarkEvent,
+    DeliveryObservationBenchmark, RelayInteractionBenchmark, RelayInteractionBenchmarkEvent,
 };
 
 const READY_CHUNK: u64 = 1_024;
 const COLLECTED_BATCHES: u64 = 64;
 const FAN_IN_SOURCES: usize = 8;
+const DELIVERY_OBSERVATION_ROWS: [usize; 3] = [1, 64, 1_024];
 
 fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -24,17 +23,17 @@ fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
         let mut completed = 0;
         let mut elapsed = Duration::ZERO;
         while completed < iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let chunk = READY_CHUNK.min(iterations - completed);
             for offset in 0..chunk {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 benchmark
                     .enqueue((completed + offset).arch_into() % source_count)
                     .await;
             }
             let started = Instant::now();
             for _ in 0..chunk {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 black_box(match benchmark.next().await {
                     RelayInteractionBenchmarkEvent::Batch { rows } => rows,
                     event => panic!("expected a ready batch, observed {event:?}"),
@@ -48,7 +47,7 @@ fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
 }
 
 fn force_drain_collections(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -58,9 +57,9 @@ fn force_drain_collections(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::collecting(FAN_IN_SOURCES, capacity);
         let mut elapsed = Duration::ZERO;
         for iteration in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             for batch in 0..COLLECTED_BATCHES {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 benchmark
                     .enqueue((iteration + batch).arch_into() % FAN_IN_SOURCES)
                     .await;
@@ -69,7 +68,7 @@ fn force_drain_collections(iterations: u64) -> Duration {
             let started = Instant::now();
             let mut drained_rows = 0;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match benchmark.next().await {
                     RelayInteractionBenchmarkEvent::Batch { rows } => drained_rows += rows,
                     RelayInteractionBenchmarkEvent::ForceFlush => break,
@@ -85,7 +84,7 @@ fn force_drain_collections(iterations: u64) -> Duration {
 }
 
 fn due_wakes(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -93,7 +92,7 @@ fn due_wakes(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::pass_through(1, 1);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             assert_eq!(
                 benchmark.wake_now().await,
                 RelayInteractionBenchmarkEvent::Wake
@@ -105,7 +104,7 @@ fn due_wakes(iterations: u64) -> Duration {
 }
 
 fn graceful_commands(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -113,7 +112,7 @@ fn graceful_commands(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::pass_through(1, 1);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             benchmark.graceful_command().await;
             assert_eq!(
                 benchmark.next().await,
@@ -126,7 +125,7 @@ fn graceful_commands(iterations: u64) -> Duration {
 }
 
 fn receiver_shutdowns(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -134,7 +133,7 @@ fn receiver_shutdowns(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::pass_through(1, 1);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             benchmark.shutdown();
             assert_eq!(
                 benchmark.next().await,
@@ -172,6 +171,21 @@ fn relay_interaction_benches(criterion: &mut Criterion) {
         bencher.iter_custom(receiver_shutdowns);
     });
     lifecycle.finish();
+
+    let mut delivery = criterion.benchmark_group("relay_interaction/delivery_observation");
+    for rows in DELIVERY_OBSERVATION_ROWS {
+        let benchmark = DeliveryObservationBenchmark::new(rows, Duration::from_millis(1));
+        delivery.throughput(Throughput::Elements(rows.arch_into()));
+        delivery.bench_function(format!("branched_input_{rows}_rows_1ms_apart"), |bencher| {
+            bencher.iter(|| benchmark.observe());
+        });
+    }
+    let shared = DeliveryObservationBenchmark::new(1_024, Duration::ZERO);
+    delivery.throughput(Throughput::Elements(1_024));
+    delivery.bench_function("branched_input_1024_rows_one_watermark", |bencher| {
+        bencher.iter(|| shared.observe());
+    });
+    delivery.finish();
 }
 
 criterion_group!(benches, relay_interaction_benches);

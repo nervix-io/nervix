@@ -1,21 +1,16 @@
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
-
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     fs::{OpenOptions, create_dir_all},
-    io::Write,
-    net::{Ipv4Addr, SocketAddr},
+    io::{Read as _, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    str::FromStr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
@@ -37,7 +32,7 @@ use cucumber::{
     writer::{self, Stats as _},
 };
 use futures_util::{
-    TryStreamExt,
+    StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
 };
 use iceberg::{
@@ -65,7 +60,17 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome};
+use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome, ConnectDns};
+use nervix_dns::{DnsConfiguration, NameServers};
+use nervix_models::parse_duration_text;
+use nervix_primitives::{
+    sync::{
+        CancellationToken, StdArc,
+        blocking::{Mutex as BlockingMutex, OnceLock},
+    },
+    task::AbortOnDropHandle,
+    time::Instant,
+};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -91,13 +96,16 @@ use sqlx::{
 };
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt as _;
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
-    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
+    cli_terminal::{CliTerminal, DisplayWaitError},
+    client_conformance::{
+        ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
+        SUBSCRIBED_LINE, corpus_report,
+    },
     cluster::{
-        BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
+        BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
         WebsocketExchangeAction, client_connect_options, client_domain,
@@ -105,45 +113,56 @@ use crate::common::{
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
-        MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
+        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
+        POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
+        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
+    grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
-        ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
-        ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
+        CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
+        ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    kafka_group_member::ExternalKafkaGroupMember,
+    node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
-    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
+    scenario_phase::{
+        ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
+        begin_suite_measurement, suite_summary,
+    },
+    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
+    server_process_cluster::ServerProcessCluster,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
     },
+    tcp_forwarder::TcpForwarders,
 };
 
+mod backup;
+mod client_consumers;
+mod client_producers;
 mod common;
+mod database_batches;
+mod domain_clock_attachment;
+mod endpoint_intake;
 mod ingestion_time;
+mod process_cluster;
 mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
-// Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
-static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
-static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
-static WASM_STATE_RESET_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> =
+static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> = OnceLock::new();
+static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<BlockingMutex<BTreeMap<String, String>>> =
     OnceLock::new();
-const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
-const MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS: usize = 1;
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -153,24 +172,8 @@ const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
-    "Web console NSPL REPL",
-    "Web console execution graph",
-    "Web console transaction inspector",
-];
-const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
-
-#[derive(Debug)]
-enum ScenarioExecutionPermit {
-    Concurrent {
-        _permit: tokio::sync::OwnedRwLockReadGuard<()>,
-    },
-    Exclusive {
-        _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
-    },
-}
 
 /// What a scenario's own steps did, as its after hook sees it.
 ///
@@ -250,9 +253,23 @@ struct TransactionQualificationObservation {
     committed_inspection: Option<Box<nervix_models::TransactionInspection>>,
 }
 
+#[derive(Debug)]
+struct SavedHealthyPlacement {
+    kind: String,
+    name: String,
+    owner: String,
+}
+
+/// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
+struct CliClockProcess {
+    child: tokio::process::Child,
+    lines: StdArc<BlockingMutex<VecDeque<String>>>,
+    _reader: AbortOnDropHandle<()>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
-    scenario_execution_permit: Option<ScenarioExecutionPermit>,
+    scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
@@ -260,27 +277,64 @@ struct ScenarioWorld {
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
+    endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     transaction_clients: BTreeMap<String, Client>,
     /// Rows a named client received and a step has not taken yet, as the client displays them.
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
     session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The session a scenario attaches to domain clocks with. Steps that replace the active
+    /// session leave it attached.
+    clock_session: Option<TestSession>,
+    /// Requests the clock session sent under names a scenario gave them.
+    clock_session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The reply to the clock session's last attach or detach request.
+    last_clock_reply: Option<nervix_client_wire::ReplyBody>,
+    /// When the last `START AT NOW` a scenario sent ran.
+    clock_start_window: Option<domain_clock_attachment::ClockStartWindow>,
+    /// The directory a scenario's backup archives are written to.
+    backup_directory: Option<TempDir>,
+    /// The backup a scenario ran through its own session, whose archive it downloads itself.
+    last_backup: Option<backup::TestBackup>,
+    /// How the last backup download a scenario shaped itself ended.
+    last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
+    /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
+    /// by statement.
+    saved_model_definitions: BTreeMap<String, BTreeMap<String, String>>,
+    /// The version lines `DESCRIBE RESOURCE` printed that a scenario saved, by the name it saved
+    /// them as and then by version.
+    saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
+    /// How the last restore stream a scenario shaped itself ended.
+    last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
+    /// A restore stream a scenario sent in the background.
+    background_restore: Option<AbortOnDropHandle<crate::common::raw_session::TestRestoreEnd>>,
+    /// The restore step pause a scenario armed and has not released.
+    restore_step_pause: Option<backup::restore::ArmedRestorePause>,
+    /// The outcome of the last command a scenario sent through its own session.
+    last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.
     last_completion_values: Vec<String>,
     last_completion_page_count: usize,
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
+    /// The metric values each named subscription passed from sampling, recorded once every value
+    /// that was sampled had been drawn for.
+    sampled_metric_values: BTreeMap<String, Vec<i64>>,
     /// When the message a delivery-delay assertion is about was published. Load moves this
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
     last_cli_output: Option<Output>,
     cli_subscription_process: Option<tokio::process::Child>,
-    cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
+    cli_subscription_lines: Option<StdArc<BlockingMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
+    cli_clock_process: Option<CliClockProcess>,
+    /// The interactive CLI a scenario types into through a pseudo-terminal.
+    cli_terminal: Option<CliTerminal>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -294,7 +348,11 @@ struct ScenarioWorld {
     saved_relocation_plan: Option<String>,
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
+    /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
+    saturated_credentials_node: Option<String>,
     broker_observer: Option<BrokerObserver>,
+    /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
+    external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
     clickhouse_table: Option<String>,
@@ -303,7 +361,7 @@ struct ScenarioWorld {
     postgres_tls: bool,
     /// Releases the Postgres table lock a contention scenario is holding, if one is held. The
     /// lock lives in a spawned task because it must outlive the step that took it.
-    postgres_lock_release: Option<tokio::sync::oneshot::Sender<()>>,
+    postgres_lock_release: Option<nervix_primitives::sync::oneshot::Sender<()>>,
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
@@ -318,8 +376,10 @@ struct ScenarioWorld {
     /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
     /// nodes and its observers bind. Given back once cleanup has stopped both.
     scenario_ports: Vec<u16>,
-    syslog_udp_observer: Option<tokio::net::UdpSocket>,
+    syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
+    saved_healthy_placements: Vec<SavedHealthyPlacement>,
+    health_fault_started_at: Option<Instant>,
     /// Human-readable references in scenarios map to UUIDv7 identities so retries retain one
     /// stable creation timestamp while feature text remains legible.
     command_execution_references: BTreeMap<String, String>,
@@ -329,6 +389,7 @@ struct ScenarioWorld {
     fault_injection: FaultInjection,
     consensus_commit_delays: BTreeMap<String, Duration>,
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
+    saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
@@ -346,8 +407,6 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
-    web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    wasm_state_reset_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
@@ -355,11 +414,20 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
+    tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
-    silent_interconnect_peers: Vec<tokio::net::TcpStream>,
+    /// The gRPC receivers a scenario started, by the name its steps give them.
+    grpc_receivers: BTreeMap<String, GrpcReceiver>,
+    /// The transport each OTLP receiver a scenario started serves, by the name its steps give it.
+    /// The receiver itself is kept with the HTTP or gRPC receivers under the same name.
+    otlp_receivers: BTreeMap<String, OtlpTransport>,
+    silent_interconnect_peers: Vec<nervix_primitives::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
+    server_process_cluster: Option<ServerProcessCluster>,
+    node_trace_export: Option<NodeTraceExport>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
     held_resource_upload: Option<HeldResourceUpload>,
     /// When the last signal was sent to the server process, taken before the signal is delivered
@@ -367,6 +435,10 @@ struct ScenarioWorld {
     last_server_signal_at: Option<Instant>,
     /// The cross-language client probe a scenario started, until a step reads its report.
     client_probe: Option<ClientProbe>,
+    /// The producers a scenario opened on client ingestors, and the batches they submitted.
+    producers: client_producers::ScenarioProducers,
+    /// Native and console consumers and the Arrow attempts they received.
+    consumers: client_consumers::ScenarioConsumers,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -406,6 +478,10 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_auth_attempts_elapsed,
             )
             .field(
+                "saturated_credentials_node",
+                &self.saturated_credentials_node,
+            )
+            .field(
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
             )
@@ -434,23 +510,33 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
             .field(
                 "web_console_permit_acquired",
-                &self.web_console_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WebConsole),
             )
             .field(
                 "wasm_state_reset_permit_acquired",
-                &self.wasm_state_reset_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WasmStateReset),
             )
             .field("dependencies", &self.dependencies)
             .field(
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
+            .field("grpc_receivers", &self.grpc_receivers)
+            .field("otlp_receivers", &self.otlp_receivers)
             .field(
                 "silent_interconnect_peer_count",
                 &self.silent_interconnect_peers.len(),
@@ -498,11 +584,23 @@ impl ScenarioWorld {
         };
         let published = registration.enter(phase);
         let marker = format!(
-            "scenario {phase}: {} age={:?} {detail}",
+            "scenario {phase}: {} suite_age={:?} age={:?} {detail}",
             published.identity,
+            ActiveScenario::suite_age(),
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.wait_for(reason);
+        append_cucumber_log_line(&format!(
+            "scenario queued: {} attempt={} waiting_for={reason}",
+            published.identity, published.attempt
+        ));
     }
 
     fn stop_durable_catch_up_work(&mut self) {
@@ -594,7 +692,7 @@ impl ScenarioWorld {
     ) {
         let domain = expand_placeholders(self, domain);
         let node_id = expand_placeholders(self, node_id);
-        tokio::time::timeout(
+        nervix_primitives::time::timeout(
             duration,
             self.fault_injection
                 .wait_for_domain_clock_progress_pause_on(
@@ -1038,6 +1136,42 @@ async fn given_http_receiver_answers_unscripted_requests_with(
     http_receiver(world, &name).answer_unscripted_requests_with(response);
 }
 
+/// Gives every request for one exact target, its path and query, its own answer, which it takes
+/// instead of the script. Requests of independent branches or source relays have no order between
+/// them, so a scenario answers each of them by its target rather than by its position. Given again
+/// later, the answer replaces the earlier one, so an endpoint that kept failing a target recovers.
+#[given(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
+#[when(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
+async fn given_http_receiver_answers_requests_for_target(
+    world: &mut ScenarioWorld,
+    name: String,
+    target: String,
+    response: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).answer_requests_for(target, response);
+}
+
+/// Answers every request the receiver holds until released, and every one it holds later, with
+/// the named response. Until this step runs, such a request stays unresolved for as long as the
+/// scenario needs to observe it, bounded only by the client's own timeout.
+#[when(expr = "HTTP receiver {string} releases its held responses with {string}")]
+async fn when_http_receiver_releases_held_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    response: String,
+) {
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).release_held_responses(response);
+}
+
 #[then(expr = "HTTP receiver {string} eventually receives at least {int} request(s)")]
 async fn then_http_receiver_eventually_receives_requests(
     world: &mut ScenarioWorld,
@@ -1053,10 +1187,116 @@ async fn then_http_receiver_eventually_receives_requests(
     }
 }
 
-/// Compares one captured request, counted from 1, with the docstring: `<METHOD> <target>`, then
-/// the headers the request must carry with exactly these values, then an empty line, then the
-/// exact body. Header names compare without case; headers the docstring does not name are not
-/// checked. A docstring without a body requires a request with zero content bytes.
+/// A request a step's docstring describes: `<METHOD> <target>`, then the headers the request must
+/// carry with exactly these values, then an empty line, then the exact body. Header names compare
+/// without case; headers the docstring does not name are not checked. A docstring without a body
+/// describes a request with zero content bytes.
+struct ExpectedHttpRequest {
+    request_line: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl ExpectedHttpRequest {
+    fn from_step(world: &ScenarioWorld, step: &Step) -> Self {
+        // Cucumber keeps the newlines that open and close a docstring; neither is part of a
+        // request.
+        let expected = expand_placeholders(world, docstring(step))
+            .trim_matches('\n')
+            .to_string();
+        // Without an empty line the docstring names no body, which is a request with zero content
+        // bytes.
+        let (head, body) = match expected.split_once("\n\n") {
+            Some((head, body)) => (head, body),
+            None => (expected.as_str(), ""),
+        };
+        let mut head_lines = head.lines();
+        let request_line = head_lines.next().unwrap_or_default().to_string();
+        let mut headers = Vec::new();
+        for header in head_lines {
+            let Some((header_name, value)) = header.split_once(':') else {
+                panic!("expected header line '{header}' has no ':'");
+            };
+            headers.push((header_name.trim().to_string(), value.trim().to_string()));
+        }
+        Self {
+            request_line,
+            headers,
+            body: body.to_string(),
+        }
+    }
+
+    /// Whether `request` has this request line, which is how a step finds the one captured request
+    /// a docstring describes when the order requests arrive in is not part of the contract.
+    fn has_request_line_of(&self, request: &CapturedRequest) -> bool {
+        self.request_line == request.request_line()
+    }
+
+    /// Asserts that exactly one of the `captured` requests has this request line, and that it is
+    /// the request this docstring describes.
+    fn assert_one_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        let mut matching = Vec::new();
+        for request in captured {
+            if self.has_request_line_of(request) {
+                matching.push(request);
+            }
+        }
+        let [request] = matching.as_slice() else {
+            panic!(
+                "HTTP receiver '{receiver}' captured {} request(s) with the request line '{}', \
+                 not exactly one, among {} captured request(s)",
+                matching.len(),
+                self.request_line,
+                captured.len()
+            );
+        };
+        self.assert_matches(
+            &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+            request,
+        );
+    }
+
+    /// Asserts that `request`, which `described` names in a failure, is the request this
+    /// docstring describes.
+    fn assert_matches(&self, described: &str, request: &CapturedRequest) {
+        assert!(
+            self.has_request_line_of(request),
+            "{described} has another request line than '{}':\n{request}",
+            self.request_line
+        );
+        for (header_name, value) in &self.headers {
+            let values = request.header_values(header_name);
+            assert_eq!(
+                values,
+                vec![value.as_bytes()],
+                "{described} does not carry exactly one '{header_name}' header with the expected \
+                 value:\n{request}"
+            );
+        }
+        assert_eq!(
+            request.body,
+            self.body.as_bytes(),
+            "{described} has another body:\n{request}"
+        );
+    }
+}
+
+/// The request a receiver captured at `position`, counted from 1.
+fn captured_http_request(world: &ScenarioWorld, name: &str, position: usize) -> CapturedRequest {
+    let captured = http_receiver(world, name).captured();
+    let Some(index) = position.checked_sub(1) else {
+        panic!("HTTP receiver requests are counted from 1");
+    };
+    match captured.get(index) {
+        Some(request) => request.clone(),
+        None => panic!(
+            "HTTP receiver '{name}' captured {} request(s), not request {position}",
+            captured.len()
+        ),
+    }
+}
+
+/// Compares one captured request, counted from 1, with the request the docstring describes.
 #[then(expr = "HTTP receiver {string} request {int} is")]
 async fn then_http_receiver_request_is(
     world: &mut ScenarioWorld,
@@ -1064,51 +1304,216 @@ async fn then_http_receiver_request_is(
     position: usize,
     #[step] step: &Step,
 ) {
-    // Cucumber keeps the newlines that open and close a docstring; neither is part of a request.
-    let expected = expand_placeholders(world, docstring(step))
-        .trim_matches('\n')
-        .to_string();
-    let receiver = http_receiver(world, &name);
-    let captured = receiver.captured();
-    let Some(index) = position.checked_sub(1) else {
-        panic!("HTTP receiver requests are counted from 1");
-    };
-    let Some(request) = captured.get(index) else {
-        panic!(
-            "HTTP receiver '{name}' captured {} request(s), not request {position}",
-            captured.len()
-        );
-    };
-    // Without an empty line the docstring names no body, which is a request with zero content
-    // bytes.
-    let (head, body) = match expected.split_once("\n\n") {
-        Some((head, body)) => (head, body),
-        None => (expected.as_str(), ""),
-    };
-    let mut head_lines = head.lines();
-    let request_line = head_lines.next().unwrap_or_default();
-    assert_eq!(
-        request_line,
-        format!("{} {}", request.method, request.target),
-        "HTTP receiver '{name}' request {position} has another request line:\n{request}"
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let request = captured_http_request(world, &name, position);
+    expected.assert_matches(
+        &format!("HTTP receiver '{name}' request {position}"),
+        &request,
     );
-    for header in head_lines {
-        let Some((header_name, value)) = header.split_once(':') else {
-            panic!("expected header line '{header}' has no ':'");
-        };
-        let values = request.header_values(header_name.trim());
-        assert_eq!(
-            values,
-            vec![value.trim().as_bytes()],
-            "HTTP receiver '{name}' request {position} does not carry exactly one '{}' header \
-             with the expected value:\n{request}",
-            header_name.trim()
+}
+
+/// Finds the one captured request with the docstring's request line, wherever it arrived, and
+/// compares it with the request the docstring describes. Requests of independent branches or
+/// source relays have no order between them, so a scenario names each by its request line.
+#[then(expr = "HTTP receiver {string} captured one request that is")]
+async fn then_http_receiver_captured_one_request_that_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let captured = http_receiver(world, &name).captured();
+    expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// the one such request with the request the docstring describes. A scenario uses it for a request
+/// that follows others whose number it cannot name, such as the attempts of a retried request.
+#[then(expr = "HTTP receiver {string} eventually captures one request that is")]
+async fn then_http_receiver_eventually_captures_one_request_that_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
+    };
+    expected.assert_one_captured(&name, &captured);
+}
+
+/// Asserts the most requests the receiver ever held awaiting their final head at once. A request
+/// awaits from its capture until the receiver begins writing its final head, or until its
+/// connection ends without one, so a sender that waits for each final head never has two.
+#[then(expr = "HTTP receiver {string} never had more than {int} request(s) awaiting a response")]
+async fn then_http_receiver_never_had_more_awaiting_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    most: usize,
+) {
+    let observed = http_receiver(world, &name).most_awaiting_responses();
+    assert!(
+        observed <= most,
+        "HTTP receiver '{name}' held {observed} requests awaiting a response at once, more than \
+         {most}"
+    );
+}
+
+/// Waits until clients have abandoned at least `expected` responses the receiver had not finished:
+/// a held response, a body it was still writing or had stalled, closed from the client's side. A
+/// stop of the receiver itself abandons nothing.
+#[then(
+    expr = "HTTP receiver {string} eventually sees the client abandon at least {int} unfinished \
+            response(s)"
+)]
+async fn then_http_receiver_sees_abandoned_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let waited = http_receiver(world, &name)
+        .wait_for_abandoned_responses(expected, HTTP_RECEIVER_WAIT)
+        .await;
+    if let Err(error) = waited {
+        panic!("HTTP receiver '{name}': {error}");
+    }
+}
+
+/// Asserts that no captured request has `request_line`. A scenario uses it for a request that must
+/// never be sent at all, once later requests that it would have preceded have arrived, or for one
+/// that cannot have been sent yet because the request ahead of it keeps failing and holds back all
+/// later work of its emitter.
+#[then(expr = "HTTP receiver {string} captured no request with request line {string}")]
+async fn then_http_receiver_captured_no_request_with_request_line(
+    world: &mut ScenarioWorld,
+    name: String,
+    request_line: String,
+) {
+    let request_line = expand_placeholders(world, &request_line);
+    let captured = http_receiver(world, &name).captured();
+    for request in &captured {
+        let captured_line = request.request_line();
+        assert_ne!(
+            captured_line, request_line,
+            "HTTP receiver '{name}' captured a request that must never be sent:\n{request}"
         );
     }
+}
+
+/// Compares two captured requests, counted from 1, byte for byte: request line, every header field
+/// in the order it arrived, and body. A retry sends the request it prepared, so a resent request
+/// repeats the attempt before it exactly.
+#[then(expr = "HTTP receiver {string} request {int} repeats request {int}")]
+async fn then_http_receiver_request_repeats_request(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    let repeated_request = captured_http_request(world, &name, repeated);
+    let original_request = captured_http_request(world, &name, original);
     assert_eq!(
-        request.body,
-        body.as_bytes(),
-        "HTTP receiver '{name}' request {position} has another body:\n{request}"
+        repeated_request, original_request,
+        "HTTP receiver '{name}' request {repeated} does not repeat request \
+         {original}:\n{repeated_request}\n---\n{original_request}"
+    );
+}
+
+/// Compares receipt times after both requests have arrived. The receiver records the first time
+/// before delaying its response, so this measures serialization without racing a silence window.
+#[then(expr = "HTTP receiver {string} request {int} arrived at least {string} after request {int}")]
+async fn then_http_receiver_requests_have_minimum_gap(
+    world: &mut ScenarioWorld,
+    name: String,
+    later: usize,
+    minimum_gap: String,
+    earlier: usize,
+) {
+    let minimum_gap = parse_duration_text(&minimum_gap)
+        .assured("the Cucumber expression supplies a valid minimum gap duration");
+    let later_request = captured_http_request(world, &name, later);
+    let earlier_request = captured_http_request(world, &name, earlier);
+    let Some(gap) = later_request
+        .received_at
+        .checked_duration_since(earlier_request.received_at)
+    else {
+        panic!("HTTP receiver '{name}' request {later} arrived before request {earlier}");
+    };
+    assert!(
+        gap >= minimum_gap,
+        "HTTP receiver '{name}' request {later} arrived {gap:?} after request {earlier}, below \
+         the {minimum_gap:?} minimum"
+    );
+}
+
+#[then(expr = "HTTP receiver {string} request {int} has no header {string}")]
+async fn then_http_receiver_request_has_no_header(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    assert!(
+        request.header_values(&header).is_empty(),
+        "HTTP receiver '{name}' request {position} unexpectedly carries '{header}':\n{request}"
+    );
+}
+
+/// Asserts that one captured request, counted from 1, carries exactly one nonempty `header` and a
+/// body containing `fragment`, for a request whose values are generated and so cannot be named.
+#[then(
+    expr = "HTTP receiver {string} request {int} carries header {string} and a body containing \
+            {string}"
+)]
+async fn then_http_receiver_request_carries_header_and_body_fragment(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+    fragment: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    let values = request.header_values(&header);
+    let [value] = values.as_slice() else {
+        panic!(
+            "HTTP receiver '{name}' request {position} carries {} '{header}' header(s), not \
+             exactly one:\n{request}",
+            values.len()
+        );
+    };
+    assert!(
+        !value.is_empty(),
+        "HTTP receiver '{name}' request {position} carries an empty '{header}' header:\n{request}"
+    );
+    assert!(
+        String::from_utf8_lossy(&request.body).contains(&fragment),
+        "HTTP receiver '{name}' request {position} has no '{fragment}' in its body:\n{request}"
+    );
+}
+
+/// Asserts how many requests the receiver holds when the step runs. A scenario uses it once the
+/// requests it expects have arrived and every request that must never be sent would have preceded
+/// them, so a count above the expected one names a request that was sent although it must not be.
+#[then(expr = "HTTP receiver {string} has captured exactly {int} request(s)")]
+async fn then_http_receiver_has_captured_exactly(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let captured = http_receiver(world, &name).captured();
+    let mut listing = String::new();
+    for request in &captured {
+        listing.push_str(&format!("{request}\n---\n"));
+    }
+    assert_eq!(
+        captured.len(),
+        expected,
+        "HTTP receiver '{name}' captured another number of requests:\n{listing}"
     );
 }
 
@@ -1125,6 +1530,433 @@ async fn then_http_receiver_records_failed_tls_handshake(world: &mut ScenarioWor
     if let Err(error) = waited {
         panic!("HTTP receiver '{name}': {error}");
     }
+}
+
+/// The OTLP transport an OTLP receiver serves, as a client names it in its `protocol` key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OtlpTransport {
+    Grpc,
+    HttpProtobuf,
+}
+
+impl FromStr for OtlpTransport {
+    type Err = String;
+
+    fn from_str(protocol: &str) -> Result<Self, Self::Err> {
+        match protocol {
+            "grpc" => Ok(Self::Grpc),
+            "http/protobuf" => Ok(Self::HttpProtobuf),
+            _ => Err(format!(
+                "unsupported OTLP protocol '{protocol}'; expected 'grpc' or 'http/protobuf'"
+            )),
+        }
+    }
+}
+
+/// One scripted answer of an OTLP receiver, the same over either transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OtlpAnswer {
+    /// A complete success answer with an empty Export response.
+    Accept,
+    /// HTTP `400`, or gRPC `INVALID_ARGUMENT`: the receiver refuses the request.
+    Reject,
+    /// HTTP `503`, or gRPC `UNAVAILABLE`: the receiver asks the client to try again.
+    Unavailable,
+    /// The receiver reads the whole request, then closes the connection without answering.
+    LoseResponse,
+    /// The receiver reads the whole request, then answers nothing until the client gives up.
+    HoldResponse,
+}
+
+impl FromStr for OtlpAnswer {
+    type Err = String;
+
+    fn from_str(line: &str) -> Result<Self, Self::Err> {
+        match line.trim() {
+            "accept" => Ok(Self::Accept),
+            "reject" => Ok(Self::Reject),
+            "unavailable" => Ok(Self::Unavailable),
+            "lose response" => Ok(Self::LoseResponse),
+            "hold response" => Ok(Self::HoldResponse),
+            other => Err(format!(
+                "unknown OTLP receiver answer '{other}'; expected accept, reject, unavailable, \
+                 lose response, or hold response"
+            )),
+        }
+    }
+}
+
+impl OtlpAnswer {
+    /// This answer as the HTTP receiver's script spells it.
+    fn http_response(self) -> ReceiverResponse {
+        let script = match self {
+            Self::Accept => "respond 200",
+            Self::Reject => "respond 400",
+            Self::Unavailable => "respond 503",
+            Self::LoseResponse => "lose response",
+            Self::HoldResponse => "hold response",
+        };
+        script
+            .parse()
+            .assured("every OTLP answer maps to a documented HTTP receiver script form")
+    }
+
+    /// This answer as the gRPC receiver takes it.
+    fn grpc_answer(self) -> GrpcAnswer {
+        match self {
+            Self::Accept => GrpcAnswer::Accept,
+            Self::Reject => GrpcAnswer::Status(tonic::Code::InvalidArgument),
+            Self::Unavailable => GrpcAnswer::Status(tonic::Code::Unavailable),
+            Self::LoseResponse => GrpcAnswer::LoseResponse,
+            Self::HoldResponse => GrpcAnswer::HoldResponse,
+        }
+    }
+}
+
+/// One Export request an OTLP receiver captured, over whichever transport it serves.
+enum CapturedExport {
+    Http(CapturedRequest),
+    Grpc(CapturedCall),
+}
+
+impl CapturedExport {
+    /// The path the request was sent to: an OTLP/HTTP path such as `/v1/logs`, or an OTLP/gRPC
+    /// method.
+    fn path(&self) -> &str {
+        match self {
+            Self::Http(request) => &request.target,
+            Self::Grpc(call) => &call.path,
+        }
+    }
+
+    /// The Export request's protobuf bytes, decompressed when the client compressed them.
+    fn protobuf(&self) -> Vec<u8> {
+        let (bytes, compression) = match self {
+            Self::Http(request) => {
+                let encoding = request.header_values("content-encoding");
+                (&request.body, encoding.first().copied())
+            }
+            Self::Grpc(call) => {
+                let encoding = call.header_values("grpc-encoding");
+                let compression = match call.compressed {
+                    true => encoding.first().copied(),
+                    false => None,
+                };
+                (&call.message, compression)
+            }
+        };
+        match compression {
+            None => bytes.clone(),
+            Some(b"gzip") => {
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(bytes.as_slice())
+                    .read_to_end(&mut decoded)
+                    .unwrap_or_else(|error| panic!("a gzip Export request must decode: {error}"));
+                decoded
+            }
+            Some(other) => panic!(
+                "the OTLP receiver captured an Export request compressed as {:?}",
+                String::from_utf8_lossy(other)
+            ),
+        }
+    }
+}
+
+impl fmt::Display for CapturedExport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(request) => write!(formatter, "{request}"),
+            Self::Grpc(call) => write!(formatter, "{call}"),
+        }
+    }
+}
+
+fn otlp_transport(world: &ScenarioWorld, name: &str) -> OtlpTransport {
+    let name = expand_placeholders(world, name);
+    match world.otlp_receivers.get(&name) {
+        Some(transport) => *transport,
+        None => panic!("OTLP receiver '{name}' is not running"),
+    }
+}
+
+fn grpc_receiver<'world>(world: &'world ScenarioWorld, name: &str) -> &'world GrpcReceiver {
+    let name = expand_placeholders(world, name);
+    match world.grpc_receivers.get(&name) {
+        Some(receiver) => receiver,
+        None => panic!("gRPC receiver '{name}' is not running"),
+    }
+}
+
+/// Every Export request an OTLP receiver captured, in the order they arrived.
+fn captured_exports(world: &ScenarioWorld, name: &str) -> Vec<CapturedExport> {
+    match otlp_transport(world, name) {
+        OtlpTransport::HttpProtobuf => http_receiver(world, name)
+            .captured()
+            .into_iter()
+            .map(CapturedExport::Http)
+            .collect(),
+        OtlpTransport::Grpc => grpc_receiver(world, name)
+            .captured()
+            .into_iter()
+            .map(CapturedExport::Grpc)
+            .collect(),
+    }
+}
+
+/// Starts an in-process receiver for the OTLP transport a client's `protocol` key names, reachable
+/// as `{{otlp_receiver.<name>}}`.
+#[given(expr = "OTLP receiver {string} is running for {string}")]
+async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String, protocol: String) {
+    initialize_scenario_identity(world);
+    let name = expand_placeholders(world, &name);
+    let transport = match protocol.parse::<OtlpTransport>() {
+        Ok(transport) => transport,
+        Err(error) => panic!("{error}"),
+    };
+    assert!(
+        !world.otlp_receivers.contains_key(&name),
+        "OTLP receiver '{name}' is already running"
+    );
+    /// Where a client reaches the receiver that was started.
+    struct Reachable {
+        origin: String,
+        port: u16,
+    }
+
+    let reachable = match transport {
+        OtlpTransport::HttpProtobuf => {
+            start_http_receiver(world, name.clone(), ReceiverTransport::Plain).await;
+            let receiver = http_receiver(world, &name);
+            Reachable {
+                origin: receiver.origin(),
+                port: receiver.port(),
+            }
+        }
+        OtlpTransport::Grpc => {
+            assert!(
+                !world.grpc_receivers.contains_key(&name),
+                "gRPC receiver '{name}' is already running"
+            );
+            let port = draw_scenario_port(world, "gRPC receiver");
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let receiver = match GrpcReceiver::start(address).await {
+                Ok(receiver) => receiver,
+                Err(error) => panic!("gRPC receiver '{name}' failed to start: {error:?}"),
+            };
+            let reachable = Reachable {
+                origin: receiver.origin(),
+                port: receiver.port(),
+            };
+            world.grpc_receivers.insert(name.clone(), receiver);
+            reachable
+        }
+    };
+    world
+        .placeholders
+        .insert(format!("otlp_receiver.{name}"), reachable.origin);
+    world.placeholders.insert(
+        format!("otlp_receiver_port.{name}"),
+        reachable.port.to_string(),
+    );
+    world.otlp_receivers.insert(name, transport);
+}
+
+/// Each line is one answer, taken by the next Export request in order: `accept`, `reject`,
+/// `unavailable`, `lose response`, or `hold response`. Requests beyond the script are accepted.
+#[given(expr = "OTLP receiver {string} answers with")]
+async fn given_otlp_receiver_answers_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let mut answers = Vec::new();
+    for line in docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        match line.parse::<OtlpAnswer>() {
+            Ok(answer) => answers.push(answer),
+            Err(error) => panic!("invalid OTLP receiver script line: {error}"),
+        }
+    }
+    match otlp_transport(world, &name) {
+        OtlpTransport::HttpProtobuf => {
+            http_receiver(world, &name).script(answers.into_iter().map(OtlpAnswer::http_response))
+        }
+        OtlpTransport::Grpc => {
+            grpc_receiver(world, &name).script(answers.into_iter().map(OtlpAnswer::grpc_answer))
+        }
+    }
+}
+
+#[then(expr = "OTLP receiver {string} eventually receives at least {int} export request(s)")]
+async fn then_otlp_receiver_eventually_receives_requests(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    match otlp_transport(world, &name) {
+        OtlpTransport::HttpProtobuf => {
+            let waited = http_receiver(world, &name)
+                .wait_for_requests(expected, HTTP_RECEIVER_WAIT)
+                .await;
+            if let Err(error) = waited {
+                panic!("OTLP receiver '{name}': {error}");
+            }
+        }
+        OtlpTransport::Grpc => {
+            let waited = grpc_receiver(world, &name)
+                .wait_for_calls(expected, HTTP_RECEIVER_WAIT)
+                .await;
+            if let Err(error) = waited {
+                panic!("OTLP receiver '{name}': {error}");
+            }
+        }
+    }
+}
+
+/// Compares two captured Export requests, counted from 1, exactly: over HTTP the request line,
+/// every header field in the order it arrived, and the body as sent; over gRPC the method, every
+/// header field, the compressed flag, and the message as sent. A retry sends the request it
+/// prepared, so a resent request repeats the attempt before it byte for byte.
+#[then(expr = "OTLP receiver {string} request {int} repeats request {int}")]
+async fn then_otlp_receiver_request_repeats_request(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    match otlp_transport(world, &name) {
+        OtlpTransport::HttpProtobuf => {
+            let repeated_request = captured_http_request(world, &name, repeated);
+            let original_request = captured_http_request(world, &name, original);
+            assert_eq!(
+                repeated_request, original_request,
+                "OTLP receiver '{name}' request {repeated} does not repeat request \
+                 {original}:\n{repeated_request}\n---\n{original_request}"
+            );
+        }
+        OtlpTransport::Grpc => {
+            let captured = grpc_receiver(world, &name).captured();
+            let call = |position: usize| -> CapturedCall {
+                let Some(index) = position.checked_sub(1) else {
+                    panic!("OTLP receiver requests are counted from 1");
+                };
+                match captured.get(index) {
+                    Some(call) => call.clone(),
+                    None => panic!(
+                        "OTLP receiver '{name}' captured {} request(s), not request {position}",
+                        captured.len()
+                    ),
+                }
+            };
+            let repeated_call = call(repeated);
+            let original_call = call(original);
+            assert_eq!(
+                repeated_call, original_call,
+                "OTLP receiver '{name}' request {repeated} does not repeat request \
+                 {original}:\n{repeated_call}\n---\n{original_call}"
+            );
+        }
+    }
+}
+
+/// Decodes every captured request as an OTLP logs Export request and compares the log record
+/// bodies each carries, in order, with one docstring line per request, bodies separated by `|`.
+/// Every request must carry exactly one resource and one scope.
+#[then(expr = "OTLP receiver {string} captured these log export requests")]
+async fn then_otlp_receiver_captured_these_log_export_requests(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    use opentelemetry_proto::tonic::{
+        collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value,
+    };
+    use otel_prost::Message as _;
+
+    let expected = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split('|')
+                .map(str::trim)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let captured = captured_exports(world, &name);
+    let mut listing = String::new();
+    for export in &captured {
+        listing.push_str(&format!("{export}\n---\n"));
+    }
+    let mut received = Vec::with_capacity(captured.len());
+    for (index, export) in captured.iter().enumerate() {
+        let position = index + 1;
+        assert!(
+            export.path() == "/v1/logs"
+                || export.path() == "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+            "OTLP receiver '{name}' request {position} was not a logs export:\n{export}"
+        );
+        let request = ExportLogsServiceRequest::decode(export.protobuf().as_slice())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "OTLP receiver '{name}' request {position} is not a logs Export request: \
+                     {error}\n{export}"
+                )
+            });
+        let [resource_logs] = request.resource_logs.as_slice() else {
+            panic!(
+                "OTLP receiver '{name}' request {position} carries {} resources, not one",
+                request.resource_logs.len()
+            );
+        };
+        let [scope_logs] = resource_logs.scope_logs.as_slice() else {
+            panic!(
+                "OTLP receiver '{name}' request {position} carries {} scopes, not one",
+                resource_logs.scope_logs.len()
+            );
+        };
+        let mut bodies = Vec::with_capacity(scope_logs.log_records.len());
+        for record in &scope_logs.log_records {
+            let body = match record.body.as_ref().and_then(|body| body.value.as_ref()) {
+                Some(any_value::Value::StringValue(body)) => body.clone(),
+                other => panic!(
+                    "OTLP receiver '{name}' request {position} carries a record whose body is not \
+                     a string: {other:?}"
+                ),
+            };
+            bodies.push(body);
+        }
+        received.push(bodies);
+    }
+    assert_eq!(
+        received, expected,
+        "OTLP receiver '{name}' captured other log export requests:\n{listing}"
+    );
+}
+
+/// Asserts how many Export requests the receiver holds when the step runs, once every request it
+/// expects has arrived, so a count above the expected one names a request that was sent although
+/// it must not be.
+#[then(expr = "OTLP receiver {string} has captured exactly {int} export request(s)")]
+async fn then_otlp_receiver_has_captured_exactly(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let captured = captured_exports(world, &name);
+    let mut listing = String::new();
+    for export in &captured {
+        listing.push_str(&format!("{export}\n---\n"));
+    }
+    assert_eq!(
+        captured.len(),
+        expected,
+        "OTLP receiver '{name}' captured another number of export requests:\n{listing}"
+    );
 }
 
 #[given(expr = "clock source recorder {string} is reset")]
@@ -1144,12 +1976,11 @@ async fn then_clock_source_recorder_records_requests(
     name: String,
     expected_count: u64,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let name = expand_placeholders(world, &name);
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observations = world
             .dependencies
             .clock_source_observations(&name)
@@ -1171,7 +2002,7 @@ async fn then_clock_source_recorder_records_requests(
             "clock source recorder '{name}' expected {expected_count} requests, observed \
              {observed_count}: {observations}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -1182,14 +2013,14 @@ async fn then_clock_source_recorder_records_at_least_requests(
     name: String,
     expected_count: u64,
 ) {
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the Cucumber expression supplies a valid step duration");
     let name = expand_placeholders(world, &name);
     let deadline = Instant::now()
         .checked_add(duration)
         .assured("the Cucumber fixture duration fits the monotonic clock range");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observations = world
             .dependencies
             .clock_source_observations(&name)
@@ -1211,7 +2042,7 @@ async fn then_clock_source_recorder_records_at_least_requests(
             "clock source recorder '{name}' expected at least {expected_count} requests, observed \
              {observed_count}: {observations}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -1225,7 +2056,7 @@ async fn then_clock_source_requests_have_minimum_physical_gap(
     name: String,
     minimum_gap: String,
 ) {
-    let minimum_gap = humantime::parse_duration(&minimum_gap)
+    let minimum_gap = parse_duration_text(&minimum_gap)
         .assured("the Cucumber expression supplies a valid minimum gap duration");
     let name = expand_placeholders(world, &name);
     let observations = world
@@ -1333,15 +2164,15 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         unix_nanos: i128,
     }
 
-    let duration = match humantime::parse_duration(&duration) {
+    let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
-    let cadence = match humantime::parse_duration(&cadence) {
+    let cadence = match parse_duration_text(&cadence) {
         Ok(cadence) => cadence,
         Err(error) => panic!("cadence duration must be valid: {error}"),
     };
-    let minimum_gap = match humantime::parse_duration(&minimum_gap) {
+    let minimum_gap = match parse_duration_text(&minimum_gap) {
         Ok(minimum_gap) => minimum_gap,
         Err(error) => panic!("minimum gap duration must be valid: {error}"),
     };
@@ -1359,7 +2190,7 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         .assured("scenario durations fit Tokio's monotonic instant range");
 
     let observations = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observations = match world.dependencies.clock_source_observations(&name).await {
             Ok(observations) => observations,
             Err(error) => panic!("failed to read clock source recorder '{name}': {error}"),
@@ -1382,7 +2213,7 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
              {observations}",
             requests.len(),
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     };
 
     let requests = observations["requests"]
@@ -1431,7 +2262,7 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         .assured("an active session with subscription must exist");
     let mut observed_payloads = Vec::with_capacity(expected_count);
     for (index, due) in recorded_due.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -1549,6 +2380,53 @@ async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
     refresh_dependency_configuration(world);
 }
 
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string} through fixture DNS"
+)]
+async fn when_node_trace_export(world: &mut ScenarioWorld, node_count: usize, receiver: String) {
+    let cluster = NodeTraceExport::start(
+        node_count,
+        grpc_receiver(world, &receiver),
+        world.test_id.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[then(expr = "OTLP receiver {string} eventually receives the server's own spans from every node")]
+async fn then_node_trace_export(world: &mut ScenarioWorld, receiver: String) {
+    world
+        .node_trace_export
+        .as_ref()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_exports(grpc_receiver(world, &receiver))
+        .await
+        .unwrap_or_else(|error| panic!("node trace export failed: {error}"));
+}
+
+#[when("every trace-exporting node receives SIGTERM")]
+async fn when_trace_exporting_nodes_receive_sigterm(world: &mut ScenarioWorld) {
+    world
+        .node_trace_export
+        .as_mut()
+        .verified("the preceding step started trace-exporting processes")
+        .signal_shutdown()
+        .unwrap_or_else(|error| panic!("could not signal trace-exporting processes: {error}"));
+}
+
+#[then("every trace-exporting node exits successfully")]
+async fn then_trace_exporting_nodes_exit_successfully(world: &mut ScenarioWorld) {
+    world
+        .node_trace_export
+        .as_mut()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting processes failed to stop: {error}"));
+}
+
 #[given("Sentry is running")]
 async fn given_sentry_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -1573,7 +2451,7 @@ async fn then_dependency_endpoint_responds_with_200(
         .to_string();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let attempt_error = match reqwest::get(&endpoint).await {
             Ok(response) if response.status() == reqwest::StatusCode::OK => return,
             Ok(response) => format!("HTTP {}", response.status()),
@@ -1584,7 +2462,7 @@ async fn then_dependency_endpoint_responds_with_200(
             "dependency endpoint '{endpoint_key}' at '{endpoint}' did not respond with 200: \
              {attempt_error}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1637,7 +2515,7 @@ async fn then_ephemeral_dependency_is_cleaned_up_when_test_process_is_killed(
         .take()
         .expect("dependency lifecycle helper stdout should be piped");
     let mut lines = tokio::io::BufReader::new(stdout).lines();
-    let container_id = tokio::time::timeout(Duration::from_secs(180), async {
+    let container_id = nervix_primitives::time::timeout(Duration::from_secs(180), async {
         while let Some(line) = lines
             .next_line()
             .await
@@ -1683,7 +2561,7 @@ async fn then_ephemeral_dependency_is_cleaned_up_when_test_process_is_killed(
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1719,6 +2597,242 @@ async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
     start_ready_server_process(world, &[]).await;
 }
 
+#[given(
+    expr = "a 3 node nervix-server process cluster is started with transaction idle timeout \
+            {string} and tombstone retention {string}"
+)]
+async fn given_server_process_cluster_is_started(
+    world: &mut ScenarioWorld,
+    idle_timeout: String,
+    tombstone_retention: String,
+) {
+    assert!(
+        world.server_process_cluster.is_none(),
+        "a scenario starts at most one real-process cluster"
+    );
+    initialize_scenario_identity(world);
+    let options = [
+        ServerProcessOption::TransactionIdleTimeout(
+            parse_duration_text(&idle_timeout)
+                .assured("the scenario's transaction idle timeout is a valid duration literal"),
+        ),
+        ServerProcessOption::TransactionTombstoneRetention(
+            parse_duration_text(&tombstone_retention)
+                .assured("the scenario's tombstone retention is a valid duration literal"),
+        ),
+    ];
+    world.server_process_cluster = Some(
+        ServerProcessCluster::start(&options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+    );
+}
+
+#[given("the server process cluster is configured with these NSPL commands")]
+async fn given_server_process_cluster_is_configured(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    for statement in nspl_statements(&commands) {
+        nervix_primitives::task::consume_budget().await;
+        let output = cluster
+            .run_commands(&world.domain, &statement)
+            .await
+            .unwrap_or_else(|error| panic!("real-process cluster rejected {statement:?}: {error}"));
+        world.last_command_output = Some(output);
+    }
+}
+
+#[when(
+    expr = "this NSPL command request with execution reference {string} is executed on the server \
+            process cluster"
+)]
+async fn when_exact_command_is_executed_on_server_process_cluster(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    let command = expand_placeholders(world, docstring(step));
+    let execution_reference = command_execution_reference(world, &execution_reference);
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let mut session = cluster
+        .open_session(&world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open a real-process cluster session: {error}"));
+    let result = session
+        .run_command_result_with_reference(&command, &execution_reference)
+        .await
+        .unwrap_or_else(|error| panic!("the exact command received no result: {error}"));
+    assert!(
+        result.succeeded(),
+        "the exact command failed: {}",
+        result.message
+    );
+    world.last_command_output = Some(result.message);
+}
+
+#[when(expr = "an open transaction is held on the server process cluster as placeholder {string}")]
+async fn when_open_transaction_is_held_on_server_process_cluster(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let mut session = cluster
+        .open_session(&world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the real-process cluster session: {error}"));
+    let result = session
+        .run_command_result("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("failed to begin the retained transaction: {error}"));
+    assert!(
+        result.succeeded(),
+        "the retained transaction must open: {}",
+        result.message
+    );
+    let transaction = result
+        .transaction
+        .verified("a successful BEGIN returns its transaction identity");
+    world
+        .placeholders
+        .insert(placeholder, transaction.transaction_id().to_string());
+    world.active_session = Some(session);
+}
+
+#[when("the held server process cluster transaction queues these NSPL commands")]
+async fn when_held_server_process_cluster_transaction_queues(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let session = world
+        .active_session
+        .as_mut()
+        .verified("the preceding step held a transaction session");
+    for statement in nspl_statements(&commands) {
+        nervix_primitives::task::consume_budget().await;
+        let result = session
+            .run_command_result(&statement)
+            .await
+            .unwrap_or_else(|error| panic!("failed to queue {statement:?}: {error}"));
+        assert!(
+            result.succeeded(),
+            "failed to queue {statement:?}: {}",
+            result.message
+        );
+    }
+}
+
+#[when("all server processes receive SIGKILL")]
+async fn when_all_server_processes_receive_sigkill(world: &mut ScenarioWorld) {
+    world
+        .server_process_cluster
+        .as_mut()
+        .verified("the preceding step started a real-process cluster")
+        .kill_all()
+        .await
+        .unwrap_or_else(|error| panic!("the process cluster did not all exit by SIGKILL: {error}"));
+    world.active_session = None;
+}
+
+#[when("all server processes restart from their existing databases")]
+async fn when_all_server_processes_restart(world: &mut ScenarioWorld) {
+    world
+        .server_process_cluster
+        .as_mut()
+        .verified("the preceding step started a real-process cluster")
+        .restart_all()
+        .await
+        .unwrap_or_else(|error| panic!("the process cluster did not recover: {error}"));
+}
+
+#[then(expr = "server process cluster transaction {string} eventually has state {string}")]
+async fn then_server_process_cluster_transaction_eventually_has_state(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    expected_state: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let expected_id = format!("id={transaction_id}");
+    let expected_state = format!("state={}", expected_state.to_ascii_uppercase());
+    let deadline = PhaseDeadline::after(Duration::from_secs(60));
+    let mut last_output = String::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !deadline.has_passed(),
+            "real-process cluster transaction '{transaction_id}' did not reach {expected_state}; \
+             last output: {last_output}"
+        );
+        let cluster = world
+            .server_process_cluster
+            .as_ref()
+            .verified("the preceding step started a real-process cluster");
+        match cluster
+            .run_commands(&world.domain, "SHOW TRANSACTIONS;")
+            .await
+        {
+            Ok(output)
+                if output
+                    .lines()
+                    .any(|line| line.contains(&expected_id) && line.contains(&expected_state)) =>
+            {
+                world.last_command_output = Some(output);
+                return;
+            }
+            Ok(output) => last_output = output,
+            Err(error) => last_output = error.to_string(),
+        }
+        deadline.pause(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "the server process cluster has no schema {string}")]
+async fn then_server_process_cluster_has_no_schema(world: &mut ScenarioWorld, schema: String) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let command = format!("SHOW CREATE SCHEMA {schema};");
+    let failure = match cluster.run_commands(&world.domain, &command).await {
+        Ok(output) => panic!("the expired transaction installed a queued schema: {output}"),
+        Err(failure) => failure,
+    };
+    assert!(
+        failure.to_string().contains("does not exist"),
+        "the schema query failed unexpectedly: {failure}"
+    );
+}
+
+#[then(expr = "the server process cluster has schema {string}")]
+async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schema: String) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let command = format!("SHOW CREATE SCHEMA {schema};");
+    let output = cluster
+        .run_commands(&world.domain, &command)
+        .await
+        .unwrap_or_else(|error| panic!("the retained schema is unavailable: {error}"));
+    assert!(
+        output.contains(&format!("CREATE SCHEMA {schema}")),
+        "the recovered schema has the wrong identity: {output}"
+    );
+    world.last_command_output = Some(output);
+}
+
 #[given("a release nervix-server process is started for the client-wire baseline")]
 async fn given_release_server_process_is_started_for_client_wire_baseline(
     world: &mut ScenarioWorld,
@@ -1739,7 +2853,7 @@ async fn given_nervix_server_process_is_started_with_drain_timeout(
     drain_timeout: String,
 ) {
     let drain_timeout =
-        humantime::parse_duration(&drain_timeout).expect("drain timeout must be a valid duration");
+        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
     start_ready_server_process(world, &[ServerProcessOption::DrainTimeout(drain_timeout)]).await;
 }
 
@@ -1748,8 +2862,8 @@ async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
     world: &mut ScenarioWorld,
     interval: String,
 ) {
-    let interval = humantime::parse_duration(&interval)
-        .expect("state snapshot interval must be a valid duration");
+    let interval =
+        parse_duration_text(&interval).expect("state snapshot interval must be a valid duration");
     start_ready_server_process(
         world,
         &[ServerProcessOption::StateSnapshotInterval(interval)],
@@ -1766,9 +2880,9 @@ async fn given_nervix_server_process_is_started_with_transaction_retention(
     idle_timeout: String,
     tombstone_retention: String,
 ) {
-    let idle_timeout = humantime::parse_duration(&idle_timeout)
+    let idle_timeout = parse_duration_text(&idle_timeout)
         .expect("transaction idle timeout must be a valid duration");
-    let tombstone_retention = humantime::parse_duration(&tombstone_retention)
+    let tombstone_retention = parse_duration_text(&tombstone_retention)
         .expect("transaction tombstone retention must be a valid duration");
     let options = [
         ServerProcessOption::TransactionIdleTimeout(idle_timeout),
@@ -1787,9 +2901,9 @@ async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
     shutdown_timeout: String,
 ) {
     let drain_timeout =
-        humantime::parse_duration(&drain_timeout).expect("drain timeout must be a valid duration");
-    let shutdown_timeout = humantime::parse_duration(&shutdown_timeout)
-        .expect("shutdown timeout must be a valid duration");
+        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
+    let shutdown_timeout =
+        parse_duration_text(&shutdown_timeout).expect("shutdown timeout must be a valid duration");
     let options = [
         ServerProcessOption::DrainTimeout(drain_timeout),
         ServerProcessOption::ShutdownTimeout(shutdown_timeout),
@@ -1826,11 +2940,45 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
     world: &mut ScenarioWorld,
     limit: u32,
 ) {
+    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[]);
+}
+
+#[when(
+    expr = "a nervix-server process is started with command-line option {string} set to {string}"
+)]
+async fn when_nervix_server_process_is_started_with_written_option(
+    world: &mut ScenarioWorld,
+    option: String,
+    value: String,
+) {
+    let option = ServerProcessOption::Written { option, value };
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+}
+
+#[when(
+    expr = "a nervix-server process is started with environment variable {string} set to {string}"
+)]
+async fn when_nervix_server_process_is_started_with_environment_variable(
+    world: &mut ScenarioWorld,
+    variable: String,
+    value: String,
+) {
+    let option = ServerProcessOption::Environment { variable, value };
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+}
+
+/// Starts the scenario's server process without waiting for it to accept commands, for a
+/// scenario about a process that is expected to exit during startup.
+fn start_server_process_without_waiting(
+    world: &mut ScenarioWorld,
+    launch: ServerProcessLaunch,
+    options: &[ServerProcessOption],
+) {
     assert!(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
     );
-    let process = ServerProcess::start(ServerProcessLaunch::OpenFileLimit(limit), &[])
+    let process = ServerProcess::start(launch, options)
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
@@ -1922,7 +3070,7 @@ async fn then_server_process_transaction_eventually_has_state(
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "server process transaction '{transaction_id}' did not reach state \
@@ -1946,7 +3094,7 @@ async fn then_server_process_transaction_eventually_has_state(
             Ok(output) => last_output = output,
             Err(error) => last_output = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -2116,8 +3264,8 @@ async fn then_server_process_is_terminated_by_signal_within(
     let expected_signal = expected_signal
         .parse::<nix::sys::signal::Signal>()
         .assured("the scenario names a recognized signal such as SIGKILL");
-    let bound = humantime::parse_duration(&bound)
-        .assured("the scenario termination bound is a valid duration");
+    let bound =
+        parse_duration_text(&bound).assured("the scenario termination bound is a valid duration");
     let signalled_at = world
         .last_server_signal_at
         .verified("the preceding step delivered a signal to the server process");
@@ -2208,9 +3356,87 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     );
 }
 
-/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
-/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+#[when("the client-wire command transport cost is captured")]
+async fn when_client_wire_command_transport_cost_is_captured(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .expect("failed to resolve leader gRPC URI");
+    let artifact = crate::common::client_wire_tls_cost::capture(&grpc_uri, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("client-wire transport cost failed: {error:#}"));
+    world.placeholders.insert(
+        "client_wire_tls_cost_artifact".to_string(),
+        artifact.display().to_string(),
+    );
+}
+
+#[then("the client-wire command transport artifact exists")]
+fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld) {
+    let artifact = world
+        .placeholders
+        .get("client_wire_tls_cost_artifact")
+        .verified("the preceding step captured the transport cost artifact");
+    assert!(
+        Path::new(artifact).is_file(),
+        "client-wire transport artifact was not written to {artifact}"
+    );
+}
+
+/// How long a probe may take to open its session and subscription or attachment. Starting a JVM
+/// or compiling nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
 const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Where a probe of the scenario's domain connects when it starts on `node_id`.
+fn client_probe_target(
+    world: &ScenarioWorld,
+    node_id: &str,
+    exercise: ProbeExercise,
+) -> ProbeTarget {
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        exercise,
+    }
+}
+
+/// Starts a probe and waits until it prints `ready_line`, the point a scenario continues from.
+async fn start_client_probe(
+    world: &mut ScenarioWorld,
+    runtime: ProbeRuntime,
+    node_id: &str,
+    target: ProbeTarget,
+    ready_line: &str,
+) {
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(ready_line, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
 
 #[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
@@ -2228,40 +3454,84 @@ async fn when_client_probe_subscribes(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let cluster = world.cluster();
-    let grpc_uri = cluster
-        .grpc_uri(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let console = cluster
-        .web_console_url(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let mut websocket_uri =
-        url::Url::parse(&console).expect("the harness builds a valid console URL");
-    websocket_uri
-        .set_scheme("ws")
-        .expect("an http URL can take the ws scheme");
-    websocket_uri.set_path("/console/ws");
-    let target = ProbeTarget {
-        grpc_uri,
-        websocket_uri: websocket_uri.to_string(),
-        username: TEST_AUTH_USERNAME.to_string(),
-        password: TEST_AUTH_PASSWORD.to_string(),
-        domain: world.domain.clone(),
+    let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
-    append_cucumber_log_line(&format!(
-        "client probe {runtime:?}: node={node_id} target={target:?}"
-    ));
-    let mut probe = ClientProbe::start(runtime, target)
+    let target = client_probe_target(world, &node_id, exercise);
+    start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+/// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood
+/// in front of `node_id`'s gRPC endpoint, so the scenario can end the probe's session by stopping
+/// the forwarder.
+#[when(
+    expr = "the {string} client probe attaches to the domain clock through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_attaches_to_the_domain_clock_through_forwarder(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    target.grpc_uri = forwarded;
+    start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
+}
+
+/// Starts a probe that opens a producer on `ingestor` and a consumer on `emitter` through the TCP
+/// forwarder a preceding step stood in front of `node_id`'s gRPC endpoint, so the scenario can end
+/// the probe's session by stopping the forwarder while the probe holds a delivery.
+#[when(
+    expr = "the {string} client probe publishes to ingestor {string} and consumes emitter \
+            {string} through the forwarded gRPC endpoint of node {string}"
+)]
+async fn when_client_probe_publishes_and_consumes_through_forwarder(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    ingestor: String,
+    emitter: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let exercise = ProbeExercise::Endpoints {
+        ingestor: expand_placeholders(world, &ingestor),
+        emitter: expand_placeholders(world, &emitter),
+    };
+    let mut target = client_probe_target(world, &node_id, exercise);
+    target.grpc_uri = forwarded;
+    start_client_probe(world, runtime, &node_id, target, OPENED_LINE).await;
+}
+
+#[then(expr = "within {string} the client probe prints {string}")]
+async fn then_client_probe_prints(world: &mut ScenarioWorld, within: String, line: String) {
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
+    let line = expand_placeholders(world, &line);
+    world
+        .client_probe
+        .as_mut()
+        .verified("a preceding step started a client probe")
+        .wait_for_line(&line, within)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    probe
-        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    world.client_probe = Some(probe);
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -2277,8 +3547,7 @@ async fn when_client_probe_decodes_the_corpus(world: &mut ScenarioWorld, runtime
 
 #[then(expr = "within {string} the client probe reports the conformance corpus")]
 async fn then_client_probe_reports_the_corpus(world: &mut ScenarioWorld, within: String) {
-    let within =
-        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
     let probe = world
         .client_probe
         .take()
@@ -2295,8 +3564,7 @@ async fn then_client_probe_reports_the_corpus(world: &mut ScenarioWorld, within:
 
 #[then(expr = "within {string} the client probe reports")]
 async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[step] step: &Step) {
-    let within =
-        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
     let probe = world
         .client_probe
         .take()
@@ -2336,7 +3604,7 @@ async fn then_server_process_exits_with_status_within(
     expected: i32,
     bound: String,
 ) {
-    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let bound = parse_duration_text(&bound).expect("step duration must be a valid duration");
     let elapsed = server_process_exit_after_last_signal(world, expected).await;
     let process = world
         .server_process
@@ -2359,9 +3627,8 @@ async fn then_server_process_exits_with_status_between(
     earliest: String,
     bound: String,
 ) {
-    let earliest =
-        humantime::parse_duration(&earliest).expect("step duration must be a valid duration");
-    let bound = humantime::parse_duration(&bound).expect("step duration must be a valid duration");
+    let earliest = parse_duration_text(&earliest).expect("step duration must be a valid duration");
+    let bound = parse_duration_text(&bound).expect("step duration must be a valid duration");
     let elapsed = server_process_exit_after_last_signal(world, expected).await;
     let process = world
         .server_process
@@ -2487,32 +3754,86 @@ fn scenario_cli_binary() -> PathBuf {
     candidate
 }
 
+fn fixture_grpc_uri(
+    world: &ScenarioWorld,
+    grpc_uri: &str,
+    name: &str,
+) -> (String, DnsConfiguration) {
+    let mut endpoint = url::Url::parse(grpc_uri).assured("the cluster's gRPC URI is valid");
+    let address = match endpoint.host() {
+        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
+        Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
+        _ => panic!("the cluster's gRPC URI must have a literal listener address"),
+    };
+    world
+        .cluster()
+        .publish_dns_service(name, vec![address])
+        .assured("the named cluster has a DNS fixture");
+    endpoint
+        .set_host(Some(name))
+        .assured("the fixture DNS name is a valid URL host");
+    let configuration = world
+        .cluster()
+        .dns_configuration()
+        .assured("the named cluster has a DNS configuration");
+    (endpoint.to_string(), configuration)
+}
+
 impl ScenarioWorld {
-    async fn execute_cli(&mut self, command: String, node: String, password: &str) {
+    async fn execute_cli(
+        &mut self,
+        command: String,
+        node: String,
+        password: &str,
+        fixture_name: Option<&str>,
+    ) {
         let command = expand_placeholders(self, &command);
         let node = expand_placeholders(self, &node);
-        let grpc_uri = self
+        let mut grpc_uri = self
             .cluster()
             .grpc_uri(&node)
             .assured("the scenario names a cluster node");
-        let result = tokio::time::timeout(
-            Duration::from_secs(60),
-            tokio::process::Command::new(scenario_cli_binary())
-                .args([
-                    "--server",
-                    &grpc_uri,
-                    "--domain",
-                    &self.domain,
-                    "--username",
-                    TEST_AUTH_USERNAME,
-                    "--password",
-                    password,
-                    "--command",
-                    &command,
-                ])
-                .output(),
-        )
-        .await;
+        let dns = if let Some(name) = fixture_name {
+            let (named_uri, configuration) = fixture_grpc_uri(self, &grpc_uri, name);
+            grpc_uri = named_uri;
+            Some(configuration)
+        } else {
+            None
+        };
+        let mut process = tokio::process::Command::new(scenario_cli_binary());
+        process.args([
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &self.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            password,
+            "--command",
+            &command,
+        ]);
+        if let Some(configuration) = dns {
+            if grpc_uri.starts_with("https://") {
+                process.arg("--tls").arg("required");
+                process
+                    .arg("--tls-ca-cert")
+                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tls/dev/ca.pem"));
+            }
+            process
+                .arg("--dns-resolver-config")
+                .arg(configuration.resolver_configuration);
+            process
+                .arg("--dns-hosts-file")
+                .arg(configuration.hosts_file);
+            if let NameServers::Explicit(addresses) = configuration.name_servers {
+                for address in addresses {
+                    process.arg("--dns-name-server").arg(address.to_string());
+                }
+            }
+        }
+        let result =
+            nervix_primitives::time::timeout(Duration::from_secs(60), process.output()).await;
         let output = match result {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => panic!("the scenario CLI process failed to start: {error}"),
@@ -2524,7 +3845,37 @@ impl ScenarioWorld {
 
 #[when(expr = "the CLI executes {string} on node {string}")]
 async fn when_cli_executes_on_node(world: &mut ScenarioWorld, command: String, node: String) {
-    world.execute_cli(command, node, TEST_AUTH_PASSWORD).await;
+    world
+        .execute_cli(command, node, TEST_AUTH_PASSWORD, None)
+        .await;
+}
+
+#[when(expr = "the CLI executes {string} on node {string} through fixture DNS")]
+async fn when_cli_executes_through_fixture_dns(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+) {
+    world
+        .execute_cli(
+            command,
+            node,
+            TEST_AUTH_PASSWORD,
+            Some("native-session.nervix.test"),
+        )
+        .await;
+}
+
+#[when(expr = "the CLI executes {string} on node {string} through fixture DNS name {string}")]
+async fn when_cli_executes_through_fixture_dns_name(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+    name: String,
+) {
+    world
+        .execute_cli(command, node, TEST_AUTH_PASSWORD, Some(&name))
+        .await;
 }
 
 #[when(expr = "the CLI executes {string} on node {string} with password {string}")]
@@ -2534,7 +3885,7 @@ async fn when_cli_executes_with_password(
     node: String,
     password: String,
 ) {
-    world.execute_cli(command, node, &password).await;
+    world.execute_cli(command, node, &password, None).await;
 }
 
 #[then(expr = "the CLI output contains {string}")]
@@ -2565,7 +3916,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
         .cluster()
         .grpc_uri(&node)
         .assured("the scenario names a cluster node");
-    let output = tokio::time::timeout(
+    let output = nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
             .args([
@@ -2701,15 +4052,13 @@ async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, 
         .stdout
         .take()
         .verified("the CLI process was started with piped stdout");
-    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let lines = StdArc::new(BlockingMutex::new(VecDeque::new()));
     let reader_lines = lines.clone();
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            tokio::task::consume_budget().await;
-            let mut retained = reader_lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            nervix_primitives::task::consume_budget().await;
+            let mut retained = reader_lines.lock();
             if retained.len() == 256 {
                 retained.pop_front();
             }
@@ -2730,23 +4079,493 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
         .verified("the preceding step started the CLI subscription");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let found = {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             retained.iter().any(|line| line.contains(&expected))
         };
         if found {
             return;
         }
         if Instant::now() >= deadline {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             panic!("CLI subscription output did not contain {expected:?}: {retained:?}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} on node {string}")]
+fn when_cli_follows_domain_clock(world: &mut ScenarioWorld, domain: String, node: String) {
+    let domain = expand_placeholders(world, &domain);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+#[given(expr = "the CLI clock connection to node {string} is forwarded")]
+async fn given_cli_clock_connection_is_forwarded(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let mut url = url::Url::parse(&grpc_uri).assured("a cluster gRPC endpoint is a URL");
+    let target_host = url
+        .host_str()
+        .assured("a cluster gRPC endpoint names a host")
+        .parse::<std::net::IpAddr>()
+        .assured("a cluster gRPC endpoint uses a literal IP address");
+    let target_port = url.port().assured("a cluster gRPC endpoint names a port");
+    let local_host = std::net::IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let forwarders = TcpForwarders::start(
+        &[local_host],
+        std::net::SocketAddr::new(target_host, target_port),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("the CLI clock forwarder could not start: {error}"));
+    url.set_host(Some("127.0.0.1"))
+        .assured("the loopback host is valid in a URL");
+    url.set_port(Some(forwarders.port()))
+        .assured("a reserved TCP port is valid in a URL");
+    world
+        .placeholders
+        .insert("cli_clock_forwarded_server".to_string(), url.to_string());
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} through its TCP forwarder")]
+fn when_cli_follows_domain_clock_through_forwarder(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let grpc_uri = world
+        .placeholders
+        .get("cli_clock_forwarded_server")
+        .verified("the preceding step forwarded the CLI clock connection")
+        .clone();
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+fn start_cli_clock_process(world: &mut ScenarioWorld, domain: &str, grpc_uri: &str) {
+    let mut child = tokio::process::Command::new(scenario_cli_binary())
+        .args([
+            "--server",
+            grpc_uri,
+            "--domain",
+            domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+            "domain-clock",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("the CLI clock process failed to start: {error}"));
+    let stdout = child
+        .stdout
+        .take()
+        .verified("the CLI clock process was started with piped stdout");
+    let lines = StdArc::new(BlockingMutex::new(VecDeque::new()));
+    let reader_lines = lines.clone();
+    let reader = nervix_primitives::task::spawn(async move {
+        let mut stdout = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = stdout.next_line().await {
+            nervix_primitives::task::consume_budget().await;
+            let mut retained = reader_lines.lock();
+            if retained.len() == 2048 {
+                retained.pop_front();
+            }
+            retained.push_back(line);
+        }
+    });
+    world.cli_clock_process = Some(CliClockProcess {
+        child,
+        lines,
+        _reader: AbortOnDropHandle::new(reader),
+    });
+}
+
+async fn wait_for_cli_clock_output(
+    world: &ScenarioWorld,
+    duration: Duration,
+    described: &str,
+    matches: impl Fn(&VecDeque<String>) -> bool,
+) {
+    let lines = &world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process")
+        .lines;
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        {
+            let retained = lines.lock();
+            if matches(&retained) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("CLI clock output did not show {described}: {retained:?}");
+            }
+        }
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "within {string} the CLI clock output contains {string}")]
+async fn then_cli_clock_output_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
+    let expected = expand_placeholders(world, &expected);
+    wait_for_cli_clock_output(world, duration, &expected, |lines| {
+        lines.iter().any(|line| line.contains(&expected))
+    })
+    .await;
+}
+
+fn cli_clock_tick_id(line: &str, domain: &str, generation: u64) -> Option<u64> {
+    let prefix = format!("[events] domain clock [{domain}] tick: generation {generation}, id ");
+    let (id, fields) = line.strip_prefix(&prefix)?.split_once(", boundary ")?;
+    if !fields.contains(", authority UTC ") || !fields.contains(", node logical ") {
+        return None;
+    }
+    id.parse().ok()
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has {int} increasing ticks for generation {int} \
+            of domain {string}"
+)]
+async fn then_cli_clock_ticks_increase(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    generation: u64,
+    domain: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    wait_for_cli_clock_output(world, duration, "increasing clock ticks", |lines| {
+        let ids: Vec<_> = lines
+            .iter()
+            .filter_map(|line| cli_clock_tick_id(line, &domain, generation))
+            .collect();
+        ids.len() >= count && ids.windows(2).all(|pair| pair[0] < pair[1])
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a tick for generation {int} after its state \
+            of domain {string}"
+)]
+async fn then_cli_clock_tick_follows_state(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(world, duration, "a tick after its clock state", |lines| {
+        let Some(state_index) = lines.iter().rposition(|line| line.starts_with(&state)) else {
+            return false;
+        };
+        lines
+            .iter()
+            .skip(state_index + 1)
+            .any(|line| cli_clock_tick_id(line, &domain, generation).is_some())
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a fresh state for generation {int} after \
+            interruption of domain {string}"
+)]
+async fn then_cli_clock_state_follows_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let interrupted =
+        format!("[events] domain clock [{domain}] notice: the session was interrupted;");
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(
+        world,
+        duration,
+        "a restored state after interruption",
+        |lines| {
+            let Some(interruption_index) =
+                lines.iter().position(|line| line.starts_with(&interrupted))
+            else {
+                return false;
+            };
+            lines
+                .iter()
+                .skip(interruption_index + 1)
+                .any(|line| line.starts_with(&state))
+        },
+    )
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output shows the clock it attached to again after an \
+            interruption of domain {string}"
+)]
+async fn then_cli_clock_shows_attached_clock_after_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    domain: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let attached = format!("attached to the clock of domain '{domain}': ");
+    let interrupted =
+        format!("[events] domain clock [{domain}] notice: the session was interrupted;");
+    let observed = format!("[events] domain clock [{domain}]: ");
+    wait_for_cli_clock_output(
+        world,
+        duration,
+        "the attached clock again after an interruption",
+        |lines| {
+            // The attach reply is the first line the command prints.
+            let Some(first_line) = lines.front() else {
+                return false;
+            };
+            let Some(attached_clock) = first_line.strip_prefix(&attached) else {
+                return false;
+            };
+            let Some(interruption_index) =
+                lines.iter().position(|line| line.starts_with(&interrupted))
+            else {
+                return false;
+            };
+            lines
+                .iter()
+                .skip(interruption_index + 1)
+                .any(|line| line.strip_prefix(&observed) == Some(attached_clock))
+        },
+    )
+    .await;
+}
+
+#[when(expr = "the CLI clock process receives Ctrl-C")]
+fn when_cli_clock_receives_ctrl_c(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process");
+    let raw_pid = process
+        .child
+        .id()
+        .verified("the CLI clock process is still running");
+    let pid = nix::unistd::Pid::from_raw(
+        i32::try_from(raw_pid).assured("a process id fits the operating system pid type"),
+    );
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT)
+        .unwrap_or_else(|error| panic!("failed to interrupt the CLI clock process: {error}"));
+}
+
+#[then(expr = "the CLI clock process exits successfully")]
+async fn then_cli_clock_exits_successfully(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_mut()
+        .verified("the preceding step started the CLI clock process");
+    let status = nervix_primitives::time::timeout(Duration::from_secs(10), process.child.wait())
+        .await
+        .unwrap_or_else(|_| panic!("the CLI clock process did not stop after Ctrl-C"))
+        .unwrap_or_else(|error| panic!("the CLI clock process could not be reaped: {error}"));
+    assert!(
+        status.success(),
+        "the CLI clock process exited with {status}"
+    );
+    world.cli_clock_process = None;
+}
+
+#[when(expr = "the CLI attempts to follow the clock of missing domain {string} on node {string}")]
+async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: String, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let output = nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(scenario_cli_binary())
+            .args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+                "domain-clock",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
+    .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
+    world.last_cli_output = Some(output);
+}
+
+/// How long the interactive CLI may take to display what a step expects. A reconnect after a node
+/// restart happens inside that wait, so it is bounded generously.
+const CLI_TERMINAL_DISPLAY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a repeated post waits for the interactive CLI to display its row before posting again.
+const CLI_TERMINAL_REPOST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long the interactive CLI may take to exit once it is asked to.
+const CLI_TERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[when(expr = "the CLI REPL is started on node {string}")]
+async fn when_cli_repl_is_started(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let terminal = CliTerminal::start(
+        &scenario_cli_binary(),
+        &[
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+        ],
+    )
+    .unwrap_or_else(|error| panic!("the CLI REPL failed to start on a terminal: {error}"));
+    // The banner follows the connected session and precedes the first prompt.
+    if let Err(error) = terminal
+        .wait_for_display("nervix-cli connected to", CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not connect: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+    world.cli_terminal = Some(terminal);
+}
+
+#[when(expr = "the CLI REPL runs {string}")]
+async fn when_cli_repl_runs(world: &mut ScenarioWorld, line: String) {
+    let line = expand_placeholders(world, &line);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal.type_line(&line).await {
+        panic!(
+            "the CLI REPL cannot run {line:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+#[then(expr = "the CLI REPL eventually displays {string}")]
+async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal
+        .wait_for_display(&expected, CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not display {expected:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+/// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
+/// transit, so the payload is posted again until the interactive CLI displays the row it expects.
+#[when(
+    expr = "http payload is posted repeatedly to node {string} with host {string} path {string} \
+            until the CLI REPL displays {string}"
+)]
+async fn when_http_payload_is_posted_until_the_cli_repl_displays(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    expected: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let expected = expand_placeholders(world, &expected);
+    let payload = expand_placeholders(world, docstring(step));
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let deadline = Instant::now() + CLI_TERMINAL_DISPLAY_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(CLI_TERMINAL_REPOST_INTERVAL);
+        match terminal.wait_for_display(&expected, wait).await {
+            Ok(()) => return,
+            Err(DisplayWaitError::Timeout { .. }) if Instant::now() < deadline => {}
+            Err(error) => panic!(
+                "the CLI REPL did not display {expected:?} from repeated posts within \
+                 {CLI_TERMINAL_DISPLAY_TIMEOUT:?}: {error}; it displayed:{}",
+                terminal.transcript()
+            ),
+        }
+    }
+}
+
+#[then("the CLI REPL ends successfully")]
+async fn then_cli_repl_ends_successfully(world: &mut ScenarioWorld) {
+    let terminal = world
+        .cli_terminal
+        .as_mut()
+        .verified("a preceding step started the CLI REPL");
+    let exited = terminal.wait_for_exit(CLI_TERMINAL_EXIT_TIMEOUT).await;
+    match exited {
+        Ok(status) if status.success() => {}
+        Ok(status) => panic!(
+            "the CLI REPL ended with {status}; it displayed:{}",
+            terminal.transcript()
+        ),
+        Err(error) => panic!(
+            "the CLI REPL did not end: {error}; it displayed:{}",
+            terminal.transcript()
+        ),
     }
 }
 
@@ -2784,6 +4603,44 @@ fn given_an_nspl_file_containing(world: &mut ScenarioWorld, name: String, #[step
         std::fs::create_dir_all(parent).expect("NSPL file directory must be created");
     }
     let contents = format!("{}\n", docstring(step).trim());
+    std::fs::write(&path, &contents).expect("NSPL file must be written");
+    world.formatter_original_files.insert(name, contents);
+}
+
+/// Reads the `\r`, `\n`, `\t` and `\\` escapes a step spells where the characters themselves
+/// cannot be written in a feature file, such as a carriage return.
+fn unescaped_step_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('r') => output.push('\r'),
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('\\') => output.push('\\'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+#[given(regex = r#"^an NSPL file "([^"]+)" containing the escaped text$"#)]
+fn given_an_nspl_file_containing_escaped_text(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let root = formatter_root(world);
+    let path = root.join(&name);
+    let contents = unescaped_step_text(docstring(step).trim());
     std::fs::write(&path, &contents).expect("NSPL file must be written");
     world.formatter_original_files.insert(name, contents);
 }
@@ -2887,6 +4744,21 @@ fn then_the_nspl_file_contains(world: &mut ScenarioWorld, name: String, #[step] 
     assert!(
         actual.contains(expected),
         "expected {name} to contain:\n{expected}\ngot:\n{actual}"
+    );
+}
+
+#[then(regex = r#"^the NSPL file "([^"]+)" contains the escaped text$"#)]
+fn then_the_nspl_file_contains_escaped_text(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let root = formatter_root(world);
+    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    let expected = unescaped_step_text(docstring(step).trim());
+    assert!(
+        actual.contains(&expected),
+        "expected {name} to contain {expected:?}, got {actual:?}"
     );
 }
 
@@ -3054,7 +4926,7 @@ impl IngestorLogicTransportFixture {
                 let topic = expand_placeholders(world, "logic_notifications_{{test_id}}");
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     world
                         .cluster()
                         .publish_kafka(&topic, payload)
@@ -3069,7 +4941,7 @@ impl IngestorLogicTransportFixture {
                         "timed out waiting for ingestor logic kafka payload to reach the relay \
                          subscription"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
             Self::Mqtt => {
@@ -3140,7 +5012,7 @@ impl IngestorLogicTransportFixture {
                 let subject = expand_placeholders(world, "logic_notifications_{{test_id}}");
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     world
                         .cluster()
                         .publish_nats_with_headers(&subject, payload, &headers)
@@ -3155,7 +5027,7 @@ impl IngestorLogicTransportFixture {
                         "timed out waiting for ingestor logic nats payload with headers to reach \
                          the relay subscription"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
             Self::Mqtt | Self::WebsocketEndpoint | Self::ZeroMq => {
@@ -3213,9 +5085,8 @@ fn then_dependency_endpoint_remains_stable_for_the_test_suite(
         .unwrap_or_else(|error| panic!("{error}"))
         .to_string();
     let mut observed = SUITE_DEPENDENCY_ENDPOINTS
-        .get_or_init(|| StdMutex::new(BTreeMap::new()))
-        .lock()
-        .expect("suite dependency endpoint observations must not be poisoned");
+        .get_or_init(|| BlockingMutex::new(BTreeMap::new()))
+        .lock();
     match observed.get(&endpoint_key) {
         Some(existing) => assert_eq!(
             existing, &endpoint,
@@ -3991,7 +5862,7 @@ async fn given_raft_retention_bounds(
 #[given(expr = "consensus commits on node {string} take {string}")]
 fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, duration: String) {
     let node_id = expand_placeholders(world, &node_id);
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the Cucumber expression supplies a valid consensus commit duration");
     world
         .fault_injection
@@ -4016,7 +5887,7 @@ async fn when_domains_are_created_in_a_burst(
         .await
         .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
     for index in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
         session
             .run_command(&format!("CREATE DOMAIN {name};"))
@@ -4092,7 +5963,7 @@ async fn finish_durable_catch_up_writer(world: &mut ScenarioWorld) -> (String, u
         .verified("durable catch-up started its continuous client writer");
     writer.cancellation.cancel();
     let prefix = writer.prefix;
-    let joined = tokio::time::timeout(Duration::from_secs(5), writer.task)
+    let joined = nervix_primitives::time::timeout(Duration::from_secs(5), writer.task)
         .await
         .unwrap_or_else(|error| panic!("durable catch-up client writer did not stop: {error}"));
     let result = joined
@@ -4154,17 +6025,17 @@ async fn when_node_starts_durable_catch_up(
     let cancellation = CancellationToken::new();
     let writer_cancellation = cancellation.clone();
     let writer_prefix = live_prefix.clone();
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
+    let task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         let mut written = 0_usize;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if writer_cancellation.is_cancelled() {
                 return Ok(written);
             }
 
             let name = burst_domain_name(&writer_prefix, written);
             let request = client.execute(format!("CREATE DOMAIN {name};"));
-            let outcome = tokio::select! {
+            let outcome = nervix_primitives::select! {
                 () = writer_cancellation.cancelled() => return Ok(written),
                 outcome = request => outcome,
             };
@@ -4187,9 +6058,9 @@ async fn when_node_starts_durable_catch_up(
                     "follower catch-up did not finish while {written} leader writes succeeded"
                 ));
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 () = writer_cancellation.cancelled() => return Ok(written),
-                () = tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
+                () = nervix_primitives::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
             }
         }
     }));
@@ -4204,7 +6075,7 @@ async fn when_node_starts_durable_catch_up(
         });
     let memory_cancellation = CancellationToken::new();
     let sampler_cancellation = memory_cancellation.clone();
-    let memory_task = AbortOnDropHandle::new(tokio::spawn(
+    let memory_task = AbortOnDropHandle::new(nervix_primitives::task::spawn(
         crate::common::cluster::sample_peak_observability_metric(
             metrics_url,
             "nervix_execution_memory_reserved_bytes".to_string(),
@@ -4270,12 +6141,12 @@ async fn then_node_catches_up_within_durable_storage_bound(
         .assured("the durable catch-up test bound fits the monotonic clock range");
 
     let backlog_applied = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let applied = applied_burst_domains(world, &node_id, &backlog_prefix).await;
         if applied >= backlog_count || Instant::now() >= maximum_deadline {
             break applied;
         }
-        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+        nervix_primitives::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
     };
 
     let (live_prefix, live_writes) = finish_durable_catch_up_writer(world).await;
@@ -4293,13 +6164,13 @@ async fn then_node_catches_up_within_durable_storage_bound(
         .assured("the durable catch-up test bound fits the monotonic clock range");
 
     let live_applied = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let applied = applied_burst_domains(world, &node_id, &live_prefix).await;
         let all_applied = backlog_applied >= backlog_count && applied >= live_writes;
         if all_applied || Instant::now() >= deadline {
             break applied;
         }
-        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+        nervix_primitives::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
     };
 
     let elapsed = observation.started_at.elapsed();
@@ -4374,8 +6245,9 @@ async fn then_follower_held_append_batches_inside_its_commands_budget(
         "follower '{node_id}' must charge the append batches it holds while catching up, but its \
          commands class never reported a reservation against its {capacity} byte budget"
     );
+    // A full reservation is valid; admission must prevent the class from exceeding capacity.
     assert!(
-        peak < capacity,
+        peak <= capacity,
         "follower '{node_id}' must hold its queued append batches inside its commands budget: the \
          class peaked at {peak} bytes against a {capacity} byte budget while it caught up"
     );
@@ -4412,15 +6284,15 @@ async fn await_burst_domains(
     prefix: &str,
 ) {
     let deadline = Instant::now()
-        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+        + parse_duration_text(duration).expect("step duration must be a valid duration");
     for node_id in nodes {
         let applied = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let applied = applied_burst_domains(world, node_id, prefix).await;
             if applied >= count || Instant::now() >= deadline {
                 break applied;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         };
         assert_eq!(
             applied, count,
@@ -4436,7 +6308,42 @@ async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: Str
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    await_covered_log_purge(&observer, &duration).await;
+    await_covered_log_purge(&observer, &duration, None).await;
+}
+
+#[given(expr = "node {string} raft log head is saved before stop")]
+async fn given_node_raft_log_head_is_saved_before_stop(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let retention = observer.raft_log_retention();
+    world.saved_raft_log_heads.insert(
+        node_id,
+        retention.last_log_index.max(retention.snapshot_index),
+    );
+}
+
+#[then(
+    expr = "within {string} the leader node has purged its covered raft log beyond stopped node \
+            {string}"
+)]
+async fn then_leader_purged_covered_log_beyond_stopped_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stopped_node_id: String,
+) {
+    let stopped_node_id = expand_placeholders(world, &stopped_node_id);
+    let stopped_head = world
+        .saved_raft_log_heads
+        .get(&stopped_node_id)
+        .copied()
+        .verified("the scenario saved this follower's log head before stopping it");
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    await_covered_log_purge(&observer, &duration, stopped_head).await;
 }
 
 #[then(
@@ -4464,13 +6371,13 @@ async fn then_leader_purged_covered_log_and_reduced_retained_bytes(
 async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld, duration: String) {
     let leader = running_leader_node(world).await;
     let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
     let section_reservation = nervix_execution::OperationLimits::default()
         .snapshot_section_working_bytes()
         .verified("the default snapshot-section working set fits in u64");
     let section_reservation: f64 = section_reservation.approx_into();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let reserved = world
             .cluster()
             .read_observability_metric(
@@ -4490,7 +6397,7 @@ async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld, du
             "within {duration} leader '{leader}' still held {reserved} bytes of bulk memory, at \
              least the {section_reservation}-byte working set for one snapshot section"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -4505,9 +6412,9 @@ async fn await_purge_beyond_retention_peak(
     peak: &nervix_consensus::RaftLogRetention,
 ) {
     let deadline = Instant::now()
-        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+        + parse_duration_text(duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let retention = observer.raft_log_retention();
         assert!(
             retention.snapshot_index >= retention.purged_index,
@@ -4524,20 +6431,21 @@ async fn await_purge_beyond_retention_peak(
              ({purged_beyond_peak}) and report fewer retained bytes ({retained_fewer_bytes}): \
              peak={peak:?} last={retention:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
 async fn await_covered_log_purge(
     observer: &nervix_consensus::Observer,
     duration: &str,
+    beyond: Option<u64>,
 ) -> nervix_consensus::RaftLogRetention {
     let deadline = Instant::now()
-        + humantime::parse_duration(duration).expect("step duration must be a valid duration");
+        + parse_duration_text(duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let retention = observer.raft_log_retention();
-        if retention.purged_index.is_some() {
+        if retention.purged_index > beyond {
             assert!(
                 retention.snapshot_index >= retention.purged_index,
                 "the leader purged entries its snapshot does not cover: {retention:?}"
@@ -4546,9 +6454,10 @@ async fn await_covered_log_purge(
         }
         assert!(
             Instant::now() < deadline,
-            "the leader did not purge its covered raft log within {duration}: {retention:?}"
+            "the leader did not purge its covered raft log beyond {beyond:?} within {duration}: \
+             {retention:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -4600,9 +6509,9 @@ async fn then_node_interrupted_a_snapshot_installation(
     let node_id = expand_placeholders(world, &node_id);
     let node = crate::common::cluster::node_name(&node_id);
     let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if world.fault_injection.consensus_storage_failure_fired(&node) {
             return;
         }
@@ -4610,7 +6519,7 @@ async fn then_node_interrupted_a_snapshot_installation(
             Instant::now() < deadline,
             "node '{node_id}' did not interrupt a raft snapshot installation within {duration}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -4622,9 +6531,9 @@ async fn then_node_recovers_by_snapshot(
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let deadline = Instant::now()
-        + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observer = world
             .fault_injection
             .consensus_observer(&crate::common::cluster::node_name(&node_id));
@@ -4636,7 +6545,7 @@ async fn then_node_recovers_by_snapshot(
             Instant::now() < deadline,
             "node '{node_id}' did not install a raft snapshot within {duration}: {retention:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -4691,7 +6600,7 @@ async fn given_runtime_replication_is_configured(
         "replication must be configured before cluster startup"
     );
     world.cluster_config.replica_count = replica_count;
-    world.cluster_config.state_snapshot_interval = humantime::parse_duration(&snapshot_interval)
+    world.cluster_config.state_snapshot_interval = parse_duration_text(&snapshot_interval)
         .expect("snapshot interval must be a valid duration");
 }
 
@@ -4705,9 +6614,9 @@ fn given_raft_election_timeout_is_configured(
         world.cluster.is_none(),
         "raft election timeout must be configured before cluster startup"
     );
-    let minimum = humantime::parse_duration(&minimum)
+    let minimum = parse_duration_text(&minimum)
         .assured("the Cucumber scenario supplies a valid minimum election timeout");
-    let maximum = humantime::parse_duration(&maximum)
+    let maximum = parse_duration_text(&maximum)
         .assured("the Cucumber scenario supplies a valid maximum election timeout");
     assert!(
         minimum <= maximum,
@@ -4724,6 +6633,15 @@ async fn given_runtime_state_replica_polling_is_paused(world: &mut ScenarioWorld
         "replica polling must be paused before cluster startup"
     );
     world.fault_injection.pause_state_replica_polling();
+}
+
+#[given("runtime state checkpoint announcements are lost")]
+async fn given_runtime_state_checkpoint_announcements_are_lost(world: &mut ScenarioWorld) {
+    assert!(
+        world.cluster.is_none(),
+        "checkpoint announcements must be lost from cluster startup"
+    );
+    world.fault_injection.lose_state_checkpoint_announcements();
 }
 
 #[when("WASM guest-state checkpoints fail to reach stable storage on every node")]
@@ -4780,7 +6698,7 @@ async fn then_wasm_checkpoint_is_held(
     window: String,
 ) {
     let target = WasmCheckpointPauseTarget::of(world, &processor, &window);
-    let reached = tokio::time::timeout(
+    let reached = nervix_primitives::time::timeout(
         Duration::from_secs(30),
         world.fault_injection.wait_for_wasm_checkpoint_pause(
             target.domain,
@@ -4871,11 +6789,10 @@ async fn then_wasm_processor_completes_a_guest_requested_state_reset(
     timeout: String,
     processor: String,
 ) {
-    let timeout =
-        humantime::parse_duration(&timeout).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&timeout).expect("step duration must be a valid duration");
     let deadline = Instant::now() + timeout;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if completed_guest_wasm_state_reset(world, &processor).await {
             return;
         }
@@ -4884,7 +6801,7 @@ async fn then_wasm_processor_completes_a_guest_requested_state_reset(
             "wasm processor '{processor}' did not complete a guest-requested state reset within \
              {timeout:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -5417,7 +7334,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
             .checked_add(Duration::from_secs(30))
             .expect("the scenario placement deadline must fit in the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = client
                 .execute("SHOW CLUSTER STATUS;".to_string())
                 .await
@@ -5448,7 +7365,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 "WASM reset processor did not reach its requested test placement: {}",
                 outcome.message
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }
@@ -5470,7 +7387,7 @@ async fn given_transaction_idle_timeout_is_configured(world: &mut ScenarioWorld,
         "transaction idle timeout must be configured before cluster startup"
     );
     world.cluster_config.transaction_idle_timeout =
-        humantime::parse_duration(&timeout).expect("transaction idle timeout must be valid");
+        parse_duration_text(&timeout).expect("transaction idle timeout must be valid");
 }
 
 #[given(expr = "the transaction tombstone retention is configured as {string}")]
@@ -5482,8 +7399,8 @@ async fn given_transaction_tombstone_retention_is_configured(
         world.cluster.is_none(),
         "transaction tombstone retention must be configured before cluster startup"
     );
-    world.cluster_config.transaction_tombstone_retention = humantime::parse_duration(&retention)
-        .expect("transaction tombstone retention must be valid");
+    world.cluster_config.transaction_tombstone_retention =
+        parse_duration_text(&retention).expect("transaction tombstone retention must be valid");
 }
 
 #[given(expr = "command retry identities are valid for {string}")]
@@ -5492,7 +7409,7 @@ async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld,
         world.cluster.is_none(),
         "command retry validity must be configured before cluster startup"
     );
-    world.cluster_config.command_retry_validity = humantime::parse_duration(&validity)
+    world.cluster_config.command_retry_validity = parse_duration_text(&validity)
         .assured("the configured command retry validity is a duration");
 }
 
@@ -5588,34 +7505,19 @@ async fn when_the_dns_fixture_answers_node_name_with(
 
 #[given("the HTTP mock endpoint is published under fixture DNS")]
 async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    const NAME: &str = "http-source.nervix.test";
-    let endpoint = world
-        .placeholders
-        .get("mock_http_addr")
-        .expect("the HTTP mock server was started");
-    let mut url = url::Url::parse(endpoint).expect("the HTTP mock address is a URL");
-    let address = url
-        .host_str()
-        .expect("the HTTP mock address has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("the HTTP mock listens on a literal address");
-    world
-        .cluster()
-        .publish_dns_service(NAME, address)
-        .expect("the cluster has a DNS fixture");
-    url.set_host(Some(NAME))
-        .expect("the fixture name is a valid URL host");
-    world.placeholders.insert(
-        "mock_http_dns_addr".to_string(),
-        url.to_string().trim_end_matches('/').to_string(),
+    publish_fixture_name(
+        world,
+        "mock_http_addr",
+        "http-source.nervix.test",
+        "mock_http_dns_addr",
     );
 }
 
 #[then("the DNS fixture eventually receives a question for the HTTP mock")]
 async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let count = world
                 .cluster()
                 .dns_questions_for_name("http-source.nervix.test")
@@ -5623,7 +7525,7 @@ async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
             if count > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
@@ -5644,34 +7546,15 @@ async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
             "rustfs_dns_addr",
         ),
     ] {
-        let endpoint = world
-            .placeholders
-            .get(source)
-            .expect("the Iceberg dependency was started");
-        let mut url = url::Url::parse(endpoint).expect("the Iceberg endpoint is a URL");
-        let address = url
-            .host_str()
-            .expect("the Iceberg endpoint has a host")
-            .parse::<std::net::IpAddr>()
-            .expect("the dependency listens on a literal address");
-        world
-            .cluster()
-            .publish_dns_service(name, address)
-            .expect("the cluster has a DNS fixture");
-        url.set_host(Some(name))
-            .expect("the fixture name is a valid URL host");
-        world.placeholders.insert(
-            target.to_string(),
-            url.to_string().trim_end_matches('/').to_string(),
-        );
+        publish_fixture_name(world, source, name, target);
     }
 }
 
 #[then("the DNS fixture eventually receives Iceberg catalog and object-store questions")]
 async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let catalog = world
                 .cluster()
                 .dns_questions_for_name("iceberg-catalog.nervix.test")
@@ -5683,27 +7566,29 @@ async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
             if catalog > 0 && objects > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .expect("the Iceberg clients did not ask the configured DNS fixture within 30 seconds");
 }
 
-fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
+/// Publish the literal address of the started dependency whose URL is placeholder `source` under
+/// the fixture name `name`, and record that URL with `name` as its host in placeholder `target`.
+fn publish_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
     let endpoint = world
         .placeholders
         .get(source)
-        .expect("the HTTP dependency was started");
-    let mut url = url::Url::parse(endpoint).expect("the HTTP endpoint is a URL");
+        .unwrap_or_else(|| panic!("the dependency behind '{source}' was not started"));
+    let mut url = url::Url::parse(endpoint).expect("the dependency endpoint is a URL");
     let address = url
         .host_str()
-        .expect("the HTTP endpoint has a host")
+        .expect("the dependency endpoint has a host")
         .parse::<std::net::IpAddr>()
         .expect("the dependency listens on a literal address");
     world
         .cluster()
-        .publish_dns_service(name, address)
+        .publish_dns_service(name, vec![address])
         .expect("the cluster has a DNS fixture");
     url.set_host(Some(name))
         .expect("the fixture name is a valid URL host");
@@ -5715,7 +7600,7 @@ fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str
 
 #[given("the Prometheus endpoint is published under fixture DNS")]
 async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(
+    publish_fixture_name(
         world,
         "prometheus_addr",
         "prometheus.nervix.test",
@@ -5725,12 +7610,12 @@ async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 
 #[given("the Sentry endpoint is published under fixture DNS")]
 async fn given_sentry_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
+    publish_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
 }
 
 #[given("the OTEL HTTP endpoint is published under fixture DNS")]
 async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(
+    publish_fixture_name(
         world,
         "otel_collector_http_addr",
         "otel-http.nervix.test",
@@ -5738,11 +7623,354 @@ async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
     );
 }
 
+#[given("the OTEL gRPC endpoint is published under fixture DNS")]
+async fn given_otel_grpc_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_fixture_name(
+        world,
+        "otel_collector_grpc_addr",
+        "otel-grpc.nervix.test",
+        "otel_collector_grpc_dns_addr",
+    );
+}
+
+#[given(expr = "the RabbitMQ endpoints are published under fixture DNS name {string}")]
+async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, RABBITMQ_ADDR, &name, "rabbitmq_dns_addr");
+    publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
+}
+
+#[given(expr = "the Redis endpoints are published under fixture DNS name {string}")]
+async fn given_redis_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, REDIS_ADDR, &name, "redis_dns_addr");
+    publish_fixture_name(world, REDIS_TLS_ADDR, &name, "redis_tls_dns_addr");
+}
+
+#[given(expr = "the MQTT endpoints are published under fixture DNS name {string}")]
+async fn given_mqtt_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, MQTT_ADDR, &name, "mqtt_dns_addr");
+    publish_fixture_name(world, MQTT_TLS_ADDR, &name, "mqtt_tls_dns_addr");
+}
+
+#[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
+async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
+    publish_fixture_name(world, CLICKHOUSE_TLS_ADDR, &name, "clickhouse_tls_dns_addr");
+}
+
+#[given(expr = "the SQS endpoints are published under fixture DNS name {string}")]
+async fn given_sqs_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, SQS_ENDPOINT, &name, "sqs_dns_endpoint");
+    publish_fixture_name(world, SQS_TLS_ENDPOINT, &name, "sqs_tls_dns_endpoint");
+}
+
+#[given("the WebSocket mock endpoints are published under fixture DNS")]
+async fn given_websocket_mock_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_fixture_name(
+        world,
+        MOCK_WS_ADDR,
+        "websocket.nervix.test",
+        "mock_ws_dns_addr",
+    );
+    publish_fixture_name(
+        world,
+        MOCK_WSS_ADDR,
+        "websocket.nervix.test",
+        "mock_wss_dns_addr",
+    );
+}
+
+#[given(
+    expr = "the WebSocket endpoint {string} is forwarded as {string} from fixture addresses \
+            {string}"
+)]
+async fn given_websocket_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    endpoint: String,
+    name: String,
+    addresses: String,
+) {
+    let endpoint = expand_placeholders(world, &endpoint);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "websocket_forwarded_addr",
+    )
+    .await;
+}
+
+#[given(
+    expr = "the Syslog endpoint {string} is forwarded as {string} from fixture addresses {string}"
+)]
+async fn given_syslog_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    endpoint: String,
+    name: String,
+    addresses: String,
+) {
+    let endpoint = expand_placeholders(world, &endpoint);
+    let target = endpoint
+        .parse::<std::net::SocketAddr>()
+        .expect("the Syslog listener has a literal socket address");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, target)
+        .await
+        .expect("the Syslog forwarders could not listen");
+    world.placeholders.insert(
+        "syslog_forwarded_addr".to_string(),
+        format!("{name}:{}", forwarders.port()),
+    );
+    world.tcp_forwarders = Some(forwarders);
+}
+
+/// Stand TCP forwarders to the plain RabbitMQ listener at `addresses`, and record in placeholder
+/// `rabbitmq_forwarded_addr` the RabbitMQ URL that reaches them through the fixture name `name`.
+/// The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "RabbitMQ is forwarded as {string} from the fixture addresses {string}")]
+async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, RABBITMQ_ADDR);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "rabbitmq_forwarded_addr",
+    )
+    .await;
+}
+
+/// Stand TCP forwarders to Redis so the fixture can move its answer between independently
+/// stoppable addresses while the source and command pool reconnect.
+#[given(expr = "Redis is forwarded as {string} from the fixture addresses {string}")]
+async fn given_redis_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, REDIS_ADDR);
+    forward_under_fixture_name(world, &endpoint, &name, &addresses, "redis_forwarded_addr").await;
+}
+
+/// Stand TCP forwarders to the plain MQTT listener at `addresses`, and record in placeholder
+/// `mqtt_forwarded_addr` the MQTT address that reaches them through the fixture name `name`. The
+/// scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "MQTT is forwarded as {string} from the fixture addresses {string}")]
+async fn given_mqtt_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, MQTT_ADDR);
+    forward_under_fixture_name(world, &endpoint, &name, &addresses, "mqtt_forwarded_addr").await;
+}
+
+/// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in
+/// placeholder `clickhouse_forwarded_addr` the ClickHouse URL that reaches them through the
+/// fixture name `name`. The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "ClickHouse is forwarded as {string} from the fixture addresses {string}")]
+async fn given_clickhouse_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, CLICKHOUSE_ADDR);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "clickhouse_forwarded_addr",
+    )
+    .await;
+}
+
+/// Stand TCP forwarders to the plain SQS listener at `addresses`, and record in placeholder
+/// `sqs_forwarded_endpoint` the SQS endpoint that reaches them through the fixture name `name`.
+/// The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "SQS is forwarded as {string} from the fixture addresses {string}")]
+async fn given_sqs_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, SQS_ENDPOINT);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "sqs_forwarded_endpoint",
+    )
+    .await;
+}
+
+/// The URL of the started dependency placeholder `source` names.
+fn started_dependency(world: &ScenarioWorld, source: &str) -> String {
+    world
+        .placeholders
+        .get(source)
+        .unwrap_or_else(|| panic!("the dependency behind '{source}' was not started"))
+        .clone()
+}
+
+/// Stand TCP forwarders at `addresses` to the literal address and port of the URL `endpoint`, and
+/// record in placeholder `target` that URL with the fixture name `name` as its host and the
+/// forwarders' port as its port.
+async fn forward_under_fixture_name(
+    world: &mut ScenarioWorld,
+    endpoint: &str,
+    name: &str,
+    addresses: &str,
+    target: &str,
+) {
+    let mut url = url::Url::parse(endpoint).expect("the forwarded endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the forwarded endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the forwarded dependency listens on a literal address");
+    let port = url.port().expect("the forwarded endpoint names its port");
+    let addresses = fixture_addresses(addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .unwrap_or_else(|error| panic!("the forwarders to {endpoint} could not listen: {error}"));
+    url.set_host(Some(name))
+        .expect("the fixture name is a valid URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("the forwarded URL can carry the forwarder port");
+    world.placeholders.insert(
+        target.to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.tcp_forwarders = Some(forwarders);
+}
+
+/// The comma-separated loopback addresses a step names, in order.
+fn fixture_addresses(addresses: &str) -> Vec<std::net::IpAddr> {
+    let mut parsed = Vec::new();
+    for address in addresses.split(',') {
+        let address = address
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .unwrap_or_else(|error| panic!("'{address}' is not an IP address: {error}"));
+        parsed.push(address);
+    }
+    parsed
+}
+
+#[given(expr = "the DNS fixture answers {string} with addresses {string}")]
+#[when(expr = "the DNS fixture answers {string} with addresses {string}")]
+async fn when_the_dns_fixture_answers_name_with_addresses(
+    world: &mut ScenarioWorld,
+    name: String,
+    addresses: String,
+) {
+    let addresses = fixture_addresses(&addresses);
+    world
+        .cluster()
+        .publish_dns_service(&name, addresses)
+        .expect("the cluster has a DNS fixture");
+}
+
+#[when(expr = "the DNS fixture answers {string} with {string}")]
+async fn when_the_dns_fixture_answers_name_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    answer: String,
+) {
+    let answer = answer
+        .parse::<FixtureAnswer>()
+        .unwrap_or_else(|_| panic!("unknown DNS fixture answer '{answer}'"));
+    world
+        .cluster()
+        .answer_dns_service(&name, answer)
+        .expect("the cluster has a DNS fixture");
+}
+
+/// Stand a TCP forwarder at `address` in front of the gRPC endpoint of `node_id`, and record the
+/// forwarded endpoint in placeholder `forwarded_grpc`. A client connected through it loses its
+/// session when the forwarder stops, while the node keeps serving every other session.
+#[given(expr = "the gRPC endpoint of node {string} is forwarded from fixture address {string}")]
+async fn given_node_grpc_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    address: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve the node gRPC URI");
+    let mut url = url::Url::parse(&grpc_uri).expect("a node gRPC URI is a URL");
+    let host = url
+        .host_str()
+        .expect("a node gRPC URI has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("a node listens for gRPC on a literal address");
+    let port = url.port().expect("a node gRPC URI names its port");
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    let forwarders = TcpForwarders::start(&[address], std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the gRPC forwarder could not listen");
+    url.set_ip_host(address)
+        .expect("a gRPC URL can carry an address host");
+    url.set_port(Some(forwarders.port()))
+        .expect("a gRPC URL can carry the forwarder port");
+    world.placeholders.insert(
+        "forwarded_grpc".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[when(expr = "the TCP forwarder at {string} stops")]
+async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .expect("the scenario started TCP forwarders")
+        .stop(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+#[when(expr = "the TCP forwarder at {string} restarts")]
+async fn when_the_tcp_forwarder_restarts(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
+}
+
+#[then(expr = "the TCP forwarder at {string} eventually accepts a connection")]
+async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, address: String) {
+    const ACCEPT_BUDGET: Duration = Duration::from_secs(30);
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    let forwarders = world
+        .tcp_forwarders
+        .as_ref()
+        .expect("the scenario started TCP forwarders");
+    nervix_primitives::time::timeout(ACCEPT_BUDGET, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let accepted = forwarders
+                .accepted(address)
+                .unwrap_or_else(|error| panic!("{error}"));
+            if accepted > 0 {
+                break;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the forwarder at {address} accepted no connection within {ACCEPT_BUDGET:?}")
+    });
+}
+
 #[then(expr = "the DNS fixture eventually receives a question for {string}")]
 async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let count = world
                 .cluster()
                 .dns_questions_for_name(&name)
@@ -5750,11 +7978,36 @@ async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) 
             if count > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+    .unwrap_or_else(|_| panic!("no client asked the DNS fixture for '{name}' within 10 seconds"));
+}
+
+#[then(expr = "the DNS fixture eventually receives another question for {string}")]
+async fn then_dns_fixture_queried_name_again(world: &mut ScenarioWorld, name: String) {
+    let baseline = world
+        .cluster()
+        .dns_questions_for_name(&name)
+        .assured("the scenario configured fixture DNS before observing questions");
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name(&name)
+                .assured("the scenario configured fixture DNS before observing questions");
+            if count > baseline {
+                break;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("no client asked the DNS fixture for '{name}' again within 30 seconds")
+    });
 }
 
 #[then("the DNS fixture received no questions for node names")]
@@ -5822,7 +8075,7 @@ async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: S
         "drain timeout must be configured before cluster startup"
     );
     world.cluster_config.drain_timeout =
-        humantime::parse_duration(&timeout).expect("shutdown drain timeout must be valid");
+        parse_duration_text(&timeout).expect("shutdown drain timeout must be valid");
 }
 
 #[given(expr = "shutdown timeout is configured as {string}")]
@@ -5832,7 +8085,7 @@ async fn given_shutdown_timeout_is_configured(world: &mut ScenarioWorld, timeout
         "shutdown timeout must be configured before cluster startup"
     );
     world.cluster_config.shutdown_timeout =
-        humantime::parse_duration(&timeout).expect("shutdown timeout must be valid");
+        parse_duration_text(&timeout).expect("shutdown timeout must be valid");
 }
 
 #[given(expr = "schema change drain timeout is configured as {string}")]
@@ -5845,7 +8098,7 @@ async fn given_schema_change_drain_timeout_is_configured(
         "schema change drain timeout must be configured before cluster startup"
     );
     world.fault_injection.set_domain_drain_timeout(
-        humantime::parse_duration(&timeout).expect("schema drain timeout must be valid"),
+        parse_duration_text(&timeout).expect("schema drain timeout must be valid"),
     );
 }
 
@@ -5856,7 +8109,7 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
         "entity gate deadline must be configured before cluster startup"
     );
     world.fault_injection.set_entity_gate_deadline(
-        humantime::parse_duration(&timeout).expect("entity gate deadline must be valid"),
+        parse_duration_text(&timeout).expect("entity gate deadline must be valid"),
     );
 }
 
@@ -5945,8 +8198,7 @@ async fn given_branched_relay_expiration_scan_interval_is_configured(
     world
         .fault_injection
         .set_branch_instance_expiration_scan_interval(
-            humantime::parse_duration(&scan_interval)
-                .expect("scan interval must be a valid duration"),
+            parse_duration_text(&scan_interval).expect("scan interval must be a valid duration"),
         );
 }
 
@@ -7559,12 +9811,72 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
 ) {
     let node_id = expand_placeholders(world, &node_id);
     for _ in 0..repetitions {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster_mut()
             .restart_node_with_new_interconnect_address(&node_id)
             .await
             .expect("failed to restart node with a new interconnect address");
+    }
+}
+
+#[then(
+    expr = "the leader eventually records node {string} at its current interconnect address in \
+            Raft membership"
+)]
+async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let endpoint = world
+        .cluster()
+        .interconnect_endpoint(&node_id)
+        .expect("the restarted node has an interconnect endpoint");
+    let expected = format!("- {node_id} [voter] {endpoint}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        if status.lines().any(|line| line == expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Raft membership did not record {expected}; last leader status: {status}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "the leader Raft log index remains unchanged for {string}")]
+async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration).expect("the observation duration is valid");
+    let leader = current_leader_node(world).await;
+    let deadline = Instant::now() + duration;
+    let mut initial = None;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        let index = status
+            .lines()
+            .find_map(|line| line.strip_prefix("raft.last_log_index: "))
+            .expect("cluster status reports a Raft log index")
+            .parse::<u64>()
+            .expect("Raft log index is numeric");
+        match initial {
+            Some(initial) => assert_eq!(
+                index, initial,
+                "leader Raft log grew after membership converged; last status: {status}"
+            ),
+            None => initial = Some(index),
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -7639,9 +9951,90 @@ async fn given_health_responses_are_paused(
 #[when(expr = "application health responses from node {string} fail")]
 async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_id: String) {
     let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world.health_fault_started_at = Some(Instant::now());
     world
         .cluster()
         .fail_health_responses_from(&responding_node_id);
+}
+
+#[when(expr = "application health probes from node {string} to node {string} fail")]
+async fn when_directed_health_probes_fail(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .fail_health_responses_between(&probing_node_id, &responding_node_id);
+}
+
+#[when(expr = "runtime preparation on node {string} is paused")]
+async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its runtime preparation pause")]
+async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("runtime preparation did not reach its pause");
+}
+
+#[when(expr = "runtime preparation on node {string} is released")]
+async fn when_runtime_preparation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "application health probes from node {string} to node {string} are restored")]
+async fn when_directed_health_probes_are_restored(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .restore_health_responses_between(&probing_node_id, &responding_node_id);
+}
+
+#[when(expr = "gossip exchanges involving node {string} are blocked with a {string} send delay")]
+async fn when_gossip_exchanges_are_blocked(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let delay = parse_duration_text(&duration).assured("the scenario duration is valid");
+    world.cluster().block_gossip_for_node(&node_id, delay);
+}
+
+#[when(expr = "consensus connectivity for node {string} is blocked")]
+async fn when_consensus_connectivity_is_blocked(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "gossip exchanges involving node {string} are restored")]
+async fn when_gossip_exchanges_are_restored(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster().restore_gossip_for_node(&node_id);
 }
 
 #[then(expr = "the health response pause from node {string} to node {string} is reached")]
@@ -7652,7 +10045,7 @@ async fn then_health_response_pause_is_reached(
 ) {
     let probing_node_id = expand_placeholders(world, &probing_node_id);
     let responding_node_id = expand_placeholders(world, &responding_node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .cluster()
@@ -7677,10 +10070,10 @@ async fn then_health_response_pause_is_reached_within(
     probing_node_id: String,
     responding_node_id: String,
 ) {
-    let limit = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let limit = parse_duration_text(&duration).assured("the scenario duration is valid");
     let probing_node_id = expand_placeholders(world, &probing_node_id);
     let responding_node_id = expand_placeholders(world, &responding_node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         limit,
         world
             .cluster()
@@ -7835,10 +10228,10 @@ async fn given_command_admission_pause(world: &mut ScenarioWorld, node_id: Strin
 async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let fault_injection = world.fault_injection.clone();
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         if let Some(task) = world.background_command_result.as_mut() {
             let node_name = crate::common::cluster::node_name(&node_id);
-            tokio::select! {
+            nervix_primitives::select! {
                 () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
                 result = task => panic!(
                     "command on '{node_id}' returned before reaching its admission pause: \
@@ -7849,7 +10242,7 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
         }
         if let Some(task) = world.background_nspl.as_mut() {
             let node_name = crate::common::cluster::node_name(&node_id);
-            tokio::select! {
+            nervix_primitives::select! {
                 () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
                 result = task => panic!(
                     "command on '{node_id}' returned before reaching its admission pause: \
@@ -7883,6 +10276,49 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "command reference lookup on node {string} pauses before proposal")]
+async fn given_command_reference_lookup_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_reference_lookup_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command reference lookup pause on node {string} is reached")]
+async fn then_command_reference_lookup_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let request = world
+        .background_command_result
+        .as_mut()
+        .verified("the preceding step started a background command request");
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
+        nervix_primitives::select! {
+            () = fault_injection.wait_for_command_reference_lookup_pause(&node_name) => {},
+            result = request => panic!(
+                "command on '{node_id}' returned before its reference lookup pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("command reference lookup pause was not reached: {error}"));
+}
+
+#[when(expr = "the command reference lookup pause on node {string} is released")]
+async fn when_command_reference_lookup_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_reference_lookup_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "command execution on node {string} pauses after durable admission")]
 async fn given_command_durable_admission_pause(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -7904,7 +10340,7 @@ async fn then_command_durable_admission_pause_is_reached(
         task.is_some() || !world.session_requests.is_empty(),
         "a background command request or a named session request must be active"
     );
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         let Some(task) = task else {
             // A request the active session sent under a name answers only when a later step
             // reads it, so its pause is awaited on its own.
@@ -7913,7 +10349,7 @@ async fn then_command_durable_admission_pause_is_reached(
                 .await;
             return;
         };
-        tokio::select! {
+        nervix_primitives::select! {
             () = fault_injection.wait_for_command_durable_admission_pause(&node_name) => {},
             result = task => panic!(
                 "command on '{node_id}' returned before its durable admission pause: {result:?}"
@@ -7958,8 +10394,8 @@ async fn then_relocation_publication_pause_is_reached(world: &mut ScenarioWorld,
         .background_nspl
         .as_mut()
         .verified("the preceding step started a background relocation");
-    tokio::time::timeout(Duration::from_secs(30), async {
-        tokio::select! {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
+        nervix_primitives::select! {
             () = fault_injection.wait_for_relocation_publication_pause(&domain) => {},
             result = task => panic!(
                 "relocation for domain '{domain}' returned before its publication pause: \
@@ -7999,9 +10435,9 @@ async fn then_command_response_delivery_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
-    tokio::select! {
+    nervix_primitives::select! {
         () = fault_injection.wait_for_command_response_delivery_pause(&node_name) => {},
-        () = tokio::time::sleep(Duration::from_secs(30)) => {
+        () = nervix_primitives::time::sleep(Duration::from_secs(30)) => {
             panic!("command response delivery pause on node '{node_id}' was not reached");
         }
     }
@@ -8046,7 +10482,7 @@ async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, no
 async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(30),
         world
             .fault_injection
@@ -8103,7 +10539,7 @@ async fn given_ingestor_dispatch_pause(world: &mut ScenarioWorld, ingestor: Stri
 #[then(expr = "ingestor {string} reaches the dispatch pause")]
 async fn then_ingestor_dispatch_pause_is_reached(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = world.ingestor_dispatch_ref(&ingestor);
-    let reached = tokio::time::timeout(
+    let reached = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -8164,7 +10600,7 @@ async fn given_remote_relay_branch_admission_pause(
 #[then(expr = "the remote relay admission pause for domain {string} is reached")]
 async fn then_remote_relay_admission_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -8184,7 +10620,7 @@ async fn then_remote_relay_branch_admission_pause_is_reached(
 ) {
     let branch = expand_placeholders(world, &branch);
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -8222,6 +10658,196 @@ async fn when_remote_relay_branch_admission_pause_is_released(
         .release_remote_relay_admission_pause_for_branch(&domain, Some(&branch));
 }
 
+#[given(expr = "admitted remote relay dispatch for domain {string} is paused")]
+async fn given_remote_relay_dispatch_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_remote_relay_dispatch(domain);
+}
+
+#[then(expr = "the admitted remote relay dispatch pause for domain {string} is reached")]
+async fn then_remote_relay_dispatch_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_remote_relay_dispatch_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "admitted remote relay dispatch pause for domain '{domain}' was not reached: {error}"
+        )
+    });
+}
+
+#[when(expr = "the admitted remote relay dispatch pause for domain {string} is released")]
+async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_remote_relay_dispatch_pause(&domain);
+}
+
+#[given(expr = "the next record acknowledgement node {string} returns to node {string} is lost")]
+async fn given_next_remote_acknowledgement_is_lost(
+    world: &mut ScenarioWorld,
+    resolver: String,
+    registrar: String,
+) {
+    let resolver = expand_placeholders(world, &resolver);
+    let registrar = expand_placeholders(world, &registrar);
+    world.fault_injection.lose_next_remote_acknowledgement(
+        crate::common::cluster::node_name(&resolver),
+        crate::common::cluster::node_name(&registrar),
+    );
+}
+
+#[then(expr = "the record acknowledgement node {string} returned to node {string} was lost")]
+async fn then_remote_acknowledgement_was_lost(
+    world: &mut ScenarioWorld,
+    resolver: String,
+    registrar: String,
+) {
+    let resolver = crate::common::cluster::node_name(&expand_placeholders(world, &resolver));
+    let registrar = crate::common::cluster::node_name(&expand_placeholders(world, &registrar));
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_lost_remote_acknowledgement(&resolver, &registrar),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "no record acknowledgement from node '{}' to node '{}' was lost: {error}",
+            resolver.as_str(),
+            registrar.as_str()
+        )
+    });
+}
+
+#[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
+async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(
+    expr = "entity drain on node {string} reports no buffered relay batches in domain {string}"
+)]
+async fn given_stale_owner_buffer_drain_report(
+    world: &mut ScenarioWorld,
+    node: String,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .report_no_owner_buffered_batches_for_entity_drain(
+            nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+            crate::common::cluster::node_name(&node),
+        );
+}
+
+#[then(expr = "the relay owner fan-out pause for domain {string} is reached")]
+async fn then_owner_relay_fanout_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out pause for domain '{domain}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the relay owner fan-out pause for domain {string} is released")]
+async fn when_owner_relay_fanout_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_owner_relay_fanout_pause(&domain);
+}
+
+#[then(expr = "relay owner fan-out for domain {string} has finished")]
+async fn then_owner_relay_fanout_has_finished(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_completion(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out in domain '{domain}' did not finish: {error}")
+    });
+}
+
+fn emitter_swap_pause_key(
+    world: &ScenarioWorld,
+    domain: &str,
+    emitter: &str,
+) -> (nervix_models::DomainName, nervix_models::EmitterName) {
+    let domain = expand_placeholders(world, domain);
+    let emitter = expand_placeholders(world, emitter);
+    (
+        nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+        nervix_models::EmitterName::try_from(emitter.as_str()).expect("valid scenario emitter"),
+    )
+}
+
+#[given(expr = "emitter {string} in domain {string} pauses its swap after detaching")]
+async fn given_emitter_swap_after_detach_pause(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .pause_emitter_swap_after_detach(domain, emitter);
+}
+
+#[then(expr = "the swap of emitter {string} in domain {string} has detached it")]
+async fn then_emitter_swap_after_detach_pause_is_reached(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_emitter_swap_after_detach_pause(&domain, &emitter),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "swap of emitter '{}' in domain '{}' did not detach it: {error}",
+            emitter.as_str(),
+            domain.as_str()
+        )
+    });
+}
+
+#[when(expr = "the swap of emitter {string} in domain {string} is released")]
+async fn when_emitter_swap_after_detach_pause_is_released(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .release_emitter_swap_after_detach_pause(&domain, &emitter);
+}
+
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
 async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -8255,8 +10881,8 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
     let fault_injection = world.fault_injection.clone();
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
-        if tokio::time::timeout(
+        nervix_primitives::task::consume_budget().await;
+        if nervix_primitives::time::timeout(
             Duration::from_millis(50),
             fault_injection.wait_for_entity_gate_pause(&domain),
         )
@@ -8305,7 +10931,7 @@ async fn then_entity_gate_response_pause_is_reached(
     let domain = expand_placeholders(world, &domain);
     let parsed_domain = nervix_models::DomainName::try_from(domain.as_str())
         .assured("the scenario uses an identifier-shaped domain name");
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         ENTITY_GATE_PAUSE_TIMEOUT,
         world.fault_injection.wait_for_entity_gate_response_pause(
             &crate::common::cluster::node_name(&node_id),
@@ -8345,8 +10971,8 @@ async fn then_ownership_handoff_preparation_pause_is_reached(
     let fault_injection = world.fault_injection.clone();
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
-        if tokio::time::timeout(
+        nervix_primitives::task::consume_budget().await;
+        if nervix_primitives::time::timeout(
             Duration::from_millis(50),
             fault_injection.wait_for_ownership_handoff_preparation_pause(&domain),
         )
@@ -8394,7 +11020,7 @@ async fn then_ownership_handoff_prepare_response_pause_is_reached(
     domain: String,
 ) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         ENTITY_GATE_PAUSE_TIMEOUT,
         world
             .fault_injection
@@ -8449,10 +11075,9 @@ async fn then_domain_clock_progress_reaches_pause(
     duration: String,
     domain: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         duration,
         world
             .fault_injection
@@ -8474,8 +11099,7 @@ async fn then_domain_clock_progress_reaches_pause_on_node(
     domain: String,
     node_id: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     world
         .wait_for_domain_clock_progress_pause_on(duration, &domain, &node_id)
         .await;
@@ -8502,7 +11126,7 @@ async fn then_domain_clock_progress_reaches_pause_within_authority_observation_b
 #[when(expr = "domain clock progress for domain {string} resumes")]
 async fn when_domain_clock_progress_resumes(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world.fault_injection.release_domain_clock_progress(&domain),
     )
@@ -8520,7 +11144,7 @@ async fn when_domain_clock_progress_resumes_on_node(
 ) {
     let domain = expand_placeholders(world, &domain);
     let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(5),
         world.fault_injection.release_domain_clock_progress_on(
             &domain,
@@ -8538,9 +11162,8 @@ async fn when_domain_clock_progress_resumes_on_node(
 
 #[when(expr = "physical time passes for {string}")]
 async fn when_physical_time_passes(_world: &mut ScenarioWorld, duration: String) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
-    tokio::time::sleep(duration).await;
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
 }
 
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
@@ -8550,7 +11173,7 @@ async fn then_transaction_commit_pause_is_reached(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&node_id),
@@ -8597,7 +11220,7 @@ async fn then_transaction_commit_admission_pause_is_reached(world: &mut Scenario
         .get("transaction_commit_admission_node")
         .cloned()
         .verified("the preceding admission-pause step saved its leader");
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&leader),
@@ -8629,14 +11252,32 @@ async fn given_consensus_storage_failure(
     boundary: String,
     domain: String,
 ) {
+    fail_consensus_storage_on_leader(world, &boundary, format!("put-domain:{domain}")).await;
+}
+
+#[given(expr = "consensus storage on the leader fails {word} committing operation {string}")]
+async fn given_consensus_storage_operation_failure(
+    world: &mut ScenarioWorld,
+    boundary: String,
+    operation: String,
+) {
+    let operation = expand_placeholders(world, &operation);
+    fail_consensus_storage_on_leader(world, &boundary, operation).await;
+}
+
+async fn fail_consensus_storage_on_leader(
+    world: &mut ScenarioWorld,
+    boundary: &str,
+    operation: String,
+) {
     let leader = current_leader_node(world).await;
     world
         .placeholders
         .insert("storage_node".into(), leader.clone());
     world.fault_injection.fail_consensus_storage(
         &crate::common::cluster::node_name(&leader),
-        format!("put-domain:{domain}"),
-        match boundary.as_str() {
+        operation,
+        match boundary {
             "before" => nervix_consensus::StorageBoundary::BeforeCommit,
             "after" => nervix_consensus::StorageBoundary::AfterSync,
             _ => panic!("the fixture names a before or after storage boundary"),
@@ -8681,7 +11322,7 @@ async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
 #[then(expr = "the last cluster operation completes within {string}")]
 async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld, duration: String) {
     let max_duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        parse_duration_text(&duration).expect("step duration must be a valid duration");
     let elapsed = world
         .last_cluster_operation_elapsed
         .expect("a timed cluster operation must run before assertion");
@@ -8696,7 +11337,7 @@ async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld,
 #[then(expr = "the last cluster operation takes at least {string}")]
 async fn then_last_cluster_operation_takes_at_least(world: &mut ScenarioWorld, duration: String) {
     let min_duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        parse_duration_text(&duration).expect("step duration must be a valid duration");
     let elapsed = world
         .last_cluster_operation_elapsed
         .expect("a timed cluster operation must run before assertion");
@@ -8738,7 +11379,7 @@ async fn then_last_authentication_attempts_take_at_least(
     duration: String,
 ) {
     let min_duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        parse_duration_text(&duration).expect("step duration must be a valid duration");
     let elapsed = world
         .last_auth_attempts_elapsed
         .expect("an authentication attempt step must run first");
@@ -8917,6 +11558,65 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .expect("kafka consumer group did not reach expected member count");
 }
 
+/// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
+/// Nervix's consumers and holds them, reading without committing, until it leaves.
+#[when(expr = "an external member joins Kafka consumer group {string} on topic {string}")]
+async fn when_an_external_member_joins_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+    topic: String,
+) {
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    assert!(
+        !world.external_kafka_members.contains_key(&group),
+        "an external member already belongs to Kafka consumer group '{group}'"
+    );
+    let member = world
+        .cluster()
+        .join_external_kafka_group_member(&group, &topic)
+        .expect("the external Kafka group member should join");
+    world.external_kafka_members.insert(group, member);
+}
+
+#[then(
+    expr = "within {string} the external member of Kafka consumer group {string} holds topic \
+            {string} partition {int}"
+)]
+async fn then_the_external_member_of_kafka_consumer_group_holds_partition(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .external_kafka_members
+        .get_mut(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .wait_until_assigned(&topic, partition, duration)
+        .await
+        .expect("the external Kafka group member was not assigned the partition");
+}
+
+#[when(expr = "the external member leaves Kafka consumer group {string}")]
+async fn when_the_external_member_leaves_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+) {
+    let group = expand_placeholders(world, &group);
+    world
+        .external_kafka_members
+        .remove(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .leave()
+        .await
+        .expect("the external Kafka group member should leave");
+}
+
 #[then(
     expr = "within {string} Kafka consumer group {string} next offset for topic {string} \
             partition {int} is {string}"
@@ -8929,8 +11629,7 @@ async fn then_kafka_consumer_group_next_offset_is(
     partition: i32,
     condition: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
     let condition = expand_placeholders(world, &condition);
@@ -9341,7 +12040,8 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let nervix_models::IngestSource::Mqtt { .. } = ingestor.source else {
+        let Some(nervix_models::IngestSource::Mqtt { .. }) = ingestor.input.transport_source()
+        else {
             continue;
         };
         world
@@ -9457,17 +12157,19 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
         .open_session(&leader, &world.domain)
         .await
         .expect("failed to open background NSPL session");
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut last_output = String::new();
-        for command in statements {
-            tokio::task::consume_budget().await;
-            last_output = session
-                .run_command(&command)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(last_output)
-    })));
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut last_output = String::new();
+            for command in statements {
+                nervix_primitives::task::consume_budget().await;
+                last_output = session
+                    .run_command(&command)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(last_output)
+        },
+    )));
 }
 
 #[when("this NSPL command request begins executing in the background on the leader node")]
@@ -9483,9 +12185,9 @@ async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
-    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        session.run_command_result(&query).await
-    })));
+    world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move { session.run_command_result(&query).await },
+    )));
 }
 
 #[when(
@@ -9509,11 +12211,13 @@ async fn when_referenced_command_request_begins_in_background(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
-    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        session
-            .run_command_result_with_reference(&query, &execution_reference)
-            .await
-    })));
+    world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            session
+                .run_command_result_with_reference(&query, &execution_reference)
+                .await
+        },
+    )));
 }
 
 #[when(
@@ -9537,17 +12241,19 @@ async fn when_exact_command_retry_begins_in_parallel(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the exact retry session: {error}"));
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let result = session
-            .run_command_result_with_reference(&query, &execution_reference)
-            .await
-            .map_err(|error| error.to_string())?;
-        if result.succeeded() {
-            Ok(result.message)
-        } else {
-            Err(result.message)
-        }
-    })));
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let result = session
+                .run_command_result_with_reference(&query, &execution_reference)
+                .await
+                .map_err(|error| error.to_string())?;
+            if result.succeeded() {
+                Ok(result.message)
+            } else {
+                Err(result.message)
+            }
+        },
+    )));
 }
 
 #[when(
@@ -9571,11 +12277,13 @@ async fn when_active_session_referenced_command_begins_in_background(
         .verified("the preceding setup created an active session");
     world.active_session_node = None;
     world.active_session_has_subscription = false;
-    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        session
-            .run_command_result_with_reference(&query, &execution_reference)
-            .await
-    })));
+    world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            session
+                .run_command_result_with_reference(&query, &execution_reference)
+                .await
+        },
+    )));
 }
 
 #[when(
@@ -9610,7 +12318,7 @@ async fn when_background_command_request_connection_is_dropped(world: &mut Scena
         .take()
         .verified("the preceding step started a background command request");
     drop(request);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 #[when(expr = "the background command caller deadline expires after {string}")]
@@ -9618,19 +12326,18 @@ async fn when_background_command_caller_deadline_expires(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).assured("the scenario caller deadline is valid");
+    let duration = parse_duration_text(&duration).assured("the scenario caller deadline is valid");
     let mut request = world
         .background_command_result
         .take()
         .verified("the preceding step started a background command request");
-    let outcome = tokio::time::timeout(duration, &mut request).await;
+    let outcome = nervix_primitives::time::timeout(duration, &mut request).await;
     assert!(
         outcome.is_err(),
         "the command request returned before its caller deadline: {outcome:?}"
     );
     drop(request);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 #[when(
@@ -9655,7 +12362,7 @@ async fn when_command_request_with_reference_created_before_now_is_executed(
     age: String,
     #[step] step: &Step,
 ) {
-    let age = humantime::parse_duration(&age).assured("the scenario reference age is a duration");
+    let age = parse_duration_text(&age).assured("the scenario reference age is a duration");
     let created_at = SystemTime::now()
         .checked_sub(age)
         .assured("the scenario reference age lies after the Unix epoch");
@@ -9672,8 +12379,7 @@ async fn when_command_request_with_reference_created_after_now_is_executed(
     lead: String,
     #[step] step: &Step,
 ) {
-    let lead =
-        humantime::parse_duration(&lead).assured("the scenario reference lead is a duration");
+    let lead = parse_duration_text(&lead).assured("the scenario reference lead is a duration");
     let created_at = SystemTime::now()
         .checked_add(lead)
         .assured("the scenario reference lead stays within the system clock range");
@@ -9723,6 +12429,7 @@ async fn execute_command_request_with_reference_on_leader(
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    world.last_command_disposition = Some(result.disposition.clone());
     if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
@@ -9730,6 +12437,51 @@ async fn execute_command_request_with_reference_on_leader(
         world.last_command_output = None;
         world.last_command_error = Some(result.message);
     }
+}
+
+#[then("the last command request reports an expired execution reference")]
+fn then_last_command_request_reports_expired_execution_reference(world: &mut ScenarioWorld) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(nervix_client_wire::CommandDisposition::ExecutionReferenceExpired)
+    );
+}
+
+#[then("the background command request reports a content conflict or unknown leadership outcome")]
+async fn then_background_command_request_reports_conflict_or_unknown_leadership(
+    world: &mut ScenarioWorld,
+) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .assured("the background command transport is live until its answer");
+    assert!(matches!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::ExecutionReferenceConflict(
+            nervix_client_wire::ExecutionReferenceConflict::Content,
+        ) | nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        )
+    ));
+}
+
+#[then("the last command request reports an execution reference content conflict")]
+fn then_last_command_request_reports_execution_reference_content_conflict(
+    world: &mut ScenarioWorld,
+) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(
+            nervix_client_wire::CommandDisposition::ExecutionReferenceConflict(
+                nervix_client_wire::ExecutionReferenceConflict::Content,
+            )
+        )
+    );
 }
 
 #[then(expr = "command execution reference {string} is eventually reclaimed")]
@@ -9746,7 +12498,7 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
         .consensus_observer(&crate::common::cluster::node_name(&leader));
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "command execution reference '{execution_reference}' was not reclaimed"
@@ -9758,7 +12510,7 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
         {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -9769,7 +12521,7 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
         .background_command_result
         .take()
         .unwrap_or_else(|| panic!("a background command request must be active"));
-    let result = tokio::time::timeout(Duration::from_secs(30), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
@@ -9804,7 +12556,7 @@ async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
         .background_command_result
         .take()
         .verified("the preceding step started a background command request");
-    let result = tokio::time::timeout(Duration::from_secs(30), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .assured("the background command request task is owned by this scenario")
@@ -9836,21 +12588,23 @@ async fn when_named_client_begins_executing_in_the_background(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut last_output = String::new();
-        for command in statements {
-            tokio::task::consume_budget().await;
-            let outcome = client
-                .execute(command)
-                .await
-                .map_err(|error| error.to_string())?;
-            if !outcome.succeeded() {
-                return Err(outcome.message);
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut last_output = String::new();
+            for command in statements {
+                nervix_primitives::task::consume_budget().await;
+                let outcome = client
+                    .execute(command)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if !outcome.succeeded() {
+                    return Err(outcome.message);
+                }
+                last_output = outcome.message;
             }
-            last_output = outcome.message;
-        }
-        Ok(last_output)
-    })));
+            Ok(last_output)
+        },
+    )));
 }
 
 #[when(
@@ -9879,27 +12633,29 @@ async fn when_named_client_begins_resource_upload_in_the_background(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .assured("the scenario identity is an identifier-shaped literal");
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let upload_domain = client
-            .domain()
-            .await
-            .assured("the upload client selected a domain");
-        let outcome = client
-            .upload_resource_from_directory_with_identity(
-                &resource,
-                directory,
-                upload_domain,
-                identity,
-                |_| {},
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        if outcome.succeeded() {
-            Ok(outcome.message)
-        } else {
-            Err(outcome.message)
-        }
-    })));
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let upload_domain = client
+                .domain()
+                .await
+                .assured("the upload client selected a domain");
+            let outcome = client
+                .upload_resource_from_directory_with_identity(
+                    &resource,
+                    directory,
+                    upload_domain,
+                    identity,
+                    |_| {},
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if outcome.succeeded() {
+                Ok(outcome.message)
+            } else {
+                Err(outcome.message)
+            }
+        },
+    )));
 }
 
 #[when("the background resource upload connection is dropped")]
@@ -9909,7 +12665,7 @@ async fn when_background_resource_upload_connection_is_dropped(world: &mut Scena
         .take()
         .verified("the preceding step started a background resource upload");
     drop(upload);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 #[then("the background NSPL execution succeeds")]
@@ -9986,7 +12742,7 @@ async fn when_the_background_nspl_execution_is_canceled(world: &mut ScenarioWorl
         .take()
         .expect("a background NSPL execution must be active");
     drop(task);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
@@ -10117,7 +12873,7 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
     for ingestor in ingestors {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let output = run_nspl_commands_on_node(
                 world,
                 &leader,
@@ -10133,7 +12889,7 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
                 "timed out waiting for MQTT ingestor '{ingestor}' to become ready. last output: {}",
                 output
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -10174,7 +12930,11 @@ async fn close_browser(world: &mut ScenarioWorld) {
     if let Some(browser) = world.browser.take() {
         let _ = browser.close().await;
     }
-    world.playwright = None;
+    if let Some(playwright) = world.playwright.take() {
+        // Driver cleanup in Drop blocks the task polling every scenario and the suite watchdog.
+        // Shut it down asynchronously before dropping the handle so the rest of the run progresses.
+        let _ = playwright.shutdown().await;
+    }
 }
 
 fn chromium_launch_options() -> LaunchOptions {
@@ -10271,20 +13031,47 @@ async fn connect_named_client_to_node(
     name: String,
     node_id: String,
     seed_nodes: Vec<String>,
+    fixture_dns: bool,
 ) {
-    let name = expand_placeholders(world, &name);
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
+    connect_named_client(world, name, grpc_uri, seed_nodes, fixture_dns).await;
+}
+
+/// Connects a named client to `grpc_uri`, with the gRPC endpoints of `seed_nodes` as its seeds.
+async fn connect_named_client(
+    world: &mut ScenarioWorld,
+    name: String,
+    mut grpc_uri: String,
+    seed_nodes: Vec<String>,
+    fixture_dns: bool,
+) {
+    let name = expand_placeholders(world, &name);
+    let dns = if fixture_dns {
+        let (named_uri, configuration) =
+            fixture_grpc_uri(world, &grpc_uri, "native-session.nervix.test");
+        grpc_uri = named_uri;
+        Some(configuration)
+    } else {
+        None
+    };
     let mut options =
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    if let Some(configuration) = dns {
+        options.dns = ConnectDns::Configuration(configuration);
+    }
     for seed_node in seed_nodes {
-        let seed_uri = world
+        let mut seed_uri = world
             .cluster()
             .grpc_uri(&seed_node)
             .expect("failed to resolve seed node gRPC URI");
+        if fixture_dns {
+            let seed_name = format!("native-session-{seed_node}.nervix.test");
+            seed_uri = fixture_grpc_uri(world, &seed_uri, &seed_name).0;
+        }
         options
             .seed_servers
             .push(url::Url::parse(&seed_uri).expect("cluster gRPC seed URIs are valid URLs"));
@@ -10292,7 +13079,7 @@ async fn connect_named_client_to_node(
     let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
         .await
         .unwrap_or_else(|error| {
-            panic!("failed to connect client '{name}' to '{node_id}': {error}")
+            panic!("failed to connect client '{name}' to '{grpc_uri}': {error}")
         });
     assert!(
         world
@@ -10309,7 +13096,7 @@ async fn given_named_client_is_connected_to_node(
     name: String,
     node_id: String,
 ) {
-    connect_named_client_to_node(world, name, node_id, Vec::new()).await;
+    connect_named_client_to_node(world, name, node_id, Vec::new(), false).await;
 }
 
 #[given(expr = "client {string} is connected to node {string} with cluster seeds")]
@@ -10319,13 +13106,62 @@ async fn given_named_client_is_connected_with_cluster_seeds(
     node_id: String,
 ) {
     let seeds = world.cluster().node_ids();
-    connect_named_client_to_node(world, name, node_id, seeds).await;
+    connect_named_client_to_node(world, name, node_id, seeds, false).await;
+}
+
+#[given(
+    expr = "client {string} is connected to node {string} through fixture DNS with cluster seeds"
+)]
+async fn given_named_client_is_connected_through_fixture_dns(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+) {
+    let seeds = world.cluster().node_ids();
+    connect_named_client_to_node(world, name, node_id, seeds, true).await;
+}
+
+#[given(expr = "client {string} is connected to {string} with cluster seeds")]
+async fn given_named_client_is_connected_to_endpoint_with_cluster_seeds(
+    world: &mut ScenarioWorld,
+    name: String,
+    grpc_uri: String,
+) {
+    let grpc_uri = expand_placeholders(world, &grpc_uri);
+    let seeds = world.cluster().node_ids();
+    connect_named_client(world, name, grpc_uri, seeds, false).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
-    connect_named_client_to_node(world, name, leader, Vec::new()).await;
+    connect_named_client_to_node(world, name, leader, Vec::new(), false).await;
+}
+
+#[given(expr = "client {string} is connected to the server process")]
+async fn given_named_client_is_connected_to_server_process(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let grpc_uri = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a real server process")
+        .grpc_uri();
+    let options = client_connect_options(&grpc_uri).expect("server process client options");
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to the process: {error}")
+        });
+    assert!(
+        world
+            .transaction_clients
+            .insert(name.clone(), client)
+            .is_none(),
+        "client '{name}' is already connected"
+    );
 }
 
 #[given(
@@ -10389,7 +13225,7 @@ async fn when_named_client_executes_commands(
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     for command in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let outcome = client
             .execute(command.clone())
             .await
@@ -10449,7 +13285,7 @@ async fn when_named_client_fails_to_execute_commands(
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     for command in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match client.execute(command.clone()).await {
             Ok(outcome) if outcome.succeeded() => {
                 world.last_command_output = Some(outcome.message);
@@ -11027,7 +13863,7 @@ async fn run_cli_inspection(
             .arg("--tls-ca-cert")
             .arg("/nonexistent/nervix-ca.pem");
     }
-    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+    let output = nervix_primitives::time::timeout(Duration::from_secs(60), command.output())
         .await
         .expect("the standalone CLI inspection finishes within one minute")
         .expect("the standalone CLI process starts and returns");
@@ -11245,6 +14081,18 @@ async fn connect_to_leader_with_credentials(
     username: String,
     password: String,
 ) {
+    let leader = current_leader_node(world).await;
+    connect_to_node_with_credentials(world, &leader, username, password).await;
+}
+
+/// Connect to `node_id` directly, without first asking the cluster for its leader, and run one
+/// status command as the given user.
+async fn connect_to_node_with_credentials(
+    world: &mut ScenarioWorld,
+    node_id: &str,
+    username: String,
+    password: String,
+) {
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -11253,11 +14101,10 @@ async fn connect_to_leader_with_credentials(
     world.active_session_has_subscription = false;
     let username = expand_placeholders(world, &username);
     let password = expand_placeholders(world, &password);
-    let leader = current_leader_node(world).await;
     let grpc_uri = world
         .cluster()
-        .grpc_uri(&leader)
-        .expect("failed to resolve leader gRPC URI");
+        .grpc_uri(node_id)
+        .expect("failed to resolve node gRPC URI");
     let mut options =
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
     options.username = Some(username);
@@ -11381,7 +14228,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
         if retry_safe {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match run_nspl_commands_on_active_session(world, &commands).await {
                     Ok(()) => break,
                     Err(error) => {
@@ -11389,7 +14236,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
                             Instant::now() < deadline,
                             "failed to execute NSPL setup command on active session: {error:?}"
                         );
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -11403,7 +14250,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
     let session = if retry_safe {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match execute_nspl_commands_on_node(world, &leader, &commands).await {
                 Ok(session) => break session,
                 Err(error) => {
@@ -11411,7 +14258,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
                         Instant::now() < deadline,
                         "failed to execute NSPL setup command on leader: {error:?}"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -11540,7 +14387,7 @@ async fn then_transaction_eventually_has_state(
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' did not reach state '{expected_state}'; last output: \
@@ -11562,7 +14409,7 @@ async fn then_transaction_eventually_has_state(
             }
             Err(error) => last_output = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -11612,28 +14459,51 @@ async fn given_stopped_transaction_qualification_graph(
     relay_count: usize,
 ) {
     let leader = current_leader_node(world).await;
-    let mut session = world
+    let grpc_uri = world
         .cluster()
-        .open_session(&leader, &world.domain)
+        .grpc_uri(&leader)
+        .expect("failed to resolve the transaction qualification setup leader");
+    let mut options =
+        client_connect_options(&grpc_uri).expect("transaction qualification client options");
+    for node in world.cluster().node_ids() {
+        let seed = world
+            .cluster()
+            .grpc_uri(&node)
+            .expect("transaction qualification seed node has a gRPC URI");
+        options
+            .seed_servers
+            .push(url::Url::parse(&seed).expect("cluster gRPC seed URIs are valid URLs"));
+    }
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
         .await
         .unwrap_or_else(|error| {
-            panic!("failed to open the transaction qualification setup session: {error}")
+            panic!("failed to connect the transaction qualification setup client: {error}")
         });
-    session
-        .run_command("CREATE SCHEMA qualification_event ( value I64 );")
+    let outcome = client
+        .execute("CREATE SCHEMA qualification_event ( value I64 );")
         .await
         .unwrap_or_else(|error| {
             panic!("failed to create the transaction qualification schema: {error}")
         });
+    assert!(
+        outcome.succeeded(),
+        "transaction qualification schema creation must succeed: {}",
+        outcome.message
+    );
     for index in 0..relay_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let relay = format!("qualification_relay_{index:04}");
         let command =
             format!("CREATE RELAY {relay} SCHEMA qualification_event UNBRANCHED CAPACITY 1;");
-        session
-            .run_command(&command)
+        let outcome = client
+            .execute(command)
             .await
             .unwrap_or_else(|error| panic!("failed to create relay '{relay}': {error}"));
+        assert!(
+            outcome.succeeded(),
+            "transaction qualification relay '{relay}' creation must succeed: {}",
+            outcome.message
+        );
     }
 }
 
@@ -11676,7 +14546,7 @@ async fn when_named_client_queues_transaction_qualification_changes(
         begun.message
     );
     for index in 0..change_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let field = format!("qualification_field_{index:03}");
         let command =
             format!("ALTER SCHEMA qualification_event ADD FIELD {field} STRING OPTIONAL;");
@@ -11775,10 +14645,10 @@ async fn then_node_retains_transaction_report(
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&node_id));
     let deadline =
-        Instant::now() + humantime::parse_duration(&duration).assured("the step duration is valid");
+        Instant::now() + parse_duration_text(&duration).assured("the step duration is valid");
     let mut observed = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "node '{node_id}' did not retain transaction '{transaction_id}' with \
@@ -11799,7 +14669,7 @@ async fn then_node_retains_transaction_report(
         } else {
             observed = "transaction is absent".to_string();
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -11859,7 +14729,7 @@ async fn then_transaction_report_records_actual_quiescence(
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut observed = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' report step {step_number} did not record planned \
@@ -11871,7 +14741,7 @@ async fn then_transaction_report_records_actual_quiescence(
                 let Some(step) = report.execution_steps().get(index) else {
                     observed =
                         format!("report contains {} step(s)", report.execution_steps().len());
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
                 let observed_planned = step.planned().pause.level().as_str();
@@ -11905,7 +14775,7 @@ async fn then_transaction_report_records_actual_quiescence(
             }
             Err(error) => observed = error,
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -11921,7 +14791,7 @@ async fn then_transaction_report_records_recovery_rebuilds(
         .assured("transaction report step numbers are one-based");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' report step {step_number} did not record recovery \
@@ -11939,7 +14809,7 @@ async fn then_transaction_report_records_recovery_rebuilds(
                 return;
             }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -11951,7 +14821,7 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' tombstone was not removed; last output: {last_output}"
@@ -11968,7 +14838,7 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
             Ok(output) => last_output = output,
             Err(error) => last_output = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12060,6 +14930,24 @@ async fn when_selector_is_filled_with(world: &mut ScenarioWorld, selector: Strin
         .expect("selector must be fillable");
 }
 
+#[when(expr = "selector {string} is filled with text")]
+async fn when_selector_is_filled_with_text(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, docstring(step));
+    page.locator(&selector)
+        .fill(&value, None)
+        .await
+        .expect("selector must be fillable with multiline text");
+}
+
 #[when(expr = "selector {string} is pressed with {string}")]
 async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: String, key: String) {
     let page = world
@@ -12088,7 +14976,7 @@ async fn when_web_console_submits_repeatedly(
     let command = expand_placeholders(world, &command);
     let input = page.locator(".prompt-row input");
     for _ in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         input
             .fill(&command, None)
             .await
@@ -12220,7 +15108,7 @@ async fn when_these_nspl_commands_are_executed_on_node(
                         Instant::now() < deadline,
                         "failed to execute NSPL setup command on requested node: {error:?}"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -12241,9 +15129,9 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(30),
-        fault_injection.occupy_bulk_execution(&node_name),
+        fault_injection.occupy_execution(&node_name, nervix_execution::CpuClass::Bulk),
     )
     .await
     .unwrap_or_else(|error| {
@@ -12251,12 +15139,93 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill the credentials worker and every place in its wait queue on the leader, so the next
+/// password the leader is asked to verify is refused rather than queued. The leader is the node
+/// the scenario created its user through, so the user is already visible there.
+#[when("credential verification on the leader node is saturated")]
+async fn when_credential_verification_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        fault_injection.saturate_execution(
+            &crate::common::cluster::node_name(&leader),
+            nervix_execution::CpuClass::Credentials,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "credential verification on '{leader}' never filled its worker and wait queue: {error}"
+        )
+    });
+    world.saturated_credentials_node = Some(leader);
+}
+
+/// Finding the leader opens status sessions, which a node whose credential verification is
+/// saturated cannot authenticate, so this connects to the saturated node it recorded instead.
+#[when(expr = "the client connects to the saturated node as user {string} with password {string}")]
+async fn when_the_client_connects_to_the_saturated_node_as_user_with_password(
+    world: &mut ScenarioWorld,
+    username: String,
+    password: String,
+) {
+    let node_id = world
+        .saturated_credentials_node
+        .clone()
+        .expect("an earlier step saturated credential verification on a node");
+    connect_to_node_with_credentials(world, &node_id, username, password).await;
+}
+
+#[when("the saturated credential verification is released")]
+async fn when_the_saturated_credential_verification_is_released(world: &mut ScenarioWorld) {
+    let node_id = world
+        .saturated_credentials_node
+        .take()
+        .expect("an earlier step saturated credential verification on a node");
+    world
+        .fault_injection
+        .release_execution(&crate::common::cluster::node_name(&node_id));
+}
+
+/// Fill every extension worker and every place in the extension wait queue on every node, so the
+/// next operator-supplied program any node is handed is refused rather than queued.
+#[when("extension execution is saturated on every node")]
+async fn when_extension_execution_is_saturated_on_every_node(world: &mut ScenarioWorld) {
+    let fault_injection = world.fault_injection.clone();
+    for node_id in world.cluster().node_ids() {
+        nervix_primitives::time::timeout(
+            Duration::from_secs(60),
+            fault_injection.saturate_execution(
+                &crate::common::cluster::node_name(&node_id),
+                nervix_execution::CpuClass::Extension,
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "extension execution on '{node_id}' never filled its workers and wait queue: \
+                 {error}"
+            )
+        });
+    }
+}
+
+#[when("extension execution is released on every node")]
+async fn when_extension_execution_is_released_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_execution(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
 #[when(expr = "bulk execution on node {string} is released")]
 async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world
         .fault_injection
-        .release_bulk_execution(&crate::common::cluster::node_name(&node_id));
+        .release_execution(&crate::common::cluster::node_name(&node_id));
 }
 
 /// Run NSPL on a node and require it to finish inside a bound, which is how a scenario states that
@@ -12268,14 +15237,13 @@ async fn then_nspl_commands_complete_within(
     node_id: String,
     #[step] step: &Step,
 ) {
-    let limit =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let limit = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let commands = expand_placeholders(world, docstring(step));
     world.last_command_error = None;
     world.last_command_output = None;
     let started = Instant::now();
-    let session = tokio::time::timeout(
+    let session = nervix_primitives::time::timeout(
         limit,
         execute_nspl_commands_on_node(world, &node_id, &commands),
     )
@@ -12358,7 +15326,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
     world.last_command_output = None;
     world.last_server_error = None;
 
-    let timeout = humantime::parse_duration(&within).expect("within must be a valid duration");
+    let timeout = parse_duration_text(&within).expect("within must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
@@ -12380,7 +15348,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
             "expected an error containing {expected_error:?} within {within}, last outcome: \
              {last_outcome}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12431,7 +15399,7 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         let placement = PhaseDeadline::after(Duration::from_secs(5));
         let mut last_output = None;
         let owner = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             assert!(
                 !placement.has_passed(),
                 "timed out waiting for logic_ingestor schedule placement; last output: \
@@ -12693,7 +15661,7 @@ async fn then_selector_contains_text_exactly_times(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -12708,7 +15676,7 @@ async fn then_selector_contains_text_exactly_times(
             "expected selector '{selector}' to contain '{expected}' {expected_count} times, got \
              {count}: {text}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12750,7 +15718,7 @@ async fn then_selector_contains_text(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -12763,8 +15731,73 @@ async fn then_selector_contains_text(
             Instant::now() < deadline,
             "expected selector '{selector}' to contain '{expected}', got '{text}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn wait_for_selector_to_advance<T>(world: &ScenarioWorld, selector: &str, bound: Duration)
+where
+    T: std::str::FromStr + PartialOrd + Copy + fmt::Debug,
+{
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before observing its clock");
+    let selector = expand_placeholders(world, selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + bound;
+    let mut first: Option<T> = None;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let text = locator
+            .all_inner_texts()
+            .await
+            .assured("the browser clock selector is readable")
+            .join("\n");
+        if let Ok(value) = text.trim().parse::<T>() {
+            if let Some(first_value) = &first {
+                if value > *first_value {
+                    return;
+                }
+            } else {
+                first = Some(value);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selector '{selector}' did not advance from {first:?} within {bound:?}; last text: \
+             '{text}'"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "selector {string} advances as a timestamp within {int} milliseconds")]
+async fn then_selector_timestamp_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<nervix_models::Timestamp>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
+}
+
+#[then(expr = "selector {string} advances as a number within {int} milliseconds")]
+async fn then_selector_number_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<u64>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
 }
 
 #[then(regex = r#"^selector "([^"]+)" contains$"#)]
@@ -12782,7 +15815,7 @@ async fn then_selector_contains_docstring(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -12795,7 +15828,7 @@ async fn then_selector_contains_docstring(
             Instant::now() < deadline,
             "expected selector '{selector}' to contain:\n{expected}\ngot:\n{text}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12815,7 +15848,7 @@ async fn then_selector_contains_text_for_milliseconds(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_millis(duration_milliseconds.arch_into());
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -12828,7 +15861,7 @@ async fn then_selector_contains_text_for_milliseconds(
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12847,7 +15880,7 @@ async fn then_selector_does_not_contain_text(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -12860,7 +15893,7 @@ async fn then_selector_does_not_contain_text(
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12878,7 +15911,7 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let missing = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -12887,7 +15920,7 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12916,7 +15949,7 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
     let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -12929,7 +15962,7 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
             "expected selector '{selector}' to disappear after its server acknowledgement, still \
              showing {texts:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12953,7 +15986,7 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
         .expect("selector must become visible");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let value = locator
             .input_value(None)
             .await
@@ -12965,8 +15998,40 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
             Instant::now() < deadline,
             "expected selector '{selector}' to have value '{expected}', got '{value}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[then(expr = "selector {string} has value containing {string}")]
+async fn then_selector_has_value_containing(
+    world: &mut ScenarioWorld,
+    selector: String,
+    expected: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let expected = expand_placeholders(world, &expected);
+    let locator = page.locator(&selector);
+    locator
+        .wait_for(Some(
+            WaitForOptions::builder()
+                .state(WaitForState::Visible)
+                .timeout(10_000.0)
+                .build(),
+        ))
+        .await
+        .expect("selector must become visible");
+    let value = locator
+        .input_value(None)
+        .await
+        .expect("selector value must be readable");
+    assert!(
+        value.contains(&expected),
+        "expected selector '{selector}' value to contain '{expected}', got '{value}'"
+    );
 }
 
 #[then(expr = "selector {string} is scrolled to bottom")]
@@ -12989,7 +16054,7 @@ async fn then_selector_is_scrolled_to_bottom(world: &mut ScenarioWorld, selector
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let is_scrolled_to_bottom = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -13001,7 +16066,7 @@ async fn then_selector_is_scrolled_to_bottom(world: &mut ScenarioWorld, selector
             Instant::now() < deadline,
             "expected selector '{selector}' to be scrolled to bottom"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13034,7 +16099,7 @@ async fn then_selector_is_pinned_to_viewport_bottom(world: &mut ScenarioWorld, s
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let is_pinned = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -13046,7 +16111,7 @@ async fn then_selector_is_pinned_to_viewport_bottom(world: &mut ScenarioWorld, s
             Instant::now() < deadline,
             "expected selector '{selector}' to be pinned to viewport bottom"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13078,7 +16143,7 @@ async fn then_selector_does_not_overlap_selector(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_overlap = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -13090,7 +16155,7 @@ async fn then_selector_does_not_overlap_selector(
             Instant::now() < deadline,
             "expected selector '{first}' not to overlap selector '{second}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13125,7 +16190,7 @@ async fn then_graph_item_does_not_overlap_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_overlap = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -13137,7 +16202,7 @@ async fn then_graph_item_does_not_overlap_graph_item(
             Instant::now() < deadline,
             "expected graph item '{first}' not to overlap graph item '{second}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13167,7 +16232,7 @@ async fn then_graph_item_has_graph_width_at_least(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let actual_width = page
             .evaluate::<(), Option<f64>>(&script, None::<&()>)
             .await
@@ -13180,7 +16245,7 @@ async fn then_graph_item_has_graph_width_at_least(
             "expected graph item '{item}' to have graph width at least {expected_width}px, got \
              {actual_width:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13204,7 +16269,7 @@ async fn then_graph_item_has_status(world: &mut ScenarioWorld, item: String, exp
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let status = page
             .evaluate::<(), Option<String>>(&script, None::<&()>)
             .await
@@ -13216,7 +16281,7 @@ async fn then_graph_item_has_status(world: &mut ScenarioWorld, item: String, exp
             Instant::now() < deadline,
             "expected graph item '{item}' to have status '{expected}', got '{status:?}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13255,7 +16320,7 @@ async fn then_graph_item_search_highlight_matches(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let highlighted = page
             .evaluate::<(), Option<bool>>(&script, None::<&()>)
             .await
@@ -13267,7 +16332,7 @@ async fn then_graph_item_search_highlight_matches(
             Instant::now() < deadline,
             "expected graph item '{item}' search highlight to be {expected}, got {highlighted:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13288,7 +16353,7 @@ async fn then_graph_search_highlights_exactly_graph_items(
     "#;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let count = page
             .evaluate::<(), i32>(script, None::<&()>)
             .await
@@ -13300,7 +16365,7 @@ async fn then_graph_search_highlights_exactly_graph_items(
             Instant::now() < deadline,
             "expected graph search to highlight {expected_count} graph items, got {count}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -13780,7 +16845,7 @@ async fn then_graph_geometry_does_not_change(world: &mut ScenarioWorld) {
         .expect("graph geometry must be readable");
     // Several leader snapshots land in this window, so an unchanged topology has been redrawn
     // repeatedly by the time the second reading is taken.
-    tokio::time::sleep(Duration::from_millis(1600)).await;
+    nervix_primitives::time::sleep(Duration::from_millis(1600)).await;
     let second = page
         .evaluate::<(), String>(&sample, None::<&()>)
         .await
@@ -14021,7 +17086,7 @@ async fn then_inspector_parallel_relations_are_distinct(
 async fn assert_graph_probe(page: &playwright_rs::Page, script: &str, expectation: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let last = page
             .evaluate::<(), String>(script, None::<&()>)
             .await
@@ -14033,7 +17098,7 @@ async fn assert_graph_probe(page: &playwright_rs::Page, script: &str, expectatio
             Instant::now() < deadline,
             "expected {expectation}, but {last}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14088,7 +17153,7 @@ async fn then_graph_search_result_is_visible_in_the_graph_viewport(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -14100,7 +17165,7 @@ async fn then_graph_search_result_is_visible_in_the_graph_viewport(
             Instant::now() < deadline,
             "expected graph search result '{item}' to be visible in the graph viewport: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14141,7 +17206,7 @@ async fn then_graph_relay_item_has_buffer_statistics(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let statistics = page
             .evaluate::<(), Option<BTreeMap<String, String>>>(&script, None::<&()>)
             .await
@@ -14163,7 +17228,7 @@ async fn then_graph_relay_item_has_buffer_statistics(
             assertions,
             statistics
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14358,7 +17423,7 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), BTreeMap<String, String>>(&script, None::<&()>)
             .await
@@ -14386,7 +17451,7 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
             "expected graph edge from '{source}' to '{target}' to be clickable with a focused \
              middle viewport: {status}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14450,7 +17515,7 @@ async fn then_graph_edge_from_to_has_both_endpoints_visible_in_the_graph_viewpor
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -14463,7 +17528,7 @@ async fn then_graph_edge_from_to_has_both_endpoints_visible_in_the_graph_viewpor
             "expected graph edge from '{source}' to '{target}' to focus both endpoints in the \
              graph viewport: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14532,7 +17597,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_intersect = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -14545,7 +17610,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_item(
             "expected graph edge from '{source}' to '{target}' not to intersect graph item \
              '{item}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14630,7 +17695,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -14643,7 +17708,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
             "expected graph edge from '{source}' to '{target}' not to intersect branch group \
              '{branch}' body: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14789,7 +17854,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_edge_from_to(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -14802,7 +17867,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_edge_from_to(
             "expected graph edge from '{first_source}' to '{first_target}' not to intersect graph \
              edge from '{second_source}' to '{second_target}': {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14896,7 +17961,7 @@ async fn then_graph_edge_from_to_does_not_share_horizontal_lane_with_graph_edge_
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -14909,7 +17974,7 @@ async fn then_graph_edge_from_to_does_not_share_horizontal_lane_with_graph_edge_
             "expected graph edge from '{first_source}' to '{first_target}' not to share a \
              horizontal lane with graph edge from '{second_source}' to '{second_target}': {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14964,7 +18029,7 @@ async fn then_graph_edge_from_to_starts_horizontally(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -14976,7 +18041,7 @@ async fn then_graph_edge_from_to_starts_horizontally(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' to start horizontally: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15031,7 +18096,7 @@ async fn then_graph_edge_from_to_ends_horizontally(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -15043,7 +18108,7 @@ async fn then_graph_edge_from_to_ends_horizontally(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' to end horizontally: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15107,7 +18172,7 @@ async fn then_graph_edge_from_to_has_target_plug_at_least(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -15120,7 +18185,7 @@ async fn then_graph_edge_from_to_has_target_plug_at_least(
             "expected graph edge from '{source}' to '{target}' to have a target plug at least \
              {expected_pixels}px: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15163,7 +18228,7 @@ async fn then_graph_edge_from_to_has_at_most_rounded_turns(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -15176,7 +18241,7 @@ async fn then_graph_edge_from_to_has_at_most_rounded_turns(
             "expected graph edge from '{source}' to '{target}' to have at most {expected_turns} \
              rounded turns: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15240,7 +18305,7 @@ async fn then_graph_edge_from_to_has_source_plug_at_least(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -15253,7 +18318,7 @@ async fn then_graph_edge_from_to_has_source_plug_at_least(
             "expected graph edge from '{source}' to '{target}' to have a source plug at least \
              {expected_pixels}px: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15316,7 +18381,7 @@ async fn then_graph_edge_from_to_has_traffic_statistics(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let statistics = page
             .evaluate::<(), Option<BTreeMap<String, String>>>(&script, None::<&()>)
             .await
@@ -15337,7 +18402,7 @@ async fn then_graph_edge_from_to_has_traffic_statistics(
             "expected graph edge from '{source}' to '{target}' to satisfy traffic assertions \
              {assertions:?}, got {statistics:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15360,7 +18425,7 @@ async fn when_graph_topology_render_count_observation_starts(world: &mut Scenari
     "##;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observing = page
             .evaluate::<(), bool>(script, None::<&()>)
             .await
@@ -15372,7 +18437,7 @@ async fn when_graph_topology_render_count_observation_starts(world: &mut Scenari
             Instant::now() < deadline,
             "expected execution graph chart render count to be available for topology observation"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15400,7 +18465,7 @@ async fn then_graph_topology_render_count_does_not_change_during_observed_traffi
     "##;
     let deadline = Instant::now() + Duration::from_millis(600);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(script, None::<&()>)
             .await
@@ -15412,7 +18477,7 @@ async fn then_graph_topology_render_count_does_not_change_during_observed_traffi
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15458,7 +18523,7 @@ async fn then_graph_edge_with_kind_from_to_is_visible(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let is_visible = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15470,7 +18535,7 @@ async fn then_graph_edge_with_kind_from_to_is_visible(
             Instant::now() < deadline,
             "expected graph edge kind '{kind}' from '{source}' to '{target}' to be visible"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15584,7 +18649,7 @@ async fn then_graph_edge_from_to_has_exact_hover_target(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -15596,7 +18661,7 @@ async fn then_graph_edge_from_to_has_exact_hover_target(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' to own its hover target: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15641,7 +18706,7 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_overlap = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15653,7 +18718,7 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
             Instant::now() < deadline,
             "expected branch group '{branch}' body not to overlap graph item '{item}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15696,7 +18761,7 @@ async fn then_branch_group_body_overlaps_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let overlaps = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15708,7 +18773,7 @@ async fn then_branch_group_body_overlaps_graph_item(
             Instant::now() < deadline,
             "expected branch group '{branch}' body to overlap graph item '{item}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15921,8 +18986,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
     relay: String,
     expected_total: u64,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let section = expand_placeholders(world, &section);
     let metric = expand_placeholders(world, &metric);
     let direction = expand_placeholders(world, &direction);
@@ -15932,12 +18996,12 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
     let mut last_totals = std::collections::BTreeMap::<String, u64>::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut outputs = Vec::new();
         let mut command_error = None;
         last_totals.clear();
         for node_id in world.cluster().node_ids() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match run_nspl_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
                 Ok(output) => {
                     for (physical_node, total) in
@@ -15974,7 +19038,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
             world.last_command_output,
             world.last_command_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16168,6 +19232,252 @@ fn scheduled_node_placement_from_status<'a>(
             None
         }
     })
+}
+
+fn scheduled_placements_for_domain(status: &str, domain: &str) -> Vec<SavedHealthyPlacement> {
+    let mut placements = Vec::new();
+    for line in status.lines() {
+        let Some(line) = line.trim().strip_prefix("- domain=") else {
+            continue;
+        };
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some(domain) {
+            continue;
+        }
+        let mut kind = None;
+        let mut name = None;
+        let mut owner = None;
+        for field in fields {
+            if let Some(value) = field.strip_prefix("kind=") {
+                kind = Some(value);
+            } else if let Some(value) = field.strip_prefix("name=") {
+                name = Some(value);
+            } else if let Some(value) = field.strip_prefix("owner=") {
+                owner = Some(value);
+            }
+        }
+        if let (Some(kind), Some(name), Some(owner)) = (kind, name, owner) {
+            placements.push(SavedHealthyPlacement {
+                kind: kind.to_string(),
+                name: name.to_string(),
+                owner: owner.to_string(),
+            });
+        }
+    }
+    placements
+}
+
+fn gossip_live_nodes_from_status(status: &str) -> BTreeSet<&str> {
+    let mut in_live_nodes = false;
+    let mut live_nodes = BTreeSet::new();
+    for line in status.lines() {
+        if line == "live_nodes:" {
+            in_live_nodes = true;
+            continue;
+        }
+        if in_live_nodes && line.starts_with('[') {
+            break;
+        }
+        if in_live_nodes && let Some(node) = line.strip_prefix("- node_id: ") {
+            live_nodes.insert(node);
+        }
+    }
+    live_nodes
+}
+
+#[then(expr = "node {string} sees node {string} live")]
+async fn then_connected_quorum_observes_lagging_follower(
+    world: &mut ScenarioWorld,
+    connected_node: String,
+    lagging_node: String,
+) {
+    let connected_node = expand_placeholders(world, &connected_node);
+    let lagging_node = expand_placeholders(world, &lagging_node);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let connected_status = world
+            .cluster()
+            .status_text(
+                &connected_node,
+                PhaseDeadline::after(STATUS_REQUEST_TIMEOUT),
+            )
+            .await
+            .expect("connected node status request failed");
+        if gossip_live_nodes_from_status(&connected_status).contains(lagging_node.as_str()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{connected_node}' did not see '{lagging_node}' live; \
+             status:\n{connected_status}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "the last cluster status work on healthy nodes {string} is saved")]
+async fn then_save_healthy_scheduled_work(world: &mut ScenarioWorld, node_ids: String) {
+    let node_ids = expand_placeholders(world, &node_ids);
+    let healthy = node_ids.split(',').collect::<BTreeSet<_>>();
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("cluster status must be read before saving scheduled work");
+    let placements = scheduled_placements_for_domain(output, &world.domain);
+    for node_id in &healthy {
+        assert!(
+            placements
+                .iter()
+                .any(|placement| placement.owner == *node_id),
+            "expected scheduled work on healthy node '{node_id}', got {placements:?} in: {output}"
+        );
+    }
+    world.saved_healthy_placements = placements
+        .into_iter()
+        .filter(|placement| healthy.contains(placement.owner.as_str()))
+        .collect();
+}
+
+#[then(
+    expr = "for {string} healthy nodes {string} keep each other live and their scheduled work \
+            while node {string} waits at least {string} for failover"
+)]
+async fn then_healthy_nodes_keep_their_work(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_ids: String,
+    unavailable_node: String,
+    minimum_failover_delay: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
+    let minimum_failover_delay = parse_duration_text(&minimum_failover_delay)
+        .assured("the scenario failover delay is valid");
+    let health_fault_started_at = world
+        .health_fault_started_at
+        .expect("the health fault must start before observing failover timing");
+    observe_healthy_peers(
+        world,
+        duration,
+        node_ids,
+        unavailable_node,
+        Some((health_fault_started_at, minimum_failover_delay)),
+    )
+    .await;
+}
+
+#[then(
+    expr = "for {string} healthy nodes {string} keep each other live and their scheduled work \
+            after node {string} stops"
+)]
+async fn then_stopped_peer_does_not_move_healthy_work(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_ids: String,
+    stopped_node: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
+    observe_healthy_peers(world, duration, node_ids, stopped_node, None).await;
+}
+
+async fn observe_healthy_peers(
+    world: &mut ScenarioWorld,
+    duration: Duration,
+    node_ids: String,
+    unavailable_node: String,
+    minimum_failover_delay: Option<(Instant, Duration)>,
+) {
+    let node_ids = expand_placeholders(world, &node_ids);
+    let unavailable_node = expand_placeholders(world, &unavailable_node);
+    let nodes = node_ids.split(',').collect::<Vec<_>>();
+    assert_eq!(nodes.len(), 2, "the scenario names the two connected peers");
+    assert!(
+        !world.saved_healthy_placements.is_empty(),
+        "healthy work must be saved before observing the partition"
+    );
+    let observation = PhaseDeadline::after(duration);
+    while !observation.has_passed() {
+        nervix_primitives::task::consume_budget().await;
+        for (source, peer) in [(nodes[0], nodes[1]), (nodes[1], nodes[0])] {
+            let status = world
+                .cluster()
+                .status_text(source, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+                .await
+                .unwrap_or_else(|error| panic!("cluster status on '{source}' failed: {error:#}"));
+            assert!(
+                gossip_live_nodes_from_status(&status).contains(peer),
+                "'{source}' dropped connected peer '{peer}' from gossip: {status}"
+            );
+            for placement in &world.saved_healthy_placements {
+                let current = scheduled_node_placement_from_status(
+                    &status,
+                    &world.domain,
+                    &placement.kind,
+                    &placement.name,
+                );
+                assert_eq!(
+                    current.map(|(owner, _)| owner),
+                    Some(placement.owner.as_str()),
+                    "'{source}' moved healthy work while another peer was unavailable: {status}"
+                );
+            }
+            if source == nodes[0]
+                && let Some((health_fault_started_at, minimum_failover_delay)) =
+                    minimum_failover_delay
+            {
+                let placements = scheduled_placements_for_domain(&status, &world.domain);
+                let isolated_work_remains = placements
+                    .iter()
+                    .any(|placement| placement.owner == unavailable_node);
+                if !isolated_work_remains {
+                    let elapsed = health_fault_started_at.elapsed();
+                    assert!(
+                        elapsed >= minimum_failover_delay,
+                        "work on '{unavailable_node}' moved after {elapsed:?}, before the \
+                         {minimum_failover_delay:?} application-health interval: {status}"
+                    );
+                }
+            }
+            world.last_command_output = Some(status);
+        }
+        observation.pause(Duration::from_millis(250)).await;
+    }
+}
+
+#[then(expr = "within {string} node {string} reports no scheduled work on {string}")]
+async fn then_no_scheduled_work_on_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    observing_node: String,
+    unavailable_node: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
+    let observing_node = expand_placeholders(world, &observing_node);
+    let unavailable_node = expand_placeholders(world, &unavailable_node);
+    let observation = PhaseDeadline::after(duration);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !observation.has_passed(),
+            "work on '{unavailable_node}' did not fail over"
+        );
+        let status = world
+            .cluster()
+            .status_text(&observing_node, observation)
+            .await
+            .unwrap_or_else(|error| panic!("cluster status failed: {error:#}"));
+        let placements = scheduled_placements_for_domain(&status, &world.domain);
+        if !placements.is_empty()
+            && placements
+                .iter()
+                .all(|placement| placement.owner != unavailable_node)
+        {
+            world.last_command_output = Some(status);
+            return;
+        }
+        world.last_command_output = Some(status);
+        observation.pause(Duration::from_millis(250)).await;
+    }
 }
 
 #[then(expr = "the last cluster status schedules nodes on at least {int} distinct owners")]
@@ -16451,14 +19761,13 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     ingestor: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let ingestor = expand_placeholders(world, &ingestor);
     let expected = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
             run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE INGESTOR {ingestor};"))
@@ -16474,7 +19783,7 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
              {output}",
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16485,14 +19794,13 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     processor: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let processor = expand_placeholders(world, &processor);
     let expected = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output = run_nspl_commands_on_node(
             world,
@@ -16511,7 +19819,7 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
              output: {output}",
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16550,8 +19858,7 @@ async fn then_describe_one_of_two_emitters_contains(
     second: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let emitters = [
         expand_placeholders(world, &first),
         expand_placeholders(world, &second),
@@ -16560,7 +19867,7 @@ async fn then_describe_one_of_two_emitters_contains(
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let mut outputs = Vec::with_capacity(emitters.len());
         for emitter in &emitters {
@@ -16581,7 +19888,7 @@ async fn then_describe_one_of_two_emitters_contains(
             emitters[1],
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16592,14 +19899,13 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     emitter: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let emitter = expand_placeholders(world, &emitter);
     let expected = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
             run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
@@ -16614,7 +19920,7 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
             "timed out waiting for DESCRIBE EMITTER {emitter} to contain {}. last output: {output}",
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16643,8 +19949,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
     deduplicator: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let deduplicator = expand_placeholders(world, &deduplicator);
     let expected = world
@@ -16655,7 +19960,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(
             world,
             &node_id,
@@ -16678,7 +19983,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
             world.last_command_output,
             world.last_command_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16693,8 +19998,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
     deduplicator: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let deduplicator = expand_placeholders(world, &deduplicator);
     let unexpected = world
@@ -16705,7 +20009,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(
             world,
             &node_id,
@@ -16730,7 +20034,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
             world.last_command_output,
             world.last_command_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -16746,8 +20050,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
     name: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let kind = expand_placeholders(world, &kind);
     let name = expand_placeholders(world, &name);
@@ -16759,7 +20062,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
     let placement = PhaseDeadline::after(duration);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
             "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
@@ -16794,8 +20097,7 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
     name: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let kind = expand_placeholders(world, &kind);
     let name = expand_placeholders(world, &name);
@@ -16807,7 +20109,7 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
     let observation = PhaseDeadline::after(duration);
 
     while !observation.has_passed() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // The observation window bounds how long the owner is watched, not how long one read may
         // take, so every read keeps a full request budget even near the end of the window.
         let output = world
@@ -16846,8 +20148,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     name: String,
     placeholder: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let kind = expand_placeholders(world, &kind);
     let name = expand_placeholders(world, &name);
@@ -16859,7 +20160,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     let placement = PhaseDeadline::after(duration);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
             "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
@@ -16953,8 +20254,7 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_e
     expected_value: i64,
     #[step] step: &Step,
 ) {
-    let wait =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let wait = parse_duration_text(&duration).expect("step duration must be a valid duration");
     world
         .wait_for_observability_metric_value(
             &node_id,
@@ -16994,8 +20294,7 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_r
     minimum_value: i64,
     #[step] step: &Step,
 ) {
-    let wait =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let wait = parse_duration_text(&duration).expect("step duration must be a valid duration");
     world
         .wait_for_observability_metric_at_least(
             &node_id,
@@ -17024,6 +20323,14 @@ async fn then_node_interconnection_metrics_use_bounded_dimensions(
     );
 }
 
+/// Whether a line of a `DESCRIBE RELAY` output begins with `expected`. Matching the start of a
+/// whole line keeps `exists` from matching the `not exists` a missing branch reports.
+fn describe_relay_output_reports(output: &str, expected: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.trim_start().starts_with(expected))
+}
+
 #[then(expr = "within {string} node {string} eventually reports describe relay as {string}")]
 async fn then_within_duration_node_eventually_reports_describe_stream_as(
     world: &mut ScenarioWorld,
@@ -17032,15 +20339,14 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
     expected: String,
     #[step] step: &Step,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
-            Ok(output) if output.contains(expected.as_str()) => {
+            Ok(output) if describe_relay_output_reports(&output, &expected) => {
                 world.last_command_output = Some(output);
                 return;
             }
@@ -17059,7 +20365,7 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -17074,8 +20380,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
     ingestor: String,
     expected: String,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let ingestor = expand_placeholders(world, &ingestor);
     let expected = expand_placeholders(world, &expected);
@@ -17083,7 +20388,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
@@ -17104,7 +20409,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -17116,13 +20421,12 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
     expected: String,
     #[step] step: &Step,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let commands = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
@@ -17143,7 +20447,7 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -17158,8 +20462,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
     relay: String,
     #[step] step: &Step,
 ) {
-    let timeout =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let timeout = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let node_id = expand_placeholders(world, &node_id);
     let expected = expand_placeholders(world, docstring(step));
     let command = format!(
@@ -17169,7 +20472,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &command).await {
             Ok(output) if output.contains(expected.trim()) => {
                 world.last_command_output = Some(output);
@@ -17191,7 +20494,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -17354,6 +20657,13 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
 #[given(expr = "ZeroMQ emission endpoint {string} is observed")]
 async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     let addr = expand_placeholders(world, &addr);
+    observe_zeromq_emission_endpoint(world, addr).await;
+}
+
+/// Binds the observing pull socket at `addr`. The scenario's own emission address can be taken by
+/// another process between its allocation and this bind, so for that address a fresh port replaces
+/// it, and the `{{zeromq_emit_addr}}` placeholder the emitter's client reads follows the socket.
+async fn observe_zeromq_emission_endpoint(world: &mut ScenarioWorld, addr: String) {
     match world.cluster().observe_zeromq(&addr).await {
         Ok(observer) => {
             world.broker_observer = Some(observer);
@@ -17366,7 +20676,7 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
     }
 
     for _ in 0..ZEROMQ_OBSERVER_BIND_ATTEMPTS {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let replacement = format!(
             "tcp://127.0.0.1:{}",
             draw_scenario_port(world, "replacement ZeroMQ emit")
@@ -17384,16 +20694,174 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
     );
 }
 
+/// A broker or message destination that one scenario outline publishes to for every transport.
+///
+/// Each fixture starts its external system before the cluster, then provisions and observes the
+/// destination a row names exactly as that transport's own emission steps do, so one outline can
+/// cover every broker and message emitter without restating their setup.
+#[derive(Clone, Copy, Debug)]
+enum EmissionTargetFixture {
+    Kafka,
+    Pulsar,
+    RabbitMq,
+    Redis,
+    Mqtt,
+    /// Core NATS, where the destination is a subject.
+    Nats,
+    /// A subject captured by a JetStream stream of the same name, provisioned with it.
+    NatsJetStream,
+    /// The destination is the address the observer binds its pull socket to.
+    ZeroMq,
+    /// A standard queue, or a FIFO queue with content-based deduplication when its name ends in
+    /// `.fifo`.
+    Sqs,
+}
+
+impl EmissionTargetFixture {
+    fn parse(value: &str) -> Self {
+        match value {
+            "Kafka" => Self::Kafka,
+            "Pulsar" => Self::Pulsar,
+            "RabbitMQ" => Self::RabbitMq,
+            "Redis" => Self::Redis,
+            "MQTT" => Self::Mqtt,
+            "NATS" => Self::Nats,
+            "NATS JetStream" => Self::NatsJetStream,
+            "ZeroMQ" => Self::ZeroMq,
+            "SQS" => Self::Sqs,
+            other => panic!("unsupported emission target '{other}'"),
+        }
+    }
+
+    async fn start(self, world: &mut ScenarioWorld) {
+        initialize_scenario_identity(world);
+        let started = match self {
+            Self::Kafka => world.dependencies.start_kafka(&world.test_id).await,
+            Self::Pulsar => world.dependencies.start_pulsar(&world.test_id).await,
+            Self::RabbitMq => world.dependencies.start_rabbitmq(&world.test_id).await,
+            Self::Redis => world.dependencies.start_redis(&world.test_id).await,
+            Self::Mqtt => world.dependencies.start_mqtt(&world.test_id).await,
+            Self::Nats | Self::NatsJetStream => world.dependencies.start_nats(&world.test_id).await,
+            Self::Sqs => world.dependencies.start_sqs(&world.test_id).await,
+            Self::ZeroMq => Ok(()),
+        };
+        started.unwrap_or_else(|error| panic!("{self:?} test dependency should start: {error}"));
+        refresh_dependency_configuration(world);
+    }
+
+    async fn observe(self, world: &mut ScenarioWorld, destination: String) {
+        let observed = match self {
+            Self::Kafka => {
+                world
+                    .cluster()
+                    .ensure_kafka_topic_partitions(&destination, 1)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to create Kafka topic '{destination}': {error}")
+                    });
+                world.cluster().observe_kafka(&destination).await
+            }
+            Self::Pulsar => world.cluster().observe_pulsar(&destination).await,
+            Self::RabbitMq => {
+                world
+                    .cluster()
+                    .ensure_rabbitmq_queue(&destination)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to declare RabbitMQ queue '{destination}': {error}")
+                    });
+                world.cluster().observe_rabbitmq(&destination).await
+            }
+            Self::Redis => world.cluster().observe_redis(&destination).await,
+            Self::Mqtt => world.cluster().observe_mqtt(&destination).await,
+            Self::Nats => world.cluster().observe_nats(&destination).await,
+            Self::NatsJetStream => {
+                world
+                    .cluster()
+                    .provision_nats_stream(&destination, &destination)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to provision NATS JetStream stream '{destination}': {error}")
+                    });
+                world.cluster().observe_nats(&destination).await
+            }
+            Self::ZeroMq => {
+                observe_zeromq_emission_endpoint(world, destination).await;
+                return;
+            }
+            Self::Sqs => world.cluster().observe_sqs(&destination).await,
+        };
+        let observer = observed
+            .unwrap_or_else(|error| panic!("failed to observe {self:?} '{destination}': {error}"));
+        world.broker_observer = Some(observer);
+    }
+}
+
+#[given(expr = "the {string} emission target is running")]
+async fn given_emission_target_is_running(world: &mut ScenarioWorld, target: String) {
+    EmissionTargetFixture::parse(&target).start(world).await;
+}
+
+#[given(expr = "the {string} emission target {string} is observed")]
+async fn given_emission_target_is_observed(
+    world: &mut ScenarioWorld,
+    target: String,
+    destination: String,
+) {
+    let destination = expand_placeholders(world, &destination);
+    EmissionTargetFixture::parse(&target)
+        .observe(world, destination)
+        .await;
+}
+
+#[given(expr = "Pulsar topic {string} accepts messages of at most {int} bytes")]
+async fn given_pulsar_topic_accepts_messages_of_at_most(
+    world: &mut ScenarioWorld,
+    topic: String,
+    max_message_size: u32,
+) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .limit_pulsar_topic_message_size(&topic, max_message_size)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to limit the message size of Pulsar topic '{topic}': {error}")
+        });
+}
+
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
 async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     initialize_scenario_identity(world);
     let addr = expand_placeholders(world, &addr);
     world.syslog_udp_observer = Some(
-        tokio::net::UdpSocket::bind(&addr)
+        nervix_primitives::net::UdpSocket::bind(&addr)
             .await
             .unwrap_or_else(|error| {
                 panic!("failed to observe Syslog UDP endpoint '{addr}': {error}")
             }),
+    );
+}
+
+#[given("the observed Syslog UDP endpoint is published under fixture DNS")]
+async fn given_syslog_udp_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    let endpoint = url::Url::parse(&format!("syslog://{}", world.syslog_emit_addr))
+        .expect("the observed Syslog endpoint has a valid authority");
+    let address = endpoint
+        .host_str()
+        .expect("the observed Syslog endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the observed Syslog endpoint listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service("syslog.nervix.test", vec![address])
+        .expect("the cluster has a DNS fixture");
+    let port = endpoint
+        .port()
+        .expect("the observed Syslog endpoint has a port");
+    world.placeholders.insert(
+        "syslog_dns_addr".to_string(),
+        format!("syslog.nervix.test:{port}"),
     );
 }
 
@@ -17816,7 +21284,7 @@ async fn when_these_mqtt_messages_are_rapidly_published(
     );
     wait_for_mqtt_ingestors_ready(world).await;
     for payload in payloads {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_mqtt(&topic, &payload)
@@ -18184,7 +21652,7 @@ async fn when_syslog_udp_message_is_published_to(
 ) {
     let addr = expand_placeholders(world, &addr);
     let payload = expand_placeholders(world, docstring(step));
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+    let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("failed to bind Syslog UDP test sender");
     socket
@@ -18214,16 +21682,16 @@ async fn then_node_eventually_forwards_syslog_udp_message(
         .expect("failed to resolve node-local Syslog ingestor address");
     let payload =
         format!("<34>1 2003-10-11T22:14:15.003Z lifecycle.example test 1 ID47 - {message}");
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+    let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("failed to bind Syslog UDP test sender");
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut received = vec![0_u8; 65_535];
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = socket.send_to(payload.as_bytes(), &addr).await;
-        let next = tokio::time::timeout(
+        let next = nervix_primitives::time::timeout(
             Duration::from_millis(250),
             world
                 .syslog_udp_observer
@@ -18243,7 +21711,7 @@ async fn then_node_eventually_forwards_syslog_udp_message(
             "timed out waiting for node '{node_id}' Syslog UDP traffic to reach the observed \
              endpoint"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -18269,14 +21737,14 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut stream = loop {
-        match tokio::net::TcpStream::connect(&addr).await {
+        match nervix_primitives::net::TcpStream::connect(&addr).await {
             Ok(stream) => break stream,
             Err(error) => {
                 assert!(
                     Instant::now() < deadline,
                     "timed out connecting to Syslog TCP listener '{addr}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
             }
         }
     };
@@ -18351,14 +21819,14 @@ async fn when_syslog_tls_message_is_published_to(
     let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = loop {
-        match tokio::net::TcpStream::connect(&addr).await {
+        match nervix_primitives::net::TcpStream::connect(&addr).await {
             Ok(stream) => break stream,
             Err(error) => {
                 assert!(
                     Instant::now() < deadline,
                     "timed out connecting to Syslog TLS listener '{addr}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
             }
         }
     };
@@ -18418,7 +21886,7 @@ async fn when_websocket_client_test_server_sends_a_payload(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match client.post(url.clone()).body(payload.clone()).send().await {
             Ok(response) if response.status().is_success() => {
                 world.last_server_error = None;
@@ -18437,7 +21905,7 @@ async fn when_websocket_client_test_server_sends_a_payload(
             "timed out waiting for an outbound WebSocket client connection. last error: {:?}",
             world.last_server_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -18459,7 +21927,7 @@ async fn when_websocket_frames_are_exchanged(
                 WebsocketExchangeAction::ExpectClose
             } else if let Some(window) = line.strip_prefix("EXPECT SILENCE ") {
                 WebsocketExchangeAction::ExpectSilence(
-                    humantime::parse_duration(window.trim()).unwrap_or_else(|error| {
+                    parse_duration_text(window.trim()).unwrap_or_else(|error| {
                         panic!("invalid silence window '{window}': {error}")
                     }),
                 )
@@ -18738,7 +22206,7 @@ async fn when_sequential_metric_http_payloads_are_posted(
         "http publish sequential metrics: node=node-1 host={host} path={path} count={count}"
     ));
     for value in 1..=count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let payload = format!(r#"{{"value":{value}}}"#);
         world
             .cluster()
@@ -18947,7 +22415,7 @@ async fn then_the_background_https_publishing_accepted_every_payload(world: &mut
         .take()
         .expect("a background https publish must be active");
     stop.cancel();
-    let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+    let outcome = nervix_primitives::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("background https publish did not stop")
         .expect("background https publish task failed");
@@ -19020,7 +22488,7 @@ async fn then_the_background_http_publish_succeeds(world: &mut ScenarioWorld) {
         .background_http_publish
         .take()
         .expect("a background http publish must be active");
-    tokio::time::timeout(Duration::from_secs(10), task)
+    nervix_primitives::time::timeout(Duration::from_secs(10), task)
         .await
         .expect("background http publish did not finish")
         .expect("background http publish task failed")
@@ -19077,7 +22545,7 @@ async fn when_http_payload_is_posted_to_node_and_fails(
     let deadline = Instant::now() + Duration::from_secs(5);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -19089,7 +22557,7 @@ async fn when_http_payload_is_posted_to_node_and_fails(
             Instant::now() < deadline,
             "expected http post to node '{node_id}' to fail"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19135,8 +22603,7 @@ async fn then_within_stream_subscription_receives_payload(
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     append_cucumber_log_line(&format!(
         "awaiting subscription payload within {:?} containing {}",
         duration,
@@ -19152,7 +22619,7 @@ async fn then_named_client_receives_subscription_payload(
     client_name: String,
     #[step] step: &Step,
 ) {
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the scenario subscription deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let expected = expand_placeholders(world, docstring(step));
@@ -19163,7 +22630,7 @@ async fn then_named_client_receives_subscription_payload(
         .clone();
     let deadline = Instant::now() + duration;
     let payload = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let pending = world
             .client_subscription_rows
             .entry(client_name.clone())
@@ -19172,7 +22639,7 @@ async fn then_named_client_receives_subscription_payload(
             break payload;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, client.next_subscription())
+        let event = nervix_primitives::time::timeout(remaining, client.next_subscription())
             .await
             .unwrap_or_else(|_| {
                 panic!(
@@ -19183,6 +22650,13 @@ async fn then_named_client_receives_subscription_payload(
             .unwrap_or_else(|error| {
                 panic!("client '{client_name}' subscription stream closed: {error}")
             });
+        if let nervix_client_core::SubscriptionEvent::ConsumerOverflow(overflowed) = &event {
+            panic!(
+                "client '{client_name}' could not retain the events of subscription '{}', so no \
+                 further rows of it follow",
+                overflowed.name.as_str()
+            );
+        }
         let nervix_client_core::SubscriptionEvent::Rows(rows) = event else {
             continue;
         };
@@ -19211,7 +22685,7 @@ async fn when_named_client_receives_from_repeated_http_posts(
     path: String,
     #[step] step: &Step,
 ) {
-    let duration = humantime::parse_duration(&duration)
+    let duration = parse_duration_text(&duration)
         .assured("the scenario delivery deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let node_id = expand_placeholders(world, &node_id);
@@ -19225,7 +22699,7 @@ async fn when_named_client_receives_from_repeated_http_posts(
         .clone();
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "client '{client_name}' did not receive a row from repeated posts within {duration:?}"
@@ -19237,7 +22711,7 @@ async fn when_named_client_receives_from_repeated_http_posts(
             .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
         let remaining = deadline.saturating_duration_since(Instant::now());
         let wait = remaining.min(Duration::from_secs(1));
-        match tokio::time::timeout(wait, client.next_subscription()).await {
+        match nervix_primitives::time::timeout(wait, client.next_subscription()).await {
             Ok(Ok(nervix_client_core::SubscriptionEvent::Rows(rows))) => {
                 let lines = rows.display_lines().unwrap_or_else(|error| {
                     panic!("client '{client_name}' rows do not render: {error}")
@@ -19260,8 +22734,8 @@ async fn then_named_client_observes_subscription_interrupted(
     client_name: String,
     subscription_name: String,
 ) {
-    let duration = humantime::parse_duration(&duration)
-        .assured("the interruption deadline is a valid duration");
+    let duration =
+        parse_duration_text(&duration).assured("the interruption deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let subscription_name = expand_placeholders(world, &subscription_name);
     let client = world
@@ -19269,7 +22743,7 @@ async fn then_named_client_observes_subscription_interrupted(
         .get(&client_name)
         .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
         .clone();
-    let event = tokio::time::timeout(duration, client.next_subscription())
+    let event = nervix_primitives::time::timeout(duration, client.next_subscription())
         .await
         .unwrap_or_else(|_| panic!("client '{client_name}' did not report an interruption"))
         .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
@@ -19277,6 +22751,212 @@ async fn then_named_client_observes_subscription_interrupted(
         panic!("client '{client_name}' did not report an interruption: {event:?}");
     };
     assert_eq!(interrupted.subscription.name.as_str(), subscription_name);
+}
+
+#[then(
+    expr = "within {string} client {string} observes a failed restoration of subscription {string}"
+)]
+async fn then_named_client_observes_failed_restoration(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        parse_duration_text(&duration).assured("the restoration deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = nervix_primitives::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("client '{client_name}' did not report a failed restoration within {duration:?}")
+        })
+        .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+    let nervix_client_core::SubscriptionEvent::RestorationFailed(failure) = event else {
+        panic!("client '{client_name}' did not report a failed restoration: {event:?}");
+    };
+    assert_eq!(failure.subscription.name.as_str(), subscription_name);
+    assert!(
+        failure.message.contains(expected.trim()),
+        "client '{client_name}' reported the restoration failure {:?}, expected it to contain \
+         {expected:?}",
+        failure.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is interrupted")]
+async fn then_named_client_subscription_is_interrupted(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    // A refused restoration is sent again after a wait, so the subscription is briefly restoring
+    // while an attempt is in flight; it is interrupted again once that attempt is refused.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let lifecycle = client.subscription_lifecycle(&name);
+        if let Some(nervix_client_core::SubscriptionLifecycle::Interrupted(_)) = lifecycle {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' subscription '{subscription_name}' is not interrupted: \
+             {lifecycle:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "within {string} client {string} observes subscription {string} ended with reason \
+            {string}"
+)]
+async fn then_named_client_observes_subscription_ended(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    reason: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the end deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected_reason = match reason.as_str() {
+        "RelayChanged" => nervix_client_core::wire::SubscriptionEndReason::RelayChanged,
+        "RelayRemoved" => nervix_client_core::wire::SubscriptionEndReason::RelayRemoved,
+        other => panic!("the scenario names an end reason the protocol does not have: {other}"),
+    };
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    // Rows the subscription delivered before its end precede it.
+    let ended = loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = nervix_primitives::time::timeout(remaining, client.next_subscription())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "client '{client_name}' did not report the end of subscription \
+                     '{subscription_name}' within {duration:?}"
+                )
+            })
+            .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        match event {
+            nervix_client_core::SubscriptionEvent::Ended(ended) => break ended,
+            nervix_client_core::SubscriptionEvent::Rows(_) => {}
+            other => panic!(
+                "client '{client_name}' reported {other:?} before the end of subscription \
+                 '{subscription_name}'"
+            ),
+        }
+    };
+    assert_eq!(ended.subscription.name.as_str(), subscription_name);
+    assert_eq!(
+        ended.reason, expected_reason,
+        "client '{client_name}' reported the end of subscription '{subscription_name}' as {:?}",
+        ended.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is ended")]
+async fn then_named_client_subscription_is_ended(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let lifecycle = client.subscription_lifecycle(&name);
+    let Some(nervix_client_core::SubscriptionLifecycle::Ended(ended)) = lifecycle else {
+        panic!(
+            "client '{client_name}' subscription '{subscription_name}' is not ended: {lifecycle:?}"
+        );
+    };
+    assert_eq!(ended.name.as_str(), subscription_name);
+}
+
+/// A subscription the server ended is never opened again, so nothing about it may arrive, and a
+/// longer window only strengthens the assertion.
+#[then(expr = "client {string} reports no event of subscription {string} within {string}")]
+async fn then_named_client_reports_no_subscription_event(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the silence window is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(read) =
+            nervix_primitives::time::timeout(remaining, client.next_subscription()).await
+        else {
+            return;
+        };
+        let event =
+            read.unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        assert_ne!(
+            event.subscription().name.as_str(),
+            subscription_name,
+            "client '{client_name}' reported an event of subscription '{subscription_name}': \
+             {event:?}"
+        );
+    }
+}
+
+#[then(expr = "client {string} no longer holds subscription {string}")]
+async fn then_named_client_no_longer_holds_subscription(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&name),
+        None,
+        "client '{client_name}' still holds subscription '{subscription_name}'"
+    );
 }
 
 #[then(expr = "client {string} subscription {string} is active")]
@@ -19295,7 +22975,7 @@ async fn then_named_client_subscription_is_active(
         .assured("the scenario subscription name is valid");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let lifecycle = client.subscription_lifecycle(&name);
         if let Some(nervix_client_core::SubscriptionLifecycle::Active(_)) = lifecycle {
             break;
@@ -19305,7 +22985,7 @@ async fn then_named_client_subscription_is_active(
             "client '{client_name}' subscription '{subscription_name}' did not become active: \
              {lifecycle:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19323,7 +23003,7 @@ async fn then_node_eventually_accepts_websocket_traffic(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match world
             .cluster()
             .publish_websocket(&node_id, &host, &path, &payload)
@@ -19335,7 +23015,7 @@ async fn then_node_eventually_accepts_websocket_traffic(
                     Instant::now() < deadline,
                     "timed out waiting for websocket endpoint on node '{node_id}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -19356,7 +23036,7 @@ async fn then_node_eventually_accepts_http_traffic(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -19368,7 +23048,7 @@ async fn then_node_eventually_accepts_http_traffic(
                     Instant::now() < deadline,
                     "timed out waiting for http endpoint on node '{node_id}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -19385,15 +23065,14 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_subscriptio
     path: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = world
             .cluster()
             .publish_http("node-1", &host, &path, &payload)
@@ -19408,7 +23087,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_subscriptio
             "timed out waiting for http payload posted to host '{host}' path '{path}' to reach \
              the relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19424,8 +23103,7 @@ async fn then_within_duration_repeatedly_posting_https_payload_yields_subscripti
     ca_resource_directory: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -19433,7 +23111,7 @@ async fn then_within_duration_repeatedly_posting_https_payload_yields_subscripti
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let publish = world
             .cluster()
             .publish_https("node-1", &host, &path, &payload, &ca_pem)
@@ -19449,7 +23127,7 @@ async fn then_within_duration_repeatedly_posting_https_payload_yields_subscripti
              CA from '{ca_resource_directory}' to reach the relay subscription; last publish: \
              {publish:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19465,8 +23143,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
     path: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
@@ -19479,7 +23156,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = world
             .cluster()
             .publish_http_bytes(
@@ -19500,7 +23177,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
             "timed out waiting for {wire_format} payload posted to host '{host}' path '{path}' to \
              reach the relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19514,14 +23191,13 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_yields_subscri
     topic: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_kafka(&topic, &payload)
@@ -19537,7 +23213,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_yields_subscri
             "timed out waiting for Kafka message published to topic '{topic}' to reach the relay \
              subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19552,8 +23228,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
     partition: usize,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let partition =
         i32::try_from(partition).assured("Kafka partition ids in cucumber features fit i32");
@@ -19561,7 +23236,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_kafka_partition(&topic, partition, &payload)
@@ -19577,7 +23252,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
             "timed out waiting for Kafka message published to topic '{topic}' partition \
              '{partition}' to reach the relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19591,14 +23266,13 @@ async fn then_within_duration_repeatedly_publishing_mqtt_message_yields_subscrip
     topic: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_mqtt(&topic, &payload)
@@ -19614,7 +23288,7 @@ async fn then_within_duration_repeatedly_publishing_mqtt_message_yields_subscrip
             "timed out waiting for MQTT message published to topic '{topic}' to reach the relay \
              subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19628,14 +23302,13 @@ async fn then_within_duration_repeatedly_publishing_pulsar_tls_message_yields_su
     topic: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_pulsar_tls(&topic, &payload)
@@ -19651,7 +23324,7 @@ async fn then_within_duration_repeatedly_publishing_pulsar_tls_message_yields_su
             "timed out waiting for Pulsar TLS message published to topic '{topic}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19665,14 +23338,13 @@ async fn then_within_duration_repeatedly_publishing_redis_message_yields_subscri
     channel: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let channel = expand_placeholders(world, &channel);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_redis(&channel, &payload)
@@ -19688,7 +23360,7 @@ async fn then_within_duration_repeatedly_publishing_redis_message_yields_subscri
             "timed out waiting for Redis message published to channel '{channel}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19702,14 +23374,13 @@ async fn then_within_duration_repeatedly_publishing_nats_message_yields_subscrip
     subject: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let subject = expand_placeholders(world, &subject);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_nats(&subject, &payload)
@@ -19725,7 +23396,7 @@ async fn then_within_duration_repeatedly_publishing_nats_message_yields_subscrip
             "timed out waiting for NATS message published to subject '{subject}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19739,14 +23410,13 @@ async fn then_within_duration_repeatedly_publishing_nats_tls_message_yields_subs
     subject: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let subject = expand_placeholders(world, &subject);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_nats_tls(&subject, &payload)
@@ -19762,7 +23432,7 @@ async fn then_within_duration_repeatedly_publishing_nats_tls_message_yields_subs
             "timed out waiting for NATS TLS message published to subject '{subject}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19776,14 +23446,13 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
     queue: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let queue = expand_placeholders(world, &queue);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_sqs(&queue, &payload)
@@ -19799,7 +23468,7 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
             "timed out waiting for SQS message published to queue '{queue}' to reach the relay \
              subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19813,14 +23482,13 @@ async fn then_within_duration_repeatedly_publishing_tls_sqs_message_yields_subsc
     queue: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let queue = expand_placeholders(world, &queue);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_sqs_tls(&queue, &payload)
@@ -19836,7 +23504,7 @@ async fn then_within_duration_repeatedly_publishing_tls_sqs_message_yields_subsc
             "timed out waiting for TLS SQS message published to queue '{queue}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19878,7 +23546,7 @@ async fn then_node_eventually_forwards_websocket_traffic_to_observed_broker(
                     "timed out waiting for node '{node_id}' websocket traffic to reach observed \
                      broker"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -19921,7 +23589,7 @@ async fn then_node_eventually_forwards_http_traffic_to_observed_broker(
                     Instant::now() < deadline,
                     "timed out waiting for node '{node_id}' http traffic to reach observed broker"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -19939,15 +23607,14 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_observed_br
     path: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -19970,7 +23637,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_observed_br
             "timed out waiting for http payload posted to node '{node_id}' host '{host}' path \
              '{path}' to reach the observed broker"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19980,8 +23647,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -20047,6 +23713,127 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
     }
 }
 
+#[then(
+    expr = "within {string} subscriptions {string} and {string} each pass between {int} and {int} \
+            of the metric values up to {int}"
+)]
+async fn then_subscriptions_each_sample_metric_values(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: String,
+    second: String,
+    fewest: usize,
+    most: usize,
+    sampled_up_to: i64,
+) {
+    /// What one subscription delivered while this step read it.
+    #[derive(Default)]
+    struct SubscriptionSample {
+        /// The values up to the sampled bound, in the order they arrived.
+        passed: Vec<i64>,
+        /// The last value of any kind that arrived.
+        last: Option<i64>,
+        /// Whether a value above the bound arrived. Rows arrive in the order they were
+        /// published, so every value up to the bound has been drawn for by then.
+        drawn: bool,
+    }
+
+    let duration = parse_duration_text(&duration)
+        .assured("the scenario sampling deadline is a valid duration");
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with the sampled subscriptions must exist");
+    let mut samples = BTreeMap::new();
+    samples.insert(first.clone(), SubscriptionSample::default());
+    samples.insert(second.clone(), SubscriptionSample::default());
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut all_drawn = true;
+        for sample in samples.values() {
+            if !sample.drawn {
+                all_drawn = false;
+            }
+        }
+        if all_drawn {
+            break;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out before '{first}' and '{second}' drew for every metric value up to \
+             {sampled_up_to}"
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sampled subscription rows")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out before '{first}' and '{second}' drew for every metric value up to \
+                     {sampled_up_to}"
+                )
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&event.payload)
+            .unwrap_or_else(|error| panic!("subscription payload is not valid JSON: {error}"));
+        let Some(value) = payload.get("value").and_then(serde_json::Value::as_i64) else {
+            panic!("subscription payload {payload} has no integer 'value'");
+        };
+        let subscription = event.subscription.as_str();
+        let Some(sample) = samples.get_mut(subscription) else {
+            panic!("subscription '{subscription}' delivered a row this step does not sample");
+        };
+        if let Some(last) = sample.last {
+            assert!(
+                value > last,
+                "subscription '{subscription}' delivered {value} after {last}, out of the order \
+                 the values were published in"
+            );
+        }
+        sample.last = Some(value);
+        if value > sampled_up_to {
+            sample.drawn = true;
+        } else {
+            sample.passed.push(value);
+        }
+    }
+
+    let mut sampled = BTreeMap::new();
+    for (subscription, sample) in samples {
+        let passed = sample.passed.len();
+        assert!(
+            (fewest..=most).contains(&passed),
+            "subscription '{subscription}' passed {passed} of the metric values up to \
+             {sampled_up_to}, not between {fewest} and {most}: {:?}",
+            sample.passed
+        );
+        sampled.insert(subscription, sample.passed);
+    }
+    world.sampled_metric_values = sampled;
+}
+
+#[then(expr = "subscriptions {string} and {string} passed different metric values")]
+async fn then_subscriptions_passed_different_metric_values(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first_values = world
+        .sampled_metric_values
+        .get(&first)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{first}' passed"));
+    let second_values = world
+        .sampled_metric_values
+        .get(&second)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{second}' passed"));
+    assert_ne!(
+        first_values, second_values,
+        "subscriptions on one node take their draws from one sequence, so '{first}' and \
+         '{second}' must not pass the same values"
+    );
+}
+
 #[then(expr = "within {string} {int} relay subscription payloads share field {string}")]
 async fn then_relay_subscription_payloads_share_field(
     world: &mut ScenarioWorld,
@@ -20054,8 +23841,7 @@ async fn then_relay_subscription_payloads_share_field(
     expected_count: usize,
     field: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -20065,7 +23851,7 @@ async fn then_relay_subscription_payloads_share_field(
     let mut observed = Vec::with_capacity(expected_count);
 
     while observed.len() < expected_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -20116,7 +23902,7 @@ async fn then_generator_occurrences_preserve_branches(
     branch_field: String,
     timestamp_field: String,
 ) {
-    let duration = match humantime::parse_duration(&duration) {
+    let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
@@ -20141,11 +23927,11 @@ async fn then_generator_occurrences_preserve_branches(
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
     let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp = None;
+    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let complete_occurrences = branches_by_timestamp
             .values()
             .filter(|branches| *branches == &expected_branches)
@@ -20221,19 +24007,21 @@ async fn then_generator_occurrences_preserve_branches(
         let timestamp = timestamp
             .timestamp_nanos_opt()
             .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if !branches_by_timestamp.contains_key(&timestamp) {
-            if let Some(latest_timestamp) = latest_timestamp.as_ref() {
-                assert!(
-                    &timestamp > latest_timestamp,
-                    "generator occurrence timestamps arrived out of order: {observed:?}, {payload}"
-                );
-            }
-            latest_timestamp = Some(timestamp);
+        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
+            assert!(
+                timestamp > previous,
+                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
+                 {payload}"
+            );
         }
-        branches_by_timestamp
+        let inserted = branches_by_timestamp
             .entry(timestamp)
             .or_default()
             .insert(branch.to_string());
+        assert!(
+            inserted,
+            "generator repeated an occurrence for branch '{branch}': {payload}"
+        );
         world.last_subscription_payload = Some(payload.clone());
         observed.push(payload);
     }
@@ -20252,8 +24040,7 @@ async fn then_generated_routes_share_field(
     second_value: i64,
     shared_field: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -20263,7 +24050,7 @@ async fn then_generated_routes_share_field(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -20320,8 +24107,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_in_order
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -20379,7 +24165,22 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+}
+
+/// Like the step above, except that every payload arriving before the last fragment set matches
+/// must match a set not yet matched, so a record the scenario expects to be dropped fails the step
+/// even when it arrives among the expected ones.
+#[then(
+    expr = "within {string} the relay subscription receives exactly one payload for each fragment \
+            set"
+)]
+async fn then_within_duration_the_stream_subscription_receives_exactly_the_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail).await;
 }
 
 /// Like the step above, and every payload matching a fragment set carries the same value in the
@@ -20394,7 +24195,8 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     field: String,
     #[step] step: &Step,
 ) {
-    let matched = receive_subscription_fragment_sets(world, &duration, step).await;
+    let matched =
+        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
     let values = matched
         .iter()
         .map(|payload| {
@@ -20417,15 +24219,24 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     );
 }
 
+/// What a fragment-set wait does with a payload that matches none of the sets still expected.
+#[derive(Debug, Clone, Copy)]
+enum UnmatchedPayloads {
+    /// Other records share the subscription, so the payload is passed over.
+    Skip,
+    /// The sets name every record the subscription may deliver, so the payload fails the step.
+    Fail,
+}
+
 /// Waits until every docstring line's `|`-separated fragments are all found in one subscription
 /// payload, and returns the payloads that matched, in the order they arrived.
 async fn receive_subscription_fragment_sets(
     world: &mut ScenarioWorld,
     duration: &str,
     step: &Step,
+    unmatched: UnmatchedPayloads,
 ) -> Vec<String> {
-    let duration =
-        humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let expected_fragment_sets = docstring(step)
         .lines()
         .map(str::trim)
@@ -20478,12 +24289,19 @@ async fn receive_subscription_fragment_sets(
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
 
-        if let Some(index) = remaining
+        let position = remaining
             .iter()
-            .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)))
-        {
-            remaining.remove(index);
-            matched.push(payload);
+            .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)));
+        match (position, unmatched) {
+            (Some(index), _) => {
+                remaining.remove(index);
+                matched.push(payload);
+            }
+            (None, UnmatchedPayloads::Skip) => {}
+            (None, UnmatchedPayloads::Fail) => panic!(
+                "subscription payload {payload:?} matches no expected fragment set. expected \
+                 remaining {remaining:?}, observed {observed:?}"
+            ),
         }
     }
     matched
@@ -20499,8 +24317,7 @@ async fn then_stream_subscription_does_not_receive_a_payload_within(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     assert_no_subscription_payload_within(world, duration).await;
 }
 
@@ -20516,8 +24333,7 @@ async fn then_stream_subscription_does_not_receive_a_payload_containing_fragment
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -20735,7 +24551,7 @@ async fn then_timestamp_placeholders_differ_by_no_more_than(
         .unwrap_or_else(|| panic!("timestamp placeholder '{second_placeholder}' is out of range"));
     let measured_nanos = first_nanos.abs_diff(second_nanos);
     let measured = Duration::from_nanos(measured_nanos);
-    let maximum = humantime::parse_duration(&maximum_difference)
+    let maximum = parse_duration_text(&maximum_difference)
         .unwrap_or_else(|error| panic!("maximum timestamp difference is invalid: {error}"));
 
     append_cucumber_log_line(&format!(
@@ -20860,8 +24676,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -20887,8 +24702,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected = expand_placeholders(world, docstring(step).trim());
     let session = world
         .active_session
@@ -20897,7 +24711,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     let deadline = Instant::now() + duration;
     let mut passed_over = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let event = session
             .try_next_server_error(remaining)
@@ -20983,10 +24797,11 @@ async fn then_observed_syslog_udp_endpoint_receives_payload(
         .as_ref()
         .expect("a Syslog UDP observer must exist before assertion");
     let mut payload = vec![0_u8; 65_535];
-    let (len, _) = tokio::time::timeout(Duration::from_secs(10), observer.recv_from(&mut payload))
-        .await
-        .expect("timed out waiting for Syslog UDP payload")
-        .expect("failed to receive Syslog UDP payload");
+    let (len, _) =
+        nervix_primitives::time::timeout(Duration::from_secs(10), observer.recv_from(&mut payload))
+            .await
+            .expect("timed out waiting for Syslog UDP payload")
+            .expect("failed to receive Syslog UDP payload");
     let actual = std::str::from_utf8(&payload[..len])
         .expect("emitted Syslog UDP payload must be valid UTF-8");
     assert!(
@@ -21029,7 +24844,7 @@ async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Some(event) = world
             .dependencies
             .sentry_event(&world.test_id)
@@ -21053,7 +24868,7 @@ async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step
             Instant::now() < deadline,
             "timed out waiting for Sentry to receive {expected}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -21091,7 +24906,7 @@ async fn then_quickwit_index_eventually_contains(
     let deadline = Instant::now() + Duration::from_secs(45);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if world
             .dependencies
             .quickwit_index_contains(&index, &expected)
@@ -21104,7 +24919,7 @@ async fn then_quickwit_index_eventually_contains(
             Instant::now() < deadline,
             "timed out waiting for Quickwit index {index:?} to contain {expected:?}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -21113,7 +24928,7 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
     let expected = expand_placeholders(world, &expected);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if world
             .dependencies
             .otel_collector_contains(&expected)
@@ -21126,7 +24941,81 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
             Instant::now() < deadline,
             "timed out waiting for OpenTelemetry Collector to contain {expected:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(
+    expr = "OpenTelemetry Collector receives a two-member {string} export followed by a \
+            one-member export"
+)]
+async fn then_otel_collector_receives_split_exports(
+    world: &mut ScenarioWorld,
+    signal: String,
+    #[step] step: &Step,
+) {
+    let (heading, count_key) = match signal.as_str() {
+        "logs" => ("Logs", "log records"),
+        "traces" => ("Traces", "spans"),
+        "metrics" => ("Metrics", "data points"),
+        _ => panic!("unsupported OTEL signal {signal}"),
+    };
+    let expected = expand_placeholders(world, docstring(step));
+    let members = expected
+        .lines()
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(members.len(), 3, "the step names exactly three members");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let export_boundary = format!("\tinfo\t{heading}\t");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let logs = world
+            .dependencies
+            .otel_collector_logs()
+            .await
+            .expect("OpenTelemetry Collector logs must be readable");
+        let mut two_record_export = None;
+        let mut one_record_export = None;
+        let mut observed = Vec::new();
+        for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
+            let count = block
+                .lines()
+                .next()
+                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .and_then(|header| header[count_key].as_u64());
+            let carried = members
+                .iter()
+                .filter(|member| block.contains(**member))
+                .count();
+            if carried > 0 {
+                observed.push(format!(
+                    "export {index}: {count:?} {count_key}, {carried} named"
+                ));
+            }
+            if count == Some(2)
+                && block.find(members[0]).is_some_and(|first| {
+                    block.find(members[1]).is_some_and(|second| first < second)
+                })
+            {
+                two_record_export = Some(index);
+            }
+            if count == Some(1) && block.contains(members[2]) {
+                one_record_export = Some(index);
+            }
+        }
+        if let (Some(first), Some(second)) = (two_record_export, one_record_export)
+            && first < second
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for ordered two-member and one-member {signal} exports; observed \
+             {observed:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21182,7 +25071,7 @@ async fn then_clickhouse_table_eventually_contains_row(
             Instant::now() < deadline,
             "timed out waiting for ClickHouse row. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21220,7 +25109,7 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
             "timed out waiting for {expected_rows} ClickHouse rows in at least {expected_parts} \
              parts; observed rows={observed_rows} parts={observed_parts}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21259,7 +25148,7 @@ async fn then_postgres_connections_stay_within(
             "expected at most {maximum} Postgres connections for {application}, observed \
              {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(
         observed_peak > 0,
@@ -21285,7 +25174,7 @@ async fn then_postgres_eventually_reports_at_least_connections(
             "timed out waiting for at least {expected} Postgres connections for {application}; \
              observed {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -21307,7 +25196,7 @@ async fn then_postgres_eventually_reports_connections(
             "timed out waiting for {expected} Postgres connections for {application}; observed \
              {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -21321,9 +25210,9 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
     let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
+    let (release_tx, release_rx) = nervix_primitives::sync::oneshot::channel();
+    let (locked_tx, locked_rx) = nervix_primitives::sync::oneshot::channel();
+    nervix_primitives::task::spawn(async move {
         let mut transaction = client
             .begin()
             .await
@@ -21408,7 +25297,7 @@ async fn then_postgres_table_eventually_contains_row(
             Instant::now() < deadline,
             "timed out waiting for Postgres row. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21440,7 +25329,7 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
             Instant::now() < deadline,
             "timed out waiting for exactly {expected_rows} Postgres rows; observed {observed_rows}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21515,7 +25404,7 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let row = sqlx::query(SqlxAssertSqlSafe(format!(
             "SELECT (SELECT count(*) FROM {table}),
                     (SELECT count(*) FROM {audit_table}),
@@ -21539,7 +25428,7 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
              {expected_inserts} inserts of at most {maximum_rows_per_insert} rows; observed \
              rows={observed_rows} inserts={observed_inserts} largest_insert={largest_insert}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21583,7 +25472,7 @@ async fn then_mysql_table_eventually_contains_row(world: &mut ScenarioWorld, #[s
             Instant::now() < deadline,
             "timed out waiting for MySQL row. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21610,7 +25499,7 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
         .expect("failed to connect to MySQL as root");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed_rows = conn
             .query_first::<u64, _>(format!("SELECT COUNT(*) FROM `{table}`"))
             .await
@@ -21639,7 +25528,7 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
             "timed out waiting for {expected_rows} MySQL rows from at least {expected_commands} \
              insert commands; observed rows={observed_rows} commands={recorded_commands}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21707,7 +25596,7 @@ async fn then_mongodb_collection_eventually_contains_document(
             Instant::now() < deadline,
             "timed out waiting for MongoDB document. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21775,7 +25664,7 @@ async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed = read_documents().await;
         if observed == expected {
             break;
@@ -21785,9 +25674,9 @@ async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
             "timed out waiting for exactly the expected MongoDB documents; expected {expected:?}, \
              observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    nervix_primitives::time::sleep(Duration::from_millis(500)).await;
     let observed = read_documents().await;
     assert_eq!(
         observed, expected,
@@ -21825,7 +25714,7 @@ async fn then_mongodb_collection_eventually_contains_exactly_documents(
             "timed out waiting for exactly {expected_documents} MongoDB documents; observed \
              {observed_documents}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21852,7 +25741,7 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
     let profile = database.collection::<MongoDbDocument>("system.profile");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed_documents = collection
             .count_documents(mongodb_doc! {})
             .await
@@ -21894,7 +25783,7 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
              observed documents={observed_documents} inserts={observed_inserts} command \
              sizes={command_sizes:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21905,8 +25794,7 @@ async fn then_within_duration_iceberg_table_contains_row(
     table: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let table = expand_placeholders(world, &table);
     let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
@@ -21917,7 +25805,7 @@ async fn then_within_duration_iceberg_table_contains_row(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 if rows
@@ -21939,7 +25827,7 @@ async fn then_within_duration_iceberg_table_contains_row(
             "timed out after {duration:?} waiting for Iceberg table {table} to contain \
              {expected}. observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -21959,7 +25847,7 @@ async fn then_iceberg_table_eventually_contains_row(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 if rows
@@ -21981,7 +25869,7 @@ async fn then_iceberg_table_eventually_contains_row(
             "timed out waiting for Iceberg table {table} to contain {expected}. observed \
              {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -21997,13 +25885,12 @@ async fn then_iceberg_table_does_not_contain_row_within(
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 assert!(
@@ -22020,7 +25907,7 @@ async fn then_iceberg_table_does_not_contain_row_within(
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -22038,7 +25925,7 @@ async fn then_iceberg_table_metadata_does_not_contain(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_metadata(&dependencies, &domain, &table).await {
             Ok(metadata) => {
                 assert!(
@@ -22055,7 +25942,7 @@ async fn then_iceberg_table_metadata_does_not_contain(
             Instant::now() < deadline,
             "timed out waiting for Iceberg table {table} metadata. observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -22067,7 +25954,7 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
         .expect("temp root must be configured by the scenario");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if path_contains_staged_iceberg_arrow_ipc_batch(temp_root.path()) {
             append_cucumber_log_line(&format!(
                 "observed Iceberg Arrow IPC staged batch under {}",
@@ -22080,7 +25967,7 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
             "timed out waiting for Iceberg Arrow IPC staged batch under {}",
             temp_root.path().display()
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -22300,12 +26187,12 @@ impl IcebergTableFixture {
 
     async fn ensure(&self) -> Result<(), String> {
         let _guard = ICEBERG_TABLE_PROVISION_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .get_or_init(|| nervix_primitives::sync::Mutex::new(()))
             .lock()
             .await;
         let deadline = Instant::now() + ICEBERG_TABLE_PROVISION_TIMEOUT;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.ensure_once().await {
                 Ok(()) => return Ok(()),
                 Err(error) if Self::is_transient_catalog_lock(&error) => {
@@ -22315,7 +26202,7 @@ impl IcebergTableFixture {
                              {error}"
                         ));
                     }
-                    tokio::time::sleep(ICEBERG_TABLE_PROVISION_RETRY_INTERVAL).await;
+                    nervix_primitives::time::sleep(ICEBERG_TABLE_PROVISION_RETRY_INTERVAL).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -22501,8 +26388,7 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
@@ -22547,7 +26433,7 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             let descriptions = PhaseDeadline::after(STATUS_DIAGNOSTIC_BUDGET);
             let mut runtime_diagnostics = Vec::new();
             for (node_id, status) in status_snapshots {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let mut node_diagnostics = Vec::new();
                 match status {
                     Ok(status) => {
@@ -22562,7 +26448,7 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
                     "DESCRIBE INGESTOR ws_notifications;",
                     "DESCRIBE EMITTER kafka_forward;",
                 ] {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let described = descriptions
                         .bound(
                             world
@@ -22617,8 +26503,7 @@ async fn then_observed_broker_receives_json_payloads_preserving_group_order(
     group_field: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected = docstring(step)
         .lines()
         .map(str::trim)
@@ -22636,7 +26521,7 @@ async fn then_observed_broker_receives_json_payloads_preserving_group_order(
     let deadline = Instant::now() + duration;
     let mut actual = Vec::with_capacity(expected.len());
     while actual.len() < expected.len() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -22688,13 +26573,12 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
     duration: String,
     count: usize,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let deadline = Instant::now() + duration;
     let mut payload_counts = BTreeMap::new();
 
     for received in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -22744,16 +26628,18 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_payload
     duration: String,
     #[step] step: &Step,
 ) {
-    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    let mut expected = BTreeMap::<ExpectedBrokerPayload, usize>::new();
     for line in docstring(step).lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let payload = expand_placeholders(world, line);
-        *expected.entry(payload.into_bytes()).or_insert(0) += 1;
+        *expected
+            .entry(ExpectedBrokerPayload(payload.into_bytes()))
+            .or_insert(0) += 1;
     }
-    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
 }
 
 /// Like the step above, for payloads that are not all text. Each docstring line is `text:`
@@ -22764,7 +26650,7 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
     duration: String,
     #[step] step: &Step,
 ) {
-    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    let mut expected = BTreeMap::<ExpectedBrokerPayload, usize>::new();
     for line in docstring(step).lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -22777,9 +26663,76 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
         } else {
             panic!("encoded payload line must start with 'text:' or 'hex:', found {line:?}");
         };
-        *expected.entry(payload).or_insert(0) += 1;
+        *expected.entry(ExpectedBrokerPayload(payload)).or_insert(0) += 1;
     }
-    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+/// Like the payload step, where every table row is one exact message: its payload and the key,
+/// headers and FIFO group the broker delivered it with. An empty cell is a message delivered
+/// without that attribute. Headers are `name=value` pairs separated by `;`, in the order the
+/// observer reports them, which is the written order for Kafka and NATS and name order for the
+/// brokers that keep none.
+#[then(expr = "within {string} the observed broker receives exactly these messages")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists every expected message in a table");
+    let mut rows = table.rows.iter();
+    let header = rows
+        .next()
+        .expect("the message table starts with its column names");
+    assert_eq!(
+        header.as_slice(),
+        ["payload", "key", "headers", "group"],
+        "the message table names its columns payload, key, headers and group"
+    );
+    let mut expected = BTreeMap::<ExpectedBrokerMessage, usize>::new();
+    for row in rows {
+        let [payload, key, headers, group] = row.as_slice() else {
+            panic!("each expected message row has four cells, got {row:?}");
+        };
+        let message = ExpectedBrokerMessage {
+            payload: expand_placeholders(world, payload).into_bytes(),
+            key: expected_message_attribute(world, key),
+            headers: expected_message_headers(world, headers),
+            group: expected_message_attribute(world, group),
+        };
+        *expected.entry(message).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+/// A key or group cell: absent when empty, otherwise the exact value.
+fn expected_message_attribute(world: &ScenarioWorld, cell: &str) -> Option<String> {
+    let cell = cell.trim();
+    if cell.is_empty() {
+        return None;
+    }
+    Some(expand_placeholders(world, cell))
+}
+
+fn expected_message_headers(world: &ScenarioWorld, cell: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    for pair in cell.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = pair.split_once('=') else {
+            panic!("expected message header '{pair}' must be written name=value");
+        };
+        headers.push((
+            expand_placeholders(world, name),
+            expand_placeholders(world, value),
+        ));
+    }
+    headers
 }
 
 fn decode_hex_payload(hex: &str) -> Vec<u8> {
@@ -22813,32 +26766,85 @@ fn describe_broker_payload(payload: &[u8]) -> String {
     )
 }
 
-async fn receive_exactly_these_broker_payloads(
+/// What an exact broker assertion compares for every message the observer delivers.
+trait BrokerMessageExpectation: Ord {
+    /// The expectation `message` satisfies.
+    fn delivered(message: &BrokerMessage) -> Self;
+
+    fn describe(&self) -> String;
+}
+
+/// A message's payload bytes, whatever key, headers or group it was delivered with.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ExpectedBrokerPayload(Vec<u8>);
+
+impl BrokerMessageExpectation for ExpectedBrokerPayload {
+    fn delivered(message: &BrokerMessage) -> Self {
+        Self(message.bytes.clone())
+    }
+
+    fn describe(&self) -> String {
+        describe_broker_payload(&self.0)
+    }
+}
+
+/// A message's payload bytes together with the key, headers and FIFO group it was delivered with.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ExpectedBrokerMessage {
+    payload: Vec<u8>,
+    key: Option<String>,
+    headers: Vec<(String, String)>,
+    group: Option<String>,
+}
+
+impl BrokerMessageExpectation for ExpectedBrokerMessage {
+    fn delivered(message: &BrokerMessage) -> Self {
+        Self {
+            payload: message.bytes.clone(),
+            key: message.key.clone(),
+            headers: message.headers.clone(),
+            group: message.group.clone(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} with key {:?}, headers {:?} and group {:?}",
+            describe_broker_payload(&self.payload),
+            self.key,
+            self.headers,
+            self.group
+        )
+    }
+}
+
+/// Receives messages until every expected one has arrived, in any order, and fails on the first
+/// message nothing expects and on any message that follows the expected ones.
+async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectation>(
     world: &mut ScenarioWorld,
     duration: &str,
-    mut remaining: BTreeMap<Vec<u8>, usize>,
+    mut remaining: BTreeMap<Expected, usize>,
 ) {
-    let duration =
-        humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     assert!(
         !remaining.is_empty(),
-        "step docstring must contain at least one expected payload"
+        "the step must list at least one expected message"
     );
-    let describe_remaining = |remaining: &BTreeMap<Vec<u8>, usize>| {
+    let describe_remaining = |remaining: &BTreeMap<Expected, usize>| {
         remaining
             .iter()
-            .map(|(payload, count)| format!("{count} x {}", describe_broker_payload(payload)))
+            .map(|(expected, count)| format!("{count} x {}", expected.describe()))
             .collect::<Vec<_>>()
     };
 
     let deadline = Instant::now() + duration;
     let mut observed = Vec::new();
     while !remaining.is_empty() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for broker payloads; expected remaining {:?}, observed {observed:?}",
+            "timed out waiting for broker messages; expected remaining {:?}, observed {observed:?}",
             describe_remaining(&remaining)
         );
         let message = world
@@ -22847,28 +26853,30 @@ async fn receive_exactly_these_broker_payloads(
             .expect("a broker observer must exist before assertion")
             .try_next_message(deadline.saturating_duration_since(now))
             .await
-            .expect("failed while waiting for exact broker payloads");
+            .expect("failed while waiting for exact broker messages");
         let Some(message) = message else {
             panic!(
-                "timed out waiting for broker payloads; expected remaining {:?}, observed \
+                "timed out waiting for broker messages; expected remaining {:?}, observed \
                  {observed:?}",
                 describe_remaining(&remaining)
             );
         };
-        let Some(count) = remaining.get_mut(&message.bytes) else {
+        let delivered = Expected::delivered(&message);
+        let Some(count) = remaining.get_mut(&delivered) else {
             panic!(
-                "observed an unexpected broker payload {}; expected remaining {:?}, observed \
+                "observed an unexpected broker message {}; expected remaining {:?}, observed \
                  before it {observed:?}",
-                describe_broker_payload(&message.bytes),
+                delivered.describe(),
                 describe_remaining(&remaining)
             );
         };
         *count -= 1;
         if *count == 0 {
-            remaining.remove(&message.bytes);
+            remaining.remove(&delivered);
         }
         world.last_broker_payload = Some(message.payload.clone());
-        observed.push(describe_broker_payload(&message.bytes));
+        world.last_broker_headers = message.headers;
+        observed.push(delivered.describe());
     }
 
     let extra = world
@@ -22877,11 +26885,11 @@ async fn receive_exactly_these_broker_payloads(
         .expect("a broker observer must exist before assertion")
         .try_next_message(Duration::from_secs(2))
         .await
-        .expect("failed while checking for an unexpected broker payload");
+        .expect("failed while checking for an unexpected broker message");
     assert!(
         extra.is_none(),
-        "observed a broker payload beyond the expected ones: {:?}; observed {observed:?}",
-        extra.map(|message| describe_broker_payload(&message.bytes))
+        "observed a broker message beyond the expected ones: {:?}; observed {observed:?}",
+        extra.map(|message| Expected::delivered(&message).describe())
     );
 }
 
@@ -22896,8 +26904,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     field: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let expected_headers = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -22916,7 +26923,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
 
     let deadline = Instant::now() + duration;
     for expected_sequence in 1..=count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -22981,8 +26988,7 @@ async fn then_the_observed_broker_does_not_receive_a_payload_within(
     world: &mut ScenarioWorld,
     duration: String,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let observer = world
         .broker_observer
         .as_mut()
@@ -23016,7 +27022,7 @@ async fn capture_and_assert_subscription_payload(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -23035,7 +27041,7 @@ async fn capture_and_assert_subscription_payload(
         let Some(event) = event else {
             let mut domain_descriptions = Vec::new();
             for node_id in world.cluster().node_ids() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let result = world
                     .cluster()
                     .run_command(&node_id, &world.domain, "DESCRIBE DOMAIN;")
@@ -23071,7 +27077,7 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     #[step] step: &Step,
 ) {
     let expected_delay =
-        humantime::parse_duration(&delay).expect("step duration must be a valid duration");
+        parse_duration_text(&delay).expect("step duration must be a valid duration");
     let published_at = world
         .last_publish_at
         .expect("a delivery-delay assertion must follow a publishing step");
@@ -23087,7 +27093,7 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     let deadline = Instant::now() + expected_delay + SUBSCRIPTION_DELIVERY_BUDGET;
     let mut observed = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -23131,7 +27137,7 @@ async fn try_capture_any_subscription_payload(
         .active_session
         .as_mut()
         .expect("an active session with subscription must exist");
-    tokio::task::consume_budget().await;
+    nervix_primitives::task::consume_budget().await;
     let Some(event) = session
         .try_next_subscription(duration)
         .await
@@ -23159,7 +27165,7 @@ async fn then_node_eventually_reports_interconnect_status(
 fn main() {
     TestDependencies::configure_process_lifecycle();
     let parallelism = TestParallelism::detect();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(parallelism.tokio_worker_threads())
         .thread_stack_size(8 * 1024 * 1024)
@@ -23222,17 +27228,31 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::future::pending::<SuiteOutcome>().await
 }
 
-/// Stops every HTTP receiver the scenario started, together under one budget, and records how
-/// each stop went. A receiver's port goes back with the scenario's other fixture ports at the end
-/// of cleanup.
-async fn stop_http_receivers(world: &mut ScenarioWorld) {
-    let receivers = std::mem::take(&mut world.http_receivers);
-    let stops = join_all(receivers.into_iter().map(|(name, receiver)| async move {
-        let stop = receiver.stop().await;
-        (name, stop)
-    }))
-    .await;
-    for (name, stop) in stops {
+/// Stops every HTTP and gRPC receiver the scenario started, together under one budget, and records
+/// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
+/// end of cleanup.
+async fn stop_receivers(world: &mut ScenarioWorld) {
+    let http_receivers = std::mem::take(&mut world.http_receivers);
+    let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
+    world.otlp_receivers.clear();
+    let http_stops = join_all(
+        http_receivers
+            .into_iter()
+            .map(|(name, receiver)| async move {
+                let stop = receiver.stop().await;
+                (name, stop)
+            }),
+    );
+    let grpc_stops = join_all(
+        grpc_receivers
+            .into_iter()
+            .map(|(name, receiver)| async move {
+                let stop = receiver.stop().await;
+                (name, stop)
+            }),
+    );
+    let (http_stops, grpc_stops) = tokio::join!(http_stops, grpc_stops);
+    for (name, stop) in http_stops {
         append_cucumber_log_line(&format!("HTTP receiver cleanup: {name}: {stop}"));
         if stop.was_forced() {
             append_cucumber_log_line(&format!(
@@ -23240,11 +27260,19 @@ async fn stop_http_receivers(world: &mut ScenarioWorld) {
             ));
         }
     }
+    for (name, stop) in grpc_stops {
+        append_cucumber_log_line(&format!("gRPC receiver cleanup: {name}: {stop}"));
+        if stop.was_forced() {
+            append_cucumber_log_line(&format!(
+                "scenario cleanup forced: gRPC receiver {name}: {stop}"
+            ));
+        }
+    }
 }
 
 const _: () = assert!(
     RECEIVER_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
-    "stopping the HTTP receivers must cost less than stopping the cluster"
+    "stopping the HTTP and gRPC receivers must cost less than stopping the cluster"
 );
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.
@@ -23256,13 +27284,51 @@ struct ScenarioRunArgs {
     watchdog: SuiteWatchdogArgs,
 }
 
+/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, then take the
+/// limited feature chains up before the bulk. Cucumber may schedule all parsed scenarios at
+/// once; admission to a feature and to a run slot happens in the before hook.
+#[derive(Clone, Debug, Default)]
+struct PrioritizedScenarioParser;
+
+impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
+    type Cli = cucumber::parser::basic::Cli;
+    type Output = futures_util::stream::LocalBoxStream<
+        'static,
+        cucumber::parser::Result<cucumber::gherkin::Feature>,
+    >;
+
+    fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
+        let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        futures_util::stream::once(async move {
+            let mut features = parsed.collect::<Vec<_>>().await;
+            prioritize_features(&mut features, |feature| {
+                feature.as_ref().ok().map(|feature| feature.name.as_str())
+            });
+            features
+        })
+        .flat_map(futures_util::stream::iter)
+        .boxed_local()
+    }
+}
+
+fn publish_suite_summary() {
+    let summary = suite_summary();
+    print!("{summary}");
+    for line in summary.lines() {
+        append_cucumber_log_line(line);
+    }
+    if let Err(error) = std::fs::write("tests/logs/suite-summary.md", &summary) {
+        eprintln!("failed to write suite summary: {error}");
+    }
+}
+
 async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @http_emitter_expected_failure) and (not @client_conformance_toolchain)"
+             @client_wire_tls_cost) and (not @client_conformance_toolchain)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -23274,9 +27340,14 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .runner
         .concurrency
         .unwrap_or(default_max_concurrent_scenarios);
+    // Cucumber's cap controls task take-up, not work. All queued scenarios may enter their before
+    // hooks; the harness permits below are the only run capacity charged to a scenario.
+    cli.runner.concurrency = None;
+    let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
     truncate_cucumber_log();
+    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(
-        "scenario parallelism: max_concurrent_scenarios={effective_max_concurrent_scenarios} \
+        "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
          concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
         parallelism.tokio_worker_threads(),
         watchdog.budget()
@@ -23289,19 +27360,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     .summarized()
     .normalized()
     .repeat_failed();
-    let run = ScenarioWorld::cucumber()
-        .max_concurrent_scenarios(default_max_concurrent_scenarios)
+    let run = ScenarioWorld::cucumber::<&str>()
+        .with_parser(PrioritizedScenarioParser)
+        .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(|feature, rule, scenario, world| {
+        .before(move |feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
-            let exclusive = scenario
-                .tags
-                .iter()
-                .chain(rule.iter().flat_map(|rule| &rule.tags))
-                .chain(&feature.tags)
-                .any(|tag| tag == "exclusive");
+            let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
@@ -23310,61 +27377,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     &scenario_name,
                     scenario_line,
                 ));
-                let wasm_state_reset_scenario_permit =
-                    if feature_name == WASM_STATE_RESET_FEATURE_NAME {
-                        // Every reset scenario starts a cluster and compiles WASM. Running more
-                        // than one with the suite's coverage concurrency starves unrelated
-                        // scenario nodes, stretching subsecond assertions into tens of seconds.
-                        // Acquire this before the shared execution guard so queued reset scenarios
-                        // cannot keep an exclusive scenario from taking that guard.
-                        Some(
-                            WASM_STATE_RESET_SCENARIO_PERMITS
-                                .get_or_init(|| {
-                                    StdArc::new(tokio::sync::Semaphore::new(
-                                        MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS,
-                                    ))
-                                })
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .expect("WASM state reset scenario semaphore must remain open"),
-                        )
-                    } else {
-                        None
-                    };
-                let execution_lock = SCENARIO_EXECUTION_LOCK
-                    .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
-                    .clone();
-                let execution_permit = if exclusive {
-                    ScenarioExecutionPermit::Exclusive {
-                        _permit: execution_lock.write_owned().await,
-                    }
-                } else {
-                    ScenarioExecutionPermit::Concurrent {
-                        _permit: execution_lock.read_owned().await,
-                    }
-                };
-                world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
-                world.scenario_execution_permit = Some(execution_permit);
-                if WEB_CONSOLE_FEATURE_NAMES
-                    .iter()
-                    .any(|name| *name == feature_name)
-                {
-                    // Starting many three-node clusters and optimized WASM consoles together can
-                    // starve Chromium renderer event loops under the suite's global concurrency.
-                    world.web_console_scenario_permit = Some(
-                        WEB_CONSOLE_SCENARIO_PERMITS
-                            .get_or_init(|| {
-                                StdArc::new(tokio::sync::Semaphore::new(
-                                    MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
-                                ))
-                            })
-                            .clone()
-                            .acquire_owned()
-                            .await
-                            .expect("web console scenario semaphore must remain open"),
-                    );
-                }
+                let limit = FeatureLimit::for_name(&feature_name);
+                let admission = run_slots
+                    .admit_with(limit, &feature_name, |reason| {
+                        world.wait_for_admission(reason)
+                    })
+                    .await;
+                world.scenario_admission = Some(admission);
                 world.enter_phase(ScenarioPhase::Body, "");
             })
         })
@@ -23407,12 +27426,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_reader = None;
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
+                world.cli_clock_process = None;
+                world.cli_terminal = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
+                world.server_process_cluster = None;
+                world.node_trace_export = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
-                stop_http_receivers(world).await;
+                world.producers = client_producers::ScenarioProducers::default();
+                stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
                 world.active_session_node = None;
@@ -23448,10 +27472,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
-                world.web_console_scenario_permit = None;
-                world.wasm_state_reset_scenario_permit = None;
-                world.scenario_execution_permit = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
                 // and its observers, and both are gone by now, so the ports go back to the pool
                 // the next scenario draws from.
@@ -23462,6 +27484,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
+                world.scenario_admission = None;
             })
         })
         .with_writer(writer)
@@ -23477,7 +27500,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
     // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
     // they are — so the retry coverage below keeps running until the budget itself expires.
-    let writer = match watchdog.bound(run).await {
+    let writer = match watchdog
+        .bound_with_timeout_report(run, publish_suite_summary)
+        .await
+    {
         SuiteRun::Completed(writer) => writer,
         SuiteRun::TimedOut(timeout) => {
             for line in timeout.to_string().lines() {
@@ -23513,6 +27539,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         SuiteOutcome::Passed
     };
     drop(writer);
+
+    publish_suite_summary();
 
     execution_failure
 }

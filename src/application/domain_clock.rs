@@ -7,7 +7,7 @@
 //! - **Depends on.** Consensus for the recorded authority and typed interconnect progress requests.
 //! - **Must not know.** What a domain does with the time it is given.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use ahash::{HashMap, HashMapExt};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -18,11 +18,10 @@ use nervix_models::{
     DomainClockPeriod, DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainStatus,
     DomainTick, Timestamp,
 };
-use tokio::{
-    sync::watch,
-    time::{Duration, sleep},
+use nervix_primitives::{
+    sync::{CancellationToken, watch},
+    time::{Instant, sleep},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};
@@ -37,6 +36,17 @@ struct DomainClockTaskSpec {
     generation: u64,
     authority_revision: nervix_models::DomainClockAuthorityRevision,
     authority: ClusterNodeIdentity,
+}
+
+impl DomainClockTaskSpec {
+    /// The physical interval represented by one logical period, rounded up by the same clock
+    /// arithmetic used for all logical deadlines.
+    fn minimum_tick_wall_spacing(
+        &self,
+    ) -> error_stack::Result<Duration, nervix_models::DomainClockError> {
+        self.clock
+            .wall_duration_for_logical_delta(self.period.as_duration())
+    }
 }
 
 pub(in crate::application) struct DomainClockTask {
@@ -63,7 +73,7 @@ impl DomainClockProgressDelivery {
         let (latest, receiver) = watch::channel(None);
         let token = shutdown.child_token();
         let task_token = token.clone();
-        let handle = tokio::spawn(async move {
+        let handle = nervix_primitives::task::spawn(async move {
             Self::run(service, target, receiver, task_token).await;
         });
         Self {
@@ -91,9 +101,9 @@ impl DomainClockProgressDelivery {
     ) {
         let mut retry_pending = false;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !retry_pending {
-                let changed = tokio::select! {
+                let changed = nervix_primitives::select! {
                     _ = shutdown.cancelled() => return,
                     changed = latest.changed() => changed,
                 };
@@ -107,7 +117,7 @@ impl DomainClockProgressDelivery {
                 continue;
             };
             let domain_id = request.domain_id.clone();
-            let result = tokio::select! {
+            let result = nervix_primitives::select! {
                 _ = shutdown.cancelled() => return,
                 result = service.inner.interconnect.request(target.node_id(), request) => result,
             };
@@ -122,7 +132,7 @@ impl DomainClockProgressDelivery {
                         error = %error,
                         "failed to deliver domain clock progress"
                     );
-                    tokio::select! {
+                    nervix_primitives::select! {
                         _ = shutdown.cancelled() => return,
                         _ = sleep(DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF) => {}
                     }
@@ -168,14 +178,14 @@ impl DomainClockProgressDeliveries {
             .cloned()
             .collect::<Vec<_>>();
         for target in departed {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(delivery) = self.targets.remove(&target) {
                 delivery.stop().await;
             }
         }
 
         for target in desired {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.targets.contains_key(&target) {
                 continue;
             }
@@ -202,7 +212,7 @@ impl DomainClockProgressDeliveries {
 
     async fn stop_all(self) {
         for delivery in self.targets.into_values() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             delivery.stop().await;
         }
     }
@@ -264,9 +274,9 @@ impl DomainClockRetirements {
 
     pub(in crate::application) async fn stop_all(self) {
         for tasks in self.tasks.into_values() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             for task in tasks {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 task.task.stop().await;
             }
         }
@@ -284,7 +294,7 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
 
     let mut desired = HashMap::<DomainName, DomainClockTaskSpec>::new();
     for (domain_id, domain) in &state.domains {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if matches!(domain.status, DomainStatus::Stopped)
             || matches!(domain.config.pace, DomainPace::Unpaced)
         {
@@ -336,7 +346,7 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
     }
 
     for (domain_id, spec) in desired {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if tasks.contains_key(&domain_id) || retirements.contains(&domain_id) {
             continue;
         }
@@ -346,7 +356,7 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
         let task_token = token.clone();
         let task_spec = spec.clone();
         let minimum_runtime_revision = state.revision;
-        let handle = tokio::spawn(async move {
+        let handle = nervix_primitives::task::spawn(async move {
             run_domain_clock(
                 task_service,
                 task_domain_id,
@@ -378,7 +388,7 @@ pub(in crate::application) async fn run_domain_clock_authority_reconciliation(
     let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // Prepare the deadline-bearing wait before reading the effective cluster view. If the
         // monotonic deadline elapses while reconciliation is running, the prepared sleep remains
         // ready and causes a second predicate evaluation instead of losing that transition.
@@ -389,7 +399,7 @@ pub(in crate::application) async fn run_domain_clock_authority_reconciliation(
         {
             service.reconcile_domain_clock_authorities().await;
         }
-        tokio::select! {
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => break,
             open = topology_changes.changed() => {
                 if !open {
@@ -413,7 +423,7 @@ async fn run_domain_clock(
 ) {
     let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
         let live_targets = service
@@ -430,17 +440,21 @@ async fn run_domain_clock(
         if !live_targets.is_empty() && live_targets.is_subset(&ready_targets) {
             break;
         }
-        tokio::select! {
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => return,
             _ = &mut cluster_change => {}
         }
     }
 
+    // A valid rate may make the next physical interval unrepresentable. Tick one is already due
+    // at START and must still be emitted before scheduling a later interval can fail.
+    let mut minimum_tick_wall_spacing = None;
     let mut next_tick_id = 1;
+    let mut last_emitted_at: Option<Instant> = None;
     let mut latest_progress = None;
     let mut deliveries = DomainClockProgressDeliveries::default();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if shutdown.is_cancelled() {
             break;
         }
@@ -474,6 +488,37 @@ async fn run_domain_clock(
             }
         };
         if let Some(advancement) = due {
+            if let Some(last) = last_emitted_at {
+                let spacing = match minimum_tick_wall_spacing {
+                    Some(spacing) => spacing,
+                    None => match spec.minimum_tick_wall_spacing() {
+                        Ok(spacing) => {
+                            minimum_tick_wall_spacing = Some(spacing);
+                            spacing
+                        }
+                        Err(error) => {
+                            service.inner.runtime.report_error(format!(
+                                "domain clock cadence for '{}' failed: {error}",
+                                domain_id.as_str()
+                            ));
+                            warn!(domain = domain_id.as_str(), error = %error, "domain clock cadence failed");
+                            break;
+                        }
+                    },
+                };
+                if let Some(remaining) = spacing.checked_sub(last.elapsed())
+                    && !remaining.is_zero()
+                {
+                    let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+                    tokio::pin!(cluster_change);
+                    nervix_primitives::select! {
+                        _ = shutdown.cancelled() => break,
+                        _ = sleep(remaining) => {},
+                        _ = &mut cluster_change => {},
+                    }
+                    continue;
+                }
+            }
             let progress = emit_domain_clock_progress(
                 &service,
                 &domain_id,
@@ -487,6 +532,7 @@ async fn run_domain_clock(
             let Some(progress) = progress else {
                 break;
             };
+            last_emitted_at = Some(Instant::now());
             latest_progress = Some(progress);
             continue;
         }
@@ -534,7 +580,7 @@ async fn run_domain_clock(
         // The model converts that positive delta with ceiling and a one-nanosecond minimum.
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
-        tokio::select! {
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => break,
             _ = sleep(wait) => {}
             _ = &mut cluster_change => {}
@@ -648,7 +694,7 @@ impl SessionServiceImpl {
         let state = self.inner.consensus.current_runtime_state().await;
         let candidates = self.domain_clock_authority_candidates().await;
         for (domain_id, domain) in state.domains {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if matches!(domain.config.pace, DomainPace::Unpaced)
                 || matches!(domain.status, DomainStatus::Stopped)
             {

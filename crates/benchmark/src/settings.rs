@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use nervix_approx_into::CheckedApproxInto as _;
+use nervix_models::parse_duration_text;
 use thiserror::Error;
 
 use crate::{BenchmarkDefinition, LoadDuration};
@@ -153,6 +154,10 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
                 reason: "duration exceeds the template integer range".to_string(),
             })?;
         parameters.insert(
+            "window_max_delay_seconds".to_string(),
+            toml::Value::Float(duration.as_secs_f64()),
+        );
+        parameters.insert(
             "window_max_delay_ms".to_string(),
             toml::Value::Integer(milliseconds),
         );
@@ -190,7 +195,7 @@ fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
             });
         };
         let flush =
-            humantime::parse_duration(value).map_err(|error| SettingsError::InvalidParameter {
+            parse_duration_text(value).map_err(|error| SettingsError::InvalidParameter {
                 name: name.clone(),
                 value: value.clone(),
                 reason: error.to_string(),
@@ -210,7 +215,7 @@ fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
 }
 
 fn parse_duration_parameter(name: &str, value: &str) -> Result<Duration, SettingsError> {
-    humantime::parse_duration(value).map_err(|error| SettingsError::InvalidParameter {
+    parse_duration_text(value).map_err(|error| SettingsError::InvalidParameter {
         name: name.to_string(),
         value: value.to_string(),
         reason: error.to_string(),
@@ -351,6 +356,32 @@ mod tests {
             settings.parameters["window_max_delay_ms"].as_integer(),
             Some(250)
         );
+    }
+
+    #[test]
+    fn a_duration_that_names_no_duration_names_the_parameter_and_the_reason() {
+        for (value, why) in [
+            ("oops", "expected number at 0"),
+            (
+                "18446744073709551615s 1000000000ns",
+                "it is longer than a duration can be",
+            ),
+        ] {
+            // A derived parameter reads the window delay, and the automatic run length reads
+            // every flush interval.
+            for parameter in ["window_max_delay", "ingestor_flush_each"] {
+                let error = RunSettings::resolve(
+                    &definition(LoadDuration::Auto),
+                    &[format!("{parameter}={value}")],
+                    None,
+                )
+                .expect_err("the override names no duration");
+                assert_eq!(
+                    error.to_string(),
+                    format!("parameter '{parameter}' has invalid value '{value}': {why}")
+                );
+            }
+        }
     }
 
     #[test]

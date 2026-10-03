@@ -9,7 +9,6 @@ use std::{
     collections::BTreeSet,
     fmt, io,
     ops::{Bound, RangeBounds},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use error_stack::Report;
@@ -17,6 +16,12 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot a
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
+use nervix_primitives::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    blocking::{Mutex, RwLock},
+    watch,
+};
 use openraft::{
     Snapshot, SnapshotMeta, StoredMembership,
     entry::{EntryPayload, RaftPayload},
@@ -28,11 +33,8 @@ use openraft::{
     },
     type_config::alias::{EntryOf, LeaderIdOf},
 };
-use parking_lot::{Mutex, RwLock};
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::watch;
-use triomphe::Arc;
 
 #[cfg(test)]
 use crate::apply_consensus_command;
@@ -84,12 +86,32 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_logs";
-const KEYSPACE_META: &str = "raft_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_state_machine";
-const KEYSPACE_SNAPSHOT: &str = "raft_snapshot";
+const KEYSPACE_LOGS: &str = "raft_count_logs";
+const KEYSPACE_META: &str = "raft_count_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_count_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_count_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
+
+/// The budget one storage operation is charged against. Storage writes votes and metadata as
+/// management work, log entries and normalized state as commands, and snapshot sections as bulk
+/// transfers; it never holds relay or credential memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageCharge {
+    Management,
+    Commands,
+    Bulk,
+}
+
+impl StorageCharge {
+    fn memory_class(self) -> MemoryClass {
+        match self {
+            Self::Management => MemoryClass::Management,
+            Self::Commands => MemoryClass::Commands,
+            Self::Bulk => MemoryClass::Bulk,
+        }
+    }
+}
 const KEYSPACE_NAMES: [&str; 4] = [
     KEYSPACE_LOGS,
     KEYSPACE_META,
@@ -100,7 +122,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    TypedCommandOutcomes = 5,
+    WideCounts = 6,
 }
 
 #[derive(Debug)]
@@ -155,7 +177,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::TypedCommandOutcomes,
+            encoding: StateEncoding::WideCounts,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -184,7 +206,7 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::TypedCommandOutcomes,
+            encoding: StateEncoding::WideCounts,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -539,7 +561,7 @@ impl GenerationSeal {
         let start = self.start.clone();
         let index = self.section_count;
         let written = inner
-            .run(MemoryClass::Bulk, move |inner, reservation| {
+            .run(StorageCharge::Bulk, move |inner, reservation| {
                 inner.write_generation_section(
                     source,
                     generation,
@@ -583,10 +605,10 @@ impl StoreInner {
 
     async fn run<T: Send + 'static>(
         &self,
-        class: MemoryClass,
+        charge: StorageCharge,
         operation: impl FnOnce(&Self, &Reservation) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        let reservation = Self::reserve(&self.executor, class).await?;
+        let reservation = Self::reserve(&self.executor, charge).await?;
         let inner = self.clone();
         self.executor
             .run_storage(
@@ -601,31 +623,25 @@ impl StoreInner {
             .map_err(io::Error::other)?
     }
 
-    async fn reserve(executor: &Executor, class: MemoryClass) -> io::Result<Reservation> {
-        let bytes = match class {
-            MemoryClass::Management => executor
+    async fn reserve(executor: &Executor, charge: StorageCharge) -> io::Result<Reservation> {
+        let bytes = match charge {
+            StorageCharge::Management => executor
                 .limits()
                 .management_event_bytes
                 .as_u64()
                 .checked_mul(STORAGE_RESERVATION_MULTIPLIER)
                 .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-            MemoryClass::Bulk => executor
+            StorageCharge::Bulk => executor
                 .limits()
                 .snapshot_section_working_bytes()
                 .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-            MemoryClass::Commands => executor
+            StorageCharge::Commands => executor
                 .limits()
                 .command_state_storage_working_bytes()
                 .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-            MemoryClass::Relay => executor
-                .limits()
-                .command_bytes
-                .as_u64()
-                .checked_mul(STORAGE_RESERVATION_MULTIPLIER)
-                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
         };
         executor
-            .reserve(class, bytes)
+            .reserve(charge.memory_class(), bytes)
             .await
             .map_err(io::Error::other)
     }
@@ -825,20 +841,22 @@ impl StoreInner {
     /// The view is opened on the ordered consensus storage worker, so its records, applied index
     /// and membership belong to one committed revision. Each worker turn seals and synchronizes
     /// one section from that view, releasing its bulk reservation before the next turn.
+    #[allow(deprecated)] // until try_update is stabilized
     async fn seal_generation(&self) -> io::Result<SnapshotManifest> {
         let section_limit = self.executor.limits().snapshot_section_bytes.as_u64();
         let generation = self.snapshots.claim_generation();
         let result = async {
             let mut seal = self
-                .run(MemoryClass::Bulk, |inner, _| GenerationSeal::open(inner))
+                .run(StorageCharge::Bulk, |inner, _| GenerationSeal::open(inner))
                 .await?;
             while !seal.complete {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 seal.write_next(self, generation, section_limit).await?;
             }
             let log_bytes_at_open = seal.log_bytes_at_open;
             let manifest = seal.into_manifest(generation);
             self.publish_manifest(manifest.clone(), None).await?;
+            #[allow(deprecated)] // until try_update is stabilized
             self.log_bytes_since_snapshot
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_sub(log_bytes_at_open)
@@ -901,7 +919,7 @@ impl StoreInner {
         index: u32,
         bytes: Vec<u8>,
     ) -> io::Result<()> {
-        self.run(MemoryClass::Bulk, move |inner, reservation| {
+        self.run(StorageCharge::Bulk, move |inner, reservation| {
             let mut batch = DurableBatch::new(reservation)?;
             batch.insert(&inner.snapshot, &section_key(generation, index), &bytes)?;
             inner.commit("snapshot_section", batch)
@@ -913,7 +931,7 @@ impl StoreInner {
         if self.snapshots.is_obsolete(generation) {
             return Err(io::Error::other(StorageFailure::SnapshotSuperseded));
         }
-        self.run(MemoryClass::Bulk, move |inner, _| {
+        self.run(StorageCharge::Bulk, move |inner, _| {
             read_key::<Vec<u8>>(&inner.snapshot, &section_key(generation, index))?
                 .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))
         })
@@ -929,7 +947,7 @@ impl StoreInner {
         manifest: SnapshotManifest,
         installing: Option<u64>,
     ) -> io::Result<()> {
-        self.run(MemoryClass::Bulk, move |inner, reservation| {
+        self.run(StorageCharge::Bulk, move |inner, reservation| {
             let mut batch = DurableBatch::new(reservation)?;
             batch.insert(
                 &inner.snapshot,
@@ -959,7 +977,7 @@ impl StoreInner {
         manifest: &SnapshotManifest,
     ) -> io::Result<StateMachineData> {
         let generation = manifest.generation;
-        self.run(MemoryClass::Bulk, move |inner, reservation| {
+        self.run(StorageCharge::Bulk, move |inner, reservation| {
             let mut batch = DurableBatch::new(reservation)?;
             for item in inner.sm.iter() {
                 batch.remove(&inner.sm, &item.key().map_err(io::Error::other)?)?;
@@ -968,9 +986,9 @@ impl StoreInner {
         })
         .await?;
         for index in 0..manifest.section_count {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let bytes = self.read_section(generation, index).await?;
-            self.run(MemoryClass::Bulk, move |inner, reservation| {
+            self.run(StorageCharge::Bulk, move |inner, reservation| {
                 let section: SnapshotSection = storage_decode(&bytes)?;
                 let mut batch = DurableBatch::new(reservation)?;
                 for record in section.records {
@@ -981,7 +999,7 @@ impl StoreInner {
             .await?;
         }
         let manifest = manifest.clone();
-        self.run(MemoryClass::Bulk, move |inner, reservation| {
+        self.run(StorageCharge::Bulk, move |inner, reservation| {
             let mut batch = DurableBatch::new(reservation)?;
             batch.remove(&inner.snapshot, KEY_INSTALLING)?;
             inner.snapshots.publish(manifest);
@@ -1091,7 +1109,7 @@ impl StoreInner {
         end: Bound<Vec<u8>>,
         expected_leader: Option<LeaderIdOf<TypeConfig>>,
     ) -> io::Result<LogChunkRead> {
-        let reservation = Self::reserve(&self.executor, MemoryClass::Commands).await?;
+        let reservation = Self::reserve(&self.executor, StorageCharge::Commands).await?;
         let executor = self.executor.clone();
         let inner = self.clone();
         executor
@@ -1169,7 +1187,7 @@ impl FjallStore {
         executor: Executor,
         fault: StorageFault,
     ) -> io::Result<Self> {
-        let reservation = StoreInner::reserve(&executor, MemoryClass::Commands).await?;
+        let reservation = StoreInner::reserve(&executor, StorageCharge::Commands).await?;
         let store_executor = executor.clone();
         let opened = executor
             .run_storage(
@@ -1289,7 +1307,7 @@ impl FjallStore {
         let Some(generation) = installing else {
             return self
                 .inner
-                .run(MemoryClass::Bulk, |inner, _| {
+                .run(StorageCharge::Bulk, |inner, _| {
                     let metadata = StateMetadata::read(&inner.sm)?
                         .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
                     StateMachineData::load(&inner.sm, metadata)
@@ -1307,7 +1325,7 @@ impl FjallStore {
 
     pub(super) async fn has_raft_state(&self) -> io::Result<bool> {
         self.inner
-            .run(MemoryClass::Management, |inner, _| {
+            .run(StorageCharge::Management, |inner, _| {
                 Ok(read_key::<VoteRecord>(&inner.meta, KEY_VOTE)?.is_some()
                     || !inner.logs.is_empty().map_err(io::Error::other)?)
             })
@@ -1321,7 +1339,9 @@ impl FjallStore {
     /// no-op therefore proves every earlier blocking job has returned and released its store
     /// handle.
     pub(super) async fn wait_for_idle(&self) -> io::Result<()> {
-        self.inner.run(MemoryClass::Management, |_, _| Ok(())).await
+        self.inner
+            .run(StorageCharge::Management, |_, _| Ok(()))
+            .await
     }
 
     /// Appended entry bytes since the last completed snapshot.
@@ -1351,7 +1371,7 @@ impl FjallStore {
         bytes_retained: u64,
     ) -> io::Result<Option<u64>> {
         self.inner
-            .run(MemoryClass::Management, move |inner, _| {
+            .run(StorageCharge::Management, move |inner, _| {
                 let bounds = StoreInner::log_bounds(..=snapshot_index);
                 let mut kept_entries = 0_u64;
                 let mut kept_bytes = 0_u64;
@@ -1500,7 +1520,7 @@ impl LogEntryStream {
         // receives. Make crossing a chunk boundary pending before starting another storage job,
         // so that the apply job for the chunk already in hand reaches the ordered worker first.
         if crossed_chunk_boundary {
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
         let read_result = self
             .inner
@@ -1585,7 +1605,7 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
     ) -> io::Result<Vec<EntryOf<TypeConfig>>> {
         let bounds = StoreInner::log_bounds(range);
         self.inner
-            .run(MemoryClass::Commands, move |inner, _| {
+            .run(StorageCharge::Commands, move |inner, _| {
                 let decoded = inner.read_log_entries(bounds, LogReadLimit::Complete)?;
                 Ok(decoded.entries)
             })
@@ -1594,7 +1614,7 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
 
     async fn read_vote(&mut self) -> io::Result<Option<VoteOf>> {
         self.inner
-            .run(MemoryClass::Management, |inner, _| inner.read_vote())
+            .run(StorageCharge::Management, |inner, _| inner.read_vote())
             .await
     }
 
@@ -1609,7 +1629,7 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
     ) -> io::Result<Vec<EntryOf<TypeConfig>>> {
         let bounds = StoreInner::log_bounds(start..end);
         self.inner
-            .run(MemoryClass::Commands, move |inner, _| {
+            .run(StorageCharge::Commands, move |inner, _| {
                 let decoded = inner.read_log_entries(
                     bounds,
                     LogReadLimit::Bounded {
@@ -1627,7 +1647,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
     type LogReader = FjallLogReader;
     async fn get_log_state(&mut self) -> io::Result<LogState<TypeConfig>> {
         self.inner
-            .run(MemoryClass::Management, |inner, _| {
+            .run(StorageCharge::Management, |inner, _| {
                 let last_purged_log_id = inner.read_optional_log_id(KEY_LAST_PURGED)?;
                 let last_log_id = match inner.logs.iter().next_back() {
                     Some(item) => {
@@ -1653,7 +1673,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
     async fn save_vote(&mut self, vote: &VoteOf) -> io::Result<()> {
         let vote = VoteRecord::from(vote.clone());
         self.inner
-            .run(MemoryClass::Management, move |inner, reservation| {
+            .run(StorageCharge::Management, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
                 batch.insert(&inner.meta, KEY_VOTE, &vote)?;
                 inner.commit("vote", batch)
@@ -1663,7 +1683,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
     async fn save_committed(&mut self, committed: Option<LogIdOf>) -> io::Result<()> {
         let committed = committed.map(LogIdRecord::from);
         self.inner
-            .run(MemoryClass::Management, move |inner, reservation| {
+            .run(StorageCharge::Management, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
                 batch.insert(&inner.meta, KEY_COMMITTED, &committed)?;
                 inner.commit("committed", batch)
@@ -1672,7 +1692,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
     }
     async fn read_committed(&mut self) -> io::Result<Option<LogIdOf>> {
         self.inner
-            .run(MemoryClass::Management, |inner, _| {
+            .run(StorageCharge::Management, |inner, _| {
                 inner.read_optional_log_id(KEY_COMMITTED)
             })
             .await
@@ -1691,7 +1711,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
         // limit is full. A queued vote waits for one fsync per batch instead of one per entry.
         let completion = AppendCompletion::new(callback);
         let reservation =
-            match StoreInner::reserve(&self.inner.executor, MemoryClass::Commands).await {
+            match StoreInner::reserve(&self.inner.executor, StorageCharge::Commands).await {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     self.inner.failed.store(true, Ordering::Release);
@@ -1727,7 +1747,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
             None => Bound::Unbounded,
         };
         self.inner
-            .run(MemoryClass::Commands, move |inner, reservation| {
+            .run(StorageCharge::Commands, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
                 let removed_bytes =
                     inner.remove_log_entries((start, Bound::Unbounded), &mut batch)?;
@@ -1737,7 +1757,7 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
     }
     async fn purge(&mut self, log_id: LogIdOf) -> io::Result<()> {
         self.inner
-            .run(MemoryClass::Commands, move |inner, reservation| {
+            .run(StorageCharge::Commands, move |inner, reservation| {
                 let mut batch = DurableBatch::new(reservation)?;
                 let bounds = StoreInner::log_bounds(..=log_id.index);
                 let removed_bytes = inner.remove_log_entries(bounds, &mut batch)?;
@@ -1774,7 +1794,7 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
         // Gathering ready entries may already have reached the end of the stream.
         let mut entries = entries.fuse();
         while let Some(item) = entries.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut ready = vec![item?];
             // Entries the stream yields without waiting share one storage job. An entry it still
             // has to read starts the next job, so entries already read are never held back.
@@ -1789,7 +1809,7 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
                 }
             }
             self.inner
-                .run(MemoryClass::Commands, move |inner, reservation| {
+                .run(StorageCharge::Commands, move |inner, reservation| {
                     inner.apply_entries(ready, reservation)
                 })
                 .await?;

@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, request
-//!   timeout, optional CA file and optional client identity.
+//!   timeout, optional CA file and optional client identity, and whether the client follows the
+//!   redirects an endpoint answers with.
 //! - **Depends on.** The client configuration's entries, TLS paths and PEM files, `nervix-dns`,
 //!   and `reqwest`.
 //! - **Must not know.** Which connector sends requests through the client, or what it sends.
@@ -12,7 +13,9 @@ use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use nervix_dns::DnsResolver;
-use reqwest::{Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity};
+use reqwest::{
+    Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity, redirect,
+};
 use thiserror::Error;
 
 use crate::client_config::{
@@ -53,7 +56,20 @@ impl<'a> HttpClientConfig<'a> {
     }
 
     pub fn build(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
-        self.builder()?.build().map_err(|source| {
+        self.finish(self.builder()?)
+    }
+
+    /// The client, refusing every redirect: an endpoint's `3xx` answer is the response, and no
+    /// request is ever sent to its `Location`.
+    pub fn build_without_redirects(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
+        self.finish(self.builder()?.redirect(redirect::Policy::none()))
+    }
+
+    fn finish(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<HttpClient, Report<HttpClientConfigError>> {
+        builder.build().map_err(|source| {
             Report::new(HttpClientConfigError::Build { label: self.label })
                 .attach_printable(source.to_string())
         })
@@ -100,7 +116,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn http_client_validates_timeout_configuration()
     -> Result<(), Report<DnsConfigurationError>> {
         let dns = DnsResolver::load(DnsConfiguration::system()).await?;
@@ -114,6 +130,16 @@ mod tests {
         )
         .build();
         assert!(client.is_ok());
+        let refusing_redirects = HttpClientConfig::new(
+            &[ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "250".to_string(),
+            }],
+            "HTTP",
+            &dns,
+        )
+        .build_without_redirects();
+        assert!(refusing_redirects.is_ok());
 
         let err = HttpClientConfig::new(
             &[ClientConfigEntry {
@@ -129,7 +155,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn http_client_classifies_invalid_tls_material()
     -> Result<(), Report<DnsConfigurationError>> {
         let dns = DnsResolver::load(DnsConfiguration::system()).await?;

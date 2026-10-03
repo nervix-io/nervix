@@ -7,7 +7,7 @@
 //! - **Depends on.** The runtime's endpoint dispatch and its signaling protocols.
 //! - **Must not know.** Transactions, scheduling or how an ingested payload is processed.
 
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Duration};
 
 use error_stack::{Report, ResultExt};
 use futures_util::SinkExt;
@@ -27,8 +27,9 @@ use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{IngestMessageHeaders, RetainedIngestHeaders};
 use nervix_connector_websockets::{SignalingDataSink, WebsocketSignalingSession};
+use nervix_models::EndpointType;
+use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
 use nervix_recovery::NoReceiver;
-use tokio::{net::TcpListener, task::JoinSet, time::Duration};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
@@ -38,11 +39,10 @@ use tokio_tungstenite::{
         protocol::{CloseFrame, Role, frame::coding::CloseCode},
     },
 };
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
-use crate::runtime::Runtime;
+use crate::runtime::{ResolvedEndpointRoute, Runtime};
 
 fn empty_body() -> Empty<Bytes> {
     Empty::new()
@@ -126,15 +126,14 @@ pub(in crate::application) fn is_websocket_upgrade_request(
 /// Ingests data frames that arrive on a server-side endpoint while its handshake is running.
 struct EndpointSignalingDataSink<'a> {
     runtime: &'a Runtime,
-    host: &'a str,
-    path: &'a str,
+    route: &'a ResolvedEndpointRoute,
     headers: &'a RetainedIngestHeaders,
 }
 
 impl SignalingDataSink for EndpointSignalingDataSink<'_> {
     async fn accept(&self, payload: Vec<u8>) {
-        self.runtime
-            .dispatch_websocket_payload(self.host, self.path, payload.as_slice(), self.headers)
+        self.route
+            .dispatch(self.runtime, payload.as_slice(), self.headers)
             .await;
     }
 }
@@ -166,11 +165,14 @@ async fn handle_http_request(
     }
     let path = request.uri().path().to_string();
 
-    if runtime.has_websocket_endpoint(&host, &path).await {
+    let Some(route) = runtime.resolve_endpoint(&host, &path) else {
+        return Ok(response_with_status(StatusCode::NOT_FOUND));
+    };
+    if route.endpoint_type() == EndpointType::Websockets {
         if !is_websocket_upgrade_request(&request) {
             return Ok(response_with_status(StatusCode::UPGRADE_REQUIRED));
         }
-        let admission = runtime.websocket_endpoint_admission(&host, &path).await;
+        let admission = route.admission();
         if !admission.is_accepted() {
             return Ok(endpoint_rejection_response(admission.retry_after));
         }
@@ -202,7 +204,7 @@ async fn handle_http_request(
 
         let on_upgrade = upgrade::on(&mut request);
         request_tasks.spawn(async move {
-            let upgraded = tokio::select! {
+            let upgraded = nervix_primitives::select! {
                 _ = shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
@@ -212,18 +214,14 @@ async fn handle_http_request(
                     let mut websocket =
                         WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
-                    if let Some(protocol) = runtime
-                        .websocket_endpoint_signaling_protocol(&host, &path)
-                        .await
-                    {
-                        let session = WebsocketSignalingSession::new(protocol);
+                    if let Some(protocol) = route.signaling_protocol() {
+                        let session = WebsocketSignalingSession::new(protocol.clone());
                         let sink = EndpointSignalingDataSink {
                             runtime: &runtime,
-                            host: &host,
-                            path: &path,
+                            route: &route,
                             headers: &headers,
                         };
-                        let session_result = tokio::select! {
+                        let session_result = nervix_primitives::select! {
                             _ = shutdown.cancelled() => return,
                             result = session.run(&mut websocket, &sink) => result,
                         };
@@ -239,7 +237,8 @@ async fn handle_http_request(
                     }
 
                     loop {
-                        let message = tokio::select! {
+                        nervix_primitives::task::consume_budget().await;
+                        let message = nervix_primitives::select! {
                             _ = shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => message,
                         };
@@ -248,14 +247,8 @@ async fn handle_http_request(
                         };
                         match message {
                             Ok(Message::Text(payload)) => {
-                                let outcome = runtime
-                                    .dispatch_websocket_payload(
-                                        &host,
-                                        &path,
-                                        payload.as_bytes(),
-                                        &headers,
-                                    )
-                                    .await;
+                                let outcome =
+                                    route.dispatch(&runtime, payload.as_bytes(), &headers).await;
                                 if !outcome.is_accepted() {
                                     websocket
                                         .send(Message::Close(Some(CloseFrame {
@@ -268,14 +261,8 @@ async fn handle_http_request(
                                 }
                             }
                             Ok(Message::Binary(payload)) => {
-                                let outcome = runtime
-                                    .dispatch_websocket_payload(
-                                        &host,
-                                        &path,
-                                        payload.as_ref(),
-                                        &headers,
-                                    )
-                                    .await;
+                                let outcome =
+                                    route.dispatch(&runtime, payload.as_ref(), &headers).await;
                                 if !outcome.is_accepted() {
                                     websocket
                                         .send(Message::Close(Some(CloseFrame {
@@ -310,7 +297,7 @@ async fn handle_http_request(
         return Ok(response);
     }
 
-    if runtime.has_http_endpoint(&host, &path).await {
+    if route.endpoint_type() == EndpointType::Http {
         if request.method() != Method::POST {
             return Ok(response_with_status(StatusCode::METHOD_NOT_ALLOWED));
         }
@@ -322,10 +309,9 @@ async fn handle_http_request(
             }
         };
 
-        let outcome = runtime
-            .dispatch_http_payload(
-                &host,
-                &path,
+        let outcome = route
+            .dispatch(
+                &runtime,
                 body.as_ref(),
                 &HyperRequestHeaders(request.headers()),
             )
@@ -349,7 +335,7 @@ pub(in crate::application) async fn serve_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
@@ -400,7 +386,7 @@ pub(in crate::application) async fn serve_https(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }

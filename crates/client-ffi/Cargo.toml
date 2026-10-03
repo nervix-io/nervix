@@ -13,13 +13,22 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 arch-into = { workspace = true }
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+arrow-data = { workspace = true }
+arrow-schema = { workspace = true }
+bytes = { workspace = true }
+error-stack = { workspace = true }
 meticulous = { workspace = true }
-nervix-client-core = { workspace = true, features = ["autocomplete"] }
-nervix-models = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow", "autocomplete"] }
+nervix-models = { workspace = true, features = ["arrow"] }
+nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
-tokio-util = { workspace = true }
-triomphe = { workspace = true }
 
 [dev-dependencies]
-error-stack = { workspace = true }
+arrow-ipc = { workspace = true }
+bolero = { workspace = true }
+serde_json = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }

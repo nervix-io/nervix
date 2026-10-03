@@ -1,5 +1,5 @@
 use error_stack::ResultExt as _;
-use nervix_models::{CreateRelay, ModelIndex, ModelName};
+use nervix_models::{ModelName, parse_duration_text};
 #[cfg(test)]
 use nervix_models::{ProcessorInputWhere, ProcessorInputs};
 
@@ -74,18 +74,6 @@ pub(in crate::runtime) enum PlanningError {
     InferencerInputCompilation { node: ModelName, relay: RelayName },
     #[error("{kind:?} '{node}' has an invalid branch TTL")]
     InvalidBranchTtl { kind: ModelKind, node: ModelName },
-    #[error("{kind:?} '{node}' output route '{route}' has no configured relay")]
-    MissingRelayModel {
-        kind: ModelKind,
-        node: ModelName,
-        route: RelayName,
-    },
-    #[error("{kind:?} '{node}' output route '{route}' has no relay registry")]
-    MissingRelayRegistry {
-        kind: ModelKind,
-        node: ModelName,
-        route: RelayName,
-    },
     #[error("{kind:?} '{node}' output route '{route}' has no relay services")]
     MissingRelayServices {
         kind: ModelKind,
@@ -118,13 +106,11 @@ fn parse_optional_window_duration(
     let Some(raw) = value else {
         return Ok(None);
     };
-    let duration = humantime::parse_duration(raw).map_err(|error| {
-        Report::new(PlanningError::InvalidWindowDuration {
+    let duration =
+        parse_duration_text(raw).change_context_lazy(|| PlanningError::InvalidWindowDuration {
             node: processor.clone(),
             setting,
-        })
-        .attach_printable(error)
-    })?;
+        })?;
     Ok(Some(duration))
 }
 
@@ -172,7 +158,7 @@ fn materialize_outputs(
     Ok(RelayProcessorOutputsTemplate { routes })
 }
 
-fn parse_branch_flush_policy(
+pub(in crate::runtime) fn parse_branch_flush_policy(
     kind: ModelKind,
     processor: &ModelName,
     route: &RelayName,
@@ -185,13 +171,12 @@ fn parse_branch_flush_policy(
     else {
         return Ok(RuntimeFlushPolicy::Immediate);
     };
-    let parsed_interval = humantime::parse_duration(interval).map_err(|error| {
-        Report::new(PlanningError::InvalidFlushInterval {
+    let parsed_interval = parse_duration_text(interval).change_context_lazy(|| {
+        PlanningError::InvalidFlushInterval {
             kind,
             node: processor.clone(),
             route: route.clone(),
-        })
-        .attach_printable(error)
+        }
     })?;
     let parsed_max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
         Report::new(PlanningError::InvalidFlushMaxBatchSize {
@@ -213,13 +198,12 @@ pub(in crate::runtime) fn parse_input_collect_policy(
     relay: &RelayName,
     policy: &nervix_models::InputCollectPolicy,
 ) -> error_stack::Result<RuntimeInputCollectPolicy, PlanningError> {
-    let interval = humantime::parse_duration(&policy.collect_for).map_err(|error| {
-        Report::new(PlanningError::InvalidCollectInterval {
+    let interval = parse_duration_text(&policy.collect_for).change_context_lazy(|| {
+        PlanningError::InvalidCollectInterval {
             kind,
             node: processor.clone(),
             relay: relay.clone(),
-        })
-        .attach_printable(error)
+        }
     })?;
     let max_batch_size = if let Some(max_batch_size) = policy.max_batch_size.as_deref() {
         let size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
@@ -245,12 +229,9 @@ fn parse_max_time(
     processor: &ModelName,
     value: &str,
 ) -> error_stack::Result<Duration, PlanningError> {
-    humantime::parse_duration(value).map_err(|error| {
-        Report::new(PlanningError::InvalidMaxTime {
-            kind,
-            node: processor.clone(),
-        })
-        .attach_printable(error)
+    parse_duration_text(value).change_context_lazy(|| PlanningError::InvalidMaxTime {
+        kind,
+        node: processor.clone(),
     })
 }
 
@@ -538,13 +519,11 @@ fn parse_branch_ttl_setting(
     let Some(ttl) = ttl else {
         return Ok(None);
     };
-    let duration = humantime::parse_duration(ttl).map_err(|error| {
-        Report::new(PlanningError::InvalidBranchTtl {
+    let duration =
+        parse_duration_text(ttl).change_context_lazy(|| PlanningError::InvalidBranchTtl {
             kind,
             node: identifier.clone(),
-        })
-        .attach_printable(error)
-    })?;
+        })?;
     Ok(Some(duration))
 }
 
@@ -552,26 +531,10 @@ fn resolve_branch_relay_templates(
     kind: ModelKind,
     node: &ModelName,
     branch_relay_ids: HashSet<RelayName>,
-    model_index: &ModelIndex,
-    relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> error_stack::Result<HashMap<RelayName, RelayProcessorRelayTemplate>, PlanningError> {
     let mut templates = HashMap::with_capacity(branch_relay_ids.len());
     for relay in branch_relay_ids {
-        if model_index.configured::<CreateRelay>(&relay).is_none() {
-            return Err(Report::new(PlanningError::MissingRelayModel {
-                kind,
-                node: node.clone(),
-                route: relay,
-            }));
-        }
-        let Some(registry) = relay_registries.get(&relay).cloned() else {
-            return Err(Report::new(PlanningError::MissingRelayRegistry {
-                kind,
-                node: node.clone(),
-                route: relay,
-            }));
-        };
         let Some(services) = relay_services.get(&relay).cloned() else {
             return Err(Report::new(PlanningError::MissingRelayServices {
                 kind,
@@ -579,60 +542,61 @@ fn resolve_branch_relay_templates(
                 route: relay,
             }));
         };
-        templates.insert(relay, RelayProcessorRelayTemplate { registry, services });
+        templates.insert(relay, RelayProcessorRelayTemplate { services });
     }
     Ok(templates)
 }
 
+/// The template of the branched entrypoint one planned route of the ingestor or reingestor `kind`
+/// `identifier` feeds, bound to the services of the relay its records publish through.
 pub(in crate::runtime) fn materialize_ingestor_route_template(
-    spec: &BranchedIngestorSpec,
-    model_index: &ModelIndex,
-    relay_registries: &HashMap<RelayName, RelayRegistry>,
+    kind: ModelKind,
+    identifier: &ModelName,
+    route: &PlannedEntryRoute,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> error_stack::Result<IngestorRouteTemplate, PlanningError> {
-    let mut branch_relay_ids = HashSet::default();
-    branch_relay_ids.insert(spec.root_relay.clone());
-    let relays = resolve_branch_relay_templates(
-        spec.kind,
-        &spec.identifier,
-        branch_relay_ids,
-        model_index,
-        relay_registries,
-        relay_services,
-    )?;
+    let Some(services) = relay_services.get(&route.relay).cloned() else {
+        return Err(Report::new(PlanningError::MissingRelayServices {
+            kind,
+            node: identifier.clone(),
+            route: route.relay.clone(),
+        }));
+    };
+    let mut relays = HashMap::default();
+    relays.insert(
+        route.relay.clone(),
+        RelayProcessorRelayTemplate { services },
+    );
+    let flush_policy =
+        parse_branch_flush_policy(kind, identifier, &route.relay, &route.flush_policy)?;
+    let mut branch = BranchInstanceTemplate {
+        revision: ProcessorPlanRevision::new(),
+        source_kind: kind,
+        source: RelayName::from(identifier),
+        root_relay: route.relay.clone(),
+        branch: None,
+        branch_ttl: None,
+        branch_max_instances: None,
+        error_policies: route.error_policies.clone(),
+        relays,
+        processors: HashMap::default(),
+        wasm_state_reset: None,
+    };
+    if let Some(retention) = route.branch.retention() {
+        branch.branch = Some(retention.branch.clone());
+        branch.branch_ttl = Some(retention.ttl);
+        branch.branch_max_instances = retention.max_instances;
+    }
     Ok(IngestorRouteTemplate {
-        branch: BranchInstanceTemplate {
-            revision: ProcessorPlanRevision::new(),
-            source_kind: spec.kind,
-            source: RelayName::from(&spec.identifier),
-            root_relay: spec.root_relay.clone(),
-            branch: spec.branch.clone(),
-            branch_ttl: parse_branch_ttl_setting(
-                spec.branch_ttl.as_deref(),
-                spec.kind,
-                &spec.identifier,
-            )?,
-            branch_max_instances: spec.branch_max_instances.map(addressable_count),
-            error_policies: spec.error_policies.clone(),
-            relays,
-            processors: HashMap::default(),
-            wasm_state_reset: None,
-        },
-        ack_boundary: spec.output_ack_boundary,
-        flush_policy: parse_branch_flush_policy(
-            spec.kind,
-            &spec.identifier,
-            &spec.root_relay,
-            &spec.output_flush_policy,
-        )?,
+        branch,
+        ack_boundary: route.ack_boundary,
+        flush_policy,
     })
 }
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
-    model_index: &ModelIndex,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
-    relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
     udfs: Option<&UdfExecutor>,
 ) -> error_stack::Result<BranchInstanceTemplate, PlanningError> {
@@ -647,8 +611,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         spec.kind,
         &spec.processor,
         spec.output_relays(),
-        model_index,
-        relay_registries,
         relay_services,
     )?;
     let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs)?
@@ -1092,9 +1054,7 @@ fn bind_transforming_output_programs<'a>(
 pub(in crate::runtime) struct ProcessorPlanBindingContext<'a> {
     pub runtime: &'a Runtime,
     pub domain: &'a DomainName,
-    pub model_index: &'a ModelIndex,
     pub relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
-    pub relay_registries: &'a HashMap<RelayName, RelayRegistry>,
     pub relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
     pub materialized_stream_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
@@ -1113,9 +1073,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
     let ProcessorPlanBindingContext {
         runtime,
         domain,
-        model_index,
         relay_schemas,
-        relay_registries,
         relay_services,
         relay_branchings,
         materialized_stream_specs,
@@ -1125,7 +1083,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
     } = context;
     let mut plans = HashMap::with_capacity(specs.len());
     for spec in specs {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let node = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
         if let Some(published) = previous.get(&node)
             && spec.reuses_prepared_revision(Some(&published.source))
@@ -1134,14 +1092,8 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
             continue;
         }
 
-        let mut template = materialize_processor_instance_template(
-            spec,
-            model_index,
-            relay_schemas,
-            relay_registries,
-            relay_services,
-            udfs,
-        )?;
+        let mut template =
+            materialize_processor_instance_template(spec, relay_schemas, relay_services, udfs)?;
         bind_processor_template_programs(
             domain,
             &mut template,

@@ -3,7 +3,10 @@ use std::{future::Future, time::Duration};
 use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
 use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
-use nervix_models::{SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat};
+use nervix_models::{
+    SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat, parse_duration_text,
+};
+use nervix_primitives::{sync::Arc, time};
 use prost::Message as ProstMessage;
 use prost_reflect::{
     DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, MessageDescriptor,
@@ -11,15 +14,11 @@ use prost_reflect::{
 };
 use serde_json::Value as JsonValue;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Error as WebSocketError, Message},
 };
-use triomphe::Arc;
 
 /// How much of a rejection value is carried into the failure reason.
 const MAX_REJECTION_REASON_BYTES: usize = 512;
@@ -288,15 +287,15 @@ impl CompiledSignalingProtocol {
         format: &SignalingWireFormat,
         on_connect: &SignalingProtocolOnConnect,
         protobuf: Option<SignalingProtobufDescriptors>,
-    ) -> Result<Self, SignalingProtocolCompileError> {
+    ) -> error_stack::Result<Self, SignalingProtocolCompileError> {
         let name = protocol_name.as_str();
         let wire = match JaqNativeFormat::try_from(format) {
             Ok(format) => CompiledSignalingWire::Native(format),
             Err(()) => {
                 let SignalingProtobufDescriptors { send, wait } = protobuf.ok_or_else(|| {
-                    SignalingProtocolCompileError::MissingProtobufDescriptors {
+                    Report::new(SignalingProtocolCompileError::MissingProtobufDescriptors {
                         protocol: name.to_string(),
-                    }
+                    })
                 })?;
                 CompiledSignalingWire::Protobuf { send, wait }
             }
@@ -307,11 +306,14 @@ impl CompiledSignalingProtocol {
         let compile = |clause: &'static str, index: usize, program: &str| {
             StatefulJaqProgram::compile(program)
                 .map(Arc::new)
-                .map_err(|error| SignalingProtocolCompileError::InvalidJaqProgram {
-                    protocol: name.to_string(),
-                    clause,
-                    index,
-                    reason: error.to_string(),
+                .map_err(|error| {
+                    let reason = error.current_context().to_string();
+                    error.change_context(SignalingProtocolCompileError::InvalidJaqProgram {
+                        protocol: name.to_string(),
+                        clause,
+                        index,
+                        reason,
+                    })
                 })
         };
 
@@ -322,7 +324,7 @@ impl CompiledSignalingProtocol {
                     programs
                         .iter()
                         .map(|program| compile("SEND JAQ", counts.next_send(), program))
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .collect::<error_stack::Result<Vec<_>, _>>()?,
                 ),
                 nervix_models::SignalingStep::Wait(wait) => {
                     let index = counts.next_wait();
@@ -331,7 +333,7 @@ impl CompiledSignalingProtocol {
                             .matchers
                             .iter()
                             .map(|matcher| compile("WAIT JAQ", index, matcher))
-                            .collect::<Result<Vec<_>, _>>()?,
+                            .collect::<error_stack::Result<Vec<_>, _>>()?,
                         capture: wait
                             .capture
                             .as_deref()
@@ -341,7 +343,7 @@ impl CompiledSignalingProtocol {
                             .fail_matchers
                             .iter()
                             .map(|matcher| compile("FAIL JAQ", index, matcher))
-                            .collect::<Result<Vec<_>, _>>()?,
+                            .collect::<error_stack::Result<Vec<_>, _>>()?,
                         accept_data: wait.accept_data,
                     })
                 }
@@ -353,14 +355,15 @@ impl CompiledSignalingProtocol {
             .iter()
             .enumerate()
             .map(|(index, matcher)| compile("FAIL JAQ", index + 1, matcher))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<error_stack::Result<Vec<_>, _>>()?;
 
-        let timeout = humantime::parse_duration(&on_connect.timeout).map_err(|error| {
-            SignalingProtocolCompileError::InvalidTimeout {
+        let timeout = parse_duration_text(&on_connect.timeout).map_err(|error| {
+            let reason = error.to_string();
+            error.change_context(SignalingProtocolCompileError::InvalidTimeout {
                 protocol: name.to_string(),
                 timeout: on_connect.timeout.clone(),
-                reason: error.to_string(),
-            }
+                reason,
+            })
         })?;
 
         Ok(Self {
@@ -456,6 +459,13 @@ impl SessionState {
 ///
 /// A trait rather than a closure: the returned future borrows the sink under one concrete
 /// lifetime, which keeps it `Send` inside the spawned connection tasks that drive signaling.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the selected sink accepts each admitted signaling payload"
+    )
+)]
 pub trait SignalingDataSink {
     fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
 }
@@ -478,7 +488,7 @@ impl WebsocketSignalingSession {
         &self,
         websocket: &mut WebSocketStream<S>,
         sink: &D,
-    ) -> Result<(), WebsocketSignalingError>
+    ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         D: SignalingDataSink,
@@ -497,13 +507,13 @@ impl WebsocketSignalingSession {
 
         match outcome {
             Ok(result) => result,
-            Err(_) => Err(WebsocketSignalingError::Timeout {
+            Err(_) => Err(Report::new(WebsocketSignalingError::Timeout {
                 timeout: self.protocol.timeout,
                 unsatisfied: pending
                     .iter()
                     .map(|matcher| matcher.source().to_string())
                     .collect(),
-            }),
+            })),
         }
     }
 
@@ -513,7 +523,7 @@ impl WebsocketSignalingSession {
         pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
         session: &mut SessionState,
         sink: &D,
-    ) -> Result<(), WebsocketSignalingError>
+    ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         D: SignalingDataSink,
@@ -527,21 +537,24 @@ impl WebsocketSignalingSession {
                         sent += 1;
                         let value = program
                             .run_single(JsonValue::Null, &session.state)
-                            .map_err(|error| WebsocketSignalingError::SendProgram {
-                                index: sent,
-                                reason: error.to_string(),
+                            .map_err(|error| {
+                                let reason = error.current_context().to_string();
+                                error.change_context(WebsocketSignalingError::SendProgram {
+                                    index: sent,
+                                    reason,
+                                })
                             })?;
                         let frame = self.protocol.encode_frame(value).map_err(|error| {
-                            WebsocketSignalingError::SendEncode {
+                            let reason = signaling_frame_encode_error_message(&error);
+                            error.change_context(WebsocketSignalingError::SendEncode {
                                 index: sent,
                                 format: self.protocol.format_name(),
-                                reason: signaling_frame_encode_error_message(&error),
-                            }
+                                reason,
+                            })
                         })?;
-                        websocket
-                            .send(frame)
-                            .await
-                            .map_err(|error| WebsocketSignalingError::Send(Box::new(error)))?;
+                        websocket.send(frame).await.map_err(|error| {
+                            Report::new(WebsocketSignalingError::Send(Box::new(error)))
+                        })?;
                     }
                 }
                 CompiledSignalingStep::Wait(wait) => {
@@ -568,29 +581,28 @@ impl WebsocketSignalingSession {
         pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
         session: &mut SessionState,
         sink: &D,
-    ) -> Result<(), WebsocketSignalingError>
+    ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         D: SignalingDataSink,
     {
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(message) = websocket.next().await else {
-                return Err(WebsocketSignalingError::Closed);
+                return Err(Report::new(WebsocketSignalingError::Closed));
             };
-            let message =
-                message.map_err(|error| WebsocketSignalingError::Receive(Box::new(error)))?;
+            let message = message
+                .map_err(|error| Report::new(WebsocketSignalingError::Receive(Box::new(error))))?;
             let (frame, is_text) = match message {
                 Message::Text(text) => (text.into_bytes(), true),
                 Message::Binary(bytes) => (bytes, false),
                 Message::Ping(ping) => {
-                    websocket
-                        .send(Message::Pong(ping))
-                        .await
-                        .map_err(|error| WebsocketSignalingError::Send(Box::new(error)))?;
+                    websocket.send(Message::Pong(ping)).await.map_err(|error| {
+                        Report::new(WebsocketSignalingError::Send(Box::new(error)))
+                    })?;
                     continue;
                 }
-                Message::Close(_) => return Err(WebsocketSignalingError::Closed),
+                Message::Close(_) => return Err(Report::new(WebsocketSignalingError::Closed)),
                 Message::Pong(_) | Message::Frame(_) => continue,
             };
 
@@ -632,12 +644,14 @@ impl WebsocketSignalingSession {
         matchers: &[Arc<StatefulJaqProgram>],
         value: &JsonValue,
         state: &JsonValue,
-    ) -> Option<WebsocketSignalingError> {
+    ) -> Option<Report<WebsocketSignalingError>> {
         matchers.iter().find_map(|matcher| {
             let output = matcher.run_first(value.clone(), state).ok().flatten()?;
-            is_truthy(&output).then(|| WebsocketSignalingError::Rejected {
-                matcher: matcher.source().to_string(),
-                reason: rejection_reason(&output),
+            is_truthy(&output).then(|| {
+                Report::new(WebsocketSignalingError::Rejected {
+                    matcher: matcher.source().to_string(),
+                    reason: rejection_reason(&output),
+                })
             })
         })
     }
@@ -651,18 +665,19 @@ fn merge_capture(
     capture: &StatefulJaqProgram,
     value: &JsonValue,
     state: &mut JsonValue,
-) -> Result<(), WebsocketSignalingError> {
+) -> error_stack::Result<(), WebsocketSignalingError> {
     let captured = capture.run_single(value.clone(), state).map_err(|error| {
-        WebsocketSignalingError::Capture {
+        let reason = error.current_context().to_string();
+        error.change_context(WebsocketSignalingError::Capture {
             capture: capture.source().to_string(),
-            reason: error.to_string(),
-        }
+            reason,
+        })
     })?;
     let JsonValue::Object(captured) = captured else {
-        return Err(WebsocketSignalingError::Capture {
+        return Err(Report::new(WebsocketSignalingError::Capture {
             capture: capture.source().to_string(),
             reason: "CAPTURE program must produce an object".to_string(),
-        });
+        }));
     };
     let JsonValue::Object(state) = state else {
         unreachable!("handshake state is always an object");
@@ -714,14 +729,12 @@ fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use nervix_models::{
-        CreateSignalingProtocol, ModelName, ResourceName, SignalingProtobufConfig,
-        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat,
+        CreateSignalingProtocol, DurationTextError, ModelName, ResourceName,
+        SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat,
     };
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::{StdArc, blocking::Mutex};
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
@@ -868,7 +881,7 @@ mod tests {
 
         assert!(
             matches!(
-                &error,
+                error.current_context(),
                 SignalingProtocolCompileError::InvalidJaqProgram {
                     clause: "SEND JAQ",
                     index: 2,
@@ -877,6 +890,7 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
+        assert!(error.contains::<nervix_jaq::JaqProgramError>());
     }
 
     #[test]
@@ -897,9 +911,41 @@ mod tests {
         .expect_err("protobuf protocol needs descriptors");
 
         assert!(matches!(
-            error,
+            error.current_context(),
             SignalingProtocolCompileError::MissingProtobufDescriptors { .. }
         ));
+    }
+
+    #[test]
+    fn invalid_timeout_keeps_the_parser_cause() {
+        for (timeout, reason) in [
+            ("not-a-duration", "expected number at 0"),
+            (
+                "18446744073709551615s 1000000000ns",
+                "it is longer than a duration can be",
+            ),
+        ] {
+            let mut configured = protocol(
+                SignalingWireFormat::Json,
+                on_connect(&["{id: 1}"], &[".id == 1"], &[]),
+            );
+            configured.on_connect.timeout = timeout.to_string();
+            let error = compile_fixture!(&configured, None).expect_err("the timeout must parse");
+            assert!(matches!(
+                error.current_context(),
+                SignalingProtocolCompileError::InvalidTimeout {
+                    timeout: invalid,
+                    reason: given,
+                    ..
+                } if invalid == timeout && given == reason
+            ));
+            assert_eq!(
+                error
+                    .downcast_ref::<DurationTextError>()
+                    .map(ToString::to_string),
+                Some(reason.to_string())
+            );
+        }
     }
 
     #[test]
@@ -943,6 +989,36 @@ mod tests {
         .expect("protocol should compile");
 
         assert!(raw.encode_frame(json!({"id": 1})).is_err());
+    }
+
+    #[nervix_primitives::test]
+    async fn failed_send_keeps_its_jaq_cause() {
+        let error = run_against_peer(
+            protocol(SignalingWireFormat::Json, on_connect(&["empty"], &[], &[])),
+            Vec::new(),
+        )
+        .await
+        .expect_err("a SEND JAQ program must produce a frame");
+        assert!(matches!(
+            error.current_context(),
+            WebsocketSignalingError::SendProgram { index: 1, .. }
+        ));
+        assert!(error.contains::<nervix_jaq::JaqProgramError>());
+    }
+
+    #[nervix_primitives::test]
+    async fn failed_frame_encoding_keeps_its_format_cause() {
+        let error = run_against_peer(
+            protocol(SignalingWireFormat::Raw, on_connect(&["{id: 1}"], &[], &[])),
+            Vec::new(),
+        )
+        .await
+        .expect_err("RAW SEND requires a string");
+        assert!(matches!(
+            error.current_context(),
+            WebsocketSignalingError::SendEncode { index: 1, .. }
+        ));
+        assert!(error.contains::<SignalingFrameEncodeError>());
     }
 
     #[test]
@@ -1047,7 +1123,7 @@ mod tests {
     async fn run_against_peer(
         protocol: CreateSignalingProtocol,
         steps: Vec<PeerStep>,
-    ) -> Result<Vec<Vec<u8>>, WebsocketSignalingError> {
+    ) -> error_stack::Result<Vec<Vec<u8>>, WebsocketSignalingError> {
         let sink = RecordingSink::default();
         run_against_peer_with(protocol, steps, &sink)
             .await
@@ -1058,14 +1134,14 @@ mod tests {
         protocol: CreateSignalingProtocol,
         steps: Vec<PeerStep>,
         sink: &RecordingSink,
-    ) -> Result<(), WebsocketSignalingError> {
+    ) -> error_stack::Result<(), WebsocketSignalingError> {
         let (server_io, client_io) = tokio::io::duplex(8 * 1024);
         let compiled =
             Arc::new(compile_fixture!(&protocol, None).expect("protocol should compile"));
         let failure = StdArc::new(Mutex::new(None::<String>));
         let peer_failure = StdArc::clone(&failure);
 
-        let peer = tokio::spawn(async move {
+        let peer = nervix_primitives::task::spawn(async move {
             let mut peer = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
             for step in steps {
                 match step {
@@ -1078,7 +1154,9 @@ mod tests {
                         }
                     },
                     PeerStep::ExpectSilence(window) => {
-                        if let Ok(frame) = tokio::time::timeout(window, peer.next()).await {
+                        if let Ok(frame) =
+                            nervix_primitives::time::timeout(window, peer.next()).await
+                        {
                             *peer_failure.lock() =
                                 Some(format!("expected no frame for {window:?}, got {frame:?}"));
                             return;
@@ -1105,7 +1183,7 @@ mod tests {
         result
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn timing_out_names_only_the_matchers_that_never_matched() {
         let error = run_against_peer(
             protocol(
@@ -1128,7 +1206,7 @@ mod tests {
 
         assert!(
             matches!(
-                &error,
+                error.current_context(),
                 WebsocketSignalingError::Timeout { unsatisfied, .. }
                     if unsatisfied == &vec![".id == 2".to_string()]
             ),
@@ -1136,7 +1214,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn payload_arriving_before_the_relay_opens_is_dropped() {
         let buffered = run_against_peer(
             protocol(
@@ -1164,7 +1242,7 @@ mod tests {
         assert!(buffered.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_later_step_sends_with_state_captured_by_an_earlier_one() {
         let buffered = run_against_peer(
             protocol(
@@ -1200,7 +1278,7 @@ mod tests {
         assert!(buffered.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_later_step_withholds_its_sends_until_the_current_one_is_satisfied() {
         let error = run_against_peer(
             protocol(
@@ -1226,7 +1304,7 @@ mod tests {
 
         assert!(
             matches!(
-                &error,
+                error.current_context(),
                 WebsocketSignalingError::Timeout { unsatisfied, .. }
                     if unsatisfied == &vec![r#".acked == "first""#.to_string()]
             ),
@@ -1234,7 +1312,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn accept_data_opens_the_relay_mid_handshake() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
@@ -1267,14 +1345,17 @@ mod tests {
         .expect_err("the second subscription is never acknowledged");
 
         assert!(
-            matches!(error, WebsocketSignalingError::Timeout { .. }),
+            matches!(
+                error.current_context(),
+                WebsocketSignalingError::Timeout { .. }
+            ),
             "unexpected error: {error}"
         );
         // Only the frame that arrived after the relay opened reached it.
         assert_eq!(sink.accepted(), vec![br#"{"seq":2}"#.to_vec()]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn accept_data_on_connect_streams_from_the_first_frame() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
@@ -1298,13 +1379,16 @@ mod tests {
         .expect_err("the subscription is never acknowledged");
 
         assert!(
-            matches!(error, WebsocketSignalingError::Timeout { .. }),
+            matches!(
+                error.current_context(),
+                WebsocketSignalingError::Timeout { .. }
+            ),
             "unexpected error: {error}"
         );
         assert_eq!(sink.accepted(), vec![br#"{"seq":1}"#.to_vec()]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_step_scoped_fail_guard_rejects_during_its_own_step() {
         let error = run_against_peer(
             protocol(
@@ -1333,12 +1417,12 @@ mod tests {
         .expect_err("the step guard must reject");
 
         assert!(
-            matches!(&error, WebsocketSignalingError::Rejected { matcher, .. } if matcher == ".denied"),
+            matches!(error.current_context(), WebsocketSignalingError::Rejected { matcher, .. } if matcher == ".denied"),
             "unexpected error: {error}"
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn payload_is_dropped_when_the_opening_step_is_never_satisfied() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
@@ -1365,7 +1449,10 @@ mod tests {
         .expect_err("the first subscription is never acknowledged");
 
         assert!(
-            matches!(error, WebsocketSignalingError::Timeout { .. }),
+            matches!(
+                error.current_context(),
+                WebsocketSignalingError::Timeout { .. }
+            ),
             "unexpected error: {error}"
         );
         assert!(
@@ -1374,7 +1461,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_capture_that_does_not_produce_an_object_fails_the_handshake() {
         let error = run_against_peer(
             protocol(
@@ -1395,12 +1482,38 @@ mod tests {
         .expect_err("a non-object capture must fail");
 
         assert!(
-            matches!(&error, WebsocketSignalingError::Capture { capture, .. } if capture == ".id"),
+            matches!(error.current_context(), WebsocketSignalingError::Capture { capture, .. } if capture == ".id"),
             "unexpected error: {error}"
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn failed_capture_keeps_its_jaq_cause() {
+        let error = run_against_peer(
+            protocol(
+                SignalingWireFormat::Json,
+                SignalingProtocolOnConnect {
+                    accept_data: false,
+                    steps: captured_steps(&["{id: 1}"], ".id == 1", "empty"),
+                    fail_matchers: Vec::new(),
+                    timeout: "5s".to_string(),
+                },
+            ),
+            vec![
+                PeerStep::Expect(r#"{"id": 1}"#.to_string()),
+                PeerStep::Send(Message::Text(r#"{"id":1}"#.to_string())),
+            ],
+        )
+        .await
+        .expect_err("CAPTURE JAQ must produce a state object");
+        assert!(matches!(
+            error.current_context(),
+            WebsocketSignalingError::Capture { .. }
+        ));
+        assert!(error.contains::<nervix_jaq::JaqProgramError>());
+    }
+
+    #[nervix_primitives::test]
     async fn a_fail_matcher_rejects_before_a_lenient_wait_matcher_consumes_the_frame() {
         let error = run_against_peer(
             protocol(
@@ -1425,7 +1538,7 @@ mod tests {
 
         assert!(
             matches!(
-                &error,
+                error.current_context(),
                 WebsocketSignalingError::Rejected { matcher, reason }
                     if matcher == ".error" && reason == "subscription denied"
             ),

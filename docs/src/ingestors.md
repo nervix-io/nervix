@@ -28,7 +28,8 @@ CREATE IF NOT EXISTS INGESTOR kafka_notifications
 Every ingestor defines:
 
 - the destination relay or relays
-- the codec used for decoding
+- the codec used for decoding, or for a [client ingestor](#client-ingestors) the schema its
+  batches carry
 - a route-local outgoing branch declaration
 - a flush policy for every destination relay
 - a message error policy for every destination relay
@@ -73,7 +74,7 @@ flush policy.
 Source acknowledgement is per payload. An acknowledged delivery mode acknowledges a payload once
 every record decoded from it has been acknowledged on every route it reached, and a negative
 acknowledgement of any of those records negatively acknowledges the payload.
-`ACK PARALLEL MAX <n>` windows count payloads.
+`ACK PARALLEL MAX <n>` windows count payloads. A client ingestor's payload is one submitted batch.
 
 Timestamp selection and admission use one domain execution snapshot when the source group is
 delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` and connector-owned event
@@ -82,6 +83,11 @@ and high watermarks initially equal the selected event time, so source event tim
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
 `FLUSH IMMEDIATE` 100 µs minimum are physical monotonic waits. `FLUSH EACH` and paced admission use
 domain-logical time. See [Domains And Time](domains-and-time.md#ingestion-timestamps).
+For a decoded group, timestamp selection and paced admission operate on Arrow columns. The group
+keeps admitted rows together; each rejected or missing event timestamp follows the ingestor route's
+`ON MESSAGE ERROR` policy with code `validation` and operation `admit`, preserving that row's ACK
+and source metadata. A batch containing both kinds can therefore deliver its accepted rows while
+its rejected rows reach the configured error route.
 
 ## Altering Ingestors
 
@@ -159,6 +165,7 @@ Only modes that the source can honor are accepted or offered by completion:
 | ZeroMQ | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | HTTP polling, Prometheus | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
 | Endpoint | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+| Client | `SUSPEND` |
 
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
 and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the source session. Unexpected
@@ -200,6 +207,14 @@ There is no total order across instances. Decode, timestamp selection, filters, 
 routing, and domain pacing use the configuration in effect at delivery, so a codec installed by an
 alteration decodes payloads buffered during its hold. `TIMESTAMP NOW` therefore records delivery
 time. Bounds are per instance, and an endpoint has an independent buffer on every serving node.
+
+A payload stays in its buffer, counted in the buffered records and bytes and within `MAX SIZE`,
+until its messages enter their ingest group, and overflow never discards it while it drains. Its
+sender was already answered or its source has moved past it, so when its codec's `ON INGESTION`
+transformation finds the node's extension workers full, the payload waits for them rather than
+being refused, ahead of work that asks after it, and nothing behind it drains first. A new quiesce
+or a shutdown ends that wait and leaves the payload at the front of the buffer. A payload its codec
+rejects is reported and dropped, as any failure after it was retained is.
 
 Memory pressure never adds buffered bytes. During memory-pressure quiesce, a `BUFFER` push source
 drops and counts new payloads, polling sources skip polls, and endpoints reject. Payloads already
@@ -366,10 +381,6 @@ Transport-specific schemes and keys:
 - `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
-
-HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
-The request timeout covers name resolution, connection establishment, TLS, and the response.
-The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -379,6 +390,16 @@ The endpoint name remains the HTTP authority and HTTPS certificate name after re
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
+
+HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
+A client `timeout_ms` covers name resolution, connection establishment, TLS, and the response.
+The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
+RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` broker certificate
+against that host; see [RabbitMQ](#rabbitmq).
+Redis Pub/Sub also resolves its `addr` hostname through the node resolver for each dedicated
+subscription connection; see [Redis Pub/Sub](#redis-pubsub).
+MQTT resolves the host of its `addr` through the node resolver for every connection and verifies
+an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 
 Example Kafka TLS client:
 
@@ -406,6 +427,180 @@ CREATE IF NOT EXISTS CLIENT http_tls
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
 ```
+
+## Client Ingestors
+
+A client ingestor admits typed batches that applications submit through a Nervix session instead of
+reading an external system. There is no `CREATE CLIENT`, codec, transport header, or `NO_ACK` mode:
+a submitted batch already carries the ingestor's input schema, and every batch is acknowledged.
+
+```nspl
+CREATE SCHEMA order_in (
+  region STRING, order_id STRING, amount I64, card STRING SENSITIVE
+);
+CREATE SCHEMA region_key (region STRING);
+CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+
+CREATE INGESTOR orders_in
+  FROM CLIENT SCHEMA order_in
+    MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+    ON QUIESCE SUSPEND
+  TIMESTAMP NOW
+  TO orders_by_region
+    INHERIT region, order_id, card
+    SET amount_cents = input.amount * 100
+    BRANCHED BY by_region SET region = message.region
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+```nspl,ignore
+FROM CLIENT SCHEMA <schema>
+  MODE ACK SEQUENTIAL | ACK PARALLEL MAX <n>
+  ACK TIMEOUT <duration>
+  RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
+```
+
+Every clause is required and there are no defaults:
+
+- `SCHEMA` names the input schema. A batch must carry exactly its fields, in order, with their
+  types and optionality, and a producer must declare exactly those fields, including which are
+  `SENSITIVE`, before it may submit anything.
+- `ACK SEQUENTIAL` admits one batch at a time; `ACK PARALLEL MAX <n>` lets at most `n` admitted
+  batches await their acknowledgement. The window belongs to the ingestor's one execution and every
+  producer shares it, so opening more producers never widens it. Producers with queued batches take
+  the window in turn.
+- `ACK TIMEOUT` bounds how long an admitted batch may make no acknowledgement progress. When it
+  passes, the batch is reported as failed with `ack_timeout`; its admitted work is not cancelled
+  and may still complete. Downstream work that reports it is alive keeps the batch from timing
+  out.
+- `RETRY POLICY BACKOFF <duration> MAX <duration>` is the physical backoff a producer applies
+  before sending again a batch that was refused only temporarily. It starts at `BACKOFF` and
+  doubles up to `MAX`, which must not be shorter than `BACKOFF`. Producers are told it when they
+  open.
+- `ON QUIESCE SUSPEND` is the only quiesce mode. Admission stops for the hold: producers are told
+  that admission is suspended, queued batches that were not admitted yet are refused as
+  `suspended`, and the producer keeps them to send again once admission reopens.
+
+Timestamp selection, `FILTER WHERE`, route construction, `WHERE`, branch construction, route
+`FLUSH`, `ON MESSAGE ERROR`, and `ON GENERAL ERROR` behave as for every ingestor; `message` and
+`input` read the submitted row. Client batches carry no transport headers or metadata, so
+`read_header`, `read_headers`, and `metadata.*` are unavailable. The ingestor executes on its one
+scheduled cluster node. A producer is opened on a session that any live node may serve, and that
+node forwards the producer's batches to the ingestor's node; a console session, like every console
+session, is served only by the leader.
+
+`ALTER INGESTOR ... SET FROM CLIENT SCHEMA ...` replaces the complete source body, and
+`SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the whole
+`FROM CLIENT` clause.
+
+### Submitted Batches
+
+A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch, and the
+end-of-stream marker. It is uncompressed and has no dictionary or extension encodings, and its
+Arrow schema is exactly the input schema in Nervix's Arrow representation of each type, with no
+field metadata. A batch carries at most 65,536 rows and at most the bytes one submission may carry,
+which is the smaller of the producer's granted bytes and what one session frame holds. The node
+that executes the ingestor validates the whole batch, its structure, bounds, and every column,
+before any row is admitted; a batch that fails is refused whole and has no effect on the graph.
+Nothing is coerced, cast, or partially admitted.
+
+### Outcomes
+
+One batch is one source acknowledgement unit. It has exactly one terminal outcome:
+
+| Outcome | Meaning | Cause |
+| --- | --- | --- |
+| not admitted | No row entered the graph. | `invalid batch: <defect>`, `suspended`, `busy`, `draining`, `producer ended`, `credit exceeded` |
+| completed | Every route and acknowledging sink its rows reached confirmed them under the graph's rules. | — |
+| processing failed | The batch was admitted and its acknowledgement failed. Some of its effects may have happened. | `ack_timeout`, `rejected` |
+| unknown outcome | The batch may have been admitted and processed, but no terminal result can be established. | `interrupted`, `owner_lost`; a client whose session ended adds `session_lost` |
+
+Transport receipt is never an outcome. A batch completes under the normal acknowledgement rules: a
+row a filter drops is resolved; a detached boundary resolves where it detaches; and an
+acknowledging sink resolves its rows at its own success boundary, such as the complete response
+headers of an HTTP emitter. The defects of an invalid batch are `malformed`, `unexpected message`,
+`compressed`, `schema mismatch`, `not one batch`, `too many rows`, `too large`, and `invalid data`.
+
+A row that fails on a route of an admitted batch is handled by that route's `ON MESSAGE ERROR`
+policy exactly as for any other ingestor: `IGNORE` acknowledges it, `LOG` negatively acknowledges
+it, so its batch fails processing as `rejected`, and `SEND TO` acknowledges it once its error record
+is published to the error relay. The other rows of the batch are processed either way.
+
+Only `suspended` and `busy` are temporary: sending the same batch again on the same producer may
+succeed, and the Rust client does so on the declared backoff. Every other outcome is final for that
+attempt. Nervix never replays a batch that failed or whose outcome is unknown; replaying it is the
+application's decision, and it may duplicate the batch's effects. The application therefore keeps
+its replayable source data until a batch completes.
+
+### Producers
+
+A producer is opened on a session with an explicit domain and ingestor, the fields it expects, and
+the credit it asks for: how many batches and how many bytes it may have outstanding. The open is
+answered with the input schema, the domain's START generation, the identity of the endpoint
+contract, the attachment, the policy above, the granted credit, and whether admission is open now.
+A later `USE` does not move a producer. An open is refused, with nothing left attached, when the
+domain does not exist or is stopped, the ingestor does not exist, reads a transport, or is not
+running on its scheduled node, the expected fields differ, the credit is larger than one producer
+may ask for, the session or node has no room left, or the session holds a transaction.
+
+| Limit | Value |
+| --- | --- |
+| Producers per session | 32 |
+| Outstanding bytes per session | 32 MiB |
+| Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
+| Batches one producer may ask to have outstanding | 1,024 |
+| Rows per batch | 65,536 |
+
+A batch holds its share of the credit from the moment it is sent until its outcome is observed. A
+batch sent beyond the credit is refused as `credit exceeded` without reaching the graph, and the
+producer is ended as a protocol violation; the batches it already submitted still receive their
+outcomes.
+
+A producer stays attached while the ingestor's endpoint contract holds. The contract is the
+ingestor as producers see it — its input schema, mode, timestamp, filter, routes, error policies,
+and the branch declarations its routes construct — without the routes' `FLUSH` cadence. The server
+ends a producer, as the last event about it, with one of these reasons:
+
+| Reason | When |
+| --- | --- |
+| `endpoint changed` | An alteration changed the endpoint contract, or made the ingestor read a transport. |
+| `endpoint removed` | The ingestor or its domain was dropped. |
+| `domain stopped` | The domain stopped, or a new `START` replaced the generation the producer attached under. |
+| `relocated` | A planned ownership handoff moved the ingestor to another node. |
+| `shutting down` | The serving node, or the node that executes the ingestor, is shutting down. |
+| `owner lost` | The node that executes the ingestor, or the connection to it, was lost. |
+| `protocol violated` | The producer sent a batch beyond its credit. |
+
+An ended producer's queued batches are refused as `producer ended`, and its admitted batches whose
+acknowledgement is unresolved have an unknown outcome. That holds when the node that executes the
+ingestor dies or stops answering, too: the node that forwards a producer's batches to it clears each
+batch before it may be admitted, so after the loss it refuses every batch it never cleared as
+`producer ended`, and only the cleared ones have an unknown outcome with cause `owner_lost`. A new
+producer can be opened as soon as the ingestor runs again. An alteration that keeps the contract, such as one that changes only a route's
+`FLUSH`, suspends admission for its hold and reopens it afterwards with every producer attached. A
+planned ownership handoff stops intake for good on the former owner: batches that arrive are
+refused as `draining`, admitted ones complete there, and its producers end as `relocated` once the
+new owner is committed.
+
+### Observing Client Ingestors
+
+`SHOW INGESTORS` lists every ingestor of the domain with its source, its codec or schema, the node
+that executes it, and its state. A client ingestor adds whether it admits batches, its attached
+producers, the batches and bytes they have outstanding, and the batches holding a slot of its
+window:
+
+```text
+orders_in source=CLIENT schema=order_in owner=node-2 status=running admission=open producers=2 outstanding_batches=3 outstanding_bytes=2412 admitted_batches=2
+```
+
+`DESCRIBE INGESTOR` renders `source: CLIENT`, `schema:`, `mode:`, `owner:`, `admission:`,
+`producers:`, `forwarded producers:`, `outstanding batches:`, `outstanding bytes:`, and
+`admitted batches:`. The node that executes the ingestor also exports the same counts and every
+answered batch as metrics; see
+[Metrics And Observability](metrics-and-observability.md#client-ingestors).
 
 ## Supported Ingestor Types
 
@@ -445,6 +640,16 @@ Offset modes:
 Kafka client configuration is passed through to librdkafka. Nervix does not override
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist.
+
+In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
+completes. If downstream work rejects a record, the ingestor seeks back to it. A consumer-group
+rebalance can move the record's partition to another group member while its batch is in flight.
+The ingestor then does not seek: whichever member is assigned the partition next, this ingestor
+included, resumes it from the committed offset, which never passes a rejected record. If Kafka
+cannot seek back on a partition the ingestor still holds, the ingestor stops polling, refreshes
+its assignment, and retries that seek. It cannot commit a later offset while the rejected
+position remains unresolved. Replays after a crash or assignment change may repeat records whose
+output was already written.
 
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
@@ -509,6 +714,15 @@ consumers on the same queue continue. Queue length, message TTL, overflow, and a
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
 re-provisions it; Nervix never creates it.
 
+Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
+every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
+addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
+connected to as written. Resolution, the TCP connection and, for `amqps`, the TLS handshake have 30
+seconds together; the broker certificate must name the host `addr` names. A connection that fails,
+including a name that does not resolve, is a source error that `DESCRIBE INGESTOR` shows as the
+transient error, and the instance tries again on its `RETRY POLICY` cadence without acknowledging
+anything.
+
 ### Redis Pub/Sub
 
 ```nspl,ignore
@@ -523,6 +737,11 @@ Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
 discarded and counted. A `TYPE REDIS` client declares connection-pool bounds even when only
 ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
+Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
+asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
+consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
+uses the configured CA and optional client identity. DNS and connection failures follow the
+source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
 
 ### MQTT
 
@@ -557,6 +776,14 @@ session expires, resume establishes a fresh session and the interim is lost. `BU
 remain connected under any valid session declaration. In ACK modes, Nervix acknowledges a payload
 when it is buffered or deliberately dropped, trading broker redelivery for the declared connected
 behavior.
+
+Each instance resolves the host of its client's `addr` through the node's asynchronous DNS
+resolver whenever it connects: on its first subscription and on every resume after a lost
+connection. It dials the answers in order within the client's five-second connect timeout, which
+also covers TLS and the MQTT handshake. For `mqtts`, TLS verifies the configured host name. A name
+that does not resolve is a connection failure, never a message rejection: the instance resumes
+again on its declared `RETRY POLICY`, or on the host's reconnect cadence in a `NO_ACK` mode. See
+[DNS for MQTT](connector-contract.md#dns-for-mqtt).
 
 ### NATS
 
@@ -607,6 +834,9 @@ Messages expose optional `metadata.peer_addr`. The source takes no `INSTANCES` c
 application acknowledgment. Every live cluster node runs the listener; it is independent of the
 leader and restarts or joins with its owning node. See [Syslog](syslog.md) for the client keys,
 cluster lifecycle, framing, TLS, limits, and failure semantics.
+An invalid client setting or unreadable TLS file fails listener startup with the Syslog key or
+file and its underlying cause. A frame or connection failure keeps its cause in the source
+diagnostic. These failures do not acknowledge a message; Syslog has no application ACK.
 
 ### SQS
 
@@ -621,6 +851,19 @@ ON QUIESCE SUSPEND
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
 as a duplicate; the ingestor resumes by polling past anything the service expired.
+
+The source resolves the host of its client's `endpoint` through the node's asynchronous resolver
+each time it opens a connection, and tries the answers in order. Every request is still signed for
+the configured host, and over HTTPS the service certificate must name that host. Without
+`tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
+alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
+queue lookup the ingestor makes when it starts, a poll, or a deletion. The AWS SDK's standard retry
+mode makes up to three attempts at each such request. A failed queue lookup then fails the
+ingestor's start, with the lookup failure in its reason; a failed poll or deletion is a transient
+source failure that `DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`. A
+message is deleted only once it is acknowledged, so a lookup failure never removes one from the
+queue.
 
 ### Prometheus
 
@@ -656,6 +899,24 @@ anything already acknowledged. A stopped, absent, or otherwise unable ingestor a
 never returns a silent 202. If several ingestors share a route, the request is accepted when at least
 one accepts it. It is rejected only when all reject, and `Retry-After` is included only when every
 rejecting ingestor declares `REJECT`.
+
+A body whose codec runs an `ON INGESTION` transformation is unfolded on the node's extension
+workers. When they cannot take it now, the body is rejected the same way: HTTP answers 503 without
+`Retry-After`, and an established WebSocket closes with 1013. The body was not decoded, so its
+sender may send it again; a body its codec rejects is still accepted and reported as a decode
+failure. A body `BUFFER` retained was already answered 202, so when it drains after resume and the
+extension workers cannot take it, it waits for them instead. It stays in the buffer, counted in the
+ingestor's buffered records and bytes, until they unfold it, and the bodies behind it follow in
+order. A body its codec rejects as it drains is reported as an ingestor error and not delivered,
+like any other retained body that fails after its 202.
+
+A WebSocket connection retains the route and signaling protocol selected at upgrade. Stopping or
+replacing its endpoint source ends that intake lifetime, including signaling data intake. During
+payload ingestion after signaling, the next refused payload closes the connection with 1013,
+even if the source has already restarted. Open a new connection to use the replacement source.
+A request already admitted before source ending may finish. Stopping a domain
+withdraws only that domain's routes and intakes; another domain serving the same host and path
+continues receiving requests. A route whose configuration has been withdrawn returns HTTP 404.
 
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 
@@ -694,6 +955,13 @@ ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 ```
 
 This opens an outbound WebSocket connection and decodes text or binary frames.
+For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
+asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
+DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
+header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
+An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
+Resolution and connection failures are transient source failures handled by the host's existing
+retry lifecycle. Cancelling or stopping the source drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
@@ -752,6 +1020,9 @@ connection ids, timestamps, or echoed parameters still match.
 A matcher that errors on a frame of a different shape counts as a non-match
 rather than a connection failure. On timeout, the error names the matchers the
 current step was still waiting on.
+Invalid signaling programs fail validation with the protocol, clause, step, and compiler cause.
+Handshake send, capture, encoding, and transport failures retain their causes in the source
+diagnostic. A failed handshake delivers no frame to the relay.
 
 ### Data Arriving During The Handshake
 

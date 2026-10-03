@@ -1,6 +1,6 @@
 use super::*;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmapped() {
     let input_schema = test_schema(&[
         ("amount", ParseAsType::I64),
@@ -46,12 +46,15 @@ async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmap
     .expect("the source record must build");
 
     let plan = plan_filter_map_messages(
+        ProgramRun {
+            executor: &Executor::default(),
+            now: Timestamp::from_unix_nanos(1),
+        },
         "processor",
         &named::<ModelName>("route_filter"),
         MessageErrorOperation::RouteWhere,
         &program,
         batch,
-        Timestamp::from_unix_nanos(1),
         &HashMap::default(),
     )
     .await
@@ -63,7 +66,7 @@ async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmap
     assert_eq!(error.error.operation, MessageErrorOperation::RouteWhere);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn filter_predicate_evaluation_error_becomes_a_planned_message_error() {
     let input_schema = test_schema(&[
         ("amount", ParseAsType::I64),
@@ -108,12 +111,15 @@ async fn filter_predicate_evaluation_error_becomes_a_planned_message_error() {
     .expect("the source record must build");
 
     let plan = plan_filter_map_messages(
+        ProgramRun {
+            executor: &Executor::default(),
+            now: Timestamp::from_unix_nanos(1),
+        },
         "processor",
         &named::<ModelName>("input_filter"),
         MessageErrorOperation::FilterWhere,
         &program,
         batch,
-        Timestamp::from_unix_nanos(1),
         &HashMap::default(),
     )
     .await

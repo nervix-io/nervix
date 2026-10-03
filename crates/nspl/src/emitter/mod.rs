@@ -15,16 +15,17 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator,
-        bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref, client_ref,
-        codec_ref, collect_for, collection_ref, duration_lit, emitter_ack_window, emitter_name,
-        emitter_ref, expression_before_clause, flush_each, from_relay_clauses,
-        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
-        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
-        render_expression_tokens, retry_policy, route_construction, string_lit, subject_ref,
-        suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, ack_window,
+        alter_op_separator, bodyless_route_construction, boxed_choice, braced_list_value_tokens,
+        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
+        duration_lit, embedded, emitter_name, emitter_ref, expression_before_clause, flush_each,
+        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
+        queue_ref, relay_ref, retry_policy, route_construction, schema_ref, string_lit,
+        subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
         where_only_route_construction, word_raw,
     },
+    semantic_program::read_expression,
 };
 
 fn no_ack_publishing_mode<'src>()
@@ -38,11 +39,27 @@ fn no_ack_publishing_mode<'src>()
 fn broker_ack_publishing_mode<'src>()
 -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Ack)
-        .ignore_then(emitter_ack_window())
+        .ignore_then(ack_window())
         .then(ack_timeout())
         .then(retry_policy())
         .map(
             |((window, ack_timeout), retry_policy)| EmitterPublishingMode::BrokerAck {
+                window,
+                ack_timeout,
+                retry_policy,
+            },
+        )
+        .boxed()
+}
+
+fn client_ack_publishing_mode<'src>()
+-> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
+        .ignore_then(ack_window())
+        .then(ack_timeout())
+        .then(retry_policy())
+        .map(
+            |((window, ack_timeout), retry_policy)| EmitterPublishingMode::ClientAck {
                 window,
                 ack_timeout,
                 retry_policy,
@@ -79,7 +96,7 @@ fn mqtt_confirming_publishing_mode<'src>(
 ) -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     mqtt_qos_level(qos)
         .ignore_then(kw(Identifier::Ack))
-        .ignore_then(emitter_ack_window())
+        .ignore_then(ack_window())
         .then(ack_timeout())
         .then(retry_policy())
         .map(move |((window, ack_timeout), retry_policy)| match qos {
@@ -112,7 +129,7 @@ fn mqtt_publishing_mode<'src>()
 fn nats_jetstream_publishing_mode<'src>()
 -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::Jetstream, Identifier::Ack)
-        .ignore_then(emitter_ack_window())
+        .ignore_then(ack_window())
         .then(ack_timeout())
         .then(retry_policy())
         .map(
@@ -170,6 +187,14 @@ fn kafka_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Topic))
         .then(topic_ref())
         .map(|(client, topic)| EmitSink::Kafka { client, topic })
+}
+
+fn client_emit_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Client)
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(schema_ref())
+        .map(|schema| EmitSink::Client { schema })
 }
 
 fn pulsar_emit_sink_parser<'src>()
@@ -235,28 +260,25 @@ fn syslog_emit_sink_parser<'src>()
 fn sqs_fifo_group_expression<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    any()
-        .and_is(kw(Identifier::Mode).not())
-        .filter(|token: &Token| !matches!(token, Token::Semicolon))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .labelled("fifo_group_expression")
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .boxed()
+    embedded(
+        any()
+            .and_is(kw(Identifier::Mode).not())
+            .filter(|token: &Token| !matches!(token, Token::Semicolon))
+            .repeated()
+            .at_least(1)
+            .labelled("fifo_group_expression"),
+        read_expression,
+    )
 }
 
 fn sqs_fifo_group_clause<'src>()
 -> impl Parser<'src, &'src [Token], SqsFifoGroup, extra::Err<ParseError<'src>>> + Clone {
+    // The expression is tried first: an embedded rejection raised at the token where `FROM BRANCH`
+    // had already failed would take that failure's span.
     kw_phrase2(Identifier::Fifo, Identifier::Group)
         .ignore_then(choice((
-            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
             sqs_fifo_group_expression().map(SqsFifoGroup::Expression),
+            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
         )))
         .boxed()
 }
@@ -446,44 +468,10 @@ fn otel_emit_sink_parser<'src>()
         )
 }
 
-fn balanced_value_expression_group<'src>()
--> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    recursive(|element| {
-        let contents = element
-            .repeated()
-            .collect::<Vec<_>>()
-            .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>());
-        let parenthesized = contents
-            .delimited_by(tok(Token::LParen), tok(Token::RParen))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LParen);
-                tokens.push(Token::RParen);
-                tokens
-            });
-        let leaf = any()
-            .filter(|token: &Token| !matches!(token, Token::LParen | Token::RParen | Token::RBrace))
-            .map(|token| vec![token]);
-        // Naming the slot stops the raw delimiters leaking out as suggestions: a bare "(" offered
-        // here cannot be completed into anything the expression grammar accepts.
-        choice((parenthesized, leaf)).labelled("value_expression")
-    })
-}
-
 fn clickhouse_value_expr<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    balanced_value_expression_group()
-        .filter(|tokens| !matches!(tokens.as_slice(), [Token::Comma]))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>())
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+    embedded(braced_list_value_tokens(), read_expression)
 }
 
 fn clickhouse_value_mapping<'src>()
@@ -491,7 +479,7 @@ fn clickhouse_value_mapping<'src>()
     string_lit()
         .labelled("column_name")
         .then_ignore(tok(Token::Eq))
-        .then(clickhouse_value_expr().labelled("value_expression"))
+        .then(clickhouse_value_expr())
         .map(|(column, expression)| ClickHouseValueMapping { column, expression })
 }
 
@@ -1025,6 +1013,21 @@ fn codec_free_sink<'src>(
         .boxed()
 }
 
+/// Native client output is constructed against its declared schema without a codec or VALUES.
+fn native_client_sink<'src>()
+-> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    sink_with_publishing_mode(client_emit_sink_parser(), client_ack_publishing_mode())
+        .then(route_construction().or_not())
+        .map(|(sink, construction)| ParsedSink {
+            sink: sink.sink,
+            publishing_mode: sink.publishing_mode,
+            body: EmitterBody::Client,
+            construction,
+            batch: None,
+        })
+        .boxed()
+}
+
 /// A complete sink clause followed by the batching clause its sink cannot do without.
 fn batch_required<'src>(
     sink: impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone + 'src,
@@ -1059,6 +1062,7 @@ fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         http_create_sink_parser(),
+        batch_required(native_client_sink()),
         batch_optional(codec_free_sink(sink_with_publishing_mode(
             otel_emit_sink_parser(),
             request_ack_publishing_mode(),
@@ -1132,6 +1136,7 @@ fn emit_sink_parser<'src>()
 fn alter_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
+        sink_with_publishing_mode(client_emit_sink_parser(), client_ack_publishing_mode()),
         sink_with_publishing_mode(otel_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(clickhouse_emit_sink_parser(), request_ack_publishing_mode()),
         sink_with_publishing_mode(postgres_emit_sink_parser(), request_ack_publishing_mode()),
@@ -1186,10 +1191,16 @@ pub fn alter_emitter_parser<'src>()
     let set_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
         .ignore_then(alter_emit_sink_parser())
-        .map(|sink| AlterEmitterOperation::SetSink {
-            sink: Box::new(sink.sink),
-            publishing_mode: sink.publishing_mode,
-            body: None,
+        .map(|sink| {
+            let body = match &sink.sink {
+                EmitSink::Client { .. } => Some(EmitterBody::Client),
+                _ => None,
+            };
+            AlterEmitterOperation::SetSink {
+                sink: Box::new(sink.sink),
+                publishing_mode: sink.publishing_mode,
+                body,
+            }
         });
     let set_http_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
@@ -1442,6 +1453,29 @@ mod tests {
             let reparsed = parse_create_emitter(&canonical).expect("canonical HTTP should parse");
             assert_eq!(parsed, reparsed);
         }
+    }
+
+    #[test]
+    fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER send FROM source TO HTTP api METHOD input.method PATH (input.prefix + \
+             input.tenant) + input.path MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        )
+        .expect("PATH takes an expression, so the parenthesis after it opens that expression");
+
+        let EmitSink::Http { method, path, .. } = parsed.sink.as_ref() else {
+            panic!("the sink must be HTTP, got {:?}", parsed.sink);
+        };
+        assert_eq!(
+            method,
+            &crate::parse_expression("input.method").expect("valid expression")
+        );
+        assert_eq!(
+            path,
+            &crate::parse_expression("(input.prefix + input.tenant) + input.path")
+                .expect("valid expression")
+        );
     }
 
     #[test]
@@ -1848,6 +1882,51 @@ mod tests {
     }
 
     #[test]
+    fn native_client_emitter_constructs_output_and_round_trips() {
+        let source = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing MODE ACK \
+                      PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s INHERIT id \
+                      SET cents = input.amount * 100 WHERE output.cents > 0 BATCH MAX MESSAGES 16 \
+                      MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        assert_canonical_emitter_roundtrip(source, "CLIENT ACK");
+        let parsed = parse_create_emitter(source).expect("native client output parses");
+        assert!(matches!(parsed.sink.as_ref(), EmitSink::Client { .. }));
+        assert!(matches!(parsed.body.body, EmitterBody::Client));
+        assert!(parsed.batch.is_some());
+    }
+
+    #[test]
+    fn native_client_emitter_requires_ack_mode_and_batch_limits() {
+        let prefix = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing ";
+        let tail = " FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        for body in [
+            "MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX MESSAGES 16 MAX SIZE 1MiB",
+            "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s",
+            "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX \
+             MESSAGES 0 MAX SIZE 1MiB",
+            "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING \
+             codec BATCH MAX MESSAGES 16 MAX SIZE 1MiB",
+        ] {
+            assert!(
+                parse_create_emitter(&format!("{prefix}{body}{tail}")).is_err(),
+                "invalid native CLIENT emitter parsed: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_client_emitter_completion_stays_on_its_grammar_branch() {
+        let source = "CREATE EMITTER app_output FROM orders TO CLIENT ";
+        let suggestions = suggest_create_emitter(source, source.len());
+        assert!(suggestions.contains(&"SCHEMA".to_string()));
+        assert!(!suggestions.contains(&"TOPIC".to_string()));
+        let source = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing MODE ACK ";
+        let suggestions = suggest_create_emitter(source, source.len());
+        assert!(suggestions.contains(&"SEQUENTIAL".to_string()));
+        assert!(suggestions.contains(&"PARALLEL".to_string()));
+        assert!(!suggestions.contains(&"NO_ACK".to_string()));
+    }
+
+    #[test]
     fn every_publishing_mode_body_parses_and_canonical_round_trips() {
         for sink in [
             "KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
@@ -2216,7 +2295,10 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
 
         assert_eq!(parsed.sink.transport_label(), "SENTRY");
-        assert_eq!(parsed.sink.client().as_str(), "sentry_main");
+        assert_eq!(
+            parsed.sink.client().map(|client| client.as_str()),
+            Some("sentry_main")
+        );
     }
 
     #[test]
@@ -2306,6 +2388,70 @@ mod tests {
         assert!(
             errs.iter().any(|err| format!("{err:?}").contains("FLUSH")),
             "expected ClickHouse flush diagnostic, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn clickhouse_values_keep_an_array_value_whole() {
+        let tokens = to_tokens(
+            r#"
+            CREATE EMITTER to_ch FROM notifications
+            TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
+            VALUES { "tags" = [input.first_tag, input.second_tag], "id" = input.id }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            "#,
+        );
+
+        let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
+
+        let EmitSink::ClickHouse { values, .. } = parsed.sink.as_ref() else {
+            panic!("expected a ClickHouse sink, got {:?}", parsed.sink);
+        };
+        assert_eq!(
+            values,
+            &vec![
+                ClickHouseValueMapping {
+                    column: "tags".to_string(),
+                    expression: expression("[input.first_tag, input.second_tag]"),
+                },
+                ClickHouseValueMapping {
+                    column: "id".to_string(),
+                    expression: expression("input.id"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_clickhouse_values_with_an_unclosed_array() {
+        let tokens = to_tokens(
+            r#"
+            CREATE EMITTER to_ch FROM notifications
+            TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
+            VALUES { "tags" = [input.first_tag, input.second_tag }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            "#,
+        );
+
+        parse_create_emitter_tokens(&tokens).expect_err("an unclosed array must not parse");
+    }
+
+    #[test]
+    fn clickhouse_completion_after_values_holding_an_array_offers_the_mode() {
+        let input = "CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client \
+                     INSERT TO TABLE my_table VALUES { 'tags' = [input.first_tag, \
+                     input.second_tag], 'id' = input.id } ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"MODE".to_string()), "{suggestions:?}");
+        assert!(!suggestions.contains(&"]".to_string()), "{suggestions:?}");
+        assert!(
+            !suggestions.contains(&"VALUES".to_string()),
+            "{suggestions:?}"
         );
     }
 

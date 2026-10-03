@@ -9,12 +9,29 @@
 //!   persistence.
 //! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "branch task construction and teardown retain the branch state; admitted \
+                  processing declares its own contract"
+    )
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
 
 pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "branch lanes retain the concrete branch while consuming admitted input and \
+                  scheduled ticks"
+    )
+)]
 pub(super) struct BranchRuntime {
     pub(super) key: Option<BranchKey>,
     pub(super) runtime: Runtime,
@@ -34,6 +51,8 @@ pub(super) struct BranchRuntime {
 }
 
 pub(super) struct BranchRuntimeMetrics {
+    pub(super) source_dirty: BranchMetricsMark,
+    pub(super) processor_dirty: HashMap<ModelName, BranchMetricsMark>,
     pub(super) source: BatchMetricsHandle,
     pub(super) source_input: Option<MessageMetricsHandle>,
     pub(super) processor_inputs: HashMap<ModelName, HashMap<RelayName, NodeInputMetricsHandle>>,
@@ -105,6 +124,14 @@ pub(super) fn internal_processor_error_policies(general: GeneralErrorPolicy) -> 
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "branch lanes retain the concrete branch while consuming admitted input and \
+                  scheduled ticks"
+    )
+)]
 pub(super) struct BranchExecutionRuntime {
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
@@ -112,13 +139,13 @@ pub(super) struct BranchExecutionRuntime {
     pub(super) checkpoints:
         mpsc::Sender<oneshot::Sender<OwnershipHandoffResult<PersistedRuntimeStateEntry>>>,
     pub(super) shutdown: watch::Sender<bool>,
-    pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
 }
 
 pub(super) struct IngestorRouteRuntime {
     pub(super) sender: mpsc::Sender<BranchedEntrypointInput>,
     pub(super) shutdown: watch::Sender<bool>,
-    pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
     pub(super) branch_runtime: Arc<BranchExecutionRuntime>,
 }
 
@@ -151,7 +178,7 @@ pub(super) struct BranchExecutionDispatchContext<'a> {
 struct BranchDispatchCompletion {
     key: Option<BranchKey>,
     acks: Vec<AckSet>,
-    result: Result<Option<Timestamp>, tokio::task::JoinError>,
+    result: Result<Option<Timestamp>, nervix_primitives::task::JoinError>,
 }
 
 type PendingBranchDispatch = BoxFuture<'static, BranchDispatchCompletion>;
@@ -161,6 +188,14 @@ struct QueuedBranchDispatch {
 }
 
 #[derive(Default)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "branch lanes retain the concrete branch while consuming admitted input and \
+                  scheduled ticks"
+    )
+)]
 struct BranchDispatchLanes {
     active: HashSet<Option<BranchKey>>,
     queued: HashMap<Option<BranchKey>, VecDeque<QueuedBranchDispatch>>,
@@ -204,7 +239,12 @@ impl BranchDispatchLanes {
 impl BranchRuntime {
     pub(super) fn refresh_domain_routing(&mut self) -> Result<(), Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = self.runtime.domain_routing_cache(&self.domain);
+            self.routing = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
+                 revision refresh instead of repeating its installation lookup",
+                self.runtime.domain_routing_cache(&self.domain)
+            );
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -304,10 +344,14 @@ impl BranchRuntime {
                     return;
                 }
             };
-            if let Err(error) = self
-                .runtime
-                .prepare_materialized_stream_restore(&placement, &schema)
-                .await
+            if let Err(error) = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "first installation of this concrete branch restores its materialized placement \
+                 before publishing the retained state",
+                self.runtime
+                    .prepare_materialized_stream_restore(&placement, &schema)
+            )
+            .await
             {
                 warn!(
                     domain = self.domain.as_str(),
@@ -317,12 +361,17 @@ impl BranchRuntime {
                 );
                 return;
             }
-            match self.runtime.replicated_materialized_stream_state(
-                placement,
-                schema,
-                None,
-                Vec::new(),
-                None,
+            match nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "first installation of this concrete branch binds its materialized placement and \
+                 retains the resulting state",
+                self.runtime.replicated_materialized_stream_state(
+                    placement,
+                    schema,
+                    None,
+                    Vec::new(),
+                    None,
+                )
             ) {
                 Ok(mut assignment) => {
                     let Some(state) = assignment.originator.take() else {
@@ -499,11 +548,7 @@ impl BranchRuntime {
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        self.runtime.mark_branch_aggregated_metrics_updated(
-            &self.domain,
-            self.source_kind,
-            &self.source,
-        );
+        self.metrics.source_dirty.mark();
         if self.dispatch_stream(&root_relay, &batch).await.is_err() {
             let reason = "branched root relay dispatch failed".to_string();
             if self.source_kind == ModelKind::Ingestor {
@@ -589,7 +634,6 @@ impl BranchRuntime {
                 return;
             }
         };
-        let delivery_observation = batch.delivery_observation(snapshot.now());
         let input_metrics =
             self.metrics.processor_inputs.get(processor_id).verified(
                 "the branch template resolves metrics for every processor before spawning",
@@ -597,19 +641,12 @@ impl BranchRuntime {
         let input_metrics = input_metrics.get(incoming_relay).verified(
             "the branch template resolves every declared processor input before spawning",
         );
-        input_metrics.observe_batch(
-            batch.message_count(),
-            batch.estimated_bytes(),
-            delivery_observation.domain_timestamp,
-        );
-        self.runtime.mark_branch_aggregated_metrics_updated(
-            &self.domain,
-            processor.kind,
-            &processor.processor,
-        );
-        for seconds in delivery_observation.latency_seconds {
-            input_metrics.observe_delivery_latency(seconds, delivery_observation.domain_timestamp);
-        }
+        input_metrics.observe_delivery(&batch.delivery_observation(snapshot.now()));
+        self.metrics
+            .processor_dirty
+            .get(processor_id)
+            .verified("the branch binds a mark for each processor")
+            .mark();
         processor
             .accept_input(self, incoming_relay, batch, &snapshot)
             .await;
@@ -627,7 +664,7 @@ impl BranchRuntime {
     pub(super) async fn dispatch_output(
         &mut self,
         output: &RelayProcessorOutputNode,
-        source_kind: ModelKind,
+        _source_kind: ModelKind,
         source: &ModelName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
@@ -642,8 +679,11 @@ impl BranchRuntime {
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        self.runtime
-            .mark_branch_aggregated_metrics_updated(&self.domain, source_kind, source);
+        self.metrics
+            .processor_dirty
+            .get(source)
+            .verified("the branch binds a mark for each processor")
+            .mark();
         self.dispatch_stream(&output.relay, batch).await
     }
 
@@ -674,7 +714,7 @@ impl BranchRuntime {
             );
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
         for processor_id in processor_ids {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
@@ -742,13 +782,19 @@ impl IngestorRouteTask {
         &self,
         input: BranchedEntrypointInput,
     ) -> Vec<RelayRecordBatch> {
-        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(vec![input]).await {
-            Ok(batch) => batch,
+        let branches = match prepare_branched_entrypoint_input(
+            self.runtime_handle.executor(),
+            input,
+            self.template.ack_boundary,
+        )
+        .await
+        {
+            Ok(branches) => branches,
             Err(failure) => {
                 self.handle_general_error(
                     &failure.preserved,
                     format!(
-                        "{} '{}' failed to build route input batch: {}",
+                        "{} '{}' failed to prepare route input: {}",
                         self.template.branch.source_kind.as_str(),
                         self.ingestor.as_str(),
                         failure.error
@@ -757,35 +803,11 @@ impl IngestorRouteTask {
                 return Vec::new();
             }
         };
-        let branch_plan = match branched_branch_plan_blocking(input_batch.clone()).await {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.handle_general_error(
-                    &input_batch.acks,
-                    format!(
-                        "{} '{}' failed to evaluate output branch assignments: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        error
-                    ),
-                );
-                return Vec::new();
-            }
-        };
-        let mut batch_builds = FuturesUnordered::new();
-        for selection in branch_plan {
-            tokio::task::consume_budget().await;
-            batch_builds.push(branched_branch_filter_blocking(
-                input_batch.clone(),
-                selection,
-                self.template.ack_boundary,
-            ));
-        }
-        let mut prepared = Vec::new();
-        while let Some(batch_result) = futures_util::StreamExt::next(&mut batch_builds).await {
-            tokio::task::consume_budget().await;
-            match batch_result {
-                Ok((_, batch)) => prepared.push(batch),
+        let mut prepared = Vec::with_capacity(branches.len());
+        for branch in branches {
+            nervix_primitives::task::consume_budget().await;
+            match branch {
+                Ok(batch) => prepared.push(batch),
                 Err(failure) => self.handle_general_error(
                     &failure.preserved,
                     format!(
@@ -845,7 +867,7 @@ impl IngestorRouteTask {
         domain_clock: &DomainClock,
     ) {
         for batch in self.prepare_input(input).await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = batch.key.clone();
             let estimated_bytes = batch.estimated_bytes();
             if !self.pending.contains_key(&key) {
@@ -922,7 +944,7 @@ impl IngestorRouteTask {
             }
         }
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
         Ok(())
@@ -931,7 +953,7 @@ impl IngestorRouteTask {
     pub(super) async fn flush_all(&mut self) {
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
     }
@@ -950,7 +972,7 @@ impl IngestorRouteTask {
     ) {
         let ready = input.len();
         for _ in 0..ready {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Ok(message) = input.try_recv() else {
                 break;
             };
@@ -971,7 +993,7 @@ impl IngestorRouteTask {
     ) {
         input.close();
         while let Some(message) = input.recv().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.accept(message, domain_clock).await;
         }
         self.flush_all().await;
@@ -1018,12 +1040,12 @@ impl IngestorRouteTask {
         let ownership_freeze =
             OwnershipHandoffFreezeWatch::new(&self.runtime_handle, ownership_entity);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let freeze = ownership_freeze.observe();
             let ownership_frozen = freeze.is_frozen();
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
                 // arm drains and finishes either way, so the outcome carries nothing to read.
@@ -1108,7 +1130,7 @@ impl IngestorRouteRuntime {
         let runtime = Arc::new(Self {
             sender,
             shutdown,
-            task: parking_lot::Mutex::new(None),
+            task: nervix_primitives::sync::blocking::Mutex::new(None),
             branch_runtime: branch_runtime.clone(),
         });
         // The obligation is registered before the task starts, so a generation requested between
@@ -1121,7 +1143,7 @@ impl IngestorRouteRuntime {
             ),
         ));
         let force_flush = runtime_handle.force_flush_participant(&domain, quiesce.counters());
-        let task = tokio::spawn(
+        let task = nervix_primitives::task::spawn(
             IngestorRouteTask {
                 runtime_handle,
                 domain,
@@ -1152,6 +1174,16 @@ impl IngestorRouteRuntime {
 }
 
 impl BranchExecutionRuntime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the branch lane serializes its own state while consuming admitted input",
+            key = "one concrete branch instance",
+            bound = "one admitted batch, expiry, eviction or tick is processed by its retained \
+                     branch owner"
+        )
+    )]
     async fn enqueue_prepared_inputs(
         context: BranchExecutionDispatchContext<'_>,
         instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
@@ -1196,7 +1228,7 @@ impl BranchExecutionRuntime {
         };
 
         for message in inputs {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = message.key.clone();
             let instance = if let Some(state) = instances.touch(&key, accepted_at) {
                 GetOrCreateBranchInstance {
@@ -1205,9 +1237,13 @@ impl BranchExecutionRuntime {
                 }
             } else {
                 let incarnation = instances.next_incarnation();
-                let state = match template
-                    .instantiate(runtime_handle, domain, key.clone(), incarnation)
-                    .await
+                let state = match nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the missing concrete branch is installed once under its branch key and \
+                     incarnation before batch dispatch",
+                    template.instantiate(runtime_handle, domain, key.clone(), incarnation)
+                )
+                .await
                 {
                     Ok(state) => state,
                     Err(error) => {
@@ -1232,10 +1268,14 @@ impl BranchExecutionRuntime {
                 }
             };
             if instance.created {
-                runtime_handle.observe_branch_instance_created(
-                    domain,
-                    template.branch.as_ref(),
-                    &key,
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the concrete branch creation transition registers its one metric identity",
+                    runtime_handle.observe_branch_instance_created(
+                        domain,
+                        template.branch.as_ref(),
+                        &key,
+                    )
                 );
                 debug!(
                     domain = domain.as_str(),
@@ -1269,7 +1309,7 @@ impl BranchExecutionRuntime {
             let dispatch_key = key.clone();
             let dispatch_acks = message.acks.clone();
             let (started, started_rx) = oneshot::channel();
-            let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+            let handle = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
                 let mut branch = state.lock().await;
                 started
                     .send(())
@@ -1424,7 +1464,7 @@ impl BranchExecutionRuntime {
         .await;
         let mut next_deadline = None;
         while let Some(completion) = lanes.pending.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             Self::finish_dispatch(
                 BranchExecutionDispatchContext {
                     runtime_handle,
@@ -1443,6 +1483,13 @@ impl BranchExecutionRuntime {
         next_deadline
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "install or terminate the one branch lifecycle task and its join handle"
+        )
+    )]
     pub(super) fn new(
         runtime_handle: Runtime,
         domain: DomainName,
@@ -1460,12 +1507,25 @@ impl BranchExecutionRuntime {
             sender,
             checkpoints,
             shutdown,
-            task: parking_lot::Mutex::new(None),
+            task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
         runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
 
-        let task = tokio::spawn(async move {
-            let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::context(
+                recurring,
+                reason = "the branch lifecycle task dispatches each admitted batch and consumes \
+                          maintenance polls"
+            )
+        )]
+        let task = nervix_primitives::task::spawn(async move {
+            let domain_clock = match nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "this task or concrete branch transition attaches its retained domain clock \
+                 before executing in the selected lifetime",
+                runtime_handle.bind_domain_clock(&domain)
+            ) {
                 Ok(clock) => clock,
                 Err(error) => {
                     runtime_handle.events().report_error(format!(
@@ -1479,11 +1539,15 @@ impl BranchExecutionRuntime {
             };
             let mut instances =
                 BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
-            let mut last_persisted_lru_lsm = match restore_branch_instance_lru_snapshot(
-                &runtime_handle,
-                &domain,
-                &template,
-                &mut instances,
+            let mut last_persisted_lru_lsm = match nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "task startup restores one branch lifecycle generation before accepting batches",
+                restore_branch_instance_lru_snapshot(
+                    &runtime_handle,
+                    &domain,
+                    &template,
+                    &mut instances,
+                )
             )
             .await
             {
@@ -1534,10 +1598,14 @@ impl BranchExecutionRuntime {
             let mut checkpoint_requests_open = true;
             let mut lanes = BranchDispatchLanes::default();
 
-            let ownership_freeze =
-                OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity);
+            let ownership_freeze = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "this task binds its exact ownership freeze publication before entering its \
+                 recurring loop",
+                OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity)
+            );
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let freeze = ownership_freeze.observe();
                 let ownership_frozen = freeze.is_frozen();
                 let snapshot = match domain_clock.snapshot() {
@@ -1577,12 +1645,17 @@ impl BranchExecutionRuntime {
                     did_scheduled_work = true;
                 }
                 if Instant::now() >= next_lru_snapshot {
-                    if let Err(error) = persist_branch_instance_lru_snapshot(
-                        &runtime_handle,
-                        &domain,
-                        &template,
-                        &instances,
-                        &mut last_persisted_lru_lsm,
+                    if let Err(error) = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "explicit checkpoint cadence or terminal teardown captures one branch \
+                         lifecycle generation; the record path does not invoke it",
+                        persist_branch_instance_lru_snapshot(
+                            &runtime_handle,
+                            &domain,
+                            &template,
+                            &instances,
+                            &mut last_persisted_lru_lsm,
+                        )
                     ) {
                         warn!(
                             domain = domain.as_str(),
@@ -1625,19 +1698,19 @@ impl BranchExecutionRuntime {
                 } else {
                     next_branch_deadline.map(|deadline| domain_clock.deadline_at(deadline))
                 };
-                tokio::select! {
+                nervix_primitives::select! {
                     biased;
                     checkpoint = checkpoint_requests.recv(), if checkpoint_requests_open && lanes.is_empty() => {
                         let Some(checkpoint) = checkpoint else {
                             checkpoint_requests_open = false;
                             continue;
                         };
-                        let result = checkpoint_branch_instance_lru_snapshot(
+                        let result = nervix_primitives::expect_lint!(nervix::lifecycle_call, "the admitted checkpoint command captures one branch lifecycle generation", checkpoint_branch_instance_lru_snapshot(
                             &runtime_handle,
                             &domain,
                             &template,
                             &instances,
-                        );
+                        ));
                         if let Ok(snapshot) = &result {
                             last_persisted_lru_lsm = snapshot.lsm;
                         }
@@ -1667,7 +1740,7 @@ impl BranchExecutionRuntime {
                     message = input.recv(), if !ownership_frozen => {
                         let Some(message) = message else {
                             while let Some(completion) = lanes.pending.next().await {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 Self::finish_dispatch(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1703,7 +1776,7 @@ impl BranchExecutionRuntime {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             input.close();
                             while let Some(message) = input.recv().await {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 Self::enqueue_prepared_inputs(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1719,7 +1792,7 @@ impl BranchExecutionRuntime {
                                 .await;
                             }
                             while let Some(completion) = lanes.pending.next().await {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 Self::finish_dispatch(
                                     BranchExecutionDispatchContext {
                                         runtime_handle: &runtime_handle,
@@ -1757,12 +1830,17 @@ impl BranchExecutionRuntime {
                 }
             }
 
-            if let Err(error) = persist_branch_instance_lru_snapshot(
-                &runtime_handle,
-                &domain,
-                &template,
-                &instances,
-                &mut last_persisted_lru_lsm,
+            if let Err(error) = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "explicit checkpoint cadence or terminal teardown captures one branch lifecycle \
+                 generation; the record path does not invoke it",
+                persist_branch_instance_lru_snapshot(
+                    &runtime_handle,
+                    &domain,
+                    &template,
+                    &instances,
+                    &mut last_persisted_lru_lsm,
+                )
             ) {
                 warn!(
                     domain = domain.as_str(),
@@ -1771,12 +1849,16 @@ impl BranchExecutionRuntime {
                     "failed to persist final branch lru snapshot"
                 );
             }
-            shutdown_all_branch_instance_instances(
-                &runtime_handle,
-                &domain,
-                &ingestor,
-                template.branch.as_ref(),
-                &mut instances,
+            nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "terminal source teardown ends the exact retained concrete branch lifetimes",
+                shutdown_all_branch_instance_instances(
+                    &runtime_handle,
+                    &domain,
+                    &ingestor,
+                    template.branch.as_ref(),
+                    &mut instances,
+                )
             )
             .await;
         });
@@ -1806,6 +1888,13 @@ impl BranchExecutionRuntime {
         self.sender.clone()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "install or terminate the one branch lifecycle task and its join handle"
+        )
+    )]
     pub(super) async fn shutdown(&self) {
         const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
@@ -1814,7 +1903,7 @@ impl BranchExecutionRuntime {
             return;
         };
 
-        match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await {
+        match nervix_primitives::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {
@@ -1855,6 +1944,16 @@ impl BranchExecutionRuntime {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "the branch lane serializes its own state while consuming admitted input",
+        key = "one concrete branch instance",
+        bound = "one admitted batch, expiry, eviction or tick is processed by its retained branch \
+                 owner"
+    )
+)]
 pub(super) async fn expire_branch_instance_instances(
     runtime: &Runtime,
     domain: &DomainName,
@@ -1866,11 +1965,15 @@ pub(super) async fn expire_branch_instance_instances(
 ) -> Vec<Option<BranchKey>> {
     let mut expired_keys = Vec::new();
     for (key, state) in instances.expire(now, expiration_after) {
-        runtime.observe_branch_instance_removed(
-            domain,
-            branch,
-            &key,
-            Some(BranchEvictionReason::Ttl),
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "the concrete branch ending or detach transition withdraws its exact metric identity",
+            runtime.observe_branch_instance_removed(
+                domain,
+                branch,
+                &key,
+                Some(BranchEvictionReason::Ttl),
+            )
         );
         runtime.invalidate_branch_relay_generation(domain, &key);
         let mut branch = state.lock().await;
@@ -1886,6 +1989,16 @@ pub(super) async fn expire_branch_instance_instances(
     expired_keys
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "the branch lane serializes its own state while consuming admitted input",
+        key = "one concrete branch instance",
+        bound = "one admitted batch, expiry, eviction or tick is processed by its retained branch \
+                 owner"
+    )
+)]
 pub(super) async fn evict_branch_instance_instances_to_capacity(
     runtime: &Runtime,
     domain: &DomainName,
@@ -1896,11 +2009,15 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
 ) -> Vec<Option<BranchKey>> {
     let mut evicted_keys = Vec::new();
     for (key, state) in instances.evict_lru_to_capacity(max_instances) {
-        runtime.observe_branch_instance_removed(
-            domain,
-            branch,
-            &key,
-            Some(BranchEvictionReason::Lru),
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "the concrete branch ending or detach transition withdraws its exact metric identity",
+            runtime.observe_branch_instance_removed(
+                domain,
+                branch,
+                &key,
+                Some(BranchEvictionReason::Lru),
+            )
         );
         runtime.invalidate_branch_relay_generation(domain, &key);
         let mut branch = state.lock().await;
@@ -1917,6 +2034,14 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
     evicted_keys
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "this operation installs, snapshots or retires retained execution state at an \
+                  explicit lifetime boundary"
+    )
+)]
 pub(super) async fn shutdown_all_branch_instance_instances(
     runtime: &Runtime,
     domain: &DomainName,
@@ -1950,6 +2075,14 @@ pub(super) fn branch_lru_placement(
     )
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "this operation installs, snapshots or retires retained execution state at an \
+                  explicit lifetime boundary"
+    )
+)]
 pub(super) async fn restore_branch_instance_lru_snapshot(
     runtime: &Runtime,
     domain: &DomainName,
@@ -1966,7 +2099,7 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     };
     let entries = decode_branch_lru_snapshot(&snapshot.payload)?;
     for (entry, restored) in entries.into_iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let key = restored.key;
         let last_ingestion = restored.last_ingestion;
         let incarnation = restored.incarnation;
@@ -1983,6 +2116,14 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
 
 /// Persist the branch lifecycle checkpoint `instances` form now and hand it to the ownership
 /// handoff that asked for it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "this operation installs, snapshots or retires retained execution state at an \
+                  explicit lifetime boundary"
+    )
+)]
 fn checkpoint_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &DomainName,
@@ -2007,6 +2148,14 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
     Ok(snapshot)
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "this operation installs, snapshots or retires retained execution state at an \
+                  explicit lifetime boundary"
+    )
+)]
 pub(super) fn persist_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &DomainName,
@@ -2033,6 +2182,14 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
 
 /// Offer the branch lifecycle of `instances` to the node's replicas at once, without writing it to
 /// storage: the periodic lifecycle snapshot persists it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "a branch that appears offers the entity's lifecycle to its replicas once, as \
+                  one branch lifetime begins"
+    )
+)]
 pub(super) fn publish_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &DomainName,
@@ -2050,6 +2207,16 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "the branch lane serializes its own state while consuming admitted input",
+        key = "one concrete branch instance",
+        bound = "one admitted batch, expiry, eviction or tick is processed by its retained branch \
+                 owner"
+    )
+)]
 pub(super) async fn tick_due_branch_instance_branches(
     snapshot: &DomainExecutionSnapshot,
     instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
@@ -2068,6 +2235,14 @@ pub(super) async fn tick_due_branch_instance_branches(
     next
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "branch lanes retain the concrete branch while consuming admitted input and \
+                  scheduled ticks"
+    )
+)]
 pub(super) fn record_next_branch_instance_branch_deadline(
     next: &mut Option<Timestamp>,
     candidate: Option<Timestamp>,
@@ -2118,15 +2293,14 @@ pub(super) async fn flush_branch_junction(
 mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
-    use tokio::time::timeout;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::*;
     use crate::{
         runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2217,7 +2391,7 @@ mod tests {
         assert_eq!(counters.outstanding_work(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_pending_materialized_batch_nacks_its_ack_root() {
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -2285,7 +2459,7 @@ mod tests {
 
     /// A domain force flush releases route buffers that a long logical cadence still holds, and
     /// the route's obligation clears only after its output has been published.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_releases_held_ingestor_route_buffers() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2327,7 +2501,8 @@ mod tests {
             pending: HashMap::default(),
             quiesce: OutputBufferQuiesceGauge::new(counters.clone()),
         };
-        let task = tokio::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+        let task =
+            nervix_primitives::task::spawn(route_task.run(route_input, shutdown_rx, force_flush));
 
         route_sender
             .send(
@@ -2343,8 +2518,8 @@ mod tests {
             .expect("the route task should accept input");
         timeout(Duration::from_secs(1), async {
             while counters.admitted_work() != 1 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -2373,7 +2548,7 @@ mod tests {
         );
         timeout(Duration::from_secs(1), async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let pending = runtime
                     .inner
                     .force_flush_by_domain
@@ -2383,7 +2558,7 @@ mod tests {
                 if pending == 0 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

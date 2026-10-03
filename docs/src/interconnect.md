@@ -21,6 +21,20 @@ outcomes. This chapter owns the transport deadline and failure signal.
 failure classes reach their callers and public edges. This chapter owns their wire representation
 and transport failure semantics.
 
+Clients never use this transport. [Client Session Protocol](./client-session-protocol.md) owns the
+public client boundary: its listeners, authentication, FlatBuffers frames, request correlation,
+command dispositions, and client recovery. The interconnect carries only node-to-node traffic,
+including the subscription fan-out that feeds a client's Row frames.
+
+Source-local compiler contracts distinguish peer/slot installation from recurring stream,
+frame, admission and acknowledgement operations. Retained admission records and placement progress
+name their bounded protocol key and transition bound; shared relay/connection discovery and remote
+ACK tracking retain exact-operation expectations naming their repair tasks. A conditional first
+installation from a recurring transport path documents that phase at the call. The compiler's
+contracts do not establish wire delivery or concurrency guarantees; those remain the protocols
+and checks described here. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
+owns the compiler authoring contract.
+
 ## Simulation Boundary
 
 The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a
@@ -30,22 +44,26 @@ fault model, supervision, replay and failure records, the scenario matrix, the c
 budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
 plugs into. Each seam has one production behavior, which is what every node uses:
 
-- **Sockets and name resolution.** The TCP listener and outbound streams use Tokio's
-  operating-system sockets, and peer names resolve through the node's own resolver, described in
-  [Peer Name Resolution](#peer-name-resolution). The dedicated `turmoil` test build selects
-  Turmoil's simulated TCP and its simulated DNS table at that one boundary and never constructs the
-  node resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in every
+- **Sockets and name resolution.** The TCP listener and outbound streams are the sockets of the
+  primitive boundary, `nervix_primitives::net`, which are Tokio's operating-system sockets, and
+  peer names resolve through the node's own resolver, described in
+  [Peer Name Resolution](#peer-name-resolution). In the dedicated `turmoil` test build the boundary
+  selects Turmoil's simulated TCP, and the peer resolver answers from the simulated DNS table
+  through the lookup the boundary offers in that build alone, never constructing the node
+  resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above them are the same code in every
   build.
 - **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production is the operating system's secure random source.
-- **Deadlines.** Every transport deadline is a Tokio instant, so it follows the clock of the runtime
-  it runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
+- **Deadlines.** Every transport deadline is an instant of the boundary's clock,
+  `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
+  runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
   lifetimes, and the drain deadline derived from certificate expiry.
-- **CPU work.** Encoding and decoding run through `nervix-execution`. Its Turmoil build runs bounded
-  CPU jobs as tasks on the simulated scheduler under the same admission, charge, and cancellation
+- **CPU work.** Encoding and decoding run through `nervix-execution`, which submits each admitted
+  CPU job through the boundary's CPU-job mechanism. In the Turmoil build that mechanism runs the
+  job as a task on the simulated scheduler, under the same admission, charge, and cancellation
   policy.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
@@ -66,10 +84,16 @@ placement, so every live node can receive every class of interconnect operation.
 confidentiality and integrity as well as peer authentication.
 
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
-peer. A configured bootstrap endpoint is the one exception: the initiating node knows the endpoint
-before it knows the remote node identifier, then obtains and authenticates that identifier from the
-peer certificate. Once discovered, a peer is addressed by its authenticated identity rather than by
-an unverified endpoint claim.
+peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
+endpoint before it knows the remote node identifier, then obtains and authenticates that identifier
+from the peer certificate. Once discovered, a peer is addressed by its authenticated identity
+rather than by an unverified endpoint claim.
+
+On restart, the node also uses the peer endpoints in its recovered Raft membership as gossip seeds,
+excluding its own endpoint. These are contact hints, not current discovery advertisements: the
+bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
+node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
+survivors even when its deployment has no configured bootstrap host.
 
 A peer advertises three endpoints independently: its interconnect endpoint as a host and port, and
 its client and web-console endpoints as URLs. Discovery converges field by field, so each one is
@@ -83,6 +107,11 @@ Discovery also carries whether the advertised process incarnation has begun term
 belongs to the incarnation rather than the stable node identifier: it keeps the process available to
 finish existing ownership handoffs and consensus work, but removes it from new placement
 destinations. A restarted process has a new incarnation and does not inherit the advertisement.
+
+The failure detector retains dead process identities separately from the live peer view. Explicit
+Raft member removal uses the newest observed live or dead identity to fence the stopped process;
+dead identities alone never make a peer eligible for membership admission. Scheduling can retain an
+already established health target while gossip liveness lapses, as described below.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
@@ -111,89 +140,54 @@ the on-demand bulk connection.
 
 ## Peer Name Resolution
 
-A node resolves every host name the interconnect dials through one resolver, owned by the
-`nervix-dns` crate and loaded once when the node starts. The resolver is Hickory's asynchronous DNS
-client: lookups never occupy Tokio's blocking pool and never call the C library resolver. It reads
-its configuration from three server options:
-
-| Option | Environment variable | Default | Meaning |
-| --- | --- | --- | --- |
-| `--dns-resolver-config` | `NERVIX_DNS_RESOLVER_CONFIG` | `/etc/resolv.conf` | A `resolv.conf`-format file: its `nameserver` lines, its last `search` or `domain` line, and the `ndots`, `timeout`, `attempts`, and `edns0` options |
-| `--dns-hosts-file` | `NERVIX_DNS_HOSTS_FILE` | `/etc/hosts` | A hosts-format file consulted before DNS |
-| `--dns-name-server` | `NERVIX_DNS_NAME_SERVERS` | none | A name server address with its port, repeatable or comma-separated, that replaces the resolver configuration's `nameserver` lines while the rest of that file still applies |
-
-A `nameserver` line names a server on port 53, asked over UDP and, for a truncated answer, over
-TCP. `attempts` counts tries of each server, as the C library counts them, and `timeout` bounds each
-try. When the file has neither a `search` nor a `domain` line, the domain of the host's own name is
-the search list, as the C library does. Lines the grammar cannot read are logged as warnings and
-ignored. Both files are read once, on the blocking pool; a changed file takes effect when the node
-next starts. Startup fails with `failed to load the name resolver configuration` when either file
-cannot be read, when no name server remains, or when a search domain is not a valid DNS name. There
-is no fallback to a public resolver or to the C library.
-
-A host resolves in this order:
-
-1. A literal IPv4 or IPv6 address, bracketed or not, is its own answer and sends no query.
-2. A name the hosts file lists, compared exactly and without case, answers with every address the
-   file gives it in either family, and nothing is asked of DNS for it.
-3. Any other name is asked of the name servers for IPv4 and IPv6 addresses together, completed by
-   the search list according to `ndots`. A name with a trailing dot is fully qualified and asked
-   exactly as written. The answer lists IPv4 addresses first, then IPv6 addresses, each in the
-   order the server gave them.
+A node resolves every host name the interconnect dials through the node's resolver.
+[Name Resolution](./name-resolution.md) owns that resolver: its configuration options, the order in
+which it answers literal addresses, hosts-file names and DNS names, its cache and TTL bounds, its
+limit on concurrent lookups, its failures, and what it does not implement of the operating system's
+name service. This section describes where and when the interconnect asks it, and what a failed
+lookup means for a peer.
 
 ### Where The Interconnect Resolves
 
 At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
-its gossip identity address, and its bootstrap endpoint, every address of which becomes a gossip
-seed. Each lookup has the connection setup timeout, five seconds by default, and a lookup that fails
-fails startup.
+its gossip identity address, and its configured bootstrap endpoint, every address of which becomes a
+gossip seed. Each lookup has the connection setup timeout, five seconds; failure of either required
+lookup fails startup with `failed to start cluster membership`. It also resolves the recovered Raft
+members' advertised endpoints in parallel. Their successful answers become additional gossip seeds;
+an unavailable recovered endpoint is logged at `warn` and skipped so it does not prevent the node
+from starting or using another reachable member. These startup answers are not looked up again:
+gossip keeps dialling the seed addresses they produced, and the gossip identity address stays the
+one resolved at startup. Once gossip discovers a live peer, the interconnect replaces the recovery
+hint with that peer's current advertised endpoint.
 
 A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
 deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
-that remains, so an address that refuses or never answers leaves time for the next one. The first
-address that accepts carries the TLS handshake. The advertised host stays the TLS server name, which
-the peer's certificate must name, and the authority of every request on the connection; a literal
-IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it dials the
-exact seed address it was given, and the node it authenticates is dialled at that address until
+that remains, so an address that refuses or never answers leaves time for the next one. The
+connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
+outbound connector transports; interconnect retains its socket and peer failure classification.
+The first address that accepts carries the TLS handshake, HTTP/2 and the connection hello, inside
+the same deadline; a failure there fails the attempt. The advertised host stays the TLS server
+name, which the peer's certificate must name, and the authority of every request on the connection;
+a literal IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it
+dials the exact seed address it was given, and the node it authenticates is dialled there until
 discovery publishes the node's own endpoint.
 
-Answers are cached for their DNS TTL, bounded above by one hour for addresses and thirty seconds for
-a name that does not exist or has no address, in a cache of 4,096 entries; an expired answer is
-asked again on the next attempt. Pool connections are keyed by the advertised endpoint rather than
-by an address, so a changed answer or an expired TTL never retires an established connection. Only
-the next connection attempt, after a connection ends, uses the new answer. A changed advertised
-host or port is a different endpoint and retires the old one, as described in
+Pool connections are keyed by the advertised endpoint rather than by an address, so a changed answer
+or an expired TTL never retires an established connection. Only the next connection attempt, after
+a connection ends, uses the new answer once the resolver's cached one has expired. A changed
+advertised host or port is a different endpoint and retires the old one, as described in
 [Connection And Credential Lifecycle](#connection-and-credential-lifecycle).
 
-At most 64 lookups run at once on a node; a lookup beyond that waits for a slot inside its own
-deadline. The resolver configuration's `timeout` and `attempts` bound each query, the connection
-setup deadline bounds the lookup, and the pool slot's reconnect backoff is the only retry around it,
-so DNS retries never multiply the transport's own.
-
-A lookup ends in an address list or in one of these failures: the name does not exist, the name has
-no address, no answer arrived in time, a name server refused or failed the query, no name server
-could be reached, or the host is not a valid DNS name. A failed lookup is a connection setup
-failure: the slot retries with its backoff, the attempt is counted with reason `resolution` in
-`nervix_interconnect_connection_failures_total`, and the failure is logged at `debug` with the
-endpoint and its kind. A peer whose name does not resolve stays a health target, and its probes
-fail as they would for a peer that cannot be reached.
-
-### Resolver Limits
-
-The resolver implements the `resolv.conf` and hosts-file behavior above and nothing else of the
-operating system's name service. It does not consult `nsswitch.conf`, so the hosts file always
-answers before DNS; it does not load NSS modules, so names served only by LDAP, NIS, `mdns`, or
-`myhostname` do not resolve; it does not answer `.local` names by multicast DNS; and it ignores the
-`rotate`, `single-request`, `use-vc`, `no-aaaa`, and `trust-ad` options. A platform split-DNS policy
-applies only as far as the name server the configuration names applies it, for example the
-`systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
-their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
-
-The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, and Iceberg REST and
-object-store clients. Other connectors and client libraries still resolve through their own
-drivers. The ledger in `tests/dns-resolution-ledger.md` records each boundary and its current
-owner.
+The connection setup deadline bounds each lookup, and the pool slot's reconnect backoff, described
+in [Connection And Credential Lifecycle](#connection-and-credential-lifecycle), is the only retry
+around it, so DNS retries never multiply the transport's own. A failed lookup is a connection setup failure: the slot retries with its
+backoff, the attempt is counted with reason `resolution` in
+`nervix_interconnect_connection_failures_total`, and the failure is logged at `debug` as
+`interconnect pool connection failed` with the peer's node, endpoint, pool class and slot. Only
+outbound pool connections are counted; the startup lookups and the bootstrap exchange are not. A
+peer whose name does not resolve stays a health target, and its probes fail as they would for a peer
+that cannot be reached.
 
 ## Peer Identity And Authentication
 
@@ -229,7 +223,9 @@ Three identities serve different purposes:
 
 - The certificate node identifier is the stable authenticated identity of a node.
 - The discovery incarnation and endpoint generation identify the current cluster presence and
-  advertised address of that node.
+  advertised address of that node. The incarnation also names the run of a node that registered a
+  relay admission or record acknowledgement, as
+  [Acknowledgement Registrations](#acknowledgement-registrations) describes.
 - The process epoch identifies one running interconnect process and fences in-memory delivery state
   across restarts. It is drawn from the transport's entropy when the transport binds, which in
   production is the operating system's secure random source.
@@ -328,6 +324,12 @@ there is no version negotiation or alternate decoding path. A wire-contract chan
 requires a coordinated cluster stop and start with all nodes on the same version.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
+
+The fingerprint also covers fixed-width 64-bit counts in Models, transaction commands and records,
+and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
+native decoding; an unrepresentable count fails decoding. Window processor state has current
+runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
+before decoding histogram delayed-removal bucket indices in the same count representation.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
@@ -473,13 +475,20 @@ operation's domain semantics.
    so their reserved quotas and typed outcomes apply independently of generic events.
 3. **Streamed response.** The receiver declares the exact byte length, then sends a flow-controlled
    sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
-   reader cancels the stream and releases its reservations.
+   reader cancels the stream and releases its reservations. The producer's opening callback and
+   each chunk carry a local `StreamHandlerError` report; an admission, storage, or encoding cause
+   stays beneath that handler context until the response reaches the wire boundary.
 4. **Ordered duplex stream.** Each direction sends length-prefixed, validated frames in order and
    may close independently. Opening the stream is bounded by the operation's declared setup
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
    is awaiting. The initiator's sender reports when the peer's flow control last accepted its
-   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Consensus append
-   traffic uses this form.
+   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Receiving is
+   cancel-safe on both ends: a frame is decoded under the pool's memory and CPU admission after it
+   leaves the stream, and a receive its caller abandons, because a timer or command it selects
+   against won, leaves that decoding to the next receive, which finishes the frame before it reads
+   another. No abandoned receive loses a frame or reorders one. Consensus append traffic,
+   [client producer links](#client-producer-links) and
+   [client consumer streams](#client-consumer-streams) use this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
 
@@ -564,8 +573,70 @@ These steps expose three intentionally different outcomes:
 
 While admission or an attached acknowledgement is unresolved, the receiver sends coalesced progress
 events through the reserved management quota. The sender treats five seconds without progress as a
-stalled exchange and bounds the total admission wait at five minutes. Progress keeps a live attempt
-from being mistaken for a disconnected one; it does not change the delivery outcome.
+stalled exchange and bounds the total admission wait at five minutes. Once the delivery is admitted,
+the sender waits for an attached record acknowledgement only while the receiver keeps reporting it,
+and fails one the receiver reports nothing about for fifteen seconds, as
+[Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
+attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
+
+### Acknowledgement Registrations
+
+The sender correlates the runtime admission of a delivery and every attached record acknowledgement
+it waits on through a registration it places in the delivery. A registration names the waiting
+entry by a number and names the run of the sending node that registered it: the node and the
+discovery incarnation of that run. Every process numbers its registrations from one, so the number
+alone repeats across restarts of a node, and the run is what keeps the registrations of different
+runs apart.
+
+The receiver returns every progress event and terminal outcome to the node the registration names,
+carrying the whole registration back with it. The sending node resolves an entry only when the
+registration names its current run. A receiver can still be resolving what an earlier run
+registered after that run ended: a record acknowledgement whose downstream work completes after the
+sending node restarted is the common case. Such an outcome is rejected and logged at `debug`. It
+never resolves the admission or record acknowledgement the current run holds under the same number,
+so a success reported for an earlier run can never acknowledge a record, and so commit it at its
+source, before its own delivery completed. The earlier run's entries ended with its process, and
+its sources redeliver the records they had not committed.
+
+A receiver issues a grant only when the admission registration names the authenticated sending
+node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
+terminal outcome addressed to an earlier run neither completes nor retires the admission a later
+run registered under the same number.
+
+### Record Acknowledgements The Receiver Stops Reporting
+
+A receiver reports every record acknowledgement it holds to the node that registered it. While the
+downstream work the acknowledgement stands for continues, it sends a report 100 milliseconds after
+its previous one was delivered or given up, and when the work completes it sends the terminal
+outcome once. Each report and the outcome is one bounded event that the receiver retries for up to
+five seconds and then gives up. Once the outcome is given up, or the receiver's run ends, nothing
+reports that acknowledgement again.
+
+The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
+it. From the moment the delivery that carries the acknowledgement is admitted, a sweep once a second
+counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
+once fifteen seconds of such passes have gone by. The bound outlasts two consecutive reports that
+each exhaust their five-second deadline, so a receiver that is still working on the record is not
+mistaken for one that stopped. Before admission, the delivery's own admission wait decides its
+failure, and the sweep leaves its acknowledgements alone. The sweep counts its own passes rather
+than elapsed time, so a registering node whose own execution stalled, such as a paused container,
+does not fail acknowledgements whose reports it could not receive meanwhile.
+
+A failed acknowledgement resolves negatively exactly once. The sweep's removal rechecks the count
+under the entry's exclusive map lock, so a report that arrives first keeps the acknowledgement
+pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
+sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
+routes, so a sink that already completed the record can receive it again. A report or outcome that
+arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
+
+Every node on a record's path applies the same bound. A relay owner that routed a record to the
+node of an attached consumer reports the record alive to the source's node for as long as the
+record's acknowledgement tree is unresolved. Without the bound, a terminal outcome lost between the
+consumer's node and the relay owner would keep the source's acknowledgement alive, and its
+`ACK TIMEOUT` from ever passing, for the rest of the relay owner's run. With it, the relay owner
+fails the acknowledgement fifteen seconds after the consumer's node fell silent, stops reporting
+the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
+`warn`, one line per receiver with the number it failed.
 
 ### Ordering, Retry, And Reconciliation
 
@@ -611,6 +682,37 @@ Removing or evicting a concrete branch cancels its unadmitted channel generation
 reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
 keeps a previous branch lifetime from being confused with the new runtime instance.
 
+### Consumers That Leave The Receiver
+
+The relay owner also fences the start of each buffered batch's fan-out against its local schedule
+swap. It acquires a dispatch permit before reading the local and remote consumer sets, and keeps
+that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
+share. A swap closes the gate
+and waits for existing permits before changing those sets. If the gate is already closed when a
+buffered batch starts fan-out, the owner fails its record acknowledgements and the source retries
+after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
+swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
+an attached sibling on the old destination cannot acknowledge a batch while another attached
+consumer moves to a new destination before the owner selected routes for that batch.
+
+The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
+it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
+batch to a node because its schedule places an attached consumer of the relay there. That consumer
+can leave the node after the owner routed the batch: a forced recovery moves every runtime node off
+a node that application health or gossip judged unavailable, including one that is still running,
+and the node stops the moved consumer when it applies the published schedule. The gap between
+admission and dispatch can be long: the receiver sends the terminal admission outcome to the owner
+before it dispatches the batch, and that send can take up to its five-second deadline while the
+owner is unreachable.
+
+A routed batch that carries record acknowledgements and finds no attached consumer of its relay on
+the receiving node fails those acknowledgements. Its admission stands, so the transport does not
+send it again, but the owner receives a failed record acknowledgement and fails its source attempt.
+The source then redelivers the record along the owner's current routes. The receiver never reports
+an attached record acknowledged when no attached consumer took the batch, so an attached record
+cannot be committed at its source without a consumer having completed it. A batch without record
+acknowledgements, such as a detached send, completes at admission as before.
+
 ## Membership, Consensus, And Bulk Transfer
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
@@ -618,27 +720,43 @@ incarnations but does not replace application health checks. Gossip payloads rem
 management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
 take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
 bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
-shut down. A node that is shutting down closes its gossip transport before it stops gossip, so an
-exchange still waiting on a peer that stopped first ends at once instead of holding shutdown until
-its one-second deadline.
+shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination. One
+worker per destination drives its interconnect requests in order, under the one-second request
+deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
+to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
+retries. Closing the transport cancels queued work and exchanges in flight.
+
+Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
+listed live until its missing heartbeats are observed, even after its links stop carrying requests;
+application probes provide the separate signal that eventually makes its work eligible for failover.
+
+Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
+period. When application health has retired one of those peers from the outbound pool, a gossip
+exchange reinstalls its known route before sending. The replacement connection still authenticates
+the peer's node identity and advertised endpoint. This lets a node with no configured bootstrap
+seed contact retained peers again after a partition heals; the returning exchange restores gossip
+membership, after which application health and Raft reconciliation use the current advertisements.
 
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
-with either of them unavailable. Membership follows a replaced endpoint by refreshing the learner
-at its new address before promotion, and a node removed from membership stays out until it returns
-with a newer incarnation.
+with either of them unavailable. Membership replaces the recorded address of an existing member
+when its advertised endpoint changes. A returning voter remains a voter, while a learner still
+waits to catch up before promotion. The recorded address is a startup contact hint; live Raft
+traffic uses authenticated discovery by node identity. A node removed from membership stays out
+until it returns with a newer incarnation.
 
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
 the leader identity without a redirect target rather than a guessed address, and retries until an
-endpoint appears.
+endpoint appears. [Leader Discovery, Redirect, And
+Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) defines how
+clients follow it.
 
-Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
-reads its stop request only between rounds, and a round exchanges with each selected peer in turn
-under a one-second request timeout. Closing the path first makes an exchange still waiting on a
-peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
+Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. Closing
+the path first cancels destination workers and their queued or in-flight requests, so a peer that is
+itself stopping cannot hold teardown until an exchange deadline.
 
 Session subscription interest also propagates through gossip. The key encoding is private to the
 cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
@@ -660,7 +778,9 @@ number of subscriptions from any number of sessions share one advertisement and 
 withdraws it. Each write of the advertisement reads the lease count while it holds the gossip lock
 that orders the writes, so the last write always matches the count: a release that finishes late
 cannot withdraw the interest of a subscription that attached after it. The count per relay is
-exported as `nervix_session_subscriptions`.
+exported as `nervix_session_subscriptions`. [Row
+Subscriptions](./client-session-protocol.md#row-subscriptions) defines what the subscriber's node
+does with the batches this fan-out delivers.
 
 Consensus separates traffic according to the progress it protects:
 
@@ -733,7 +853,10 @@ names, so an acknowledgement for a replaced generation never satisfies the repli
 current one.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
-activate after a later one is committed.
+activate after a later one is committed. The control plane computes the exact fingerprint of the
+committed schedule before runtime installation and carries it in the complete typed execution
+revision used for activation and reconciliation; a node does not reconstruct it from a second
+schedule view.
 Window state also binds to its current window model. A model replacement with unchanged schemas
 therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
 window definition.
@@ -764,11 +887,48 @@ acknowledgements a guest checkpoint covers only once every replica the committed
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
 checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
-its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
-replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
-refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
-owner has evicted. [WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint
-these acknowledgements complete.
+its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
+owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
+checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.
+[WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint these
+acknowledgements complete.
+
+A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
+entity, through two replication-class requests. A state synchronization request names one placement
+and the revision the replica holds of it. The owner answers from the registry that keeps the
+placement's kind of state: with the checkpoint when it is newer, and with nothing otherwise. Only for
+a placement it holds no state for does the owner read its storage. A branch checkpoint listing
+request names the entity's branch lifecycle placement and the cursor the replica's previous listing
+returned. The owner answers with the next changes of its catalog of the entity's branch
+checkpoints, in the order they happened and at most 256 of them: each branch whose checkpoint
+changed, with the state that checkpoint belongs to and its newest revision, and each branch whose
+state went away, followed by the cursor after them and whether more changes follow. The listing
+restarts from the catalog's beginning when the replica has no cursor, when its cursor belongs to
+another catalog, such as one a replaced or restarted owner kept, and when it is older than the
+oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
+holds none. Both requests are answered only while the answering node is assigned the placement. A
+round synchronizes the lifecycle, reads the catalog's changes, and requests only the checkpoints of
+the branches that changed or were announced, so a round in which no branch changed sends two
+requests however many branches the entity has.
+
+The owner of a placement offers its newest checkpoint to the replicas the committed schedule
+assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
+that revision, until every one of them has, the node stops being the placement's primary, the
+placement's state goes away, or the node stops. A newer checkpoint taken meanwhile raises the
+revision on offer instead of starting a second offer. The owner records the highest revision each
+replica acknowledged, so an acknowledgement delivered after a newer one never lowers it, and a
+Kafka offset commit waiting for its replica quorum, like a WASM checkpoint waiting for its replicas,
+completes on the acknowledgement that satisfies it rather than at its deadline. Only a node that
+holds a placement's state announces it: an ownership handoff announces the final checkpoints it
+captured from live state, and the placements it fills from its storage or with an empty checkpoint
+reach replicas through their own synchronization. A replica acts on an announcement by waking the
+task that keeps its copy of that placement current, which keeps the announcement until it next
+waits when it is busy; an announcement of a placement the replica holds no state for wakes nothing.
+The announcements of a branch-keyed entity's lifecycle and branch checkpoints wake the entity's one
+replica task, which takes the newest announcement of each at the start of its next round and
+fetches or acknowledges each announced revision then. The task also runs a round every replication
+poll interval, so a checkpoint whose announcement was lost reaches the replica within one interval.
+
 The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
 replica that installs that revision replaces the evicted branch's rows and sketch panes with the
 empty state. The branch lifecycle checkpoint records an incarnation for each concrete branch;
@@ -802,6 +962,82 @@ The [Control Plane](./control-plane.md) defines when replicated changes and reso
 authoritative. The [Data Plane](./data-plane.md) defines how a local execution consumes transferred
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret
 their state.
+
+## Client Producer Links
+
+A client may open a producer for a [client ingestor](./ingestors.md#client-ingestors) through any
+live node. When the serving node does not execute the ingestor, it forwards the producer to the node
+that does over one `client_producer_link`: an ordered duplex stream on the relay pool, admitted
+through the shared relay subquota, with a five-second setup deadline. A serving node keeps at most
+one link to each owning node, opened by the first producer that needs it and shared by every
+producer it forwards there, so forwarding holds one stream per peer however many producers use it.
+Two opens racing for one owner start one link.
+
+The opening frame names the serving node, and the owning node refuses a link whose named node is
+not the peer it authenticated. Each forwarded producer then has a key the serving node assigns and
+never reuses within its process, so a late frame about an ended producer can never reach a later
+one. The serving node sends `Open` with the domain, ingestor, expected fields, credit, and the
+largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
+bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
+with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
+`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`.
+Frames of one producer keep their order in both directions, so its open precedes its batches and
+its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
+over the link, and the frames are validated and charged to the relay memory class like every other
+relay-pool operation.
+
+The owning node queues a forwarded batch like any other, but admits it only once the serving node
+has cleared it. When the batch's turn in the ingestor's window comes, the owning node takes a slot
+of the window for it and sends `Admitting` naming the batch. The serving node records that the
+batch may now be admitted, answers `Clear`, and from then on counts the batch as possibly admitted;
+only on that `Clear` does the owning node hand the batch to its admission worker. The serving node
+clears only a batch it forwarded and holds no outcome for, and it answers in the order it was asked,
+so clearances return in the order the owning node requested them. Admitting a forwarded batch
+therefore costs one more round trip of the link. A batch awaiting its clearance holds its slot of
+the window, so a serving node that stops answering holds at most the slots it was asked to clear,
+until the silence limit ends its link.
+
+The serving node waits at most 20 seconds for the owning node to answer a forwarded open, including
+opening the link. Both ends send a heartbeat after two seconds without other frames and treat ten
+seconds without hearing anything as a lost link; the owning node skips a heartbeat rather than queue
+it behind 64 unsent answers. When a link ends for any reason, the serving node refuses the opens it
+has not heard back about as `EndpointUnavailable` and ends every producer the link carried as
+`OwnerLost`. Before that end, it answers each batch of the producer that it never cleared — whether
+it sent the batch or the link ended before it could — as `NotAdmitted` with `ProducerEnded`: the
+owning node admits nothing without a clearance, so none of those batches entered the graph. Only
+the batches it cleared become `OutcomeUnknown` with cause `OwnerLost`. A crashed owning node closes
+its connections and ends the link at once; one that stops answering without closing them ends it
+when the silence limit passes. The owning node detaches the link's producers: their admitted
+batches continue through the graph with nobody left to answer them, and the batches it queued or
+was clearing are dropped unadmitted, releasing their slots of the window. A later producer opens a
+new link.
+
+Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
+for the batches its session holds, and the owning node again for the batches it retains for another
+node. The link adds no reservation of its own beyond the transport's per-frame charge.
+[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+
+## Client Consumer Streams
+
+When a session opens a consumer of a `TO CLIENT` emitter executing on another node, the serving
+node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
+shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
+schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
+own 128 MiB consumer budget and attaches to its local emitter endpoint before replying `Opened`
+with the endpoint description or `Refused` with a typed cause. The serving node has already
+reserved the same grant against its session and node budgets.
+
+The owner sends each attempt's identity, fresh ACK reference, source relay, opaque branch
+fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes.
+It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool.
+The serving node checks the announced length against the grant and reassembles one delivery before
+answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
+one typed result for each; an independent writer keeps settlement and heartbeat sends from
+blocking response reads. Both ends send two-second heartbeats and end the attachment after ten
+seconds of peer silence. A lost stream detaches the owner's consumer, revokes its attempts and
+allows the retained batches to be reassigned. Output and ACK state stay volatile, so an owner
+loss can require upstream replay. [Client Session
+Protocol](./client-session-protocol.md#emitter-consumers) owns what clients observe.
 
 ## Domain Clock Progress
 
@@ -853,14 +1089,19 @@ An established HTTP/2 connection and a successful transport `PING` show that byt
 do not show that the peer application can accept work. Nervix therefore probes application health
 through a typed management request with reserved liveness capacity.
 
-A peer becomes a health target and an outbound target only while its interconnect endpoint is
-available. One whose endpoint is unavailable is neither probed nor dialled, and its availability
-stays unknown until discovery publishes an endpoint for it.
+A peer becomes a health target and an outbound target once discovery publishes its interconnect
+endpoint. A target with no usable endpoint is neither probed nor dialled, and its availability stays
+unknown until discovery publishes one. A previously established target remains eligible for probes
+and outbound connections through a Chitchat liveness loss while application health still has an
+observation of it from the node-unavailability interval, as described below. A different
+incarnation or advertised endpoint must establish a new target.
 
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
 peer occupies only its own concurrency slot. The next regular round begins roughly one second after
-the previous round finishes.
+the previous round finishes. Gossip updates remain pending while those bounded probes finish and
+start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
+updates must not prevent an unreachable peer's deadline from becoming a failed observation.
 
 Every result is bound to the exact certificate node identifier, discovery incarnation, endpoint
 generation, advertised address, and observation time that were targeted. A healthy response must
@@ -874,11 +1115,27 @@ Health observations distinguish:
   including a target whose advertised host does not resolve.
 - **Capacity exhausted:** the probe could not obtain its reserved local capacity.
 
-A missing, stale, or capacity-exhausted observation produces unknown availability. It
-does not mark a peer unavailable and does not extend a previous run of failures. Only continuous,
-fresh failures for the configured node-unavailability interval produce unavailable status; a healthy
-observation resets that run. Scheduling and runtime availability use this application result, while
-consensus membership continues to use the cluster topology established by gossip.
+A missing, stale, or capacity-exhausted observation produces unknown availability. It does not mark
+a peer unavailable and does not extend a previous run of failures. Only continuous, fresh failures
+for the configured node-unavailability interval produce unavailable status; a healthy observation
+resets that run. Consensus membership continues to use the cluster topology established by gossip.
+
+Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
+listing live only while its latest application observation is younger than the node-unavailability
+interval and has not made it unavailable. A healthy, briefly failing, or capacity-refused
+observation from that interval keeps the peer available. A peer with no completed observation in the
+interval falls back to its gossip liveness, even though no failure was recorded. A stopped peer
+therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
+its last observation has aged out, whether or not any probe to it completes.
+
+Command completion reads the leader's effective availability view through the
+`application_completion_peers` management progress request. The response names the leader's
+incarnation, Raft term, and required process incarnations. A follower uses it only while its own
+Raft leader and term still match, and includes its own incarnation in the barrier. Failure to reach
+the leader leaves the command pending. This avoids conflicting completion sets when application
+health is asymmetric: a connected follower may still probe an unreachable peer successfully after
+the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
+reported incarnation.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
@@ -891,6 +1148,13 @@ milliseconds and capped at five seconds. A peer removal, incarnation change, or 
 change retires the old target and cancels work tied to its slots. New operations use only the new
 target generation. A new DNS answer for the same advertised endpoint is not a target change: it
 leaves established connections in place and is used by the next connection attempt.
+
+Each established HTTP/2 connection sends a protocol ping every 15 seconds and waits at most ten
+seconds for its acknowledgement. The outbound and inbound ends both close a session that cannot
+answer, independently of the operating system's TCP retransmission timeout. Closing the outbound
+end starts its pool slot's bounded reconnect; closing the inbound end releases the per-peer class
+slot so that reconnect can be accepted. Ordinary request deadlines still apply to individual
+operations during the detection window.
 
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so
@@ -952,12 +1216,19 @@ Transport failures identify name-resolution, setup, authentication, admission, e
 flow-control, timeout, remote-response, and target-departure failures separately. Typed remote
 errors remain available to the operation owner, which decides whether a request is safe to retry.
 The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
+Local transport operations return `error_stack` reports. TLS and wire failures retain their typed
+causes beneath `TransportError`; typed requests and stream readers add `RequestError` context while
+retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, and
+indeterminate-delivery decisions inspect the current typed context, not formatted report text.
+An answering node sends its established remote failure class or stream rejection text over the
+wire; a local report's cause chain is not serialized into an HTTP/2 response.
 
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and
 selected runtime state remains in its owning snapshot or replication mechanism. This boundary is
-why process epochs are part of relay delivery identities and why an unresolved result across a
-receiver restart is reported as indeterminate.
+why process epochs are part of relay delivery identities, why an unresolved result across a
+receiver restart is reported as indeterminate, and why an acknowledgement registration names the
+run of the node that registered it.
 
 An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
 lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an
@@ -975,7 +1246,10 @@ setup, handshake, capacity, and closed failures, so a DNS outage is visible as i
 
 Typed-request observations identify application health as operation `liveness` and replaceable
 domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
-request counts, outcomes, latency, and quota failures can be evaluated independently.
+request counts, outcomes, latency, and quota failures can be evaluated independently. A client
+producer link's opening, failure, silence, and the producers it ends or detaches are logged at
+`debug` on both ends; the owning node's client-ingestor metrics count forwarded producers apart
+from local ones.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.

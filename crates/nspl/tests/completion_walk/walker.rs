@@ -11,10 +11,10 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use ahash_compile_time::{HashSet, HashSetExt};
+use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     grammar::{Grammar, ParseOutcome},
@@ -213,10 +213,10 @@ impl Walker {
     fn evaluate_level(&self, level: &[WalkState]) -> Vec<Evaluated> {
         let cursor = AtomicUsize::new(0);
 
-        let parts = std::thread::scope(|scope| {
+        let parts = nervix_primitives::thread::scope(|scope| {
             let handles = (0..self.jobs)
                 .map(|_| {
-                    std::thread::Builder::new()
+                    nervix_primitives::thread::Builder::new()
                         .stack_size(WORKER_STACK_SIZE)
                         .spawn_scoped(scope, || {
                             let mut evaluated = Vec::new();

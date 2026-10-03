@@ -10,11 +10,12 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How a datetime kernel traverses its Arrow buffers.
 
-use std::{str::FromStr as _, sync::Arc as StdArc};
+use std::str::FromStr as _;
 
 use arrow_array::{Int64Array, StringArray, TimestampNanosecondArray, UInt32Array};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::StdArc;
 
 use super::{ExecutionContext, execute_program_in_context_sync, execute_program_sync};
 use crate::{
@@ -74,7 +75,9 @@ fn compile_error(source: &str, inputs: Vec<Field>, outputs: Vec<Field>) -> Strin
         [CompileBinding::writable("input", input_schema)],
     )
     .expect_err("the datetime program must be rejected")
+    .current_context()
     .message
+    .clone()
 }
 
 fn column<'a>(batch: &'a TypedBatch, name: &str) -> &'a TypedArray {

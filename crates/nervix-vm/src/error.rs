@@ -456,6 +456,17 @@ impl RowErrors {
         self.rows[row].push(error);
     }
 
+    /// The rows holding an error, as a bitmap over the batch, or `None` when no row does. A batch
+    /// without errors answers without visiting a row.
+    pub(crate) fn failed_rows(&self) -> Option<BooleanBuffer> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        Some(BooleanBuffer::collect_bool(self.row_count, |row| {
+            !self.row(row).is_empty()
+        }))
+    }
+
     /// The rows holding an error recorded inside `span`, as a bitmap over the batch, or `None`
     /// when no row does. A batch without errors answers without visiting a row.
     pub(crate) fn rows_failed_within(&self, span: Span) -> Option<BooleanBuffer> {
@@ -581,12 +592,66 @@ impl<'a> RowErrorMask<'a> {
     }
 }
 
+/// The semantic reason expression compilation failed. Each variant retains its stable diagnostic
+/// code independently of the human-readable detail and source span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum CompileErrorCode {
+    DuplicateNamespace,
+    InternalNamespaceNotWritable,
+    InvalidArgument,
+    InvalidCase,
+    InvalidCondition,
+    InvalidFilter,
+    InvalidFunctionArity,
+    InvalidIpNetwork,
+    InvalidPredicateBinding,
+    InvalidSetElement,
+    InvalidSideEffectCall,
+    MissingOutputNamespace,
+    MissingPredicateBinding,
+    MissingPredicateInputNamespace,
+    MissingSet,
+    NonConstantSetElement,
+    NullForRequiredField,
+    NullSetElement,
+    NullableHeaderArgument,
+    SensitiveLeak,
+    TypeMismatch,
+    UnknownFunction,
+    UnknownIdentifier,
+    UnknownSensitiveField,
+    UnknownSet,
+    UnsupportedAssignmentTarget,
+    UnsupportedBinary,
+    UnsupportedCast,
+    UnsupportedFunction,
+    UnsupportedFunctionContext,
+    UnsupportedIdentifier,
+    UnsupportedInvocation,
+    UnsupportedInvokeContext,
+    UnsupportedMembership,
+    UnsupportedPassthrough,
+    UnsupportedRange,
+    UnsupportedType,
+    UnsupportedUnary,
+    UninitializedRequiredField,
+    UntypedNull,
+    WrongStream,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message} at {span}")]
 pub struct CompileError {
-    pub code: &'static str,
+    pub code: CompileErrorCode,
     pub message: String,
     pub span: Span,
+}
+
+impl CompileError {
+    pub fn code(&self) -> &'static str {
+        self.code.into()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -635,14 +700,6 @@ pub enum RuntimeError {
         #[source]
         source: ArrowError,
     },
-    #[error("text search kernel failed: {report}")]
-    TextSearchKernel {
-        report: Box<error_stack::Report<RuntimeError>>,
-    },
-    #[error("collection kernel failed: {report}")]
-    CollectionKernel {
-        report: Box<error_stack::Report<RuntimeError>>,
-    },
     #[error("required output column '{column}' is uninitialized")]
     UninitializedRequiredColumn { column: String },
     #[error("required output column '{column}' contains null values")]
@@ -656,8 +713,12 @@ pub enum RuntimeError {
     },
     #[error("unsupported column type {data_type:?}")]
     UnsupportedColumnType { data_type: DataType },
-    #[error("blocking execution task failed: {message}")]
-    BlockingExecutionFailed { message: String },
+    #[error("the node's bounded execution did not admit the program")]
+    ExecutionNotAdmitted,
+    #[error("the program panicked on an executor worker")]
+    ExecutionPanicked,
+    #[error("the caller stopped waiting for the program between two of its instructions")]
+    ExecutionCancelled,
     #[error("function '{function}' requires caller-supplied values")]
     MissingFunctionInjector { function: String },
     #[error(
@@ -700,22 +761,6 @@ pub enum CollectionLimit {
     VectorOffsets,
 }
 
-impl From<error_stack::Report<RuntimeError>> for RuntimeError {
-    fn from(report: error_stack::Report<RuntimeError>) -> Self {
-        Self::CollectionKernel {
-            report: Box::new(report),
-        }
-    }
-}
-
-impl RuntimeError {
-    pub(crate) fn text_search_kernel(report: error_stack::Report<Self>) -> Self {
-        Self::TextSearchKernel {
-            report: Box::new(report),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -723,6 +768,24 @@ mod tests {
         RowErrors, ShiftOperation, SideError, SideErrorReason, TextOperation,
     };
     use crate::ir::RegisterType;
+
+    #[test]
+    fn failed_rows_are_a_bitmap_only_once_a_row_fails() {
+        let mut errors = RowErrors::new(70);
+        assert!(errors.failed_rows().is_none());
+
+        let error = SideError {
+            reason: SideErrorReason::IntegerOverflow(IntegerOperation::Addition),
+            span: crate::program::Span { start: 0, end: 1 },
+        };
+        errors.push(1, error.clone());
+        errors.push(65, error.clone());
+        errors.push(65, error);
+
+        let failed = errors.failed_rows().expect("two rows failed");
+        assert_eq!(failed.len(), 70);
+        assert_eq!(failed.set_indices().collect::<Vec<_>>(), [1, 65]);
+    }
 
     #[test]
     fn error_code_strings_are_stable() {

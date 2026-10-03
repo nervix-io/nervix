@@ -1,34 +1,41 @@
 //! Representative values of every message family, at the edges of their ranges.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
+    AckWindow, ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
-    CanonicalImpactSet, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
-    DomainLifecycleAction, DomainLifecycleImpact, ExecutionStepImpactReport, ExecutionStepOutcome,
-    ForceFlushImpact, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind,
-    ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge, ModelChangeAspect, ModelKind,
-    ModelName, NodeRef, OperationImpactReason, OperationImpactReport, OwnershipMoveImpact,
-    ParseAsType, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome,
-    RebuildImpact, RebuildReason, RequestedResourceVersion, ResourceBindingImpact,
-    ResourceCatalogAction, ResourceCatalogImpact, SchemaField, StatePurge, StateResetImpact,
-    Timestamp, TransactionImpactReport, TransactionInspectionTarget, TransactionLifecycle,
-    TransactionOperation, TransactionOperationAdmission, TransactionOperationRange,
-    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    CanonicalImpactSet, ClientAttachmentId, ClientConsumerLimits, ClientEndpointContract,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerGrant, ClientProducerLimits,
+    ClientProducerPolicy, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
+    DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
+    DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
+    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
+    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
+    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
+    SchemaField, StatePurge, StateResetImpact, Timestamp, TransactionImpactReport,
+    TransactionInspectionTarget, TransactionLifecycle, TransactionOperation,
+    TransactionOperationAdmission, TransactionOperationRange, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
 
 use super::fixtures::{name, non_zero, operation, reference, request};
 use crate::{
-    AttachTransactionRequest, CancelRequest, CellWriter, ChoiceLookupRequest, ChoiceSelection,
-    ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
-    CommandRequest, Diagnostic, EncodedFrame, InspectTransactionRequest, LeaderEndpoints,
-    LeaderRedirect, OutcomeOrigin, RowBranch, RowSchema, SelectDomainRequest, ServerFrame,
-    SessionLimits, SourceSpan, StatementDisposition, StatementOutcome, SubscribeRequest,
+    AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, CellWriter,
+    ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
+    CloseEmitterRequest, CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
+    ConsumerId, DetachDomainClockRequest, Diagnostic, EmitterBatchDecision, EncodedFrame,
+    InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
+    OpenIngestorRequest, OutcomeOrigin, ProducerId, ReadEmitterBatchRequest, RowBranch, RowSchema,
+    SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest, SourceSpan,
+    StatementDisposition, StatementOutcome, SubmitBatchRequest, SubscribeRequest,
     SubscriptionHandle, SubscriptionRowsEncoder, SubscriptionType, SuggestRequest,
     UnsubscribeRequest, WireEncodeError,
 };
@@ -159,6 +166,67 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             .with_page(2, Some("choice-page-two".to_string()))
             .assured("two choices fit a bounded page"),
         ),
+        ClientRequest::AttachDomainClock(AttachDomainClockRequest {
+            domain: name("simulation"),
+        }),
+        ClientRequest::DetachDomainClock(DetachDomainClockRequest {
+            domain: name(&"d".repeat(128)),
+        }),
+        ClientRequest::Choice(
+            ChoiceLookupRequest::new(
+                ChoiceTarget::RelayField,
+                vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(name("tenant")),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(NodeRef::new(
+                            ModelKind::Relay,
+                            name::<ModelName>("orders"),
+                        )),
+                    },
+                ],
+                "amo".to_string(),
+            )
+            .with_page(100, None)
+            .assured("the largest bounded page is a valid page size"),
+        ),
+        ClientRequest::OpenIngestor(OpenIngestorRequest {
+            domain: name("tenant"),
+            ingestor: name("orders_in"),
+            expected_fields: producer_fields(),
+            limits: ClientProducerLimits {
+                batches: NonZeroU32::new(8).assured("a literal non-zero count"),
+                bytes: non_zero(4 * 1024 * 1024),
+            },
+        }),
+        ClientRequest::SubmitBatch(SubmitBatchRequest {
+            producer: producer(),
+            batch: bytes::Bytes::from_static(b"\xff\xff\xff\xffARROW-IPC-BODY"),
+        }),
+        ClientRequest::CloseIngestor(CloseIngestorRequest {
+            producer: producer(),
+        }),
+        ClientRequest::OpenEmitter(OpenEmitterRequest {
+            domain: name("tenant"),
+            emitter: name("app_output"),
+            expected_fields: producer_fields(),
+            limits: ClientConsumerLimits {
+                batches: NonZeroU32::new(8).assured("literal nonzero"),
+                bytes: non_zero(4 * 1024 * 1024),
+            },
+        }),
+        ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
+            consumer: ConsumerId::opened_by(request(22)),
+        }),
+        ClientRequest::SettleEmitterBatch(SettleEmitterBatchRequest {
+            consumer: ConsumerId::opened_by(request(22)),
+            reference: uuid::Uuid::from_bytes([0xB4; 16]),
+            decision: EmitterBatchDecision::Ack,
+        }),
+        ClientRequest::CloseEmitter(CloseEmitterRequest {
+            consumer: ConsumerId::opened_by(request(22)),
+        }),
     ];
     requests
         .into_iter()
@@ -168,6 +236,92 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             request: request_body,
         })
         .collect()
+}
+
+/// The producer the samples name: the one request 19 opened.
+pub(crate) fn producer() -> ProducerId {
+    ProducerId::opened_by(request(19))
+}
+
+/// The input schema a sample producer submits: a required field and an optional sensitive one.
+pub(crate) fn producer_fields() -> Vec<SchemaField> {
+    vec![
+        SchemaField {
+            name: name("order_id"),
+            ty: ParseAsType::U64,
+            optional: false,
+            sensitive: false,
+        },
+        SchemaField {
+            name: name("card"),
+            ty: ParseAsType::String,
+            optional: true,
+            sensitive: true,
+        },
+    ]
+}
+
+/// What a sample producer is told when it opens, under `window`.
+pub(crate) fn producer_description(window: AckWindow) -> ClientProducerDescription {
+    ClientProducerDescription {
+        attachment: ClientAttachmentId::from_u128(0x0192_d4e4_7b36_7c3e_9f00_5b2d_8c3a_1e44),
+        fields: producer_fields(),
+        generation: u64::MAX,
+        contract: ClientEndpointContract::from_digest([0x5C; 32]),
+        policy: ClientProducerPolicy {
+            window,
+            ack_timeout: Duration::from_secs(30),
+            retry_backoff: Duration::from_millis(100),
+            retry_max_backoff: Duration::from_secs(5),
+        },
+        grant: ClientProducerGrant {
+            batches: NonZeroU32::new(8).assured("a literal non-zero count"),
+            bytes: non_zero(4 * 1024 * 1024),
+            max_batch_bytes: non_zero(4 * 1024 * 1024 - 256),
+            max_batch_rows: NonZeroU32::new(65_536).assured("a literal non-zero count"),
+        },
+        admission: ClientProducerAdmission::Open,
+    }
+}
+
+/// A domain clock in every installation state, at the edges of each value: the generation before
+/// the first START and after the last, both signed-nanosecond endpoints, the shortest and longest
+/// period, zero and maximal skew, and the smallest and largest time rate.
+pub(crate) fn domain_clock_observations() -> Vec<DomainClockObservation> {
+    let paced = |period: u64, skew: u64, anchor: i64, origin: i64, rate: f64| {
+        DomainClockObservedState::Paced(PacedDomainClock {
+            period: DomainClockPeriod::from_nanos(non_zero(period)),
+            skew: DomainClockSkew::from_nanos(skew),
+            mapping: DomainClockState::new(
+                Timestamp::from_unix_nanos(anchor),
+                Timestamp::from_unix_nanos(origin),
+                DomainTimeRate::try_from(rate).assured("the sample rate is positive and finite"),
+            ),
+        })
+    };
+    [
+        (0, DomainClockObservedState::Stopped),
+        (1, DomainClockObservedState::Uninstalled),
+        (2, DomainClockObservedState::Unpaced),
+        (
+            3,
+            paced(
+                100_000_000,
+                10_000_000,
+                1_790_535_000_123_456_789,
+                1_893_456_000_000_000_000,
+                2.0,
+            ),
+        ),
+        (u64::MAX, paced(1, 0, i64::MIN, i64::MAX, f64::MIN_POSITIVE)),
+        (
+            u64::MAX,
+            paced(u64::MAX, u64::MAX, i64::MAX, i64::MIN, f64::MAX),
+        ),
+    ]
+    .into_iter()
+    .map(|(generation, state)| DomainClockObservation { generation, state })
+    .collect()
 }
 
 pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome {
@@ -207,6 +361,8 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
         inspection: None,
         wasm_state: None,
         resource: None,
+        backup: None,
+        restore: None,
     }
 }
 

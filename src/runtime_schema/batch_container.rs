@@ -32,8 +32,8 @@ use prost::encoding::{WireType, encode_key, encode_varint};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::{
-    ArrowCodecRow, CodecError, CompiledCodec, CompiledCodecBatchEncoder, CompiledWireSchema,
-    PayloadLimitExceeded, encode_protobuf_payload, run_jaq_transformation,
+    ArrowCodecRow, CodecContractError, CodecError, CompiledCodec, CompiledCodecBatchEncoder,
+    CompiledWireSchema, PayloadLimitExceeded, encode_protobuf_payload, run_jaq_transformation,
     syslog::SyslogBatchMember,
 };
 
@@ -161,6 +161,7 @@ impl CompiledCodecBatchEncoder<'_> {
                                 codec: codec.name.as_str().to_string(),
                                 format: native.format.name(),
                                 reason: error.to_string(),
+                                report: error,
                             })
                         })?;
                 }
@@ -204,18 +205,10 @@ impl CompiledCodecBatchEncoder<'_> {
         let codec = self.codec;
         self.check_row(row_index)?;
         let Some(program) = codec.on_emitting() else {
-            return Err(Report::new(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: "codec used for encoding must declare ON EMITTING transformation"
-                    .to_string(),
-            }));
+            return Err(codec.contract_violation(CodecContractError::OnEmittingRequired));
         };
         let row = ArrowCodecRow::new(codec, self.batch, row_index);
-        Ok(run_jaq_transformation(
-            codec,
-            program,
-            row.to_json_value()?,
-        )?)
+        run_jaq_transformation(codec, program, row.to_json_value()?)
     }
 }
 
@@ -241,6 +234,11 @@ impl CompiledCodec {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the external JSON, Arrow and payload writer interfaces \
+                                   encode one admitted batch")
+    )]
     fn write_batch(
         &self,
         members: &[&BatchMember],
@@ -403,7 +401,10 @@ fn run_batch_transformation(
     }
     program
         .run_single(JsonValue::Array(values))
-        .map_err(|error| Report::new(BatchContainerError::from(&error)))
+        .map_err(|error| {
+            let context = BatchContainerError::from(error.current_context());
+            error.change_context(context)
+        })
 }
 
 /// The default container of a jaq-native format: an array for the formats with a top-level
@@ -487,10 +488,10 @@ mod tests {
         CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ParseAsType,
         ResolvedCodecWireFormat, SchemaField, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use prost::Message as _;
     use prost_reflect::DynamicMessage;
     use serde_json::json;
-    use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{
@@ -1017,6 +1018,7 @@ mod tests {
             fields: [
                 ("facility", ParseAsType::U8),
                 ("severity", ParseAsType::U8),
+                ("timestamp", ParseAsType::Datetime),
                 ("hostname", ParseAsType::String),
                 ("message", ParseAsType::String),
             ]
@@ -1024,7 +1026,7 @@ mod tests {
             .map(|(name, ty)| SchemaField {
                 name: named(name),
                 ty,
-                optional: name == "hostname",
+                optional: name == "hostname" || name == "timestamp",
                 sensitive: false,
             })
             .collect(),
@@ -1046,10 +1048,18 @@ mod tests {
         .expect("the SYSLOG codec should compile");
         let arrow_schema = compiled_schema.arrow_schema();
         let columns: Vec<arrow_array::ArrayRef> = vec![
-            std::sync::Arc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
-            std::sync::Arc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
-            std::sync::Arc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
-            std::sync::Arc::new(arrow_array::StringArray::from(vec![
+            nervix_primitives::sync::StdArc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
+            nervix_primitives::sync::StdArc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
+            nervix_primitives::sync::StdArc::new(
+                arrow_array::TimestampNanosecondArray::from(vec![
+                    946_684_800_000_000_000,
+                    946_684_801_000_000_000,
+                    946_684_802_000_000_000,
+                ])
+                .with_timezone("+00:00"),
+            ),
+            nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
+            nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec![
                 "order accepted",
                 "say \"hi\"",
                 "order failed",
@@ -1077,7 +1087,7 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8(payload).expect("syslog is text"),
-            r#"<134>1 - app-01 - - - - ["<134>1 - app-01 - - - - order accepted","<134>1 - app-01 - - - - say \"hi\""]"#
+            r#"<134>1 2000-01-01T00:00:00Z app-01 - - - - ["<134>1 2000-01-01T00:00:00Z app-01 - - - - order accepted","<134>1 2000-01-01T00:00:01Z app-01 - - - - say \"hi\""]"#
         );
         let member = codec
             .batch_encoder(&batch)

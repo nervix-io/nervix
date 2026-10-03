@@ -6,23 +6,111 @@
 //! - **Depends on.** Wire codec models, Arrow builders and UTC for omitted RFC 3164 years.
 //! - **Must not know.** Domains, runtime clocks, schedules or connector lifecycle.
 
+use std::fmt;
+
 use ahash::HashSet;
 use arrow_array::{
     Array, StringArray, TimestampNanosecondArray, UInt8Array,
     builder::{StringBuilder, TimestampNanosecondBuilder, UInt8Builder},
 };
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{CodecEncodingRule, CodecName, ParseAsType};
+use thiserror::Error;
 
 use super::{
-    ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder,
-    RuntimeSchemaError, RuntimeValueLocation, SyslogHeaderIssue, SyslogStructuredDataIssue,
-    arrow_data_type,
+    ArrowCodecRow, CodecContractError, CodecError, CompiledCodec, CompiledSchema, FieldEncodeError,
+    RuntimeRecordBatchBuilder, RuntimeSchemaError, RuntimeValueLocation, SyslogHeaderIssue,
+    SyslogStructuredDataIssue,
 };
 
 const DEFAULT_PRIORITY: u8 = 13;
+
+/// Why a payload is not a syslog message the codec can decode. It is the cause beneath
+/// [`CodecError::SyslogDecode`].
+#[derive(Debug, Error)]
+pub(crate) enum SyslogDecodeError {
+    #[error("payload is empty after trailing delimiters")]
+    Empty,
+    #[error("payload is not valid UTF-8")]
+    InvalidUtf8 {
+        #[source]
+        source: std::str::Utf8Error,
+    },
+    #[error("RFC 5424 VERSION must be 1")]
+    Version,
+    #[error("RFC 5424 header is missing {field}")]
+    MissingHeaderField { field: SyslogHeaderField },
+    #[error("RFC 5424 {field} is empty")]
+    EmptyHeaderField { field: SyslogHeaderField },
+    /// The runtime-schema failure beneath names the offending byte and the rule it breaks.
+    #[error("invalid {field}")]
+    InvalidHeaderField { field: SyslogHeaderField },
+    /// The runtime-schema failure beneath names the offending byte and the rule it breaks.
+    #[error("invalid STRUCTURED-DATA")]
+    StructuredData,
+    #[error("STRUCTURED-DATA must be followed by a space or end of message")]
+    StructuredDataDelimiter,
+    #[error("invalid RFC 5424 TIMESTAMP time offset")]
+    TimestampOffset,
+    #[error("invalid RFC 5424 TIMESTAMP date or time shape")]
+    TimestampShape,
+    #[error("invalid RFC 5424 TIMESTAMP fractional seconds")]
+    TimestampFraction,
+    #[error("invalid RFC 5424 TIMESTAMP")]
+    Timestamp {
+        #[source]
+        source: chrono::ParseError,
+    },
+}
+
+/// A header field of a syslog message, as a decoding failure names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum SyslogHeaderField {
+    #[strum(serialize = "VERSION")]
+    Version,
+    #[strum(serialize = "TIMESTAMP")]
+    Timestamp,
+    #[strum(serialize = "HOSTNAME")]
+    Hostname,
+    #[strum(serialize = "APP-NAME")]
+    AppName,
+    #[strum(serialize = "PROCID")]
+    ProcId,
+    #[strum(serialize = "MSGID")]
+    MsgId,
+    #[strum(serialize = "RFC 3164 HOSTNAME")]
+    Rfc3164Hostname,
+    #[strum(serialize = "RFC 3164 TAG")]
+    Rfc3164Tag,
+}
+
+/// Why a record cannot be written as a syslog message. It is the cause beneath
+/// [`CodecError::SyslogEncode`].
+#[derive(Debug, Error)]
+pub(crate) enum SyslogEncodeError {
+    #[error("SYSLOG encoding requires schema field '{field}'")]
+    MissingSchemaField { field: String },
+}
+
+/// The type and optionality the fixed SYSLOG field contract gives a field, or a schema declares
+/// for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SyslogFieldShape {
+    ty: ParseAsType,
+    optional: bool,
+}
+
+impl fmt::Display for SyslogFieldShape {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.ty)?;
+        if self.optional {
+            formatter.write_str(" OPTIONAL")?;
+        }
+        Ok(())
+    }
+}
 
 struct ParsedSyslog<'a> {
     facility: u8,
@@ -40,11 +128,11 @@ pub(super) fn validate_compiled_schema(
     codec: &CodecName,
     encoding_rules: &[CodecEncodingRule],
     schema: &CompiledSchema,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     if !encoding_rules.is_empty() {
-        return Err(invalid_codec(
-            codec,
-            "SYSLOG codecs do not support ENCODE field rules",
+        return Err(CodecError::contract_violation(
+            codec.as_str(),
+            CodecContractError::SyslogEncodingRules,
         ));
     }
     for field in &schema.fields {
@@ -58,25 +146,27 @@ pub(super) fn validate_compiled_schema(
             _ => None,
         };
         let Some((expected_type, expected_optional)) = expected else {
-            return Err(invalid_codec(
-                codec,
-                format!(
-                    "SYSLOG schema field '{}' is outside the fixed field contract",
-                    field.name
-                ),
+            return Err(CodecError::contract_violation(
+                codec.as_str(),
+                CodecContractError::SyslogFieldOutsideContract {
+                    field: field.name.clone(),
+                },
             ));
         };
         if field.ty != expected_type || field.optional != expected_optional {
-            return Err(invalid_codec(
-                codec,
-                format!(
-                    "SYSLOG field '{}' must be {}{}, found {}{}",
-                    field.name,
-                    expected_type,
-                    if expected_optional { " OPTIONAL" } else { "" },
-                    field.ty,
-                    if field.optional { " OPTIONAL" } else { "" },
-                ),
+            return Err(CodecError::contract_violation(
+                codec.as_str(),
+                CodecContractError::SyslogFieldShape {
+                    field: field.name.clone(),
+                    expected: SyslogFieldShape {
+                        ty: expected_type,
+                        optional: expected_optional,
+                    },
+                    found: SyslogFieldShape {
+                        ty: field.ty.clone(),
+                        optional: field.optional,
+                    },
+                },
             ));
         }
     }
@@ -87,7 +177,7 @@ pub(super) fn decode(
     codec: &CompiledCodec,
     payload: &[u8],
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     let last_kept = payload
         .iter()
         .rposition(|byte| !matches!(byte, b'\r' | b'\n' | b'\0'));
@@ -97,13 +187,10 @@ pub(super) fn decode(
     };
     let payload = &payload[..end];
     if payload.is_empty() {
-        return Err(decode_error(
-            codec,
-            "payload is empty after trailing delimiters",
-        ));
+        return Err(decode_failure(codec, SyslogDecodeError::Empty));
     }
     let payload = std::str::from_utf8(payload)
-        .map_err(|error| decode_error(codec, format!("payload is not valid UTF-8: {error}")))?;
+        .map_err(|source| decode_failure(codec, SyslogDecodeError::InvalidUtf8 { source }))?;
     let split = split_priority(payload);
     let parsed = if split.has_priority && looks_like_rfc5424(split.body) {
         parse_rfc5424(codec, split.priority, split.body)?
@@ -187,6 +274,12 @@ impl SyslogBatchMember {
     /// timestamp, and a `MSG` that is the JSON array of the members' own messages.
     ///
     /// The members must share a frame header, which the packing that chose them guarantees.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external writer interface encodes one admitted syslog frame"
+        )
+    )]
     pub(super) fn write_frame(
         members: &[&Self],
         output: &mut impl std::io::Write,
@@ -238,19 +331,19 @@ impl<'a> SyslogMessage<'a> {
     fn from_row(row: &'a ArrowCodecRow<'_>) -> error_stack::Result<Self, CodecError> {
         let facility = required_u8(row, "facility")?;
         if facility > 23 {
-            return Err(Report::new(encode_field_error(
+            return Err(encode_field_failure(
                 row,
                 "facility",
-                "value must be at most 23",
-            )));
+                FieldEncodeError::AboveMaximum { maximum: 23 },
+            ));
         }
         let severity = required_u8(row, "severity")?;
         if severity > 7 {
-            return Err(Report::new(encode_field_error(
+            return Err(encode_field_failure(
                 row,
                 "severity",
-                "value must be at most 7",
-            )));
+                FieldEncodeError::AboveMaximum { maximum: 7 },
+            ));
         }
         let message = required_string(row, "message")?;
         let message = message.strip_prefix('\u{feff}').unwrap_or(message);
@@ -261,13 +354,13 @@ impl<'a> SyslogMessage<'a> {
         let structured_data = optional_string(row, "structured_data")?;
         if let Some(structured_data) = structured_data {
             let consumed = structured_data_prefix(structured_data, true)
-                .map_err(|error| encode_field_error(row, "structured_data", error.to_string()))?;
+                .change_context_lazy(|| encode_field_context(row, "structured_data"))?;
             if consumed != structured_data.len() {
-                return Err(Report::new(encode_field_error(
+                return Err(encode_field_failure(
                     row,
                     "structured_data",
-                    "text contains trailing content after the SD elements",
-                )));
+                    FieldEncodeError::TrailingStructuredData,
+                ));
             }
         }
 
@@ -308,41 +401,63 @@ impl<'a> SyslogMessage<'a> {
             header.structured_data.unwrap_or("-"),
             self.message,
         )
-        .map_err(|error| Report::new(encode_error(row, error.to_string())))
+        .map_err(|source| Report::new(source).change_context(encode_context(row)))
     }
 }
 
-fn invalid_codec(codec: &CodecName, reason: impl Into<String>) -> CodecError {
-    CodecError::InvalidCodec {
-        codec: codec.as_str().to_string(),
-        reason: reason.into(),
-    }
-}
-
-fn decode_error(codec: &CompiledCodec, reason: impl Into<String>) -> CodecError {
+/// The context of a failure to decode a payload as a syslog message.
+fn decode_context(codec: &CompiledCodec) -> CodecError {
     CodecError::SyslogDecode {
         codec: codec.name.as_str().to_string(),
-        reason: reason.into(),
     }
 }
 
-fn encode_error(row: &ArrowCodecRow<'_>, reason: impl Into<String>) -> CodecError {
+/// A payload failing to decode as a syslog message because of `issue`.
+fn decode_failure(codec: &CompiledCodec, issue: SyslogDecodeError) -> Report<CodecError> {
+    Report::new(issue).change_context(decode_context(codec))
+}
+
+/// The context of a failure to encode a record as a syslog message.
+fn encode_context(row: &ArrowCodecRow<'_>) -> CodecError {
     CodecError::SyslogEncode {
         codec: row.codec.name.as_str().to_string(),
-        reason: reason.into(),
     }
 }
 
-fn encode_field_error(
-    row: &ArrowCodecRow<'_>,
-    field: &str,
-    reason: impl Into<String>,
-) -> CodecError {
+/// The context of a failure to encode `field` of a record as a syslog message.
+fn encode_field_context(row: &ArrowCodecRow<'_>, field: &str) -> CodecError {
     CodecError::EncodeField {
         codec: row.codec.name.as_str().to_string(),
         field: field.to_string(),
-        reason: reason.into(),
     }
+}
+
+/// `field` of a record failing to encode as a syslog message because of `issue`.
+fn encode_field_failure(
+    row: &ArrowCodecRow<'_>,
+    field: &str,
+    issue: FieldEncodeError,
+) -> Report<CodecError> {
+    Report::new(issue).change_context(encode_field_context(row, field))
+}
+
+/// A required `field` of a record holding null.
+fn required_null(row: &ArrowCodecRow<'_>, field: &str) -> Report<CodecError> {
+    encode_field_failure(row, field, FieldEncodeError::RequiredNull)
+}
+
+/// A `field` of a record held in a column of another type than the `expected` one the fixed
+/// SYSLOG field contract gives it.
+fn column_type(row: &ArrowCodecRow<'_>, field: &str, expected: ParseAsType) -> Report<CodecError> {
+    encode_field_failure(row, field, FieldEncodeError::ColumnType { expected })
+}
+
+/// A record whose schema lacks `field`, which the syslog message it encodes to requires.
+fn missing_schema_field(row: &ArrowCodecRow<'_>, field: &str) -> Report<CodecError> {
+    Report::new(SyslogEncodeError::MissingSchemaField {
+        field: field.to_string(),
+    })
+    .change_context(encode_context(row))
 }
 
 /// A payload split at its `<PRI>` header. `has_priority` says whether the header was actually
@@ -406,30 +521,31 @@ fn parse_rfc5424<'a>(
     codec: &CompiledCodec,
     priority: u8,
     body: &'a str,
-) -> Result<ParsedSyslog<'a>, CodecError> {
+) -> error_stack::Result<ParsedSyslog<'a>, CodecError> {
     let mut body = body;
-    let version = take_token(codec, &mut body, "VERSION")?;
+    let version = take_token(codec, &mut body, SyslogHeaderField::Version)?;
     if version != "1" {
-        return Err(decode_error(codec, "RFC 5424 VERSION must be 1"));
+        return Err(decode_failure(codec, SyslogDecodeError::Version));
     }
-    let timestamp = take_token(codec, &mut body, "TIMESTAMP")?;
-    let hostname = take_token(codec, &mut body, "HOSTNAME")?;
-    let app_name = take_token(codec, &mut body, "APP-NAME")?;
-    let proc_id = take_token(codec, &mut body, "PROCID")?;
-    let msg_id = take_token(codec, &mut body, "MSGID")?;
+    let timestamp = take_token(codec, &mut body, SyslogHeaderField::Timestamp)?;
+    let hostname = take_token(codec, &mut body, SyslogHeaderField::Hostname)?;
+    let app_name = take_token(codec, &mut body, SyslogHeaderField::AppName)?;
+    let proc_id = take_token(codec, &mut body, SyslogHeaderField::ProcId)?;
+    let msg_id = take_token(codec, &mut body, SyslogHeaderField::MsgId)?;
 
     let timestamp = if timestamp == "-" {
         None
     } else {
         Some(parse_rfc5424_timestamp(codec, timestamp)?)
     };
-    let hostname = parse_header(codec, "HOSTNAME", hostname, 255)?;
-    let app_name = parse_header(codec, "APP-NAME", app_name, 48)?;
-    let proc_id = parse_header(codec, "PROCID", proc_id, 128)?;
-    let msg_id = parse_header(codec, "MSGID", msg_id, 32)?;
+    let hostname = parse_header(codec, SyslogHeaderField::Hostname, hostname, 255)?;
+    let app_name = parse_header(codec, SyslogHeaderField::AppName, app_name, 48)?;
+    let proc_id = parse_header(codec, SyslogHeaderField::ProcId, proc_id, 128)?;
+    let msg_id = parse_header(codec, SyslogHeaderField::MsgId, msg_id, 32)?;
 
     let structured_end = structured_data_prefix(body, false)
-        .map_err(|reason| decode_error(codec, format!("invalid STRUCTURED-DATA: {reason}")))?;
+        .change_context(SyslogDecodeError::StructuredData)
+        .change_context_lazy(|| decode_context(codec))?;
     let structured_data_raw = &body[..structured_end];
     let tail = &body[structured_end..];
     let message = if tail.is_empty() {
@@ -437,9 +553,9 @@ fn parse_rfc5424<'a>(
     } else if let Some(message) = tail.strip_prefix(' ') {
         message.strip_prefix('\u{feff}').unwrap_or(message)
     } else {
-        return Err(decode_error(
+        return Err(decode_failure(
             codec,
-            "STRUCTURED-DATA must be followed by a space or end of message",
+            SyslogDecodeError::StructuredDataDelimiter,
         ));
     };
 
@@ -459,16 +575,19 @@ fn parse_rfc5424<'a>(
 fn take_token<'a>(
     codec: &CompiledCodec,
     body: &mut &'a str,
-    label: &str,
-) -> Result<&'a str, CodecError> {
+    field: SyslogHeaderField,
+) -> error_stack::Result<&'a str, CodecError> {
     let Some((token, remainder)) = body.split_once(' ') else {
-        return Err(decode_error(
+        return Err(decode_failure(
             codec,
-            format!("RFC 5424 header is missing {label}"),
+            SyslogDecodeError::MissingHeaderField { field },
         ));
     };
     if token.is_empty() {
-        return Err(decode_error(codec, format!("RFC 5424 {label} is empty")));
+        return Err(decode_failure(
+            codec,
+            SyslogDecodeError::EmptyHeaderField { field },
+        ));
     }
     *body = remainder;
     Ok(token)
@@ -476,23 +595,35 @@ fn take_token<'a>(
 
 fn parse_header<'a>(
     codec: &CompiledCodec,
-    label: &str,
+    field: SyslogHeaderField,
     value: &'a str,
     max_len: usize,
-) -> Result<Option<&'a str>, CodecError> {
+) -> error_stack::Result<Option<&'a str>, CodecError> {
     if value == "-" {
         return Ok(None);
     }
-    validate_header_shape(value, max_len)
-        .map_err(|reason| decode_error(codec, format!("invalid {label}: {reason}")))?;
+    validate_decoded_header(codec, field, value, max_len)?;
     Ok(Some(value))
+}
+
+/// Checks the shape of a decoded header `field`, whose failure names the field and keeps the
+/// offending byte beneath it.
+fn validate_decoded_header(
+    codec: &CompiledCodec,
+    field: SyslogHeaderField,
+    value: &str,
+    max_len: usize,
+) -> error_stack::Result<(), CodecError> {
+    validate_header_shape(value, max_len)
+        .change_context(SyslogDecodeError::InvalidHeaderField { field })
+        .change_context_lazy(|| decode_context(codec))
 }
 
 fn parse_rfc3164<'a>(
     codec: &CompiledCodec,
     priority: u8,
     body: &'a str,
-) -> Result<ParsedSyslog<'a>, CodecError> {
+) -> error_stack::Result<ParsedSyslog<'a>, CodecError> {
     let (timestamp, remainder) = parse_rfc3164_timestamp(body);
     let Some(timestamp) = timestamp else {
         return Ok(ParsedSyslog {
@@ -514,9 +645,7 @@ fn parse_rfc3164<'a>(
     let hostname = if hostname.is_empty() {
         None
     } else {
-        validate_header_shape(hostname, 255).map_err(|reason| {
-            decode_error(codec, format!("invalid RFC 3164 HOSTNAME: {reason}"))
-        })?;
+        validate_decoded_header(codec, SyslogHeaderField::Rfc3164Hostname, hostname, 255)?;
         Some(hostname)
     };
     let tag_len = remainder
@@ -527,8 +656,7 @@ fn parse_rfc3164<'a>(
         (None, remainder)
     } else {
         let tag = &remainder[..tag_len];
-        validate_header_shape(tag, 32)
-            .map_err(|reason| decode_error(codec, format!("invalid RFC 3164 TAG: {reason}")))?;
+        validate_decoded_header(codec, SyslogHeaderField::Rfc3164Tag, tag, 32)?;
         let mut content = &remainder[tag_len..];
         if let Some(process_suffix) = content.strip_prefix('[')
             && let Some(end) = process_suffix.find(']')
@@ -572,7 +700,7 @@ fn parse_rfc3164_timestamp(body: &str) -> (Option<DateTime<FixedOffset>>, &str) 
 fn parse_rfc5424_timestamp(
     codec: &CompiledCodec,
     value: &str,
-) -> Result<DateTime<FixedOffset>, CodecError> {
+) -> error_stack::Result<DateTime<FixedOffset>, CodecError> {
     let bytes = value.as_bytes();
     let zone_start = if bytes.last() == Some(&b'Z') {
         bytes
@@ -589,10 +717,7 @@ fn parse_rfc5424_timestamp(
     {
         bytes.len() - 6
     } else {
-        return Err(decode_error(
-            codec,
-            "invalid RFC 5424 TIMESTAMP time offset",
-        ));
+        return Err(decode_failure(codec, SyslogDecodeError::TimestampOffset));
     };
     let fixed_shape = bytes.len() >= 20
         && bytes.get(4) == Some(&b'-')
@@ -612,10 +737,7 @@ fn parse_rfc5424_timestamp(
         .flatten()
         .all(u8::is_ascii_digit);
     if !fixed_shape || zone_start < 19 {
-        return Err(decode_error(
-            codec,
-            "invalid RFC 5424 TIMESTAMP date or time shape",
-        ));
+        return Err(decode_failure(codec, SyslogDecodeError::TimestampShape));
     }
     if zone_start > 19 {
         let fraction = &bytes[20..zone_start];
@@ -624,14 +746,11 @@ fn parse_rfc5424_timestamp(
             || fraction.len() > 6
             || !fraction.iter().all(u8::is_ascii_digit)
         {
-            return Err(decode_error(
-                codec,
-                "invalid RFC 5424 TIMESTAMP fractional seconds",
-            ));
+            return Err(decode_failure(codec, SyslogDecodeError::TimestampFraction));
         }
     }
     DateTime::parse_from_rfc3339(value)
-        .map_err(|error| decode_error(codec, format!("invalid RFC 5424 TIMESTAMP: {error}")))
+        .map_err(|source| decode_failure(codec, SyslogDecodeError::Timestamp { source }))
 }
 
 fn format_rfc5424_timestamp(value: &DateTime<FixedOffset>) -> String {
@@ -865,10 +984,10 @@ fn append_row(
     codec: &CompiledCodec,
     parsed: &ParsedSyslog<'_>,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     for index in 0..codec.schema.fields.len() {
         let field = codec.schema.fields[index].name.as_str();
-        match field {
+        let appended = match field {
             "facility" => append_u8(builder, index, parsed.facility),
             "severity" => append_u8(builder, index, parsed.severity),
             "timestamp" => append_datetime(builder, index, parsed.timestamp.as_ref()),
@@ -881,8 +1000,8 @@ fn append_row(
             unknown => Err(Report::new(RuntimeSchemaError::UnsupportedSyslogField {
                 field: unknown.to_string(),
             })),
-        }
-        .map_err(|error| decode_error(codec, error.to_string()))?;
+        };
+        appended.change_context_lazy(|| decode_context(codec))?;
     }
     Ok(())
 }
@@ -901,6 +1020,10 @@ fn prepare_append(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external Arrow builder owns one appended scalar")
+)]
 fn append_u8(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
@@ -908,7 +1031,7 @@ fn append_u8(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
     let field = builder.fields[index].name.clone();
-    let expected = arrow_data_type(&builder.fields[index].ty);
+    let expected = builder.fields[index].ty.arrow_data_type();
     if !builder.builders[index].as_any().is::<UInt8Builder>() {
         return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
             location: RuntimeValueLocation::CodecField {
@@ -928,6 +1051,10 @@ fn append_u8(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external Arrow builder owns one appended scalar")
+)]
 fn append_string(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
@@ -935,7 +1062,7 @@ fn append_string(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
     let field = builder.fields[index].name.clone();
-    let expected = arrow_data_type(&builder.fields[index].ty);
+    let expected = builder.fields[index].ty.arrow_data_type();
     if !builder.builders[index].as_any().is::<StringBuilder>() {
         return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
             location: RuntimeValueLocation::CodecField {
@@ -955,6 +1082,10 @@ fn append_string(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external Arrow builder owns one appended scalar")
+)]
 fn append_datetime(
     builder: &mut RuntimeRecordBatchBuilder,
     index: usize,
@@ -969,7 +1100,7 @@ fn append_datetime(
         })
         .transpose()?;
     let field = builder.fields[index].name.clone();
-    let expected = arrow_data_type(&builder.fields[index].ty);
+    let expected = builder.fields[index].ty.arrow_data_type();
     if !builder.builders[index]
         .as_any()
         .is::<TimestampNanosecondBuilder>()
@@ -1000,40 +1131,37 @@ fn field_index(row: &ArrowCodecRow<'_>, name: &str) -> Option<usize> {
         .position(|field| field.name == name)
 }
 
-fn required_u8(row: &ArrowCodecRow<'_>, name: &str) -> Result<u8, CodecError> {
-    let index = field_index(row, name).ok_or_else(|| {
-        encode_error(
-            row,
-            format!("SYSLOG encoding requires schema field '{name}'"),
-        )
-    })?;
+fn required_u8(row: &ArrowCodecRow<'_>, name: &str) -> error_stack::Result<u8, CodecError> {
+    let Some(index) = field_index(row, name) else {
+        return Err(missing_schema_field(row, name));
+    };
     let array = row.batch.batch.column(index);
     if array.is_null(row.row_index) {
-        return Err(encode_field_error(row, name, "required field is null"));
+        return Err(required_null(row, name));
     }
     let Some(array) = array.as_any().downcast_ref::<UInt8Array>() else {
-        return Err(encode_field_error(row, name, "field is not a U8 column"));
+        return Err(column_type(row, name, ParseAsType::U8));
     };
     Ok(array.value(row.row_index))
 }
 
-fn required_string<'a>(row: &'a ArrowCodecRow<'_>, name: &str) -> Result<&'a str, CodecError> {
-    optional_string(row, name)?.ok_or_else(|| {
-        if field_index(row, name).is_none() {
-            encode_error(
-                row,
-                format!("SYSLOG encoding requires schema field '{name}'"),
-            )
-        } else {
-            encode_field_error(row, name, "required field is null")
-        }
-    })
+fn required_string<'a>(
+    row: &'a ArrowCodecRow<'_>,
+    name: &str,
+) -> error_stack::Result<&'a str, CodecError> {
+    if let Some(value) = optional_string(row, name)? {
+        return Ok(value);
+    }
+    if field_index(row, name).is_none() {
+        return Err(missing_schema_field(row, name));
+    }
+    Err(required_null(row, name))
 }
 
 fn optional_string<'a>(
     row: &'a ArrowCodecRow<'_>,
     name: &str,
-) -> Result<Option<&'a str>, CodecError> {
+) -> error_stack::Result<Option<&'a str>, CodecError> {
     let Some(index) = field_index(row, name) else {
         return Ok(None);
     };
@@ -1042,11 +1170,7 @@ fn optional_string<'a>(
         return Ok(None);
     }
     let Some(array) = array.as_any().downcast_ref::<StringArray>() else {
-        return Err(encode_field_error(
-            row,
-            name,
-            "field is not a STRING column",
-        ));
+        return Err(column_type(row, name, ParseAsType::String));
     };
     Ok(Some(array.value(row.row_index)))
 }
@@ -1054,7 +1178,7 @@ fn optional_string<'a>(
 fn optional_datetime(
     row: &ArrowCodecRow<'_>,
     name: &str,
-) -> Result<Option<DateTime<FixedOffset>>, CodecError> {
+) -> error_stack::Result<Option<DateTime<FixedOffset>>, CodecError> {
     let Some(index) = field_index(row, name) else {
         return Ok(None);
     };
@@ -1063,11 +1187,7 @@ fn optional_datetime(
         return Ok(None);
     }
     let Some(array) = array.as_any().downcast_ref::<TimestampNanosecondArray>() else {
-        return Err(encode_field_error(
-            row,
-            name,
-            "field is not a DATETIME column",
-        ));
+        return Err(column_type(row, name, ParseAsType::Datetime));
     };
     Ok(Some(
         DateTime::from_timestamp_nanos(array.value(row.row_index)).fixed_offset(),
@@ -1078,11 +1198,11 @@ fn header_value<'a>(
     row: &'a ArrowCodecRow<'_>,
     name: &str,
     max_len: usize,
-) -> Result<Option<&'a str>, CodecError> {
+) -> error_stack::Result<Option<&'a str>, CodecError> {
     let value = optional_string(row, name)?;
     if let Some(value) = value {
         validate_header_shape(value, max_len)
-            .map_err(|error| encode_field_error(row, name, error.to_string()))?;
+            .change_context_lazy(|| encode_field_context(row, name))?;
     }
     Ok(value)
 }

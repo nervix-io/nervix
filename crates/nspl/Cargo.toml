@@ -18,7 +18,6 @@ ahash-compile-time = { workspace = true }
 arrow-schema = { workspace = true }
 chumsky = { workspace = true }
 error-stack = { workspace = true }
-humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
@@ -32,6 +31,8 @@ ubyte = { workspace = true }
 ariadne = { workspace = true }
 bolero = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+nervix-arbitrary = { workspace = true }
+nervix-backup = { workspace = true }
 nervix-vm = { workspace = true }
 rstest = { workspace = true }
 rustyline = { workspace = true }
@@ -41,6 +42,8 @@ serde_json = { workspace = true }
 # Excluded from the default test run: the walk saturates every core for tens of seconds, which is
 # not what belongs in a suite people run while working. It is a gate of its own, run by
 # `just nspl-completion-walk` and by CI once the main tests have passed.
+nervix-primitives = { workspace = true }
+
 [[test]]
 harness = false
 name = "completion_walk"

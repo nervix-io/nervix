@@ -39,6 +39,7 @@ pub struct TransactionStatement {
 )]
 pub struct TransactionStatementRequest {
     pub request_reference: CommandExecutionReference,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub expected_position: usize,
     pub source: String,
     pub statement: Statement,
@@ -100,6 +101,7 @@ impl std::ops::Deref for TransactionStatement {
     RkyvDeserialize,
 )]
 pub struct TransactionQueueLimits {
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub max_statements: usize,
     pub max_source_bytes: u64,
 }
@@ -239,6 +241,7 @@ pub struct TransactionCommitProgress {
     /// The latest actual-UTC observation associated with administrative commit progress.
     pub last_activity_at: Timestamp,
     /// The first statement whose application has not completed yet.
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub next_statement: usize,
     /// Results whose authoritative effects and application obligations both completed.
     pub results: Vec<TransactionStepResult>,
@@ -253,6 +256,7 @@ pub struct TransactionCommitProgress {
 )]
 pub struct TransactionApplyingStep {
     pub effect_revision: u64,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub next_statement: usize,
     pub result: TransactionStepResult,
     pub effect: Option<TransactionStepEffect>,
@@ -275,11 +279,13 @@ pub struct TransactionApplyingStep {
 pub enum TransactionOutcome {
     Committed,
     Failed {
+        #[rkyv(with = nervix_models::CountAsU64)]
         failing_step: usize,
         error: String,
     },
     #[strum(serialize = "FAILED")]
     PlanningInputsChanged {
+        #[rkyv(with = nervix_models::CountAsU64)]
         failing_step: usize,
         error: String,
     },
@@ -407,6 +413,7 @@ pub struct ReplicatedTransaction {
     pub owner: UserName,
     pub created_at: Timestamp,
     pub state: TransactionState,
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub statement_count: usize,
     pub queued_source_bytes: u64,
     pub statements: Vec<TransactionStatement>,
@@ -555,28 +562,31 @@ impl ReplicatedTransaction {
             )
     }
 
-    pub(crate) fn ensure_owner(&self, owner: &UserName) -> Result<(), TransactionMutationError> {
+    pub(crate) fn ensure_owner(
+        &self,
+        owner: &UserName,
+    ) -> error_stack::Result<(), TransactionMutationError> {
         if &self.owner == owner {
             Ok(())
         } else {
-            Err(TransactionMutationError::OwnerMismatch {
+            Err(Report::new(TransactionMutationError::OwnerMismatch {
                 id: self.id.clone(),
-            })
+            }))
         }
     }
 
     pub(crate) fn ensure_domain(
         &self,
         domain: &DomainName,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         if &self.domain == domain {
             Ok(())
         } else {
-            Err(TransactionMutationError::DomainMismatch {
+            Err(Report::new(TransactionMutationError::DomainMismatch {
                 id: self.id.clone(),
                 expected: self.domain.clone(),
                 requested: domain.clone(),
-            })
+            }))
         }
     }
 
@@ -586,7 +596,7 @@ impl ReplicatedTransaction {
         domain: &DomainName,
         statement: &TransactionStatementRequest,
         limits: TransactionQueueLimits,
-    ) -> Result<TransactionQueueAdmission, TransactionMutationError> {
+    ) -> error_stack::Result<TransactionQueueAdmission, TransactionMutationError> {
         self.ensure_owner(owner)?;
         self.ensure_domain(domain)?;
         // Open transactions are capped by `limits.max_statements`, so this identity lookup has
@@ -601,29 +611,29 @@ impl ReplicatedTransaction {
                     existing.admission.clone(),
                 ));
             }
-            return Err(TransactionMutationError::RequestConflict {
+            return Err(Report::new(TransactionMutationError::RequestConflict {
                 id: self.id.clone(),
                 request_reference: statement.request_reference.clone(),
-            });
+            }));
         }
         if !matches!(self.state, TransactionState::Open(_)) {
-            return Err(TransactionMutationError::NotOpen {
+            return Err(Report::new(TransactionMutationError::NotOpen {
                 id: self.id.clone(),
                 state: self.state.as_str().to_string(),
-            });
+            }));
         }
         if statement.expected_position != self.statements.len() {
-            return Err(TransactionMutationError::PositionConflict {
+            return Err(Report::new(TransactionMutationError::PositionConflict {
                 id: self.id.clone(),
                 expected: statement.expected_position,
                 actual: self.statements.len(),
-            });
+            }));
         }
         if self.statements.len() >= limits.max_statements {
-            return Err(TransactionMutationError::StatementLimit {
+            return Err(Report::new(TransactionMutationError::StatementLimit {
                 id: self.id.clone(),
                 limit: limits.max_statements,
-            });
+            }));
         }
         // A statement whose bytes cannot even be added to the queued total is past any
         // configured limit, so it reports as the same admission failure.
@@ -632,10 +642,10 @@ impl ReplicatedTransaction {
             .checked_add(statement.source_bytes())
             .is_some_and(|next| next <= limits.max_source_bytes);
         if !admitted {
-            return Err(TransactionMutationError::SourceByteLimit {
+            return Err(Report::new(TransactionMutationError::SourceByteLimit {
                 id: self.id.clone(),
                 limit: limits.max_source_bytes,
-            });
+            }));
         }
         Ok(TransactionQueueAdmission::New)
     }
@@ -679,13 +689,13 @@ impl ReplicatedTransaction {
         outcome_revision: u64,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
-    ) -> Result<TransactionQueueDecision, TransactionMutationError> {
+    ) -> error_stack::Result<TransactionQueueDecision, TransactionMutationError> {
         self.ensure_owner(owner)?;
         self.ensure_domain(domain)?;
         match self.expire_open_if_inactive(activity, outcome_revision) {
             OpenActivityDecision::Active => {}
             OpenActivityDecision::Expired => return Ok(TransactionQueueDecision::Expired),
-            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+            OpenActivityDecision::NotOpen => return Err(Report::new(self.not_open_error())),
         }
         match self.queue_admission(owner, domain, &statement.request, limits)? {
             TransactionQueueAdmission::Existing(_) => {
@@ -694,7 +704,7 @@ impl ReplicatedTransaction {
             TransactionQueueAdmission::New => {}
         }
         let TransactionState::Open(current) = &mut self.state else {
-            return Err(self.not_open_error());
+            return Err(Report::new(self.not_open_error()));
         };
         current.renew(activity);
         let next_source_bytes = self
@@ -717,15 +727,15 @@ impl ReplicatedTransaction {
         outcome_revision: u64,
         domain_mutation: Option<DomainMutationLease>,
         commit_plan: TransactionCommitPlanHeader,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
         match self.expire_open_if_inactive(activity, outcome_revision) {
             OpenActivityDecision::Active => {}
             OpenActivityDecision::Expired => return Ok(()),
-            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+            OpenActivityDecision::NotOpen => return Err(Report::new(self.not_open_error())),
         }
         let TransactionState::Open(current) = &mut self.state else {
-            return Err(self.not_open_error());
+            return Err(Report::new(self.not_open_error()));
         };
         current.renew(activity);
         let last_activity_at = current.last_activity_at();
@@ -769,7 +779,7 @@ impl ReplicatedTransaction {
         failing_step: usize,
         error: &str,
     ) -> error_stack::Result<TransactionCommitFailureDecision, TransactionMutationError> {
-        self.ensure_owner(owner).map_err(Report::new)?;
+        self.ensure_owner(owner)?;
         if self.matches_commit_admission_failure(preview, failing_step, error) {
             return Ok(TransactionCommitFailureDecision::Existing);
         }
@@ -810,16 +820,16 @@ impl ReplicatedTransaction {
         owner: &UserName,
         activity: TransactionActivity,
         outcome_revision: u64,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
         if matches!(self.state, TransactionState::Open(_)) {
             match self.expire_open_if_inactive(activity, outcome_revision) {
                 OpenActivityDecision::Active => {}
                 OpenActivityDecision::Expired => return Ok(()),
-                OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+                OpenActivityDecision::NotOpen => return Err(Report::new(self.not_open_error())),
             }
             let TransactionState::Open(current) = &mut self.state else {
-                return Err(self.not_open_error());
+                return Err(Report::new(self.not_open_error()));
             };
             current.renew(activity);
             return Ok(());
@@ -830,10 +840,12 @@ impl ReplicatedTransaction {
                     progress.last_activity_at.max(activity.last_activity_at());
                 Ok(())
             }
-            TransactionState::Finished(finished) => Err(TransactionMutationError::Finished {
-                id: self.id.clone(),
-                outcome: finished.outcome.as_str().to_string(),
-            }),
+            TransactionState::Finished(finished) => {
+                Err(Report::new(TransactionMutationError::Finished {
+                    id: self.id.clone(),
+                    outcome: finished.outcome.as_str().to_string(),
+                }))
+            }
             TransactionState::Open(_) => Ok(()),
         }
     }
@@ -843,45 +855,47 @@ impl ReplicatedTransaction {
         expected_next_statement: usize,
         at: Timestamp,
         applying: TransactionApplyingStep,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         let TransactionState::Committing(progress) = &mut self.state else {
-            return Err(TransactionMutationError::NotCommitting {
+            return Err(Report::new(TransactionMutationError::NotCommitting {
                 id: self.id.clone(),
                 state: self.state.as_str().to_string(),
-            });
+            }));
         };
         if progress.next_statement != expected_next_statement {
-            return Err(TransactionMutationError::ProgressConflict {
+            return Err(Report::new(TransactionMutationError::ProgressConflict {
                 id: self.id.clone(),
                 expected: expected_next_statement,
                 actual: progress.next_statement,
-            });
+            }));
         }
         if let Some(current) = &progress.applying {
             if current == &applying {
                 return Ok(());
             }
-            return Err(TransactionMutationError::ApplicationInProgress {
-                id: self.id.clone(),
-                statement: progress.next_statement,
-            });
+            return Err(Report::new(
+                TransactionMutationError::ApplicationInProgress {
+                    id: self.id.clone(),
+                    statement: progress.next_statement,
+                },
+            ));
         }
         if applying.next_statement <= expected_next_statement
             || applying.next_statement > self.statements.len()
         {
-            return Err(TransactionMutationError::InvalidProgress {
+            return Err(Report::new(TransactionMutationError::InvalidProgress {
                 id: self.id.clone(),
                 next: applying.next_statement,
                 statement_count: self.statements.len(),
-            });
+            }));
         }
         if applying.result.first_statement() != expected_next_statement
             || Some(applying.result.statement_count())
                 != applying.next_statement.checked_sub(expected_next_statement)
         {
-            return Err(TransactionMutationError::InvalidStepResult {
+            return Err(Report::new(TransactionMutationError::InvalidStepResult {
                 id: self.id.clone(),
-            });
+            }));
         }
         progress.last_activity_at = progress.last_activity_at.max(at);
         progress.applying = Some(applying);
@@ -895,31 +909,33 @@ impl ReplicatedTransaction {
         outcome_revision: u64,
         actual: ActualExecutionStepImpact,
         application_failure: Option<String>,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         let TransactionState::Committing(progress) = &mut self.state else {
-            return Err(TransactionMutationError::NotCommitting {
+            return Err(Report::new(TransactionMutationError::NotCommitting {
                 id: self.id.clone(),
                 state: self.state.as_str().to_string(),
-            });
+            }));
         };
         if progress.next_statement != expected_next_statement {
-            return Err(TransactionMutationError::ProgressConflict {
+            return Err(Report::new(TransactionMutationError::ProgressConflict {
                 id: self.id.clone(),
                 expected: expected_next_statement,
                 actual: progress.next_statement,
-            });
+            }));
         }
         let Some(mut applying) = progress.applying.take() else {
-            return Err(TransactionMutationError::NoApplicationInProgress {
-                id: self.id.clone(),
-                statement: expected_next_statement,
-            });
+            return Err(Report::new(
+                TransactionMutationError::NoApplicationInProgress {
+                    id: self.id.clone(),
+                    statement: expected_next_statement,
+                },
+            ));
         };
         if applying.result.first_statement() != expected_next_statement {
             progress.applying = Some(applying);
-            return Err(TransactionMutationError::InvalidStepResult {
+            return Err(Report::new(TransactionMutationError::InvalidStepResult {
                 id: self.id.clone(),
-            });
+            }));
         }
         applying.result.impact.actual_mut().quiescence = actual.quiescence;
         applying.result.impact.actual_mut().effects = actual.effects;
@@ -971,22 +987,22 @@ impl ReplicatedTransaction {
         &mut self,
         at: Timestamp,
         outcome_revision: u64,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         let TransactionState::Committing(progress) = &mut self.state else {
-            return Err(TransactionMutationError::NotCommitting {
+            return Err(Report::new(TransactionMutationError::NotCommitting {
                 id: self.id.clone(),
                 state: self.state.as_str().to_string(),
-            });
+            }));
         };
         if !self.statements.is_empty()
             || progress.next_statement != 0
             || progress.applying.is_some()
         {
-            return Err(TransactionMutationError::InvalidProgress {
+            return Err(Report::new(TransactionMutationError::InvalidProgress {
                 id: self.id.clone(),
                 next: progress.next_statement,
                 statement_count: self.statements.len(),
-            });
+            }));
         }
         let finished_at = progress.last_activity_at.max(at);
         self.finish(
@@ -1003,15 +1019,15 @@ impl ReplicatedTransaction {
         owner: &UserName,
         activity: TransactionActivity,
         outcome_revision: u64,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> error_stack::Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
         match self.expire_open_if_inactive(activity, outcome_revision) {
             OpenActivityDecision::Active => {}
             OpenActivityDecision::Expired => return Ok(()),
-            OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
+            OpenActivityDecision::NotOpen => return Err(Report::new(self.not_open_error())),
         }
         let TransactionState::Open(current) = &mut self.state else {
-            return Err(self.not_open_error());
+            return Err(Report::new(self.not_open_error()));
         };
         current.renew(activity);
         let finished_at = current.last_activity_at();
@@ -1028,7 +1044,7 @@ impl ReplicatedTransaction {
         &mut self,
         at: Timestamp,
         outcome_revision: u64,
-    ) -> Result<bool, TransactionMutationError> {
+    ) -> error_stack::Result<bool, TransactionMutationError> {
         let TransactionState::Open(activity) = &self.state else {
             return Ok(false);
         };
@@ -1181,9 +1197,16 @@ pub enum TransactionMutationError {
     #[error("transaction '{id}' finished with outcome {outcome}")]
     Finished { id: String, outcome: String },
     #[error("concurrent open transaction limit {limit} reached")]
-    OpenLimit { limit: usize },
+    OpenLimit {
+        #[rkyv(with = nervix_models::CountAsU64)]
+        limit: usize,
+    },
     #[error("transaction '{id}' queued statement limit {limit} reached")]
-    StatementLimit { id: String, limit: usize },
+    StatementLimit {
+        id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
+        limit: usize,
+    },
     #[error("transaction '{id}' queued source byte limit {limit} exceeded")]
     SourceByteLimit { id: String, limit: u64 },
     #[error(
@@ -1197,7 +1220,9 @@ pub enum TransactionMutationError {
     #[error("transaction '{id}' queue position changed: expected {expected}, found {actual}")]
     PositionConflict {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         actual: usize,
     },
     #[error("transaction '{id}' report identity does not match its accepted queue state")]
@@ -1220,7 +1245,9 @@ pub enum TransactionMutationError {
     )]
     ProgressConflict {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         actual: usize,
     },
     #[error(
@@ -1228,15 +1255,25 @@ pub enum TransactionMutationError {
     )]
     InvalidProgress {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         next: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         statement_count: usize,
     },
     #[error("transaction '{id}' commit step result does not match its progress range")]
     InvalidStepResult { id: String },
     #[error("transaction '{id}' is already applying the step beginning at statement {statement}")]
-    ApplicationInProgress { id: String, statement: usize },
+    ApplicationInProgress {
+        id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
+        statement: usize,
+    },
     #[error("transaction '{id}' has no applying step beginning at statement {statement}")]
-    NoApplicationInProgress { id: String, statement: usize },
+    NoApplicationInProgress {
+        id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
+        statement: usize,
+    },
     #[error("transaction '{id}' commit step effect does not match its queued statement(s)")]
     EffectMismatch { id: String },
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]
@@ -1249,6 +1286,118 @@ pub enum TransactionMutationError {
     },
     #[error("transaction '{id}' lost its mutation lease for domain '{domain}'")]
     DomainMutationFenceLost { id: String, domain: DomainName },
+}
+
+#[cfg(test)]
+pub(crate) fn assert_count_archives(count: usize) {
+    use crate::archive_count_tests::assert_round_trip;
+
+    let id = "count-transaction".to_string();
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let owner = UserName::parse("operator").assured("the literal follows the name rule");
+    let activity =
+        TransactionActivity::from_timeout(Timestamp::from_unix_nanos(1), Duration::from_secs(60));
+    let request = TransactionStatementRequest {
+        request_reference: CommandExecutionReference::parse("count-request")
+            .assured("the literal follows the reference rule"),
+        expected_position: count,
+        source: "SHOW TRANSACTIONS;".to_string(),
+        statement: Statement::ShowTransactions(nervix_models::ShowTransactions),
+    };
+    assert_round_trip(&request);
+    assert_round_trip(&TransactionQueueLimits {
+        max_statements: count,
+        max_source_bytes: 1024,
+    });
+    let mut transaction = ReplicatedTransaction::open(id.clone(), domain, owner, activity);
+    transaction.statement_count = count;
+    assert_round_trip(&transaction);
+
+    let impact = test_commit_plan(&id, 1).steps.remove(0).impact;
+    let applying = TransactionApplyingStep {
+        effect_revision: 1,
+        next_statement: count,
+        result: TransactionStepResult {
+            impact,
+            result: TransactionCommandResult {
+                success: true,
+                message: "applied".to_string(),
+                diagnostics: Vec::new(),
+                already_existed: false,
+                admission: None,
+            },
+        },
+        effect: None,
+        completion: None,
+    };
+    assert_round_trip(&applying);
+    let progress = TransactionCommitProgress {
+        last_activity_at: Timestamp::from_unix_nanos(2),
+        next_statement: count,
+        results: vec![applying.result.clone()],
+        applying: Some(applying),
+        domain_mutation: None,
+    };
+    assert_round_trip(&progress);
+    for outcome in [
+        TransactionOutcome::Failed {
+            failing_step: count,
+            error: "step failed".to_string(),
+        },
+        TransactionOutcome::PlanningInputsChanged {
+            failing_step: count,
+            error: "inputs changed".to_string(),
+        },
+    ] {
+        assert_round_trip(&outcome);
+    }
+    for error in [
+        TransactionMutationError::OpenLimit { limit: count },
+        TransactionMutationError::StatementLimit {
+            id: id.clone(),
+            limit: count,
+        },
+        TransactionMutationError::PositionConflict {
+            id: id.clone(),
+            expected: count,
+            actual: 0,
+        },
+        TransactionMutationError::PositionConflict {
+            id: id.clone(),
+            expected: 0,
+            actual: count,
+        },
+        TransactionMutationError::ProgressConflict {
+            id: id.clone(),
+            expected: count,
+            actual: 0,
+        },
+        TransactionMutationError::ProgressConflict {
+            id: id.clone(),
+            expected: 0,
+            actual: count,
+        },
+        TransactionMutationError::InvalidProgress {
+            id: id.clone(),
+            next: count,
+            statement_count: 0,
+        },
+        TransactionMutationError::InvalidProgress {
+            id: id.clone(),
+            next: 0,
+            statement_count: count,
+        },
+        TransactionMutationError::ApplicationInProgress {
+            id: id.clone(),
+            statement: count,
+        },
+        TransactionMutationError::NoApplicationInProgress {
+            id,
+            statement: count,
+        },
+    ] {
+        assert_round_trip(&error);
+    }
 }
 
 #[cfg(test)]
@@ -1358,7 +1507,10 @@ mod tests {
         let mut conflicting = applying;
         conflicting.effect_revision = 5;
         assert!(matches!(
-            transaction.begin_application(0, Timestamp::from_unix_nanos(6), conflicting),
+            transaction
+                .begin_application(0, Timestamp::from_unix_nanos(6), conflicting)
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::ApplicationInProgress { statement: 0, .. })
         ));
 
@@ -1366,7 +1518,10 @@ mod tests {
         let mut no_progress = applying_step();
         no_progress.next_statement = 0;
         assert!(matches!(
-            invalid.begin_application(0, Timestamp::from_unix_nanos(4), no_progress),
+            invalid
+                .begin_application(0, Timestamp::from_unix_nanos(4), no_progress)
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::InvalidProgress {
                 next: 0,
                 statement_count: 1,
@@ -1390,19 +1545,24 @@ mod tests {
                 2,
                 ActualExecutionStepImpact::applying(),
                 None,
-            ),
+            )
+            .as_ref()
+            .map_err(Report::current_context),
             Err(TransactionMutationError::NotCommitting { .. })
         ));
 
         let mut without_application = transaction_with_one_statement();
         assert!(matches!(
-            without_application.complete_application(
-                0,
-                Timestamp::from_unix_nanos(4),
-                4,
-                ActualExecutionStepImpact::applying(),
-                None,
-            ),
+            without_application
+                .complete_application(
+                    0,
+                    Timestamp::from_unix_nanos(4),
+                    4,
+                    ActualExecutionStepImpact::applying(),
+                    None,
+                )
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::NoApplicationInProgress { statement: 0, .. })
         ));
 
@@ -1411,13 +1571,16 @@ mod tests {
             .begin_application(0, Timestamp::from_unix_nanos(4), applying_step())
             .assured("the application step spans the queued test statement");
         assert!(matches!(
-            conflicting_progress.complete_application(
-                1,
-                Timestamp::from_unix_nanos(5),
-                5,
-                ActualExecutionStepImpact::applying(),
-                None,
-            ),
+            conflicting_progress
+                .complete_application(
+                    1,
+                    Timestamp::from_unix_nanos(5),
+                    5,
+                    ActualExecutionStepImpact::applying(),
+                    None,
+                )
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::ProgressConflict {
                 expected: 1,
                 actual: 0,
@@ -1448,13 +1611,16 @@ mod tests {
             ActualExecutionStepImpact::applying(),
         );
         assert!(matches!(
-            invalid_result.complete_application(
-                0,
-                Timestamp::from_unix_nanos(5),
-                5,
-                ActualExecutionStepImpact::applying(),
-                None,
-            ),
+            invalid_result
+                .complete_application(
+                    0,
+                    Timestamp::from_unix_nanos(5),
+                    5,
+                    ActualExecutionStepImpact::applying(),
+                    None,
+                )
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::InvalidStepResult { .. })
         ));
         let TransactionState::Committing(progress) = &invalid_result.state else {
@@ -1472,13 +1638,18 @@ mod tests {
             activity(1),
         );
         assert!(matches!(
-            open.finish_empty_commit(Timestamp::from_unix_nanos(2), 2),
+            open.finish_empty_commit(Timestamp::from_unix_nanos(2), 2)
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::NotCommitting { .. })
         ));
 
         let mut nonempty = transaction_with_one_statement();
         assert!(matches!(
-            nonempty.finish_empty_commit(Timestamp::from_unix_nanos(4), 4),
+            nonempty
+                .finish_empty_commit(Timestamp::from_unix_nanos(4), 4)
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::InvalidProgress {
                 next: 0,
                 statement_count: 1,
@@ -1621,7 +1792,10 @@ mod tests {
             Some(TransactionOutcome::Expired)
         ));
         assert!(matches!(
-            transaction.touch(&owner, activity(12), 10),
+            transaction
+                .touch(&owner, activity(12), 10)
+                .as_ref()
+                .map_err(Report::current_context),
             Err(TransactionMutationError::Finished { .. })
         ));
     }
@@ -1654,5 +1828,136 @@ mod tests {
                 .assured("expiry ignores a durable committing state")
         );
         assert!(matches!(transaction.state, TransactionState::Committing(_)));
+    }
+
+    #[test]
+    fn mutation_reports_distinguish_owner_limits_and_commit_state() {
+        let owner = test_owner();
+        let domain = test_domain();
+        let other_owner = UserName::parse("another_operator")
+            .assured("the other test owner is an identifier-shaped literal");
+        let request = TransactionStatementRequest {
+            request_reference: CommandExecutionReference::parse("limited.request")
+                .assured("the test request reference is an accepted literal"),
+            expected_position: 0,
+            source: "SHOW TRANSACTIONS".to_string(),
+            statement: Statement::ShowTransactions(ShowTransactions),
+        };
+        let statement = TransactionStatement::test_admitted(request);
+        let mut open = ReplicatedTransaction::open(
+            "limited".to_string(),
+            domain.clone(),
+            owner.clone(),
+            activity(1),
+        );
+
+        let limits = TransactionQueueLimits {
+            max_statements: 1,
+            max_source_bytes: 1024,
+        };
+        let wrong_owner = open
+            .queue(
+                &other_owner,
+                &domain,
+                activity(2),
+                2,
+                statement.clone(),
+                limits,
+            )
+            .expect_err("only the transaction owner may queue a statement");
+        assert!(matches!(
+            wrong_owner.current_context(),
+            TransactionMutationError::OwnerMismatch { .. }
+        ));
+
+        let statement_limit = open
+            .queue(
+                &owner,
+                &domain,
+                activity(2),
+                2,
+                statement.clone(),
+                TransactionQueueLimits {
+                    max_statements: 0,
+                    max_source_bytes: 1024,
+                },
+            )
+            .expect_err("a zero statement limit must refuse the first append");
+        assert!(matches!(
+            statement_limit.current_context(),
+            TransactionMutationError::StatementLimit { limit: 0, .. }
+        ));
+
+        let source_limit = open
+            .queue(
+                &owner,
+                &domain,
+                activity(2),
+                2,
+                statement.clone(),
+                TransactionQueueLimits {
+                    max_statements: 1,
+                    max_source_bytes: 0,
+                },
+            )
+            .expect_err("a zero source byte limit must refuse a nonempty statement");
+        assert!(matches!(
+            source_limit.current_context(),
+            TransactionMutationError::SourceByteLimit { limit: 0, .. }
+        ));
+
+        let mut committing = transaction_with_one_statement();
+        let not_open = committing
+            .queue(&owner, &domain, activity(4), 4, statement.clone(), limits)
+            .expect_err("a committing transaction must reject a new append");
+        assert!(matches!(
+            not_open.current_context(),
+            TransactionMutationError::NotOpen { .. }
+        ));
+        let admission = committing
+            .queue_admission(&owner, &domain, &statement.request, limits)
+            .expect_err("a committing transaction must refuse admission before queueing");
+        assert!(matches!(
+            admission.current_context(),
+            TransactionMutationError::NotOpen { .. }
+        ));
+
+        let premature = open
+            .begin_application(0, Timestamp::from_unix_nanos(4), applying_step())
+            .expect_err("an open transaction cannot apply a commit step");
+        assert!(matches!(
+            premature.current_context(),
+            TransactionMutationError::NotCommitting { .. }
+        ));
+        let progress = committing
+            .begin_application(1, Timestamp::from_unix_nanos(4), applying_step())
+            .expect_err("application must use the durable next statement");
+        assert!(matches!(
+            progress.current_context(),
+            TransactionMutationError::ProgressConflict {
+                expected: 1,
+                actual: 0,
+                ..
+            }
+        ));
+
+        let mut invalid_step = applying_step();
+        invalid_step.result.impact = ExecutionStepImpactReport::new(
+            TransactionOperationRange::from_index_and_count(1, 1)
+                .assured("the second operation is an addressable test range"),
+            PlannedExecutionStepImpact {
+                completeness: ImpactReportCompleteness::Complete,
+                pause: PauseRequirement::NoPause,
+                effects: ImpactEffects::default(),
+            },
+            ActualExecutionStepImpact::applying(),
+        );
+        let invalid_result = committing
+            .begin_application(0, Timestamp::from_unix_nanos(4), invalid_step)
+            .expect_err("the reported operation range must start at durable progress");
+        assert!(matches!(
+            invalid_result.current_context(),
+            TransactionMutationError::InvalidStepResult { .. }
+        ));
     }
 }

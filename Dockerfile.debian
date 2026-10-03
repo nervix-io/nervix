@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.98
-ARG KACHE_VERSION=0.19.0
+ARG RUST_VERSION=1.99
+ARG KACHE_VERSION=0.28.1
 ARG DEBIAN_VERSION=trixie
 ARG LLVM_VERSION=23
 ARG FLATBUFFERS_VERSION=25.12.19
@@ -27,6 +27,7 @@ ARG SONIC_PARALLELISM
 ARG SONIC_TARGET_CPUS
 ARG KACHE_S3_BUCKET
 ARG KACHE_S3_REGION
+ARG KACHE_S3_ENDPOINT
 ARG KACHE_S3_ACCESS_KEY
 ARG KACHE_S3_SECRET_KEY
 
@@ -54,6 +55,7 @@ RUN apt-get update \
         perl \
         pkg-config \
         protobuf-compiler \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
@@ -107,10 +109,14 @@ COPY src ./src
 COPY crates ./crates
 COPY tests/scenarios.rs ./tests/scenarios.rs
 COPY scripts/configure_kache_remote.sh ./scripts/configure_kache_remote.sh
+COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ENV RUSTC_WRAPPER=kache
+ENV KACHE_MAX_SIZE=1TiB
+ENV KACHE_CACHE_EXECUTABLES=true
+ENV KACHE_REMOTE_KEY_LISTING=false
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -118,6 +124,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cache/kache,sharing=locked \
     : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}" \
     && : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}" \
+    && : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}" \
     && : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}" \
     && : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}" \
     && export KACHE_CONFIG=/tmp/kache.toml \
@@ -126,7 +133,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}" \
     && export KACHE_NAMESPACE="${KACHE_MANIFEST_KEY}" \
     && kache daemon start \
-    && trap 'build_status=$?; kache stats || true; kache daemon stop >/dev/null 2>&1 || true; exit "${build_status}"' EXIT \
+    && trap 'build_status=$?; python3 scripts/publish_kache_report.py /tmp/kache-report || true; kache stats || true; kache daemon stop >/dev/null 2>&1 || true; exit "${build_status}"' EXIT \
     && case "${TARGETARCH}" in \
     amd64) export RUST_TARGET=x86_64-unknown-linux-gnu ;; \
     arm64) export RUST_TARGET=aarch64-unknown-linux-gnu ;; \

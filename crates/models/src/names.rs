@@ -10,6 +10,11 @@
 //! form. Their immutable text is reference counted, so cloning a name or widening it to a
 //! [`ModelName`] does not copy the text. The only thing a declaration chooses is whether a dot
 //! belongs to the name's alphabet.
+//!
+//! Decoding is construction too. The serde and archived forms hold exactly the text `parse`
+//! produced, so their decoders accept that text and nothing else: text `parse` would reject, or
+//! would lower-case, fails to decode with a typed [`NameError`] instead of producing a name no
+//! validation ever saw.
 
 use std::{
     borrow::Borrow,
@@ -20,6 +25,7 @@ use std::{
 };
 
 use error_stack::Report;
+use nervix_primitives::sync::Arc;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize, SerializeUnsized,
     rancor::{Fallible, Source},
@@ -27,7 +33,6 @@ use rkyv::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 /// The longest a name may be, in bytes.
 const MAX_NAME_LEN: usize = 128;
@@ -43,6 +48,10 @@ pub enum NameError {
     InvalidChar { ch: char },
     #[error("dot '.' is not allowed")]
     DotNotAllowed,
+    /// Stored or transmitted name text holding an upper-case letter. Parsing lower-cases a name
+    /// before any encoder writes it, so such text was never produced by one.
+    #[error("stored name holds the upper-case letter '{ch}'; names are stored in lower case")]
+    UpperCase { ch: char },
 }
 
 /// Whether a dot belongs to a name's alphabet.
@@ -128,45 +137,6 @@ impl Serialize for NameText {
     }
 }
 
-impl<'de> Deserialize<'de> for NameText {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(value.into())
-    }
-}
-
-impl Archive for NameText {
-    type Archived = ArchivedString;
-    type Resolver = StringResolver;
-
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
-        ArchivedString::resolve_from_str(self.as_str(), resolver, out);
-    }
-}
-
-impl<S> RkyvSerialize<S> for NameText
-where
-    S: Fallible + ?Sized,
-    S::Error: Source,
-    str: SerializeUnsized<S>,
-{
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        ArchivedString::serialize_from_str(self.as_str(), serializer)
-    }
-}
-
-impl<D> RkyvDeserialize<NameText, D> for ArchivedString
-where
-    D: Fallible + ?Sized,
-{
-    fn deserialize(&self, _: &mut D) -> Result<NameText, D::Error> {
-        Ok(self.as_str().to_string().into())
-    }
-}
-
 /// Generate the shared shape of a named domain concept.
 ///
 /// Each entry declares one name type and the only thing that varies between them: whether a dot
@@ -177,20 +147,7 @@ macro_rules! declare_names {
     ($($(#[$doc:meta])* $Name:ident => $dots:ident,)+) => {
         $(
             $(#[$doc])*
-            #[derive(
-                Clone,
-                PartialEq,
-                Eq,
-                PartialOrd,
-                Ord,
-                Hash,
-                Serialize,
-                Deserialize,
-                Archive,
-                RkyvSerialize,
-                RkyvDeserialize,
-            )]
-            #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+            #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
             pub struct $Name(NameText);
 
             impl Debug for $Name {
@@ -214,6 +171,62 @@ macro_rules! declare_names {
                 #[inline]
                 pub fn as_str(&self) -> &str {
                     self.0.as_str()
+                }
+
+                /// Read a name back from its serde or archived form, which holds exactly the text
+                /// `parse` produced. Text that is not already a valid lower-case name is refused
+                /// rather than normalized: no encoder ever wrote it.
+                fn decode(raw: &str) -> Result<Self, Report<NameError>> {
+                    let name = Self::parse(raw)?;
+                    if let Some(ch) = raw.chars().find(char::is_ascii_uppercase) {
+                        return Err(Report::new(NameError::UpperCase { ch }));
+                    }
+                    Ok(name)
+                }
+            }
+
+            impl<'de> Deserialize<'de> for $Name {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    let raw = String::deserialize(deserializer)?;
+                    Self::decode(&raw).map_err(|report| {
+                        <D::Error as serde::de::Error>::custom(report.current_context())
+                    })
+                }
+            }
+
+            /// The archived form is the name's text as an inline string, the same bytes a `String`
+            /// archives to.
+            impl Archive for $Name {
+                type Archived = ArchivedString;
+                type Resolver = StringResolver;
+
+                fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+                    ArchivedString::resolve_from_str(self.as_str(), resolver, out);
+                }
+            }
+
+            impl<S> RkyvSerialize<S> for $Name
+            where
+                S: Fallible + ?Sized,
+                S::Error: Source,
+                str: SerializeUnsized<S>,
+            {
+                fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+                    ArchivedString::serialize_from_str(self.as_str(), serializer)
+                }
+            }
+
+            impl<D> RkyvDeserialize<$Name, D> for ArchivedString
+            where
+                D: Fallible + ?Sized,
+                D::Error: Source,
+            {
+                fn deserialize(&self, _: &mut D) -> Result<$Name, D::Error> {
+                    $Name::decode(self.as_str())
+                        .map_err(|report| D::Error::new(report.current_context().clone()))
                 }
             }
 
@@ -556,6 +569,34 @@ mod tests {
 
         assert_eq!(encoded, r#""orders""#);
         assert_eq!(decoded, relay);
+    }
+
+    #[test]
+    fn decoders_refuse_text_that_parsing_would_reject_or_normalize() {
+        for (raw, dots_rejected) in [
+            ("bad/name", false),
+            ("", false),
+            ("Orders", false),
+            ("topic.main", true),
+        ] {
+            let json = serde_json::to_string(raw)
+                .assured("a string has an infallible JSON string representation");
+            let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&raw.to_owned())
+                .assured("a string has an inline archived string representation");
+            if dots_rejected {
+                assert!(serde_json::from_str::<DomainName>(&json).is_err(), "{raw}");
+                assert!(
+                    rkyv::from_bytes::<DomainName, rkyv::rancor::Error>(&archived).is_err(),
+                    "{raw}"
+                );
+            } else {
+                assert!(serde_json::from_str::<RelayName>(&json).is_err(), "{raw}");
+                assert!(
+                    rkyv::from_bytes::<RelayName, rkyv::rancor::Error>(&archived).is_err(),
+                    "{raw}"
+                );
+            }
+        }
     }
 
     #[test]

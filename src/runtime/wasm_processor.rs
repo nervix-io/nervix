@@ -6,7 +6,16 @@
 //! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
 //! - **Must not know.** NSPL parsing, placement policy or external connector clients.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "WASM task installation and reset bind retained guest-state and callback owners"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
+use nervix_wasm::WasmGuestReportExt as _;
 
 use super::{state_replication::StateReplicationError, *};
 
@@ -130,8 +139,8 @@ impl WasmLifecycleStage {
 
     /// The stage a failed guest operation belongs to. A verdict on saved state and output the host
     /// cannot decode are stages of their own; every other failure belongs to its operation.
-    pub(super) fn of_guest_failure(failure: &nervix_wasm::WasmGuestError) -> Self {
-        match failure.saved_state_rejection() {
+    pub(super) fn of_guest_failure(failure: &Report<nervix_wasm::WasmGuestError>) -> Self {
+        match failure.current_context().saved_state_rejection() {
             Some(nervix_wasm::SavedStateRejection::SnapshotEnvelope) => {
                 return Self::SnapshotEnvelopeDecoding;
             }
@@ -143,7 +152,7 @@ impl WasmLifecycleStage {
         if failure.is_invalid_emission() {
             return Self::OutputEmission;
         }
-        Self::Guest(failure.operation())
+        Self::Guest(failure.current_context().operation())
     }
 
     /// The stage a failed save of guest state belongs to once the guest produced the state.
@@ -192,8 +201,8 @@ impl WasmBranchModule {
         failure: Report<nervix_wasm::WasmGuestError>,
         revision: Option<u64>,
     ) -> Report<WasmInstanceError> {
-        let stage = WasmLifecycleStage::of_guest_failure(failure.current_context());
-        let export = failure.current_context().export();
+        let stage = WasmLifecycleStage::of_guest_failure(&failure);
+        let export = failure.export();
         failure.change_context(WasmInstanceError::Lifecycle {
             module: self.clone(),
             stage,
@@ -632,6 +641,20 @@ impl Runtime {
     /// while the schedule assigns a processor that pins it to the node: validating the domain,
     /// starting the processor, preparing an ownership handoff and restoring guests during forced
     /// recovery all reuse it instead of waiting for a compilation the node already made.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "typed name conversion and external Arrow access own their data effects"
+        )
+    )]
     pub(super) async fn compile_wasm_processor_module(
         &self,
         domain: &DomainName,
@@ -672,7 +695,7 @@ impl Runtime {
         let compiled = self
             .inner
             .wasm_runtime
-            .compile_processor(&wasm)
+            .compile_processor(self.executor(), &wasm)
             .await
             .change_context_lazy(|| WasmInstanceError::CompileModule {
                 processor: processor.clone(),
@@ -697,48 +720,45 @@ impl Runtime {
     /// so a batch discovered to be unusable after publication has already invalidated the saved
     /// state of the binding it replaced. Compiling first keeps the previous model and its guest
     /// state the current ones, and the module this check compiles is the one activation installs.
-    pub(crate) async fn prepare_candidate_wasm_module(
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one resource binding prepares the retained module before guest execution"
+        )
+    )]
+    pub(crate) async fn prepare_wasm_module(
         &self,
-        domain: &DomainName,
-        processor: &CreateWasmProcessor,
+        plan: &WasmModulePlan,
     ) -> error_stack::Result<(), WasmInstanceError> {
         self.compile_wasm_processor_module(
-            domain,
-            &processor.name,
-            &processor.resource,
-            processor.resource_version,
-            &processor.file,
+            &plan.resource.domain,
+            &plan.processor,
+            &plan.resource.identifier,
+            plan.resource.version,
+            &plan.file,
         )
         .await?;
         Ok(())
     }
 
-    /// Keep the compiled modules of the WASM processors `schedule` assigns to `local_node_id`, as
+    /// Keep the compiled modules of the WASM processors the revision assigns to `local_node_id`, as
     /// their owner or as a replica that may have to restore their guests, and drop every other
     /// module this node compiled, such as those it only compiled to validate a domain.
     pub(super) fn retain_assigned_wasm_modules(
         &self,
         local_node_id: &ClusterNodeName,
-        schedule: &ClusterSchedule,
+        revision_plan: &PlannedClusterRevision,
     ) {
         let mut assigned = HashSet::default();
-        for domain in schedule.domains.values() {
-            for node in domain.nodes.values() {
-                let Some(processor) = node.wasm_processor() else {
-                    continue;
-                };
-                if !node.is_assigned_to(local_node_id) {
-                    continue;
+        for change in revision_plan.domains.values() {
+            for wasm in change.revision.resources.wasm.values() {
+                if wasm.assignment.is_assigned_to(local_node_id) {
+                    assigned.insert(WasmModuleFile {
+                        resource: wasm.module.resource.clone(),
+                        file: wasm.module.file.clone(),
+                    });
                 }
-                let resource = ResourceId::new(
-                    domain.domain.clone(),
-                    processor.resource.clone(),
-                    processor.resource_version,
-                );
-                assigned.insert(WasmModuleFile {
-                    resource,
-                    file: processor.file.clone(),
-                });
             }
         }
         self.inner
@@ -771,16 +791,19 @@ pub(super) async fn ensure_wasm_processor_instance(
     let compiled_module = match compiled.as_ref() {
         Some(compiled_module) => compiled_module.clone(),
         None => {
-            let prepared = branch
-                .runtime
-                .compile_wasm_processor_module(
+            let prepared = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the admitted module-preparation job installs one resource binding before guest \
+                 callbacks",
+                branch.runtime.compile_wasm_processor_module(
                     &branch.domain,
                     processor,
                     resource,
                     resource_version,
                     file,
                 )
-                .await?;
+            )
+            .await?;
             *compiled = Some(prepared.clone());
             *instance = None;
             prepared
@@ -831,6 +854,12 @@ pub(super) async fn ensure_wasm_processor_instance(
     Ok(())
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "typed name conversion and external Arrow access own their data effects"
+    )
+)]
 pub(super) async fn wasm_envelope_from_relay_batch(
     executor: &Executor,
     batch: &RelayRecordBatch,
@@ -853,7 +882,7 @@ pub(super) async fn wasm_envelope_from_relay_batch(
     let mut rows = Vec::with_capacity(batch.acks.len());
     let mut ack_map = HashMap::with_capacity(batch.acks.len());
     let input_batch = Arc::new(batch.batch.clone());
-    for (input_row, (metadata, acks)) in batch.metadata.iter().zip(batch.acks.iter()).enumerate() {
+    for (input_row, (metadata, acks)) in batch.metadata.rows().zip(batch.acks.iter()).enumerate() {
         let token = *next_ack_token;
         *next_ack_token = next_ack_token
             .checked_add(1)
@@ -866,7 +895,7 @@ pub(super) async fn wasm_envelope_from_relay_batch(
             token,
             WasmAckContext {
                 acks: acks.clone(),
-                metadata: metadata.clone(),
+                metadata,
                 input_batch: Arc::clone(&input_batch),
                 input_row,
             },
@@ -888,14 +917,12 @@ pub(super) async fn wasm_envelope_from_relay_batch(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::{Array, Int32Array};
     use nervix_models::{ParseAsType, WasmStateGeneration};
+    use nervix_primitives::sync::{Arc, StdArc};
     use nervix_wasm::{WasmAckToken, WasmEnvelope, WasmOutputColumnRef};
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
-    use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
@@ -937,8 +964,10 @@ mod tests {
 
     #[test]
     fn a_rejected_saved_state_is_a_stage_of_its_own() {
-        let envelope = nervix_wasm::WasmGuestError::SnapshotEnvelopeRejected { reason: None };
-        let application = nervix_wasm::WasmGuestError::ApplicationStateRejected { reason: None };
+        let envelope =
+            Report::new(nervix_wasm::WasmGuestError::SnapshotEnvelopeRejected { reason: None });
+        let application =
+            Report::new(nervix_wasm::WasmGuestError::ApplicationStateRejected { reason: None });
 
         assert_eq!(
             WasmLifecycleStage::of_guest_failure(&envelope),
@@ -952,19 +981,19 @@ mod tests {
 
     #[test]
     fn a_failed_restore_without_a_verdict_stays_with_its_operation() {
-        let exhausted = nervix_wasm::WasmGuestError::Failed {
+        let exhausted = Report::new(nervix_wasm::WasmGuestCallError::FuelExhausted {
+            limit: nonzero!(1_000u64),
+            export: Some("nervix_load_state"),
+        })
+        .change_context(nervix_wasm::WasmGuestError::Failed {
             operation: nervix_wasm::WasmGuestOperation::StateRestore,
-            cause: nervix_wasm::WasmGuestCallError::FuelExhausted {
-                limit: nonzero!(1_000u64),
-                export: Some("nervix_load_state"),
-            },
-        };
-        let refused_init = nervix_wasm::WasmGuestError::Failed {
+        });
+        let refused_init = Report::new(nervix_wasm::WasmGuestCallError::GlobalError {
+            reason: "unsupported schema".to_string(),
+        })
+        .change_context(nervix_wasm::WasmGuestError::Failed {
             operation: nervix_wasm::WasmGuestOperation::Initialization,
-            cause: nervix_wasm::WasmGuestCallError::GlobalError {
-                reason: "unsupported schema".to_string(),
-            },
-        };
+        });
 
         assert_eq!(
             WasmLifecycleStage::of_guest_failure(&exhausted),
@@ -980,10 +1009,11 @@ mod tests {
     fn output_the_host_cannot_decode_is_an_emission_failure() {
         let decode_failure =
             WasmEnvelope::decode(&[0xa0]).expect_err("a single byte is not an envelope");
-        let emission = nervix_wasm::WasmGuestError::Failed {
-            operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
-            cause: nervix_wasm::WasmGuestCallError::InvalidEmission(decode_failure),
-        };
+        let emission = decode_failure
+            .change_context(nervix_wasm::WasmGuestCallError::InvalidEmission)
+            .change_context(nervix_wasm::WasmGuestError::Failed {
+                operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
+            });
 
         assert_eq!(
             WasmLifecycleStage::of_guest_failure(&emission),
@@ -1044,12 +1074,12 @@ mod tests {
 
     #[test]
     fn an_unbranched_guest_failure_diagnostic_renders_every_cause_once() {
-        let exhausted = Report::new(nervix_wasm::WasmGuestError::Failed {
+        let exhausted = Report::new(nervix_wasm::WasmGuestCallError::FuelExhausted {
+            limit: nonzero!(1_000u64),
+            export: Some("nervix_process_batch"),
+        })
+        .change_context(nervix_wasm::WasmGuestError::Failed {
             operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
-            cause: nervix_wasm::WasmGuestCallError::FuelExhausted {
-                limit: nonzero!(1_000u64),
-                export: Some("nervix_process_batch"),
-            },
         });
 
         let failure = sessionizer_module(None).guest_failure(exhausted, None);
@@ -1062,7 +1092,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_input_envelope_retains_one_shared_source_batch_and_source_tokens() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (envelope, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]).await;
@@ -1088,7 +1118,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_identity_input_reference_reuses_exact_source_array() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]).await;
@@ -1107,7 +1137,7 @@ mod tests {
         assert!(StdArc::ptr_eq(&source, outputs[0].batch.batch().column(0)));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_contiguous_input_reference_shares_source_buffers() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]).await;
@@ -1143,7 +1173,7 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[20, 30]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_general_input_selection_filters_reorders_and_duplicates_rows() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]).await;
@@ -1174,7 +1204,7 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[40, 20, 20]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_input_references_materialize_rows_from_multiple_retained_batches() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (first_input, mut ack_map) = wasm_input_for_values(&schema, &[10]).await;
@@ -1208,7 +1238,7 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[10, 20]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_identity_references_support_every_internal_arrow_field_kind() {
         let schema = test_schema(&[
             ("u8", ParseAsType::U8),
@@ -1301,7 +1331,7 @@ mod tests {
 
     /// A node compiles the module a processor pins once, keeps it while the schedule assigns a
     /// processor that pins it to the node, and drops it once no such processor is left.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_pinned_module_is_compiled_once_and_kept_while_assigned() {
         let domain = DomainName::parse("events").expect("valid domain");
         let resource = ResourceName::parse("sessionizer").expect("valid identifier");
@@ -1370,19 +1400,52 @@ mod tests {
         );
         scheduled.primary_node = Some(local_node.clone());
         scheduled.assigned_nodes = vec![local_node.clone()];
+        let schema = nervix_models::SchemaName::parse("session_event").expect("valid schema name");
+        let schema_node =
+            scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                name: schema.clone(),
+                fields: vec![nervix_models::SchemaField {
+                    name: FieldName::parse("value").expect("valid field name"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }));
+        let relay_node = |name: &str| {
+            scheduled_model(nervix_models::Model::Relay(nervix_models::CreateRelay {
+                name: RelayName::parse(name).expect("valid relay name"),
+                schema: schema.clone(),
+                buffer: nonzero!(2usize),
+                branching: nervix_models::RelayBranching::unbranched(),
+                materialized_state: None,
+            }))
+        };
         let mut assigned = ClusterSchedule::default();
         assigned.domains.insert(
             domain.clone(),
-            DomainSchedule::new(domain.clone(), [scheduled], Vec::new()),
+            DomainSchedule::new(
+                domain.clone(),
+                [
+                    schema_node,
+                    relay_node("events"),
+                    relay_node("sessions"),
+                    scheduled,
+                ],
+                Vec::new(),
+            ),
         );
-        runtime.retain_assigned_wasm_modules(&local_node, &assigned);
+        let assigned_revision = PlannedClusterRevision::between(None, &assigned)
+            .assured("the WASM fixture has a complete assigned revision");
+        runtime.retain_assigned_wasm_modules(&local_node, &assigned_revision);
         let kept = compile().await.expect("the kept module is handed out");
         assert!(
             Arc::ptr_eq(&first.compiled, &kept.compiled),
             "the module of a processor assigned to the node must be kept"
         );
 
-        runtime.retain_assigned_wasm_modules(&local_node, &ClusterSchedule::default());
+        let empty_revision = PlannedClusterRevision::between(None, &ClusterSchedule::default())
+            .assured("an empty cluster schedule has a complete revision");
+        runtime.retain_assigned_wasm_modules(&local_node, &empty_revision);
         let recompiled = compile().await.expect("the module compiles again");
         assert!(
             !Arc::ptr_eq(&first.compiled, &recompiled.compiled),

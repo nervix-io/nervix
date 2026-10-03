@@ -9,20 +9,18 @@
 //! cargo test -p nervix-wasm --test geo_guest_smoke -- --ignored --nocapture
 //! ```
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
 use nervix_models::{Timestamp, WasmProcessorLimits};
+use nervix_primitives::sync::StdArc;
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmExecutionContext,
-    WasmGuestOperation, WasmOutputColumnRef, WasmOutputRow, WasmProcessorField,
-    WasmProcessorSchema, WasmProcessorType, WasmRuntime, WasmRuntimeConfig,
+    WasmGuestOperation, WasmGuestReportExt as _, WasmOutputColumnRef, WasmOutputRow,
+    WasmProcessorField, WasmProcessorSchema, WasmProcessorType, WasmRuntime, WasmRuntimeConfig,
 };
 use nonzero_ext::nonzero;
 
@@ -103,7 +101,7 @@ fn init() -> WasmBranchInit {
 }
 
 fn input_arrow(source_ip: &str) -> Vec<u8> {
-    let schema = Arc::new(Schema::new(vec![
+    let schema = StdArc::new(Schema::new(vec![
         Field::new("source", DataType::Utf8, false),
         Field::new("event_id", DataType::Utf8, false),
         Field::new("tenant_id", DataType::Utf8, false),
@@ -123,7 +121,7 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
         ),
         Field::new("seq", DataType::Int64, false),
     ]));
-    let text = |value: &str| Arc::new(StringArray::from(vec![value.to_string()]));
+    let text = |value: &str| StdArc::new(StringArray::from(vec![value.to_string()]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -135,14 +133,14 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
             text("edge-1"),
             text("location"),
             text(source_ip),
-            Arc::new(Float64Array::from(vec![1.0])),
-            Arc::new(Float64Array::from(vec![2.0])),
-            Arc::new(Float64Array::from(vec![90.0])),
+            StdArc::new(Float64Array::from(vec![1.0])),
+            StdArc::new(Float64Array::from(vec![2.0])),
+            StdArc::new(Float64Array::from(vec![90.0])),
             text("1.0.0"),
-            Arc::new(
+            StdArc::new(
                 TimestampNanosecondArray::from(vec![1_000_000_000_i64]).with_timezone("+00:00"),
             ),
-            Arc::new(Int64Array::from(vec![7_i64])),
+            StdArc::new(Int64Array::from(vec![7_i64])),
         ],
     )
     .expect("input batch must build");
@@ -155,7 +153,7 @@ fn input_arrow(source_ip: &str) -> Vec<u8> {
     ipc
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 #[ignore = "needs `just wasm-datalake-geo-guest`"]
 async fn the_geo_guest_enriches_every_declared_route() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
@@ -166,7 +164,10 @@ async fn the_geo_guest_enriches_every_declared_route() {
     })
     .expect("runtime must initialize");
     let compiled = runtime
-        .compile_processor(&std::fs::read(GUEST).expect("build the guest first"))
+        .compile_processor(
+            &nervix_execution::Executor::default(),
+            &std::fs::read(GUEST).expect("build the guest first"),
+        )
         .await
         .expect("geo guest must compile");
     let mut branch = compiled
@@ -290,7 +291,7 @@ async fn the_geo_guest_enriches_every_declared_route() {
     assert!(number(9) > 0.0, "the distance to the hub must be positive");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 #[ignore = "needs `just wasm-datalake-geo-guest`"]
 async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
     let runtime = WasmRuntime::new(WasmRuntimeConfig {
@@ -301,7 +302,10 @@ async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
     })
     .expect("runtime must initialize");
     let compiled = runtime
-        .compile_processor(&std::fs::read(GUEST).expect("build the guest first"))
+        .compile_processor(
+            &nervix_execution::Executor::default(),
+            &std::fs::read(GUEST).expect("build the guest first"),
+        )
         .await
         .expect("geo guest must compile");
 
@@ -323,5 +327,5 @@ async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
         WasmGuestOperation::Initialization,
         "a misdeclared destination is rejected before any data reaches the guest: {failure:?}"
     );
-    assert_eq!(failure.export(), Some("nervix_init"));
+    assert_eq!(error.export(), Some("nervix_init"));
 }

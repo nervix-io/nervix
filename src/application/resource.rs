@@ -7,7 +7,7 @@
 //! - **Depends on.** The resource store for bytes and the interconnect to publish and fetch them.
 //! - **Must not know.** What a model does with the resource once it is installed.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc as StdArc};
+use std::{collections::BTreeMap, path::Path};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt};
@@ -18,8 +18,8 @@ use nervix_models::{
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUploadKey,
     ResourceUploadState, UploadResource,
 };
+use nervix_primitives::sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc};
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use super::{
     command_result::{CommandOrigin, CommandResult},
@@ -143,6 +143,20 @@ impl ResourceUploadError {
     }
 }
 
+/// A resource version a restore imports under its archived number.
+pub(in crate::application) struct ImportedResourceVersion<'a> {
+    /// The execution reference of the restore that imports it.
+    pub(in crate::application) restore: &'a nervix_models::CommandExecutionReference,
+    /// The upload identity the version is recorded under.
+    pub(in crate::application) key: ResourceUploadKey,
+    /// The version's catalog metadata as the archive recorded it, under the restored domain.
+    pub(in crate::application) resource: nervix_models::ResourceVersion,
+    /// The staged restore archive that holds the version's original archive.
+    pub(in crate::application) archive_path: &'a Path,
+    /// Where the version's archive starts in it. Its length is the version's archive size.
+    pub(in crate::application) offset: u64,
+}
+
 pub(in crate::application) struct ResourceInstallation {
     pub(in crate::application) version: u64,
     /// Whether this call installed the version, or found the upload identity already completed by
@@ -195,7 +209,7 @@ async fn fetch_resource_archive(
         .await
         .change_context(ResourceFetchError::Read)?
     {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let chunk_bytes =
             u64::try_from(chunk.len()).map_err(|_| Report::new(ResourceFetchError::ChunkLength))?;
         let next_received = received
@@ -359,7 +373,7 @@ impl SessionServiceImpl {
 
         let mut missing = Vec::new();
         for resource in resources.versions.iter().cloned() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let local_key = ResourceReplicaKey::new(
                 resource.id.domain.clone(),
                 resource.id.identifier.clone(),
@@ -459,7 +473,7 @@ impl SessionServiceImpl {
             == Some(self.inner.consensus.local_node_id())
         {
             for upload in resources.uploads.iter() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !matches!(upload.state, ResourceUploadState::Applying { .. }) {
                     continue;
                 }
@@ -715,12 +729,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!(
-                        "failed to create resource '{}': {error}",
-                        create.identifier.as_str()
-                    ),
+                    format!("failed to create resource '{}'", create.identifier.as_str()),
                 )
                 .await
             }
@@ -982,6 +993,147 @@ impl SessionServiceImpl {
         })
     }
 
+    /// Installs a version a restore imports under its archived number: the leader installs its
+    /// own copy from `import`'s section of the restore's archive, verifying every field the archive
+    /// recorded, records and publishes the version in one consensus command, and then completes it
+    /// exactly as an upload completes, once every live node incarnation holds the same digest.
+    ///
+    /// Importing a version recorded before, by an earlier attempt of the same restore, joins that
+    /// installation: a published version waits for the live set, and a completed one returns once
+    /// every live node holds it.
+    pub(in crate::application) async fn install_imported_resource_version(
+        &self,
+        import: ImportedResourceVersion<'_>,
+    ) -> Result<(), Report<ResourceUploadError>> {
+        let ImportedResourceVersion {
+            restore,
+            key,
+            resource,
+            archive_path,
+            offset,
+        } = import;
+        let execution = self
+            .inner
+            .resource_upload_executions
+            .entry(key.clone())
+            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+            .clone();
+        let _execution_guard = execution.lock().await;
+        let id = resource.id.clone();
+        let recorded = self.inner.consensus.current_resources().await;
+        match recorded.upload(&key).map(|upload| upload.state.clone()) {
+            Some(ResourceUploadState::Completed {
+                outcome_revision, ..
+            }) => {
+                self.wait_for_resource_completion(&id).await?;
+                return self
+                    .wait_for_authoritative_revision(outcome_revision)
+                    .await
+                    .map_err(|error| {
+                        Report::new(ResourceUploadError::Terminal {
+                            key: key.clone(),
+                            version: id.version,
+                            reason: error.to_string(),
+                        })
+                    });
+            }
+            Some(ResourceUploadState::Failed { reason, .. }) => {
+                return Err(Report::new(ResourceUploadError::Terminal {
+                    key,
+                    version: id.version,
+                    reason,
+                }));
+            }
+            Some(ResourceUploadState::Applying { .. }) => {}
+            None => {
+                let manifest = self
+                    .inner
+                    .resource_store
+                    .install_replica_from_archive_section(
+                        resource.clone(),
+                        archive_path,
+                        offset,
+                        resource.archive_bytes,
+                    )
+                    .await
+                    .change_context(ResourceUploadError::InstallArchive { id: id.clone() })?;
+                let local = ClusterNodeIdentity::new(
+                    self.inner.consensus.local_node_id().clone(),
+                    self.inner.cluster.local_incarnation(),
+                );
+                let replica = ResourceNodeStatus {
+                    key: ResourceReplicaKey::new(
+                        id.domain.clone(),
+                        id.identifier.clone(),
+                        id.version,
+                        local.clone(),
+                    ),
+                    state: ResourceNodeState::Ready,
+                    root_checksum: Some(manifest.resource.root_checksum.clone()),
+                    last_verified_at: Some(current_timestamp()),
+                    source_node: Some(local),
+                    error: None,
+                };
+                self.inner
+                    .consensus
+                    .import_resource_version(
+                        restore.clone(),
+                        key.clone(),
+                        manifest.resource,
+                        replica,
+                    )
+                    .await
+                    .change_context(ResourceUploadError::Publish { id: id.clone() })?;
+            }
+        }
+        if let Err(error) = self.wait_for_resource_completion(&id).await {
+            let reason = error.to_string();
+            self.inner
+                .consensus
+                .fail_resource_upload(key.clone(), reason.clone())
+                .await
+                .change_context(ResourceUploadError::Publish { id: id.clone() })?;
+            return Err(Report::new(ResourceUploadError::Terminal {
+                key,
+                version: id.version,
+                reason,
+            }));
+        }
+        let completed = self
+            .inner
+            .consensus
+            .complete_resource_upload(key.clone())
+            .await
+            .change_context(ResourceUploadError::Publish { id: id.clone() })?;
+        let outcome_revision = match &completed.state {
+            ResourceUploadState::Completed {
+                outcome_revision, ..
+            } => *outcome_revision,
+            ResourceUploadState::Failed { reason, .. } => {
+                return Err(Report::new(ResourceUploadError::Terminal {
+                    key,
+                    version: id.version,
+                    reason: reason.clone(),
+                }));
+            }
+            ResourceUploadState::Applying { .. } => {
+                return Err(Report::new(ResourceUploadError::Publish { id }));
+            }
+        };
+        self.wait_for_authoritative_revision(outcome_revision)
+            .await
+            .map_err(|error| {
+                Report::new(ResourceUploadError::Terminal {
+                    key,
+                    version: id.version,
+                    reason: error.to_string(),
+                })
+            })?;
+        // As for an upload, a node that joined while the outcome propagated also has to hold the
+        // version before the import reports it complete.
+        self.wait_for_resource_completion(&id).await
+    }
+
     async fn wait_for_resource_completion(
         &self,
         id: &ResourceId,
@@ -989,7 +1141,7 @@ impl SessionServiceImpl {
         let mut resources_changed = self.inner.consensus.subscribe_resources();
         let mut cluster_changed = self.inner.cluster.subscribe_state_changes().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let resources = self.inner.consensus.current_resources().await;
             let Some(resource) = resources.version(id) else {
                 return Err(Report::new(ResourceUploadError::Publish { id: id.clone() }));
@@ -1002,7 +1154,7 @@ impl SessionServiceImpl {
             ));
             let mut pending = false;
             for node in live_nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let replica = resources.replicas.iter().find(|replica| {
                     replica.key.version_key().resource_id() == *id && replica.key.node == node
                 });
@@ -1028,7 +1180,7 @@ impl SessionServiceImpl {
                 return Ok(());
             }
 
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = resources_changed.changed() => {
                     if changed.is_err() {
                         return Err(Report::new(ResourceUploadError::Publish { id: id.clone() }));
@@ -1043,19 +1195,67 @@ impl SessionServiceImpl {
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateResource,
         CreateStatement, DomainName, ResourceName, ResourceUpload, ResourceUploadIdentity,
         ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp,
         UserName,
     };
-    use nervix_nspl::client_statement::upload_resource_path_fragment;
+    use nervix_nspl::client_statement::local_path_fragment;
     use sorted_vec::SortedVec;
 
+    #[cfg(feature = "testing")]
+    use super::super::test_fixtures::build_test_service_with_probe;
     use super::{
         super::test_fixtures::{TestService, build_test_service, create_test_domain, named},
         *,
     };
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn resource_catalog_storage_failure_keeps_resource_undeclared() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let resource =
+            ResourceName::parse("failed_resource").assured("the test resource name is valid");
+        probe.storage_fault().fail_next(
+            "create-resource-catalog:default.failed_resource".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let result = service
+            .create_resource(
+                &domain,
+                CreateStatement::new(
+                    CreateResource {
+                        identifier: resource.clone(),
+                    },
+                    false,
+                ),
+            )
+            .await;
+        assert!(!result.succeeded(), "{result:?}");
+        assert!(result.message.contains("consensus storage"), "{result:?}");
+        assert!(
+            !service
+                .inner
+                .consensus
+                .current_resources()
+                .await
+                .is_declared(&domain, &resource)
+        );
+
+        drop(service);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(path);
+    }
 
     fn resource_upload_key(
         domain: &DomainName,
@@ -1307,39 +1507,25 @@ mod tests {
         );
     }
 
+    fn local_path_at_end(input: &str) -> Option<&str> {
+        let local_path = local_path_fragment(input, input.len())?;
+        Some(local_path.fragment)
+    }
+
     #[test]
-    fn upload_resource_path_fragment_is_detected_for_upload_resource_path() {
+    fn a_local_path_is_detected_where_upload_resource_expects_one() {
         assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION '/tmp/pro",
-                "UPLOAD RESOURCE proto VERSION '/tmp/pro".len(),
-            ),
+            local_path_at_end("UPLOAD RESOURCE proto VERSION '/tmp/pro"),
             Some("/tmp/pro")
         );
         assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION ",
-                "UPLOAD RESOURCE proto VERSION ".len(),
-            ),
+            local_path_at_end("UPLOAD RESOURCE proto VERSION "),
             Some("")
         );
-        assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION ",
-                "UPLOAD RESOURCE proto VERSION '".len(),
-            ),
-            Some("")
-        );
-        assert_eq!(
-            upload_resource_path_fragment(
-                "DESCRIBE RESOURCE proto VERSION ",
-                "DESCRIBE RESOURCE proto VERSION ".len(),
-            ),
-            None
-        );
+        assert_eq!(local_path_at_end("DESCRIBE RESOURCE proto VERSION "), None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn create_resource_if_not_exists_returns_already_existed() {
         let TestService {
             service,
@@ -1400,7 +1586,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn interrupted_resource_upload_without_a_durable_version_becomes_terminal() {
         let TestService {
             service,
@@ -1443,7 +1629,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn interrupted_resource_upload_with_ready_replicas_completes() {
         let TestService {
             service,
@@ -1501,7 +1687,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reconciliation_retains_a_failed_local_replica_when_no_live_source_exists() {
         let TestService {
             service,
@@ -1572,7 +1758,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn invalid_resource_archive_failure_is_retained_across_retry() {
         let TestService {
             service,

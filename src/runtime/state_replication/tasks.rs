@@ -3,6 +3,15 @@
 //! May depend on: runtime state carriers, the state store, interconnect, and vocabulary models.
 //! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "replica task and placement installation establish ownership-bound execution \
+                  lifetimes"
+    )
+)]
+
 use super::*;
 
 impl Runtime {
@@ -15,7 +24,7 @@ impl Runtime {
         let snapshot_interval = self.inner.state_snapshot_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let flush_latest_snapshot =
                 |state: &KafkaOffsetStatePersistence,
                  store: &RuntimeStateStore|
@@ -36,14 +45,17 @@ impl Runtime {
                     Ok(Some(snapshot.lsm))
                 };
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &store) {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    state.read().placement(), lsm,
-                                ),
+                                Ok(Some(lsm)) => {
+                                    let offsets = state.read();
+                                    runtime.announce_checkpoint(
+                                        offsets.placement(), offsets.replication(), lsm,
+                                    );
+                                }
                                 Ok(None) => {}
                                 Err(error) => warn!(error = %error, "failed to flush kafka offset snapshot during shutdown"),
                             }
@@ -52,9 +64,12 @@ impl Runtime {
                     }
                     _ = sleep(snapshot_interval) => {
                         match flush_latest_snapshot(&state, &store) {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                state.read().placement(), lsm,
-                            ),
+                            Ok(Some(lsm)) => {
+                                let offsets = state.read();
+                                runtime.announce_checkpoint(
+                                    offsets.placement(), offsets.replication(), lsm,
+                                );
+                            }
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist kafka offset snapshot"),
                         }
@@ -82,11 +97,11 @@ impl Runtime {
             snapshot_interval.min(self.inner.state_replication_poll_interval);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let mut next_persist = Instant::now() + snapshot_interval;
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             if let Err(error) = state.request_publication(&snapshot_requests).await {
@@ -97,8 +112,8 @@ impl Runtime {
                                 );
                             }
                             match state.persist_published(&store, &runtime.inner.executor).await {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    state.placement(), lsm,
+                                Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                    state.placement(), state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
                                 Err(error) => warn!(
@@ -123,8 +138,8 @@ impl Runtime {
                         }
                         next_persist = Instant::now() + snapshot_interval;
                         match state.persist_published(&store, &runtime.inner.executor).await {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                state.placement(), lsm,
+                            Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                state.placement(), state.replication(), lsm,
                             ),
                             Ok(None) => {}
                             Err(error) => warn!(
@@ -149,7 +164,7 @@ impl Runtime {
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let executor = self.inner.executor.clone();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let flush_latest_snapshot =
                 async |state: &MaterializedRelayStatePersistence,
                        store: &Arc<RuntimeStateStore>| {
@@ -197,14 +212,17 @@ impl Runtime {
                     Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
                 };
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &store).await {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    state.read().placement(), lsm,
-                                ),
+                                Ok(Some(lsm)) => {
+                                    let materialized = state.read();
+                                    runtime.announce_checkpoint(
+                                        materialized.placement(), materialized.replication(), lsm,
+                                    );
+                                }
                                 Ok(None) => {}
                                 Err(error) => warn!(error = %error, "failed to flush materialized relay snapshot during shutdown"),
                             }
@@ -213,9 +231,12 @@ impl Runtime {
                     }
                     _ = sleep(snapshot_interval) => {
                         match flush_latest_snapshot(&state, &store).await {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                state.read().placement(), lsm,
-                            ),
+                            Ok(Some(lsm)) => {
+                                let materialized = state.read();
+                                runtime.announce_checkpoint(
+                                    materialized.placement(), materialized.replication(), lsm,
+                                );
+                            }
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist materialized relay snapshot"),
                         }
@@ -235,7 +256,7 @@ impl Runtime {
         let snapshot_interval = self.inner.state_snapshot_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let flush_latest_snapshot =
                 |state: &ReplicatedBranchAggregatedState,
                  metrics: &RuntimeMetrics,
@@ -259,13 +280,13 @@ impl Runtime {
                     Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
                 };
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &metrics, &store) {
-                                Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                    &state.placement, lsm,
+                                Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                    &state.placement, state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
                                 Err(error) => warn!(error = %error, "failed to flush branch-aggregated state snapshot during shutdown"),
@@ -275,8 +296,8 @@ impl Runtime {
                     }
                     _ = sleep(snapshot_interval) => {
                         match flush_latest_snapshot(&state, &metrics, &store) {
-                            Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
-                                &state.placement, lsm,
+                            Ok(Some(lsm)) => runtime.announce_checkpoint(
+                                &state.placement, state.replication(), lsm,
                             ),
                             Ok(None) => {}
                             Err(error) => warn!(error = %error, "failed to persist branch-aggregated state snapshot"),
@@ -296,17 +317,17 @@ impl Runtime {
         let primary_node = offsets.primary_node()?;
         let placement = offsets.placement().clone();
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(&placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
+            let offsets = state.read();
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        offsets.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -315,7 +336,7 @@ impl Runtime {
                     break;
                 }
                 initial_sync_pending = false;
-                let after_lsm = state.read().current_lsm();
+                let after_lsm = offsets.current_lsm();
                 match runtime
                     .request_state_sync_with_timeout(
                         &primary_node,
@@ -359,13 +380,22 @@ impl Runtime {
         }))
     }
 
+    /// Spawn the replica task that keeps one branch-keyed entity current on this node: the
+    /// entity's branch lifecycle and, for a deduplicator, window or WASM processor, the state of
+    /// each of its branches.
+    ///
+    /// The task retains the entity's lifecycle handle and owns everything it learns of the
+    /// entity's branch checkpoints, so each round asks the owner only what changed since the
+    /// previous one. It runs a round when it starts, when the owner announces a checkpoint, and
+    /// once every replication poll interval, which catches up a checkpoint whose announcement was
+    /// lost.
     pub(in crate::runtime) fn spawn_branch_state_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
     ) -> error_stack::Result<Option<JoinHandle<()>>, StateIdentityError> {
-        let state_kind = match node.kind() {
+        let branch_states = match node.kind() {
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
             ModelKind::WasmProcessor => Some(RuntimeStateKind::WasmProcessor),
             ModelKind::WindowProcessor => Some(RuntimeStateKind::WindowProcessor),
@@ -388,17 +418,22 @@ impl Runtime {
             None,
         )?;
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(&branch_lru);
+        let lifecycle = self.replicated_branch_lifecycle(&branch_lru);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Ok(Some(tokio::spawn(async move {
+        Ok(Some(nervix_primitives::task::spawn(async move {
+            if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
+                warn!(error = %error, "failed to read the stored replicated branch lifecycle");
+            }
+            let owner = RemoteStateOwner::new(runtime.clone(), primary_node, poll_interval);
+            let mut checkpoints = ReplicaBranchCheckpoints::default();
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        lifecycle.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -407,112 +442,15 @@ impl Runtime {
                     break;
                 }
                 initial_sync_pending = false;
-                let after_lsm = match runtime.passive_state_replica_lsm(&branch_lru) {
-                    Ok(lsm) => lsm,
-                    Err(error) => {
-                        warn!(error = %error, "failed to read replicated branch lifecycle progress");
-                        None
-                    }
-                };
-                match runtime
-                    .request_state_sync_with_timeout(
-                        &primary_node,
+                runtime
+                    .catch_up_replica_branches(
+                        &owner,
                         &branch_lru,
-                        after_lsm,
-                        poll_interval,
+                        &lifecycle,
+                        &mut checkpoints,
+                        branch_states,
                     )
-                    .await
-                {
-                    Ok(Some(snapshot)) => {
-                        if let Err(error) = runtime
-                            .install_passive_state_replica_snapshot(
-                                &primary_node,
-                                &branch_lru,
-                                snapshot,
-                            )
-                            .await
-                        {
-                            warn!(error = %error, "failed to install replicated branch lifecycle checkpoint");
-                            continue;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        warn!(error = %error, "failed to sync replicated branch lifecycle state");
-                        continue;
-                    }
-                }
-                let Some(state_kind) = state_kind else {
-                    continue;
-                };
-                let branch_snapshot = match runtime
-                    .inner
-                    .replicated_branch_lru_snapshots
-                    .get(&branch_lru)
-                    .map(|snapshot| snapshot.clone())
-                {
-                    Some(snapshot) => snapshot,
-                    None => continue,
-                };
-                let branches = match decode_branch_lru_snapshot(&branch_snapshot.payload) {
-                    Ok(branches) => branches,
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            "failed to decode replicated branch lifecycle checkpoint"
-                        );
-                        continue;
-                    }
-                };
-                for branch in branches {
-                    tokio::task::consume_budget().await;
-                    let placement = match runtime.state_placement(
-                        &branch_lru.domain,
-                        state_kind,
-                        branch_lru.kind,
-                        branch_lru.identifier.clone(),
-                        branch.key,
-                    ) {
-                        Ok(placement) => placement,
-                        Err(error) => {
-                            warn!(error = %error, "failed to place replicated branch state");
-                            continue;
-                        }
-                    };
-                    let after_lsm = match runtime.passive_state_replica_lsm(&placement) {
-                        Ok(lsm) => lsm,
-                        Err(error) => {
-                            warn!(error = %error, "failed to read replicated branch state progress");
-                            continue;
-                        }
-                    };
-                    match runtime
-                        .request_state_sync_with_timeout(
-                            &primary_node,
-                            &placement,
-                            after_lsm,
-                            poll_interval,
-                        )
-                        .await
-                    {
-                        Ok(Some(snapshot)) => {
-                            if let Err(error) = runtime
-                                .install_passive_state_replica_snapshot(
-                                    &primary_node,
-                                    &placement,
-                                    snapshot,
-                                )
-                                .await
-                            {
-                                warn!(error = %error, "failed to install replicated branch state checkpoint");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            warn!(error = %error, "failed to sync replicated branch state");
-                        }
-                    }
-                }
+                    .await;
             }
         })))
     }
@@ -524,17 +462,17 @@ impl Runtime {
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.read().primary_node()?;
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(state.read().placement());
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
+            let materialized = state.read();
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        materialized.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -543,11 +481,11 @@ impl Runtime {
                     break;
                 }
                 initial_sync_pending = false;
-                let after_lsm = state.read().current_lsm();
+                let after_lsm = materialized.current_lsm();
                 match runtime
                     .install_materialized_snapshot_from(
                         &primary_node,
-                        state.read(),
+                        materialized,
                         &state,
                         Some(after_lsm),
                     )
@@ -563,7 +501,7 @@ impl Runtime {
                                     Envelope::Control(
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
-                                                placement: state.read().placement().to_remote(),
+                                                placement: materialized.placement().to_remote(),
                                                 lsm: revision,
                                             },
                                         ),
@@ -590,17 +528,16 @@ impl Runtime {
     ) -> Option<JoinHandle<()>> {
         let primary_node = state.primary_node()?;
         let poll_interval = self.inner.state_replication_poll_interval;
-        let notification = self.state_checkpoint_notification(&state.placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
-                        &notification,
+                        state.replication(),
                         poll_interval,
                         initial_sync_pending,
                     )
@@ -665,39 +602,96 @@ impl Runtime {
     /// scheduled node has no identity, and a placement resolved in that window cannot address the
     /// state the node owns. Relocation rebuilds these while the relocating node's own state task is
     /// still reading them, which is exactly when that window is observed.
-    pub(in crate::runtime) fn install_state_identities(&self, schedule: &DomainSchedule) {
-        let start_version = match self.inner.domains.get(&schedule.domain) {
+    pub(in crate::runtime) fn state_assignment(
+        &self,
+        node: &DomainNodeRef,
+    ) -> SharedStateAssignment {
+        if let Some(slot) = self.inner.state_identities.get(node) {
+            return slot.clone();
+        }
+        // Schedule application is the single registration owner; tasks bind only after publication.
+        let slot = Arc::new(ArcSwapOption::empty());
+        self.inner
+            .state_identities
+            .insert(node.clone(), slot.clone());
+        slot
+    }
+
+    pub(in crate::runtime) fn publish_state_assignment(
+        &self,
+        node: DomainNodeRef,
+        assignment: ScheduledStateAssignment,
+    ) {
+        self.state_assignment(&node)
+            .store(Some(StdArc::new(assignment)));
+    }
+
+    pub(in crate::runtime) fn install_state_identities(&self, revision: &ExecutionRevision) {
+        self.install_state_identities_from_nodes(&revision.domain, revision.nodes.values());
+    }
+
+    fn install_state_identities_from_nodes<'a>(
+        &self,
+        domain: &DomainName,
+        nodes: impl Iterator<Item = &'a ExecutionNode>,
+    ) {
+        let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
             None => 0,
         };
         let mut scheduled = HashSet::default();
-        for node in schedule.nodes.values() {
-            let node_ref = DomainNodeRef::node_in(
-                schedule.domain.clone(),
-                node.kind(),
-                node.identifier.clone(),
-            );
-            self.inner.state_identities.insert(
+        for node in nodes {
+            let node_ref =
+                DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
+            let executors = node
+                .assigned_nodes
+                .iter()
+                .filter(|owner| node.executes_on(owner))
+                .cloned()
+                .collect();
+            let replicas = node.replica_nodes().into_iter().cloned().collect();
+            self.publish_state_assignment(
                 node_ref.clone(),
-                ScheduledStateIdentity {
-                    schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
-                    wasm_state_generations: node.wasm_state_generations().cloned(),
+                ScheduledStateAssignment {
+                    identity: ScheduledStateIdentity {
+                        schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
+                        wasm_state_generations: node.wasm_state_generations().cloned(),
+                    },
+                    checkpoint_owners: Some(WasmCheckpointOwners {
+                        executors,
+                        replicas,
+                    }),
                 },
             );
             scheduled.insert(node_ref);
         }
-        self.retain_state_identities(&schedule.domain, &scheduled);
+        self.retain_state_identities(domain, &scheduled);
     }
 
-    /// The graph-driven form of [`Self::install_state_identities`], written the same way and for
-    /// the same reason: a node the graph still carries never loses its identity. `nodes` are the
-    /// graph's unplaced schedule entries, and each schema-bound state is keyed exactly as a schedule
-    /// of the same graph keys it. A graph carries no schedule, so it publishes no WASM guest-state
-    /// generation; a node that already has one keeps it.
-    pub(in crate::runtime) fn install_state_identities_from_graph(
+    #[cfg(test)]
+    pub(in crate::runtime) fn install_schedule_state_identities(&self, schedule: &DomainSchedule) {
+        let nodes = schedule
+            .nodes
+            .values()
+            .map(|node| ExecutionNode::from_scheduled(node, schedule))
+            .collect::<Vec<_>>();
+        self.install_state_identities_from_nodes(&schedule.domain, nodes.iter());
+    }
+
+    /// Before cluster assignment, preserve an existing guest-state generation while installing
+    /// the schema identities of the unplaced revision.
+    pub(in crate::runtime) fn install_state_identities_from_unplaced_revision(
         &self,
         domain: &DomainName,
-        nodes: &[ScheduledNode],
+        revision: &ExecutionRevision,
+    ) {
+        self.install_state_identities_from_unplaced_nodes(domain, revision.nodes.values());
+    }
+
+    fn install_state_identities_from_unplaced_nodes<'a>(
+        &self,
+        domain: &DomainName,
+        nodes: impl Iterator<Item = &'a ExecutionNode>,
     ) {
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -708,20 +702,37 @@ impl Runtime {
             let node_ref =
                 DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
             let schema_fingerprint = Self::state_schema_fingerprint(node, start_version);
-            if let Some(mut identity) = self.inner.state_identities.get_mut(&node_ref) {
-                identity.schema_fingerprint = schema_fingerprint;
-            } else {
-                self.inner.state_identities.insert(
-                    node_ref.clone(),
-                    ScheduledStateIdentity {
+            let slot = self.state_assignment(&node_ref);
+            let mut assignment = match slot.load_full() {
+                Some(current) => (*current).clone(),
+                None => ScheduledStateAssignment {
+                    identity: ScheduledStateIdentity {
                         schema_fingerprint,
                         wasm_state_generations: None,
                     },
-                );
-            }
+                    checkpoint_owners: None,
+                },
+            };
+            assignment.identity.schema_fingerprint = schema_fingerprint;
+            slot.store(Some(StdArc::new(assignment)));
             active.insert(node_ref);
         }
         self.retain_state_identities(domain, &active);
+    }
+
+    #[cfg(test)]
+    pub(in crate::runtime) fn install_state_identities_from_graph(
+        &self,
+        domain: &DomainName,
+        nodes: &[ScheduledNode],
+    ) {
+        let schedule = DomainSchedule::new(domain.clone(), nodes.to_vec(), Vec::new());
+        let nodes = schedule
+            .nodes
+            .values()
+            .map(|node| ExecutionNode::from_scheduled(node, &schedule))
+            .collect::<Vec<_>>();
+        self.install_state_identities_from_unplaced_nodes(domain, nodes.iter());
     }
 
     /// The fingerprint every schema-bound runtime state of `node` is keyed by in a domain started
@@ -729,11 +740,8 @@ impl Runtime {
     ///
     /// Materialized relay state also belongs to the domain start that began it, so a START resets
     /// it: its fingerprint covers the start version beside the node's schemas.
-    fn state_schema_fingerprint(node: &ScheduledNode, start_version: u64) -> SchemaFingerprint {
-        let Model::Relay(relay) = node.config.as_ref() else {
-            return node.schema_fingerprint;
-        };
-        if relay.materialized_state.is_none() {
+    fn state_schema_fingerprint(node: &ExecutionNode, start_version: u64) -> SchemaFingerprint {
+        if !node.materialized_relay {
             return node.schema_fingerprint;
         }
         let mut hasher = blake3::Hasher::new();
@@ -759,6 +767,9 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         for key in stale {
+            if let Some(slot) = self.inner.state_identities.get(&key) {
+                slot.store(None);
+            }
             self.inner.state_identities.remove(&key);
         }
     }
@@ -770,6 +781,18 @@ impl Runtime {
     /// Every other kind is placed under the schema fingerprint the schedule publishes for the node,
     /// and WASM guest state also in the generation it names for the branch, so neither can be
     /// placed for a node that no schedule has published them for.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed model-name conversion")
+    )]
     pub(in crate::runtime) fn state_placement(
         &self,
         domain: &DomainName,
@@ -789,7 +812,14 @@ impl Runtime {
             | RuntimeStateKind::WindowProcessor
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
-                let Some(identity) = self.inner.state_identities.get(&node) else {
+                let assignment = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the published \
+                     state placement before recurring branch work",
+                    self.inner.state_identities.get(&node)
+                )
+                .and_then(|slot| slot.load_full());
+                let Some(assignment) = assignment else {
                     return Err(Report::new(
                         StateIdentityError::SchemaFingerprintUnpublished {
                             domain: domain.clone(),
@@ -799,7 +829,7 @@ impl Runtime {
                     ));
                 };
                 let branch = branch_key.as_ref().map(BranchKey::fingerprint);
-                let Some(state) = identity.state_of(state, branch.as_ref()) else {
+                let Some(state) = assignment.identity.state_of(state, branch.as_ref()) else {
                     return Err(Report::new(StateIdentityError::GenerationUnpublished {
                         domain: domain.clone(),
                         kind,
@@ -819,6 +849,14 @@ impl Runtime {
     }
 
     /// Whether `placement` still names the state the committed schedule keys this node's state by.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(in crate::runtime) fn runtime_state_placement_is_current(
         &self,
         placement: &RuntimeStatePlacement,
@@ -829,10 +867,18 @@ impl Runtime {
             placement.identifier.clone(),
         );
         let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-        let Some(identity) = self.inner.state_identities.get(&node) else {
+        let Some(identity) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current assignment \
+             generation for frame admission",
+            self.inner.state_identities.get(&node)
+        ) else {
             return false;
         };
-        identity.names(placement.state, branch.as_ref())
+        let Some(assignment) = identity.load_full() else {
+            return false;
+        };
+        assignment.identity.names(placement.state, branch.as_ref())
     }
 
     pub(in crate::runtime) fn purge_stale_runtime_state(
@@ -925,9 +971,9 @@ impl Runtime {
                 .replicated_branch_aggregated_states
                 .remove(&placement);
         }
-        let stale_expiring = self
+        let stale_presences = self
             .inner
-            .expiring_stream_states
+            .relay_branch_presences
             .iter()
             .filter_map(|entry| {
                 let placement = entry.key();
@@ -935,8 +981,8 @@ impl Runtime {
                     .then(|| placement.clone())
             })
             .collect::<Vec<_>>();
-        for placement in stale_expiring {
-            self.inner.expiring_stream_states.remove(&placement);
+        for placement in stale_presences {
+            self.inner.relay_branch_presences.remove(&placement);
         }
 
         if let Some(store) = self.inner.state_store.as_ref() {
@@ -946,7 +992,11 @@ impl Runtime {
                 .iter()
                 .filter_map(|entry| {
                     let key = entry.key();
-                    (&key.domain == domain).then(|| (key.node.clone(), entry.value().clone()))
+                    if &key.domain != domain {
+                        return None;
+                    }
+                    let assignment = entry.load_full()?;
+                    Some((key.node.clone(), assignment.identity.clone()))
                 })
                 .collect::<HashMap<_, _>>();
             store.purge_stale_state_identities(domain, &current)?;
@@ -1024,19 +1074,10 @@ impl Runtime {
                 .remove(&placement);
         }
         self.inner
-            .replicated_branch_lru_snapshots
+            .replicated_branch_lifecycles
             .retain(|placement, _| &placement.domain != domain);
         self.inner
             .passive_runtime_state_snapshots
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .pending_state_replica_syncs
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .pending_state_checkpoint_announcements
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .state_checkpoint_notifications
             .retain(|placement, _| &placement.domain != domain);
     }
 }

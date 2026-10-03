@@ -2,18 +2,13 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Compiling a `CREATE UDF` definition, the watchdog that bounds a call, and the
+//! - **Owns.** Compiling a planned UDF program, the watchdog that bounds a call, and the
 //!   `FunctionInjector` that returns results to the VM as typed Arrow arrays.
-//! - **Depends on.** The VM and the vocabulary.
+//! - **Depends on.** The VM, the vocabulary, and the node's bounded executor, whose bulk workers
+//!   compile its programs off the caller's task.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
 //!
-use std::{
-    cell::RefCell,
-    fmt,
-    panic::AssertUnwindSafe,
-    sync::Arc as StdArc,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, time::Duration};
 
 use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
@@ -27,11 +22,17 @@ use arrow_array::{
         UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use arrow_schema::{DataType, Field, TimeUnit};
+use arrow_schema::{DataType, TimeUnit};
 use arrow_select::{nullif::nullif, zip::zip};
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
-use nervix_models::{CreateUdf, ParseAsType, Timestamp};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
+use nervix_models::{ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName, UdfReturn};
+use nervix_primitives::{
+    sync::{Arc, StdArc, blocking::Mutex},
+    time::Instant,
+};
 use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
@@ -39,20 +40,55 @@ use nervix_vm::{
     UdfSignatures,
     program::{FunctionName, Span},
 };
-use parking_lot::Mutex;
 use regex::Regex;
-use roto::{FileTree, NoCtx, RotoString, Runtime, TypedFunc, Val, library};
+use roto::{FileTree, NoCtx, RegistrationError, RotoString, Runtime, TypedFunc, Val, library};
 use thiserror::Error;
-use triomphe::Arc;
 
 const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
 const COMPILE_TEST_BUDGET: Duration = Duration::from_secs(10);
 const RESERVED_PREFIX: &str = "__nervix_";
 
+/// Engine input selected from a validated UDF declaration before runtime activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdfProgram {
+    pub name: UdfName,
+    pub language: UdfLanguage,
+    pub arguments: Vec<UdfArgument>,
+    pub returns: UdfReturn,
+    pub volatile: bool,
+    pub code: String,
+    pub code_hash: String,
+}
+
+impl UdfProgram {
+    pub fn new(
+        name: UdfName,
+        language: UdfLanguage,
+        arguments: Vec<UdfArgument>,
+        returns: UdfReturn,
+        volatile: bool,
+        code: String,
+    ) -> Self {
+        let code_hash = blake3::hash(code.as_bytes()).to_hex().to_string();
+        Self {
+            name,
+            language,
+            arguments,
+            returns,
+            volatile,
+            code,
+            code_hash,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum UdfError {
-    #[error("failed to initialize the ROTO_0_13 runtime: {0}")]
-    RuntimeRegistration(String),
+    #[error("failed to initialize the ROTO_0_13 runtime: {source}")]
+    RuntimeRegistration {
+        #[source]
+        source: RegistrationError,
+    },
     #[error("UDF '{name}' uses reserved identifier prefix '__nervix_'")]
     ReservedIdentifier { name: String },
     #[error("{function}() requires VOLATILE")]
@@ -63,8 +99,10 @@ pub enum UdfError {
     TestsFailed,
     #[error("Roto compile and test budget of {limit:?} was exceeded")]
     CompileBudgetExceeded { limit: Duration },
-    #[error("Roto compilation task failed: {0}")]
-    CompileTask(#[source] tokio::task::JoinError),
+    #[error("the node's bounded execution did not compile the UDFs")]
+    CompileExecution,
+    #[error("the caller stopped waiting between two UDF compilations")]
+    CompileCancelled,
     #[error("Roto entry signature is invalid: {0}")]
     Signature(String),
 }
@@ -181,7 +219,7 @@ struct CallState {
     fatal: Option<String>,
 }
 
-thread_local! {
+nervix_primitives::thread_local! {
     static CALL_STATE: RefCell<Option<CallState>> = const { RefCell::new(None) };
 }
 
@@ -610,12 +648,15 @@ fn base_library() -> impl roto::Registerable {
         }
 
         impl Val<BoolColumnBuilder> {
+            #[cfg_attr(nervix_lint, nervix::context(bounded, reason = "Roto callbacks share the builder required by the external value API", key = "one admitted UDF call column builder", bound = "one synchronous builder transition per callback; the extension executor bounds the admitted call"))]
             fn push(builder: Val<BoolColumnBuilder>, value: bool) {
                 builder.0.0.lock().push(Some(value));
             }
+            #[cfg_attr(nervix_lint, nervix::context(bounded, reason = "Roto callbacks share the builder required by the external value API", key = "one admitted UDF call column builder", bound = "one synchronous builder transition per callback; the extension executor bounds the admitted call"))]
             fn push_null(builder: Val<BoolColumnBuilder>) {
                 builder.0.0.lock().push(None);
             }
+            #[cfg_attr(nervix_lint, nervix::context(bounded, reason = "Roto callbacks share the builder required by the external value API", key = "one admitted UDF call column builder", bound = "one synchronous builder transition per callback; the extension executor bounds the admitted call"))]
             fn finish(builder: Val<BoolColumnBuilder>) -> Val<BoolColumn> {
                 let values = std::mem::take(
                     &mut *builder.0.0.lock()
@@ -866,9 +907,9 @@ fn datetime_library() -> impl roto::Registerable {
     }
 }
 
-fn deterministic_runtime() -> Result<Runtime<NoCtx>, UdfError> {
+fn deterministic_runtime() -> error_stack::Result<Runtime<NoCtx>, UdfError> {
     let mut runtime = Runtime::from_lib(base_library())
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     for library in [
         integer_column_library!(U8Column, UInt8Type, u8),
         integer_column_library!(I8Column, Int8Type, i8),
@@ -881,29 +922,29 @@ fn deterministic_runtime() -> Result<Runtime<NoCtx>, UdfError> {
     ] {
         runtime
             .add(library)
-            .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+            .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     }
     runtime
         .add(float_column_library!(F32Column, Float32Type, f32))
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(float_column_library!(F64Column, Float64Type, f64))
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(bool_library())
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(string_library())
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(cast_library())
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(list_library())
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(datetime_library())
-        .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     Ok(runtime)
 }
 
@@ -929,7 +970,7 @@ type EntryFunction = TypedFunc<NoCtx, fn(Val<UdfArgs>) -> Val<AnyColumn>>;
 
 #[derive(Clone)]
 struct CompiledUdf {
-    model: CreateUdf,
+    program: UdfProgram,
     entry: EntryFunction,
     watchdog: Duration,
 }
@@ -938,8 +979,8 @@ impl fmt::Debug for CompiledUdf {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CompiledUdf")
-            .field("name", &self.model.name)
-            .field("code_hash", &self.model.code_hash)
+            .field("name", &self.program.name)
+            .field("code_hash", &self.program.code_hash)
             .finish_non_exhaustive()
     }
 }
@@ -947,6 +988,11 @@ impl fmt::Debug for CompiledUdf {
 impl CompiledUdf {
     /// Runs the function over the rows `rows` names. A UDF is pure, so it reads the rows' values
     /// and never their identities.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the admitted Roto extension and external Arrow values own \
+                                   their dynamic effects")
+    )]
     fn execute(
         &self,
         arguments: &[TypedArray],
@@ -954,48 +1000,48 @@ impl CompiledUdf {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         let row_count = rows.len();
-        if arguments.len() != self.model.arguments.len() {
-            return Err(RuntimeError::InjectedFunctionFailed {
-                function: self.model.name.to_string(),
+        if arguments.len() != self.program.arguments.len() {
+            return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                function: self.program.name.to_string(),
                 message: format!(
                     "expected {} arguments, found {}",
-                    self.model.arguments.len(),
+                    self.program.arguments.len(),
                     arguments.len()
                 ),
-            });
+            }));
         }
         let mut argument_arrays = Vec::with_capacity(arguments.len());
         for (index, (argument, declaration)) in
-            arguments.iter().zip(&self.model.arguments).enumerate()
+            arguments.iter().zip(&self.program.arguments).enumerate()
         {
             let argument = argument.to_array_ref();
-            let expected_type = arrow_data_type(&declaration.ty);
+            let expected_type = declaration.ty.arrow_data_type();
             if argument.data_type() != &expected_type || argument.len() != row_count {
-                return Err(RuntimeError::InjectedFunctionFailed {
-                    function: self.model.name.to_string(),
+                return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                    function: self.program.name.to_string(),
                     message: format!(
                         "argument {index} expected {expected_type:?} with {row_count} rows, found \
                          {:?} with {} rows",
                         argument.data_type(),
                         argument.len()
                     ),
-                });
+                }));
             }
             argument_arrays.push(argument);
         }
         let mut propagation = prior_error_rows.iter().collect::<Vec<_>>();
         if propagation.len() != row_count {
-            return Err(RuntimeError::InjectedFunctionFailed {
-                function: self.model.name.to_string(),
+            return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                function: self.program.name.to_string(),
                 message: format!(
                     "received {} prior-error rows for a {row_count}-row batch",
                     propagation.len()
                 ),
-            });
+            }));
         }
-        for (argument, declaration) in argument_arrays.iter().zip(&self.model.arguments) {
+        for (argument, declaration) in argument_arrays.iter().zip(&self.program.arguments) {
             if !declaration.optional {
                 for (row, masked) in propagation.iter_mut().enumerate() {
                     *masked |= argument.is_null(row);
@@ -1004,7 +1050,7 @@ impl CompiledUdf {
         }
         if propagation.iter().all(|masked| *masked) {
             return Ok(InjectedResult::success(typed_array_from_ref(
-                new_null_array(&arrow_data_type(&self.model.returns.ty), row_count),
+                new_null_array(&self.program.returns.ty.arrow_data_type(), row_count),
             )?));
         }
         if propagation.iter().any(|masked| *masked) {
@@ -1013,12 +1059,12 @@ impl CompiledUdf {
                 .into_iter()
                 .map(|argument| {
                     nullif(argument.as_ref(), &mask).map_err(|error| {
-                        RuntimeError::InjectedFunctionFailed {
-                            function: self.model.name.to_string(),
-                            message: format!(
-                                "failed to hide strict-propagation rows from the UDF: {error}"
-                            ),
-                        }
+                        let message =
+                            format!("failed to hide strict-propagation rows from the UDF: {error}");
+                        Report::new(error).change_context(RuntimeError::InjectedFunctionFailed {
+                            function: self.program.name.to_string(),
+                            message,
+                        })
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1027,13 +1073,13 @@ impl CompiledUdf {
         CALL_STATE.with(|state| {
             let mut state = state.borrow_mut();
             if state.is_some() {
-                return Err(RuntimeError::InjectedFunctionFailed {
-                    function: self.model.name.to_string(),
+                return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                    function: self.program.name.to_string(),
                     message: "nested Roto execution context is not supported".to_string(),
-                });
+                }));
             }
             *state = Some(CallState {
-                udf_name: self.model.name.to_string(),
+                udf_name: self.program.name.to_string(),
                 span,
                 row_count,
                 now,
@@ -1059,57 +1105,58 @@ impl CompiledUdf {
             } else {
                 "Roto execution trapped".to_string()
             };
-            RuntimeError::InjectedFunctionFailed {
-                function: self.model.name.to_string(),
+            Report::new(RuntimeError::InjectedFunctionFailed {
+                function: self.program.name.to_string(),
                 message,
-            }
+            })
         })?;
         if started.elapsed() > self.watchdog {
-            return Err(RuntimeError::InjectedFunctionFailed {
-                function: self.model.name.to_string(),
+            return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                function: self.program.name.to_string(),
                 message: format!("watchdog expired after {:?}", self.watchdog),
-            });
+            }));
         }
         if let Some(message) = state.fatal {
-            return Err(RuntimeError::InjectedFunctionFailed {
-                function: self.model.name.to_string(),
+            return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                function: self.program.name.to_string(),
                 message,
-            });
+            }));
         }
-        let expected_type = arrow_data_type(&self.model.returns.ty);
+        let expected_type = self.program.returns.ty.arrow_data_type();
         if output.data_type() != &expected_type || output.len() != row_count {
-            return Err(RuntimeError::InvalidInjectedResult {
-                function: self.model.name.to_string(),
+            return Err(Report::new(RuntimeError::InvalidInjectedResult {
+                function: self.program.name.to_string(),
                 expected_type,
                 actual_type: output.data_type().clone(),
                 expected_rows: row_count,
                 actual_rows: output.len(),
-            });
+            }));
         }
         let output = if propagation.iter().any(|masked| *masked) {
             let mask = BooleanArray::from(propagation.clone());
             nullif(output.as_ref(), &mask).map_err(|error| {
-                RuntimeError::InjectedFunctionFailed {
-                    function: self.model.name.to_string(),
-                    message: format!("failed to apply required-argument null mask: {error}"),
-                }
+                let message = format!("failed to apply required-argument null mask: {error}");
+                Report::new(error).change_context(RuntimeError::InjectedFunctionFailed {
+                    function: self.program.name.to_string(),
+                    message,
+                })
             })?
         } else {
             output
         };
-        if !self.model.returns.optional {
+        if !self.program.returns.optional {
             for (row, propagated) in propagation.iter().copied().enumerate() {
                 let error_row = state
                     .side_errors
                     .iter()
                     .any(|(error_row, _)| *error_row == row);
                 if output.is_null(row) && !propagated && !error_row {
-                    return Err(RuntimeError::InjectedFunctionFailed {
-                        function: self.model.name.to_string(),
+                    return Err(Report::new(RuntimeError::InjectedFunctionFailed {
+                        function: self.program.name.to_string(),
                         message: format!(
                             "non-OPTIONAL return contains an unexplained null at row {row}"
                         ),
-                    });
+                    }));
                 }
             }
         }
@@ -1120,29 +1167,107 @@ impl CompiledUdf {
     }
 }
 
+/// Executes domain UDFs with the caller's execution time and prior row errors.
+///
+/// Injection supplies the complete execution context:
+///
+/// ```no_run
+/// use nervix_models::Timestamp;
+/// use nervix_roto::UdfExecutor;
+/// use nervix_vm::{
+///     FunctionInjector, RowErrorMask, RowSelection, TypedArray,
+///     program::{FunctionName, Span},
+/// };
+///
+/// fn inject(
+///     injector: &UdfExecutor,
+///     function: &FunctionName,
+///     arguments: &[TypedArray],
+///     rows: &RowSelection,
+///     span: Span,
+///     now: Timestamp,
+///     prior_error_rows: RowErrorMask<'_>,
+/// ) {
+///     drop(injector.inject_with_context(function, arguments, rows, span, now, prior_error_rows));
+/// }
+/// ```
+///
+/// The current injection API cannot be called without the execution time:
+///
+/// ```compile_fail
+/// use nervix_roto::UdfExecutor;
+/// use nervix_vm::{
+///     FunctionInjector, RowErrorMask, RowSelection, TypedArray,
+///     program::{FunctionName, Span},
+/// };
+///
+/// fn inject(
+///     injector: &UdfExecutor,
+///     function: &FunctionName,
+///     arguments: &[TypedArray],
+///     rows: &RowSelection,
+///     span: Span,
+///     prior_error_rows: RowErrorMask<'_>,
+/// ) {
+///     drop(injector.inject_with_context(function, arguments, rows, span, prior_error_rows));
+/// }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct UdfExecutor {
     functions: HashMap<String, Arc<CompiledUdf>>,
     signatures: UdfSignatures,
 }
 
+/// What compiling a domain's UDFs is charged. Roto's compiler allocates the code it generates
+/// itself and the executor keeps it for as long as the domain does, which no transient budget can
+/// stand for, so the charge only admits the compilation onto the bulk workers.
+const COMPILE_RESERVATION_BYTES: u64 = 1;
+
 impl UdfExecutor {
-    pub async fn compile(models: Vec<CreateUdf>) -> Result<Self, UdfError> {
-        tokio::task::spawn_blocking(move || Self::compile_sync(models))
+    /// Compile `models` on the node's bulk workers, checking between two programs whether the
+    /// caller stopped waiting.
+    pub async fn compile(
+        executor: &Executor,
+        models: Vec<UdfProgram>,
+    ) -> error_stack::Result<Self, UdfError> {
+        let reservation = match executor
+            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
             .await
-            .map_err(UdfError::CompileTask)?
+        {
+            Ok(reservation) => reservation,
+            Err(error) => return Err(error.change_context(UdfError::CompileExecution)),
+        };
+        let compiled = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                Self::compile_sync(models, Some(cancellation))
+            })
+            .await;
+        match compiled {
+            Ok(compiled) => compiled,
+            Err(error) => Err(error.change_context(UdfError::CompileExecution)),
+        }
     }
 
-    fn compile_sync(models: impl IntoIterator<Item = CreateUdf>) -> Result<Self, UdfError> {
+    /// Compile `models` on the calling thread. An admitted compilation passes the `cancellation`
+    /// its worker checks between programs; a test has none.
+    fn compile_sync(
+        models: impl IntoIterator<Item = UdfProgram>,
+        cancellation: Option<&Cancellation>,
+    ) -> error_stack::Result<Self, UdfError> {
         let mut functions = HashMap::new();
         let mut signatures = UdfSignatures::default();
         for model in models {
+            if let Some(cancellation) = cancellation
+                && cancellation.is_cancelled()
+            {
+                return Err(Report::new(UdfError::CompileCancelled));
+            }
             let started = Instant::now();
             let compiled = compile_udf(model.clone(), DEFAULT_WATCHDOG)?;
             if started.elapsed() > COMPILE_TEST_BUDGET {
-                return Err(UdfError::CompileBudgetExceeded {
+                return Err(Report::new(UdfError::CompileBudgetExceeded {
                     limit: COMPILE_TEST_BUDGET,
-                });
+                }));
             }
             signatures.insert(model.name.as_str(), signature_for(&model));
             functions.insert(model.name.as_str().to_ascii_lowercase(), Arc::new(compiled));
@@ -1165,7 +1290,7 @@ impl UdfExecutor {
 impl FunctionInjector for UdfExecutor {
     fn execution_policy(&self, function: &FunctionName) -> FunctionExecutionPolicy {
         if matches!(function, FunctionName::Udf(_)) {
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         } else {
             FunctionExecutionPolicy::Inline
         }
@@ -1179,38 +1304,38 @@ impl FunctionInjector for UdfExecutor {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         let FunctionName::Udf(name) = function else {
-            return Err(RuntimeError::MissingFunctionInjector {
+            return Err(Report::new(RuntimeError::MissingFunctionInjector {
                 function: function.as_str().to_string(),
-            });
+            }));
         };
         let Some(compiled) = self.functions.get(&name.to_ascii_lowercase()) else {
-            return Err(RuntimeError::MissingFunctionInjector {
+            return Err(Report::new(RuntimeError::MissingFunctionInjector {
                 function: function.as_str().to_string(),
-            });
+            }));
         };
         compiled.execute(arguments, rows, span, now, prior_error_rows)
     }
 }
 
-pub fn signature_for(model: &CreateUdf) -> UdfSignature {
+pub fn signature_for(model: &UdfProgram) -> UdfSignature {
     UdfSignature {
         arguments: model
             .arguments
             .iter()
             .map(|argument| UdfParameter {
-                data_type: arrow_data_type(&argument.ty),
+                data_type: argument.ty.arrow_data_type(),
                 optional: argument.optional,
             })
             .collect(),
-        return_type: arrow_data_type(&model.returns.ty),
+        return_type: model.returns.ty.arrow_data_type(),
         return_optional: model.returns.optional,
         volatile: model.volatile,
     }
 }
 
-pub fn signatures_for<'a>(models: impl IntoIterator<Item = &'a CreateUdf>) -> UdfSignatures {
+pub fn signatures_for<'a>(models: impl IntoIterator<Item = &'a UdfProgram>) -> UdfSignatures {
     let mut signatures = UdfSignatures::default();
     for model in models {
         signatures.insert(model.name.as_str(), signature_for(model));
@@ -1218,17 +1343,20 @@ pub fn signatures_for<'a>(models: impl IntoIterator<Item = &'a CreateUdf>) -> Ud
     signatures
 }
 
-fn compile_udf(model: CreateUdf, watchdog: Duration) -> Result<CompiledUdf, UdfError> {
+fn compile_udf(
+    model: UdfProgram,
+    watchdog: Duration,
+) -> error_stack::Result<CompiledUdf, UdfError> {
     if model.code.contains(RESERVED_PREFIX) {
-        return Err(UdfError::ReservedIdentifier {
+        return Err(Report::new(UdfError::ReservedIdentifier {
             name: model.name.to_string(),
-        });
+        }));
     }
     let mut runtime = deterministic_runtime()?;
     if model.volatile {
         runtime
             .add(volatile_library())
-            .map_err(|error| UdfError::RuntimeRegistration(error.to_string()))?;
+            .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     }
     let wrapper = generated_wrapper(&model);
     let source = format!("{}\n{wrapper}", model.code);
@@ -1243,21 +1371,24 @@ fn compile_udf(model: CreateUdf, watchdog: Duration) -> Result<CompiledUdf, UdfE
             if !model.volatile {
                 for function in ["now", "rand_f64", "uuid_v4"] {
                     if contains_call(&model.code, function) && diagnostics.contains(function) {
-                        return Err(UdfError::VolatileRequired { function });
+                        return Err(Report::new(UdfError::VolatileRequired { function }));
                     }
                 }
             }
-            return Err(UdfError::Compile { diagnostics });
+            return Err(Report::new(UdfError::Compile { diagnostics }));
         }
     };
     if package.run_tests().is_err() {
-        return Err(UdfError::TestsFailed);
+        return Err(Report::new(UdfError::TestsFailed));
     }
     let entry = package
         .get_function::<fn(Val<UdfArgs>) -> Val<AnyColumn>>("__nervix_entry")
-        .map_err(|error| UdfError::Signature(error.to_string()))?;
+        .map_err(|error| {
+            let reason = error.to_string();
+            Report::new(error).change_context(UdfError::Signature(reason))
+        })?;
     Ok(CompiledUdf {
-        model,
+        program: model,
         entry,
         watchdog,
     })
@@ -1272,7 +1403,7 @@ fn contains_call(source: &str, function: &str) -> bool {
         .is_match(source)
 }
 
-fn generated_wrapper(model: &CreateUdf) -> String {
+fn generated_wrapper(model: &UdfProgram) -> String {
     let arguments = model
         .arguments
         .iter()
@@ -1375,48 +1506,17 @@ fn list_bridge_conversion(element: &ParseAsType) -> &'static str {
     }
 }
 
-pub fn arrow_data_type(ty: &ParseAsType) -> DataType {
-    match ty {
-        ParseAsType::U8 => DataType::UInt8,
-        ParseAsType::I8 => DataType::Int8,
-        ParseAsType::U16 => DataType::UInt16,
-        ParseAsType::I16 => DataType::Int16,
-        ParseAsType::U32 => DataType::UInt32,
-        ParseAsType::I32 => DataType::Int32,
-        ParseAsType::U64 => DataType::UInt64,
-        ParseAsType::I64 => DataType::Int64,
-        ParseAsType::F32 => DataType::Float32,
-        ParseAsType::F64 => DataType::Float64,
-        ParseAsType::Bool => DataType::Boolean,
-        ParseAsType::String => DataType::Utf8,
-        ParseAsType::Bytes => DataType::Binary,
-        ParseAsType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
-        ParseAsType::Array { element, len } => DataType::FixedSizeList(
-            StdArc::new(Field::new("item", arrow_data_type(element), false)),
-            i32::try_from(len.get()).verified(
-                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
-                 list",
-            ),
-        ),
-        ParseAsType::Vec { element } => DataType::List(StdArc::new(Field::new(
-            "item",
-            arrow_data_type(element),
-            false,
-        ))),
-    }
-}
-
-fn typed_array_from_ref(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
+fn typed_array_from_ref(array: ArrayRef) -> error_stack::Result<TypedArray, RuntimeError> {
     macro_rules! downcast {
         ($array_ty:ty, $variant:ident) => {
             match array.as_any().downcast_ref::<$array_ty>() {
                 Some(typed) => Ok(TypedArray::$variant(typed.clone())),
-                None => Err(RuntimeError::InvalidBatch {
+                None => Err(Report::new(RuntimeError::InvalidBatch {
                     message: format!(
                         "Arrow array has invalid physical type for {:?}",
                         array.data_type()
                     ),
-                }),
+                })),
             }
         };
     }
@@ -1440,9 +1540,9 @@ fn typed_array_from_ref(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
             downcast!(TimestampNanosecondArray, Datetime)
         }
         DataType::List(_) | DataType::FixedSizeList(_, _) => Ok(TypedArray::Generic(array)),
-        data_type => Err(RuntimeError::InvalidBatch {
+        data_type => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!("unsupported UDF Arrow type {data_type:?}"),
-        }),
+        })),
     }
 }
 
@@ -1452,8 +1552,8 @@ mod tests {
 
     use super::*;
 
-    fn add_one_model() -> CreateUdf {
-        CreateUdf::new(
+    fn add_one_model() -> UdfProgram {
+        UdfProgram::new(
             UdfName::parse("add_one").expect("valid udf name"),
             UdfLanguage::Roto0_13,
             vec![UdfArgument {
@@ -1483,8 +1583,8 @@ mod tests {
         returns: ParseAsType,
         volatile: bool,
         code: &str,
-    ) -> CreateUdf {
-        CreateUdf::new(
+    ) -> UdfProgram {
+        UdfProgram::new(
             UdfName::parse(name).expect("valid udf name"),
             UdfLanguage::Roto0_13,
             arguments
@@ -1506,11 +1606,12 @@ mod tests {
 
     #[test]
     fn compiles_and_executes_i64_column_udf() {
-        let executor = UdfExecutor::compile_sync([add_one_model()]).expect("UDF should compile");
+        let executor =
+            UdfExecutor::compile_sync([add_one_model()], None).expect("UDF should compile");
         let function = FunctionName::Udf("add_one".to_string());
         assert_eq!(
             executor.execution_policy(&function),
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         );
         let result = executor
             .inject_with_context(
@@ -1535,17 +1636,20 @@ mod tests {
 
     #[test]
     fn bytes_bridge_preserves_binary_columns_and_list_eligibility() {
-        let executor = UdfExecutor::compile_sync([model(
-            "copy_bytes",
-            [TestArgument {
-                name: "value",
-                ty: ParseAsType::Bytes,
-                optional: false,
-            }],
-            ParseAsType::Bytes,
-            false,
-            "fn copy_bytes(value: BytesColumn) -> BytesColumn { value }",
-        )])
+        let executor = UdfExecutor::compile_sync(
+            [model(
+                "copy_bytes",
+                [TestArgument {
+                    name: "value",
+                    ty: ParseAsType::Bytes,
+                    optional: false,
+                }],
+                ParseAsType::Bytes,
+                false,
+                "fn copy_bytes(value: BytesColumn) -> BytesColumn { value }",
+            )],
+            None,
+        )
         .assured("the BYTES bridge registers a Roto column type");
         let input = BinaryArray::from(vec![Some(&[0, 255][..]), Some(&[][..]), None]);
         let result = executor
@@ -1577,14 +1681,16 @@ mod tests {
     fn compiles_independent_udfs_concurrently() {
         const COMPILER_COUNT: usize = 16;
 
-        let barrier = StdArc::new(std::sync::Barrier::new(COMPILER_COUNT));
-        std::thread::scope(|scope| {
+        let barrier = StdArc::new(nervix_primitives::sync::blocking::Barrier::new(
+            COMPILER_COUNT,
+        ));
+        nervix_primitives::thread::scope(|scope| {
             let compilers = (0..COMPILER_COUNT)
                 .map(|_| {
                     let barrier = barrier.clone();
                     scope.spawn(move || {
                         barrier.wait();
-                        UdfExecutor::compile_sync([add_one_model()])
+                        UdfExecutor::compile_sync([add_one_model()], None)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1603,8 +1709,106 @@ mod tests {
         let mut model = add_one_model();
         model.code = "fn add_one(value: I64Column) -> I64Column { value.add_s(now()) }".to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model]),
-            Err(UdfError::VolatileRequired { function: "now" })
+            UdfExecutor::compile_sync([model], None),
+            Err(error) if matches!(error.current_context(), UdfError::VolatileRequired { function: "now" })
+        ));
+    }
+
+    #[test]
+    fn udf_execution_reports_invalid_argument_shapes_with_function_context() {
+        let executor = UdfExecutor::compile_sync([add_one_model()], None)
+            .assured("the fixed add_one function and its wrapper compile");
+        let function = FunctionName::Udf("add_one".to_string());
+        let rows = RowSelection::All(2);
+        let span = (0..7).into();
+        let now = Timestamp::from_unix_nanos(123);
+        let cases = [
+            (
+                vec![],
+                RowErrorMask::none(2),
+                "expected 1 arguments, found 0",
+            ),
+            (
+                vec![TypedArray::Boolean(BooleanArray::from(vec![true, false]))],
+                RowErrorMask::none(2),
+                "expected Int64 with 2 rows, found Boolean with 2 rows",
+            ),
+            (
+                vec![TypedArray::Int64(Int64Array::from(vec![1]))],
+                RowErrorMask::none(2),
+                "expected Int64 with 2 rows, found Int64 with 1 rows",
+            ),
+            (
+                vec![TypedArray::Int64(Int64Array::from(vec![1, 2]))],
+                RowErrorMask::none(1),
+                "received 1 prior-error rows for a 2-row batch",
+            ),
+        ];
+        for (arguments, prior_errors, reason) in cases {
+            let report = executor
+                .inject_with_context(&function, &arguments, &rows, span, now, prior_errors)
+                .expect_err("invalid call shape must fail before guest execution");
+            assert!(matches!(
+                report.current_context(),
+                RuntimeError::InjectedFunctionFailed { function, message }
+                    if function == "add_one" && message.contains(reason)
+            ));
+        }
+    }
+
+    #[test]
+    fn udf_reports_missing_injectors_and_reserved_guest_identifiers() {
+        let executor = UdfExecutor::default();
+        let report = executor
+            .inject_with_context(
+                &FunctionName::Udf("missing".to_string()),
+                &[],
+                &RowSelection::All(0),
+                (0..0).into(),
+                Timestamp::from_unix_nanos(0),
+                RowErrorMask::none(0),
+            )
+            .expect_err("an unregistered UDF has no implementation");
+        assert!(matches!(
+            report.current_context(),
+            RuntimeError::MissingFunctionInjector { function } if function == "missing"
+        ));
+
+        let mut guest = add_one_model();
+        guest.code.push_str("\n// __nervix_entry is reserved");
+        let report = UdfExecutor::compile_sync([guest], None)
+            .expect_err("guest source cannot claim the host's private namespace");
+        assert!(matches!(
+            report.current_context(),
+            UdfError::ReservedIdentifier { name } if name == "add_one"
+        ));
+    }
+
+    #[test]
+    fn udf_watchdog_and_unsupported_arrow_type_keep_typed_failures() {
+        let compiled = compile_udf(add_one_model(), Duration::ZERO)
+            .assured("the fixed add_one guest compiles with any watchdog duration");
+        let report = compiled
+            .execute(
+                &[TypedArray::Int64(Int64Array::from(vec![1]))],
+                &RowSelection::All(1),
+                (0..7).into(),
+                Timestamp::from_unix_nanos(123),
+                RowErrorMask::none(1),
+            )
+            .expect_err("a zero-duration watchdog expires after guest execution");
+        assert!(matches!(
+            report.current_context(),
+            RuntimeError::InjectedFunctionFailed { function, message }
+                if function == "add_one" && message.contains("watchdog expired")
+        ));
+
+        let date_array: ArrayRef = StdArc::new(arrow_array::Date32Array::from(vec![1]));
+        let unsupported = typed_array_from_ref(date_array)
+            .expect_err("the Roto bridge cannot accept an undeclared Arrow type");
+        assert!(matches!(
+            unsupported.current_context(),
+            RuntimeError::InvalidBatch { message } if message.contains("Date32")
         ));
     }
 
@@ -1630,8 +1834,8 @@ test increments_by_one {
 "#
         .to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model]),
-            Err(UdfError::TestsFailed)
+            UdfExecutor::compile_sync([model], None),
+            Err(error) if matches!(error.current_context(), UdfError::TestsFailed)
         ));
     }
 
@@ -1640,8 +1844,8 @@ test increments_by_one {
         let mut model = add_one_model();
         model.code = "fn add_one(value: StringColumn) -> StringColumn { value.trim() }".to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model]),
-            Err(UdfError::Compile { .. })
+            UdfExecutor::compile_sync([model], None),
+            Err(error) if matches!(error.current_context(), UdfError::Compile { .. })
         ));
     }
 
@@ -1773,6 +1977,21 @@ test increments_by_one {
             ),
         ];
 
-        UdfExecutor::compile_sync(models).expect("documented UDF shapes should compile");
+        UdfExecutor::compile_sync(models, None).expect("documented UDF shapes should compile");
+    }
+
+    #[nervix_primitives::test]
+    async fn udfs_compile_on_the_bulk_workers() {
+        let executor = Executor::default();
+
+        let compiled = UdfExecutor::compile(&executor, vec![add_one_model()])
+            .await
+            .expect("the bulk workers compile the UDF");
+
+        assert!(!compiled.is_empty());
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.bulk_cpu.admitted, 1);
+        assert_eq!(snapshot.bulk_cpu.completed, 1);
+        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     }
 }

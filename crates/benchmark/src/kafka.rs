@@ -1,6 +1,7 @@
-use std::{io, sync::Arc as StdArc, time::Duration};
+use std::{io, time::Duration};
 
 use meticulous::ResultExt as _;
+use nervix_primitives::sync::StdArc;
 use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
@@ -27,11 +28,14 @@ pub async fn provision_topics(
         NewTopic::new(input_topic, partitions, TopicReplication::Fixed(1)),
         NewTopic::new(output_topic, partitions, TopicReplication::Fixed(1)),
     ];
-    let deadline = tokio::time::Instant::now() + timeout;
-    let results = tokio::time::timeout(timeout, admin.create_topics(&topics, &AdminOptions::new()))
-        .await
-        .map_err(|_| io::Error::other("timed out creating Kafka benchmark topics"))?
-        .map_err(io::Error::other)?;
+    let deadline = nervix_primitives::time::Instant::now() + timeout;
+    let results = nervix_primitives::time::timeout(
+        timeout,
+        admin.create_topics(&topics, &AdminOptions::new()),
+    )
+    .await
+    .map_err(|_| io::Error::other("timed out creating Kafka benchmark topics"))?
+    .map_err(io::Error::other)?;
     for result in results {
         match result {
             Ok(_) => {}
@@ -49,8 +53,9 @@ pub async fn provision_topics(
     let admin = StdArc::new(admin);
     for topic in [input_topic, output_topic] {
         loop {
-            tokio::task::consume_budget().await;
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            nervix_primitives::task::consume_budget().await;
+            let remaining =
+                deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
             if remaining.is_zero() {
                 return Err(io::Error::other(format!(
                     "Kafka topic '{topic}' did not reach {expected} partitions before timeout"
@@ -59,7 +64,7 @@ pub async fn provision_topics(
             let request_timeout = remaining.min(METADATA_ATTEMPT_TIMEOUT);
             let admin = StdArc::clone(&admin);
             let topic_name = topic.to_string();
-            let observed = tokio::task::spawn_blocking(move || {
+            let observed = nervix_primitives::task::spawn_blocking(move || {
                 let Ok(metadata) = admin
                     .inner()
                     .fetch_metadata(Some(&topic_name), request_timeout)
@@ -77,13 +82,13 @@ pub async fn provision_topics(
             if observed == Some(expected) {
                 break;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if nervix_primitives::time::Instant::now() >= deadline {
                 return Err(io::Error::other(format!(
                     "Kafka topic '{topic}' did not reach {expected} partitions before timeout; \
                      observed {observed:?}"
                 )));
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         }
     }
     Ok(())

@@ -2,19 +2,46 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Reingestor input evaluation, branch construction and route-local buffering.
-//! - **Depends on.** Validated plans, Arrow batches, materialized state and bound clocks.
+//! - **Depends on.** Decision-layer reingestor plans, their bound programs, Arrow batches,
+//!   materialized state and bound clocks.
 //! - **Must not know.** NSPL parsing, placement selection or source transport lifecycle.
 
 use indexmap::IndexMap;
 
 use super::*;
 
-/// One reingestor input this node runs: the reingestor model, the relay that input reads from,
-/// and the fan-in that delivers that relay's batches.
-pub(super) struct ReingestorInputSpec {
-    pub(super) reingestor: CreateReingestor,
-    pub(super) from_relay: RelayName,
-    pub(super) receiver: RelayRuntimeFanIn,
+/// Where the task of one reingestor input reads its relay's batches from.
+pub(super) enum ReingestorInputConsumer {
+    /// A consumer the relay boundary builder of a new execution registered for the input.
+    Registered(RelayRuntimeFanIn),
+    /// The services of a running relay, which register the input's consumer only once every input
+    /// of the start is bound. A relay refuses attached delivery while a registered consumer has no
+    /// receiver, so a start that fails must not register one.
+    Deferred(Arc<RelayBoundaryServices>),
+}
+
+impl ReingestorInputConsumer {
+    fn attach(self, mode: AckMode) -> RelayRuntimeFanIn {
+        match self {
+            Self::Registered(receiver) => receiver,
+            Self::Deferred(services) => services.add_local_runtime_consumer(mode),
+        }
+    }
+}
+
+/// One reingestor input this node runs, before its programs are bound: the reingestor's plan, the
+/// input relay, and where its task reads that relay's batches from.
+pub(super) struct PlannedReingestorInput {
+    pub(super) plan: Arc<ReingestorPlan>,
+    pub(super) input: ReingestorInputPlan,
+    pub(super) consumer: ReingestorInputConsumer,
+}
+
+/// The branched entrypoints and input tasks of the reingestors one build started.
+#[derive(Default)]
+pub(super) struct ReingestorRuntimes {
+    pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
+    pub(super) tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -22,8 +49,6 @@ pub(super) struct ReingestorDispatchContext<'a> {
     pub(super) routing: &'a DomainRoutingSnapshot,
     pub(super) domain: &'a DomainName,
     pub(super) reingestor: &'a ReingestorName,
-    pub(super) from_relay: &'a RelayName,
-    pub(super) from_where: Option<&'a nervix_models::Expression>,
     pub(super) mode: AckMode,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
@@ -185,10 +210,89 @@ impl ReingestorOutputBuffers {
 }
 
 impl Runtime {
+    /// Starts every planned reingestor input: the branched entrypoints of each reingestor once, then
+    /// one task per input relay with that input's programs bound.
+    ///
+    /// Every entrypoint template is prepared and every input bound before anything starts, so a
+    /// start that fails leaves no entrypoint or task running and registers no deferred consumer.
+    pub(super) fn start_reingestor_runtimes(
+        &self,
+        deps: ExecutionBuildDeps<'_>,
+        shutdown_tx: &watch::Sender<bool>,
+        relays: RelayRuntimeHandles<'_>,
+        inputs: Vec<PlannedReingestorInput>,
+    ) -> error_stack::Result<ReingestorRuntimes, EntrypointBindingError> {
+        /// One input bound for this node, with where its task will read its relay.
+        struct BoundInput {
+            bound: BoundReingestorInput,
+            consumer: ReingestorInputConsumer,
+        }
+
+        let mut templates_by_reingestor =
+            HashMap::<ReingestorName, HashMap<RelayName, IngestorRouteTemplate>>::default();
+        let mut bound_inputs = Vec::with_capacity(inputs.len());
+        for PlannedReingestorInput {
+            plan,
+            input,
+            consumer,
+        } in inputs
+        {
+            if !templates_by_reingestor.contains_key(&plan.name) {
+                let templates = relays.route_templates(
+                    ModelKind::Reingestor,
+                    &ModelName::from(&plan.name),
+                    &plan.routes,
+                )?;
+                templates_by_reingestor.insert(plan.name.clone(), templates);
+            }
+            let bound = deps.bind_reingestor_input(&plan, &input)?;
+            bound_inputs.push(BoundInput { bound, consumer });
+        }
+
+        let mut runtimes = ReingestorRuntimes::default();
+        let mut senders_by_reingestor = HashMap::<
+            ReingestorName,
+            HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+        >::default();
+        for (reingestor, templates) in templates_by_reingestor {
+            let identifier = ModelName::from(&reingestor);
+            let entrypoints =
+                self.start_branched_entrypoint_runtimes(deps.domain, &identifier, templates);
+            runtimes
+                .branched_entrypoints
+                .insert(identifier, entrypoints.runtimes);
+            senders_by_reingestor.insert(reingestor, entrypoints.senders);
+        }
+        for BoundInput { bound, consumer } in bound_inputs {
+            let senders = senders_by_reingestor
+                .get(&bound.reingestor)
+                .verified("the entrypoints of every bound reingestor were started above");
+            let mut route_senders = HashMap::default();
+            for route in &bound.routes {
+                let sender = senders.get(&route.route.relay).verified(
+                    "the entrypoints started above came from a template of every route of the \
+                     plan this input was bound from",
+                );
+                route_senders.insert(route.route.relay.clone(), sender.clone());
+            }
+            let receiver = consumer.attach(bound.mode);
+            let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&bound.reingestor));
+            let task = self.spawn_reingestor_task(
+                deps.domain,
+                shutdown_tx,
+                route_senders,
+                bound,
+                receiver,
+            );
+            runtimes.tasks.entry(identity).or_default().push(task);
+        }
+        Ok(runtimes)
+    }
+
     pub(super) async fn evaluate_reingestor_output_events(
         &self,
         context: ReingestorDispatchContext<'_>,
-        output: &mut RelayProcessorOutputNode,
+        output: &BoundEntryRoute,
         output_index: usize,
         batch: &RelayRecordBatch,
         scope: &mut ProcessorOutputBatchScope,
@@ -199,183 +303,8 @@ impl Runtime {
         ),
         PlannedGeneralError,
     > {
-        let ReingestorDispatchContext {
-            routing,
-            domain,
-            reingestor,
-            from_relay,
-            ..
-        } = context;
-        if output.compiled_program.is_none() {
-            let input_schema = routing
-                .relay_schemas
-                .get(from_relay)
-                .cloned()
-                .ok_or_else(|| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "stream '{}' schema is not instantiated in domain '{}'",
-                        from_relay.as_str(),
-                        domain.as_str()
-                    ),
-                })?;
-            let output_schema = routing
-                .relay_schemas
-                .get(&output.relay)
-                .cloned()
-                .ok_or_else(|| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "stream '{}' schema is not instantiated in domain '{}'",
-                        output.relay.as_str(),
-                        domain.as_str()
-                    ),
-                })?;
-            let current_branching = routing
-                .relay_branchings
-                .get(from_relay)
-                .cloned()
-                .assured("the validated reingestor source relay has branch routing");
-            let target_branch_schema = relay_branch_schema_for_routing(routing, &output.relay);
-            match compile_processor_output_filter_map_program(
-                RuntimeCompileTarget {
-                    domain,
-                    identifier: &ModelName::from(reingestor),
-                },
-                std::slice::from_ref(from_relay),
-                &output.relay,
-                &output.construction,
-                RuntimeVmSchemaPair {
-                    input: batch.arrow_schema(),
-                    input_sensitivity: input_schema.vm_sensitivity(),
-                    output: output_schema.arrow_schema(),
-                    output_sensitivity: output_schema.vm_sensitivity(),
-                },
-                None,
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &routing.materialized_stream_specs,
-                    available_lookups: &routing.lookups,
-                    current_branching: &current_branching,
-                    udfs: Some(&routing.udfs),
-                },
-            ) {
-                Ok(program) => output.compiled_program = program,
-                Err(error) => {
-                    return Err(PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: error.to_string(),
-                    });
-                }
-            }
-            output.compiled_branch_program = compile_output_branch_program(
-                RuntimeCompileTarget {
-                    domain,
-                    identifier: &ModelName::from(reingestor),
-                },
-                output.branch.as_ref(),
-                RuntimeVmSchema {
-                    schema: batch.arrow_schema(),
-                    sensitivity: input_schema.vm_sensitivity(),
-                },
-                RuntimeVmSchema {
-                    schema: output_schema.arrow_schema(),
-                    sensitivity: output_schema.vm_sensitivity(),
-                },
-                target_branch_schema,
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &routing.materialized_stream_specs,
-                    available_lookups: &routing.lookups,
-                    current_branching: &current_branching,
-                    udfs: Some(&routing.udfs),
-                },
-            )
-            .map_err(|error| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: error.to_string(),
-            })?;
-        }
-
-        let Some(program) = output.compiled_program.as_ref() else {
-            let output_schema = routing
-                .relay_schemas
-                .get(&output.relay)
-                .cloned()
-                .ok_or_else(|| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "reingestor '{}' output relay '{}' is not instantiated",
-                        reingestor.as_str(),
-                        output.relay.as_str()
-                    ),
-                })?;
-            let projected = batch
-                .batch
-                .project(output_schema.arrow_schema())
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "reingestor '{}' failed to project output relay '{}': {error}",
-                        reingestor.as_str(),
-                        output.relay.as_str()
-                    ),
-                })?;
-            let keys = if let Some(branch_program) = output.compiled_branch_program.as_ref() {
-                evaluate_output_branch_program(
-                    reingestor,
-                    branch_program,
-                    &batch.batch,
-                    &projected,
-                    &batch.keys,
-                    &scope.side_inputs,
-                    scope.execution_now,
-                )
-                .await
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                })?
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                })?
-            } else {
-                match output.branch.as_ref() {
-                    Some(OutputBranch::Unbranched) => vec![None; projected.batch().num_rows()],
-                    Some(OutputBranch::BranchedBy { assignments, .. })
-                        if assignments.is_empty() =>
-                    {
-                        batch.keys.clone()
-                    }
-                    Some(OutputBranch::BranchedBy { .. }) => {
-                        return Err(PlannedGeneralError {
-                            acks: batch.acks.clone(),
-                            reason: format!(
-                                "reingestor '{}' output '{}' has no compiled branch program",
-                                reingestor.as_str(),
-                                output.relay.as_str()
-                            ),
-                        });
-                    }
-                    None => batch.keys.clone(),
-                }
-            };
-            let input_rows = (0..projected.batch().num_rows()).collect::<Vec<_>>();
-            let pending = pending_output_batches_by_key(
-                output_index,
-                &input_rows,
-                keys,
-                projected,
-                &batch.metadata,
-            )
-            .map_err(|reason| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!("{reason:#}"),
-            })?;
-            return Ok((pending, Vec::new()));
-        };
-
+        let ReingestorDispatchContext { reingestor, .. } = context;
+        let program = &output.program;
         let Some(output_schema) = scope.output_schemas[output_index].clone() else {
             return Err(PlannedGeneralError {
                 acks: batch.acks.clone(),
@@ -389,6 +318,10 @@ impl Runtime {
         };
         let execution_now = scope.execution_now;
         let executed = execute_filter_map_program_on_batch(
+            ProgramRun {
+                executor: self.executor(),
+                now: execution_now,
+            },
             "reingestor",
             reingestor,
             program,
@@ -399,7 +332,6 @@ impl Runtime {
                 side_inputs: &scope.side_inputs,
                 ingest_metadata: None,
             },
-            execution_now,
             batch.acks.clone(),
             Some(&mut scope.shared),
         )
@@ -469,10 +401,10 @@ impl Runtime {
                     ),
                 });
             }
-            let metadata = success_input_rows
-                .iter()
-                .map(|input_row| batch.metadata[*input_row].clone())
-                .collect::<Vec<_>>();
+            let metadata = batch.metadata.take(&success_input_rows).verified(
+                "the program selects rows of this batch, whose metadata has one entry for every \
+                 row",
+            );
             let input_batch =
                 batch
                     .batch
@@ -485,15 +417,20 @@ impl Runtime {
                 .iter()
                 .map(|row| batch.keys[*row].clone())
                 .collect::<Vec<_>>();
-            let keys = if let Some(branch_program) = output.compiled_branch_program.as_ref() {
-                evaluate_output_branch_program(
+            let keys = match &output.branch {
+                BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
+                BoundRouteBranch::Preserved => input_keys,
+                BoundRouteBranch::Constructed(branch_program) => evaluate_output_branch_program(
+                    ProgramRun {
+                        executor: self.executor(),
+                        now: execution_now,
+                    },
                     reingestor,
                     branch_program,
                     &input_batch,
                     &output_batch,
                     &input_keys,
                     &scope.side_inputs,
-                    execution_now,
                 )
                 .await
                 .map_err(|error| PlannedGeneralError {
@@ -505,27 +442,7 @@ impl Runtime {
                 .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
                     reason: error.to_string(),
-                })?
-            } else {
-                match output.branch.as_ref() {
-                    Some(OutputBranch::Unbranched) => vec![None; output_batch.batch().num_rows()],
-                    Some(OutputBranch::BranchedBy { assignments, .. })
-                        if assignments.is_empty() =>
-                    {
-                        input_keys
-                    }
-                    Some(OutputBranch::BranchedBy { .. }) => {
-                        return Err(PlannedGeneralError {
-                            acks: batch.acks.clone(),
-                            reason: format!(
-                                "reingestor '{}' output '{}' has no compiled branch program",
-                                reingestor.as_str(),
-                                output.relay.as_str()
-                            ),
-                        });
-                    }
-                    None => input_keys,
-                }
+                })?,
             };
             pending_output_batches_by_key(
                 output_index,
@@ -551,8 +468,7 @@ impl Runtime {
     async fn dispatch_reingestor_outputs(
         &self,
         context: ReingestorDispatchContext<'_>,
-        compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
-        output_routes: &mut RelayProcessorOutputsNode,
+        input: &BoundReingestorInput,
         output_buffers: &mut ReingestorOutputBuffers,
         batch: RelayRecordBatch,
         materialized_values: &HashMap<String, RuntimeValue>,
@@ -569,20 +485,31 @@ impl Runtime {
         if batch.message_count() == 0 {
             return;
         }
-        let Some(batch) = self
-            .filter_reingestor_from_batch(context, compiled_from_where, batch, materialized_values)
-            .await
-        else {
-            return;
-        };
-        if batch.message_count() == 0 {
-            return;
+        let mut batch = batch;
+        let filters = [
+            (&input.from_where, MessageErrorOperation::SourceWhere),
+            (&input.filter_where, MessageErrorOperation::FilterWhere),
+        ];
+        for (filter, operation) in filters {
+            let Some(program) = filter.as_ref() else {
+                continue;
+            };
+            let Some(filtered) = self
+                .filter_reingestor_batch(context, program, operation, batch, materialized_values)
+                .await
+            else {
+                return;
+            };
+            if filtered.message_count() == 0 {
+                return;
+            }
+            batch = filtered;
         }
 
-        let output_relays = output_routes
+        let output_relays = input
             .routes
             .iter()
-            .map(|output| output.relay.clone())
+            .map(|output| output.route.relay.clone())
             .collect::<Vec<_>>();
 
         let mut output_schemas = Vec::with_capacity(output_relays.len());
@@ -612,12 +539,12 @@ impl Runtime {
 
         let mut pending_batches = Vec::new();
         let mut pending_errors = Vec::new();
-        for (output_index, output) in output_routes.routes.iter_mut().enumerate() {
-            tokio::task::consume_budget().await;
+        for (output_index, output) in input.routes.iter().enumerate() {
+            nervix_primitives::task::consume_budget().await;
             let (batches, errors) = match self
                 .evaluate_reingestor_output_events(
                     context,
-                    output,
+                    &output.route,
                     output_index,
                     &batch,
                     &mut scope,
@@ -711,12 +638,14 @@ impl Runtime {
             let Some(acks) = ack_queues[error.row].pop_front() else {
                 continue;
             };
+            let route = &input.routes[output_index].route;
             self.handle_structured_message_error(MessageErrorHandling {
+                routing: Some(routing),
                 domain,
                 node_kind: ModelKind::Reingestor,
                 node: &ModelName::from(reingestor),
-                source_route: Some(&output_routes.routes[output_index].relay),
-                policy: &output_routes.routes[output_index].message_error_policy,
+                source_route: Some(&route.relay),
+                policy: &route.message_error_policy,
                 message: RelayMessage {
                     key: error.key,
                     record: error.record,
@@ -755,7 +684,7 @@ impl Runtime {
             }
         };
         for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let relay = &output_relays[output_index];
             if !branched_senders.contains_key(relay) {
                 for batch in batches {
@@ -776,9 +705,7 @@ impl Runtime {
             if batches.is_empty() {
                 continue;
             }
-            let policy = output_routes.routes[output_index]
-                .flush_policy
-                .verified("the registry requires every reingestor output to declare FLUSH");
+            let policy = input.routes[output_index].flush_policy;
             for batch in batches.drain(..) {
                 let batch_acks = batch.acks.clone();
                 match output_buffers.enqueue(
@@ -897,7 +824,7 @@ impl Runtime {
     async fn flush_reingestor_outputs(
         &self,
         context: ReingestorOutputFlushContext<'_>,
-        output_routes: &RelayProcessorOutputsNode,
+        routes: &[BoundReingestorRoute],
         output_buffers: &mut ReingestorOutputBuffers,
         flush: ReingestorOutputFlush,
     ) {
@@ -907,11 +834,11 @@ impl Runtime {
                 Err(error) => {
                     let keys = output_buffers.keys();
                     for key in keys {
-                        tokio::task::consume_budget().await;
-                        let relay = &output_routes
-                            .routes
+                        nervix_primitives::task::consume_budget().await;
+                        let relay = &routes
                             .get(key.output_index)
                             .verified("the buffer key came from this reingestor's route list")
+                            .route
                             .relay;
                         let pending = output_buffers.take(&key);
                         let acks = pending
@@ -939,11 +866,11 @@ impl Runtime {
         };
         let keys = output_buffers.keys();
         for key in keys {
-            tokio::task::consume_budget().await;
-            let relay = &output_routes
-                .routes
+            nervix_primitives::task::consume_budget().await;
+            let relay = &routes
                 .get(key.output_index)
                 .verified("the buffer key came from this reingestor's route list")
+                .route
                 .relay;
             let should_flush = if let Some(snapshot) = &snapshot {
                 match output_buffers
@@ -985,95 +912,34 @@ impl Runtime {
         }
     }
 
-    pub(super) async fn filter_reingestor_from_batch(
+    /// Applies one of the reingestor's input predicates to an admitted batch, handling each message
+    /// error it reports under `operation`, and returns the messages that pass it.
+    pub(super) async fn filter_reingestor_batch(
         &self,
         context: ReingestorDispatchContext<'_>,
-        compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
+        program: &CompiledProgramWithMaterializedInterest,
+        operation: MessageErrorOperation,
         batch: RelayRecordBatch,
         materialized_values: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let ReingestorDispatchContext {
-            routing,
             domain,
             reingestor,
-            from_relay,
-            from_where,
             error_policies,
             execution_now,
+            routing,
             ..
         } = context;
-        let Some(from_where) = from_where else {
-            return Some(batch);
-        };
-
-        if compiled_from_where.is_none() {
-            let input_schema = match routing.relay_schemas.get(from_relay).cloned() {
-                Some(schema) => schema,
-                None => {
-                    self.handle_internal_processor_error_for_acks(
-                        domain,
-                        ModelKind::Reingestor,
-                        reingestor,
-                        error_policies,
-                        batch.acks.iter(),
-                        format!(
-                            "stream '{}' schema is not instantiated in domain '{}'",
-                            from_relay.as_str(),
-                            domain.as_str()
-                        ),
-                    );
-                    return None;
-                }
-            };
-            let current_branching = routing
-                .relay_branchings
-                .get(from_relay)
-                .cloned()
-                .assured("the validated reingestor source relay has branch routing");
-            match compile_expression_filter_program(
-                RuntimeCompileTarget {
-                    domain,
-                    identifier: &ModelName::from(reingestor),
-                },
-                Some(from_where),
-                RuntimeVmSchema {
-                    schema: batch.arrow_schema(),
-                    sensitivity: input_schema.vm_sensitivity(),
-                },
-                false,
-                MessageErrorOperation::SourceWhere,
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &routing.materialized_stream_specs,
-                    available_lookups: &routing.lookups,
-                    current_branching: &current_branching,
-                    udfs: Some(&routing.udfs),
-                },
-            ) {
-                Ok(program) => *compiled_from_where = program,
-                Err(error) => {
-                    self.handle_internal_processor_error_for_acks(
-                        domain,
-                        ModelKind::Reingestor,
-                        reingestor,
-                        error_policies,
-                        batch.acks.iter(),
-                        format!("FROM WHERE compile failed: {}", error),
-                    );
-                    return None;
-                }
-            }
-        }
-
-        let Some(program) = compiled_from_where.clone() else {
-            return Some(batch);
-        };
         let plan = match plan_filter_map_messages(
+            ProgramRun {
+                executor: self.executor(),
+                now: execution_now,
+            },
             "reingestor",
             reingestor,
-            MessageErrorOperation::SourceWhere,
-            &program,
+            operation,
+            program,
             batch,
-            execution_now,
             materialized_values,
         )
         .await
@@ -1092,6 +958,7 @@ impl Runtime {
             }
         };
         self.handle_planned_message_errors(
+            Some(routing),
             domain,
             ModelKind::Reingestor,
             reingestor,
@@ -1102,81 +969,27 @@ impl Runtime {
         plan.batch
     }
 
-    pub(in crate::runtime) fn spawn_reingestor_task(
+    /// Starts the task that runs one bound reingestor input over the batches `receiver` delivers,
+    /// handing each route's records to the branched entrypoint `task_branched_senders` names for
+    /// its relay.
+    fn spawn_reingestor_task(
         &self,
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
-        branched_entrypoint_senders: &HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
-        reingestor: CreateReingestor,
-        from_relay: RelayName,
+        task_branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+        input: BoundReingestorInput,
         receiver: RelayRuntimeFanIn,
-    ) -> Result<JoinHandle<()>, RuntimeError> {
-        let input_collect_policy = Self::parse_runtime_node_input_collect_policy(
-            domain,
-            "reingestor",
-            &reingestor.name,
-            reingestor.from.collect_policy.as_ref(),
-        )?;
-        let mut task_output_routes = RelayProcessorOutputsNode {
-            routes: reingestor
-                .output_routes
-                .routes
-                .iter()
-                .map(|output| {
-                    let flush_policy = output
-                        .flush_policy
-                        .as_ref()
-                        .map(|policy| {
-                            Self::parse_runtime_node_flush_policy(
-                                domain,
-                                "reingestor output",
-                                &output.relay,
-                                policy,
-                            )
-                        })
-                        .transpose()?;
-                    Ok(RelayProcessorOutputNode {
-                        relay: output.relay.clone(),
-                        construction: output.construction.clone(),
-                        branch: output.branch.clone(),
-                        flush_policy,
-                        message_error_policy: output.message_error_policy.clone(),
-                        pending: Vec::new(),
-                        flush_timer: BranchBufferTimer::default(),
-                        compiled_program: None,
-                        compiled_branch_program: None,
-                    })
-                })
-                .collect::<Result<Vec<_>, RuntimeError>>()?,
-        };
-        let mut task_branched_senders = HashMap::default();
-        for output in reingestor.output_routes.outputs() {
-            let Some(sender) = branched_entrypoint_senders.get(&output.relay).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing reingestor branched entrypoint for relay '{}'",
-                        output.relay.as_str()
-                    ),
-                });
-            };
-            task_branched_senders.insert(output.relay.clone(), sender);
-        }
+    ) -> JoinHandle<()> {
+        let metrics_dirty =
+            self.branch_metrics_mark(domain, ModelKind::Reingestor, &input.reingestor);
         let task_domain = domain.clone();
-        let task_reingestor = reingestor.name.clone();
-        let task_from_relay = from_relay;
-        let task_from_where = reingestor
-            .from
-            .where_clauses()
-            .iter()
-            .find(|source_filter| source_filter.relay == task_from_relay)
-            .map(|source_filter| source_filter.where_clause.clone());
-        let task_materialized_state = reingestor.materialized_state.clone();
-        let task_mode = reingestor.mode;
+        let task_reingestor = input.reingestor.clone();
+        let task_from_relay = input.relay.clone();
+        let task_mode = input.mode;
         let task_error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
         let quiesce_counters = self.node_quiesce_counters(
             domain,
-            NodeRef::new(ModelKind::Reingestor, &reingestor.name),
+            NodeRef::new(ModelKind::Reingestor, &input.reingestor),
         );
         let runtime = self.clone();
         let shutdown_rx = shutdown_tx.subscribe();
@@ -1185,13 +998,13 @@ impl Runtime {
         let input_metrics = self.inner.metrics.resolve_node_input_metrics(
             domain,
             ModelKind::Reingestor,
-            &ModelName::from(&reingestor.name),
+            &ModelName::from(&input.reingestor),
             &task_from_relay,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             None,
         );
 
-        Ok(tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let shared_routing = match runtime
                 .wait_for_domain_routing(&task_domain, &task_from_relay)
                 .await
@@ -1219,11 +1032,8 @@ impl Runtime {
                     return;
                 }
             };
-            let mut task_output_buffers = ReingestorOutputBuffers::new(
-                task_output_routes.routes.len(),
-                quiesce_counters.clone(),
-            );
-            let task_reingestor_node = ModelName::from(&task_reingestor);
+            let mut task_output_buffers =
+                ReingestorOutputBuffers::new(input.routes.len(), quiesce_counters.clone());
             let output_flush_context = ReingestorOutputFlushContext {
                 domain: &task_domain,
                 reingestor: &task_reingestor,
@@ -1232,7 +1042,7 @@ impl Runtime {
                 branched_senders: &task_branched_senders,
                 domain_clock: &domain_clock,
             };
-            let interaction_input = match input_collect_policy {
+            let interaction_input = match input.collect_policy {
                 Some(policy) => RelayInteractionInput::collecting(
                     task_from_relay.clone(),
                     receiver,
@@ -1251,12 +1061,11 @@ impl Runtime {
                 "the registry validated this input, and a non-empty input list builds an \
                  interaction",
             );
-            let mut compiled_from_where = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let output_deadlines = task_output_buffers.deadlines();
                 let has_output_deadlines = !output_deadlines.is_empty();
-                let work = tokio::select! {
+                let work = nervix_primitives::select! {
                     result = wait_for_branch_buffer_deadlines(&domain_clock, output_deadlines),
                         if has_output_deadlines =>
                     {
@@ -1272,7 +1081,7 @@ impl Runtime {
                         runtime
                             .flush_reingestor_outputs(
                                 output_flush_context,
-                                &task_output_routes,
+                                &input.routes,
                                 &mut task_output_buffers,
                                 ReingestorOutputFlush::Due,
                             )
@@ -1314,7 +1123,7 @@ impl Runtime {
                         runtime
                             .flush_reingestor_outputs(
                                 output_flush_context,
-                                &task_output_routes,
+                                &input.routes,
                                 &mut task_output_buffers,
                                 ReingestorOutputFlush::Due,
                             )
@@ -1324,7 +1133,7 @@ impl Runtime {
                         runtime
                             .flush_reingestor_outputs(
                                 output_flush_context,
-                                &task_output_routes,
+                                &input.routes,
                                 &mut task_output_buffers,
                                 ReingestorOutputFlush::All,
                             )
@@ -1360,23 +1169,8 @@ impl Runtime {
                                 continue;
                             }
                         };
-                        let delivery_observation = batch.delivery_observation(accepted_at);
-                        input_metrics.observe_batch(
-                            batch.message_count(),
-                            batch.estimated_bytes(),
-                            delivery_observation.domain_timestamp,
-                        );
-                        runtime.mark_branch_aggregated_metrics_updated(
-                            &task_domain,
-                            ModelKind::Reingestor,
-                            &task_reingestor_node,
-                        );
-                        for seconds in delivery_observation.latency_seconds {
-                            input_metrics.observe_delivery_latency(
-                                seconds,
-                                delivery_observation.domain_timestamp,
-                            );
-                        }
+                        input_metrics.observe_delivery(&batch.delivery_observation(accepted_at));
+                        metrics_dirty.mark();
                         let dependency_error_acks = batch.acks.clone();
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime
@@ -1387,7 +1181,7 @@ impl Runtime {
                                     domain: &task_domain,
                                 },
                                 &task_from_relay,
-                                &task_materialized_state,
+                                &input.materialized_state,
                                 batch,
                                 MaterializedBatchWaitContext {
                                     shutdown_rx: interaction.shutdown_receiver(),
@@ -1423,16 +1217,13 @@ impl Runtime {
                                     routing: routing_snapshot,
                                     domain: &task_domain,
                                     reingestor: &task_reingestor,
-                                    from_relay: &task_from_relay,
-                                    from_where: task_from_where.as_ref(),
                                     mode: task_mode,
                                     error_policies: &task_error_policies,
                                     branched_senders: &task_branched_senders,
                                     domain_clock: &domain_clock,
                                     execution_now,
                                 },
-                                &mut compiled_from_where,
-                                &mut task_output_routes,
+                                &input,
                                 &mut task_output_buffers,
                                 batch,
                                 &materialized_values,
@@ -1444,27 +1235,28 @@ impl Runtime {
             runtime
                 .flush_reingestor_outputs(
                     output_flush_context,
-                    &task_output_routes,
+                    &input.routes,
                     &mut task_output_buffers,
                     ReingestorOutputFlush::All,
                 )
                 .await;
-        }))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_models::{
-        AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
-        ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
+        AckMode, CreateReingestor, ErrorPolicies, ModelKind, NodeRef, ParseAsType, ProcessorInputs,
+        ProcessorOutputs, ReingestorName, RelayName,
     };
-    use tokio::{
-        sync::{Mutex, mpsc, watch},
-        time::{Duration, timeout},
+    use nervix_primitives::{
+        sync::{Arc, Mutex, mpsc, watch},
+        time::timeout,
     };
-    use triomphe::Arc;
 
     use super::*;
     use crate::{
@@ -1474,7 +1266,7 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filters() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1485,12 +1277,17 @@ mod tests {
         ));
         let mut fan_in =
             RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-        let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-        let registry = RelayRegistry::new();
+        let services = Arc::new(RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+            Arc::new(BranchPresence::new()),
+        ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &root_relay,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
@@ -1507,7 +1304,6 @@ mod tests {
             relays: [(
                 root_relay.clone(),
                 RelayProcessorRelayTemplate {
-                    registry,
                     services: services.clone(),
                 },
             )]
@@ -1632,7 +1428,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1644,12 +1440,11 @@ mod tests {
             0,
             Vec::new(),
             None,
+            Arc::new(BranchPresence::new()),
         ));
-        let registry = RelayRegistry::new();
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &root_relay,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
@@ -1666,7 +1461,6 @@ mod tests {
             relays: [(
                 root_relay.clone(),
                 RelayProcessorRelayTemplate {
-                    registry,
                     services: services.clone(),
                 },
             )]
@@ -1732,7 +1526,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(instances.len(), 64);
+            assert_eq!(instances.states().len(), 64);
         }
         owner_task
             .stop(Duration::from_secs(1))
@@ -1740,18 +1534,16 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
         let relay = named("tenant_orders");
-        let output_registry = RelayRegistry::new();
         let output_services = test_relay_boundary_services();
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &relay,
-            output_registry.clone(),
             output_services.clone(),
             RelayRetention::default(),
         );
@@ -1765,7 +1557,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
@@ -1787,7 +1579,7 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                branched_ingestors: HashMap::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
@@ -1797,7 +1589,6 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -1818,7 +1609,6 @@ mod tests {
                     relays: [(
                         relay.clone(),
                         RelayProcessorRelayTemplate {
-                            registry: output_registry.clone(),
                             services: output_services.clone(),
                         },
                     )]
@@ -1841,30 +1631,44 @@ mod tests {
         let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
         let mut branched_entrypoint_senders = HashMap::default();
         branched_entrypoint_senders.insert(relay, branched_runtime.sender());
-        let task = runtime
-            .spawn_reingestor_task(
-                &domain,
-                &shutdown_tx,
-                &branched_entrypoint_senders,
-                CreateReingestor {
-                    name: named("tenant_partition"),
-                    from: ProcessorInputs::single(named("orders")),
-                    output_routes: with_inherit_all(ProcessorOutputs::single(named(
-                        "tenant_orders",
-                    )))
+        let plan = EntrypointTestDomain {
+            relays: &["orders", "tenant_orders"],
+            fields: &[
+                ("tenant", ParseAsType::String),
+                ("user_id", ParseAsType::U32),
+            ],
+            branch_fields: &[("tenant", ParseAsType::String)],
+        }
+        .plan_reingestor(
+            &domain,
+            CreateReingestor {
+                name: named("tenant_partition"),
+                from: ProcessorInputs::single(named("orders")),
+                output_routes: with_inherit_all(ProcessorOutputs::single(named("tenant_orders")))
                     .with_flush_policy(FlushPolicy::Each {
                         interval: "500ms".to_string(),
                         max_batch_size: "1MiB".to_string(),
                     })
                     .with_branch(branched_by("tenant_orders", &["tenant"])),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                },
-                named("orders"),
-                fan_in,
-            )
-            .expect("reingestor task should spawn");
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            },
+        );
+        let routing = runtime
+            .domain_routing(&domain)
+            .expect("the test domain routing is installed")
+            .load_full();
+        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
+            .bind_reingestor_input(&plan, &plan.inputs[0])
+            .expect("the planned reingestor input binds");
+        let task = runtime.spawn_reingestor_task(
+            &domain,
+            &shutdown_tx,
+            branched_entrypoint_senders,
+            input,
+            fan_in,
+        );
         let (acme_acks, acme_completion) = AckSet::root();
         let (beta_acks, beta_completion) = AckSet::root();
         let mut acme_completion = Box::pin(acme_completion.wait());
@@ -1898,8 +1702,8 @@ mod tests {
         acme_acks.ack_success();
         timeout(Duration::from_secs(1), async {
             while output_counters.admitted_work() != 1 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -1913,8 +1717,8 @@ mod tests {
         beta_acks.ack_success();
         timeout(Duration::from_secs(1), async {
             while output_counters.admitted_work() != 2 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -1987,7 +1791,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2002,7 +1806,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
@@ -2024,7 +1828,7 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                branched_ingestors: HashMap::default(),
+
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
@@ -2034,7 +1838,6 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -2042,27 +1845,44 @@ mod tests {
         let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
         let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
         let (output_tx, mut output_rx) = mpsc::channel(4);
-        let task = runtime
-            .spawn_reingestor_task(
-                &domain,
-                &shutdown_tx,
-                &[(output_relay.clone(), output_tx)].into_iter().collect(),
-                CreateReingestor {
-                    name: reingestor.clone(),
-                    from: ProcessorInputs::single(input_relay.clone()),
-                    output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "10s".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        }),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                },
-                input_relay,
-                fan_in,
-            )
-            .expect("reingestor task should spawn");
+        let plan = EntrypointTestDomain {
+            relays: &["orders", "tenant_orders"],
+            fields: &[
+                ("tenant", ParseAsType::String),
+                ("user_id", ParseAsType::U32),
+            ],
+            branch_fields: &[],
+        }
+        .plan_reingestor(
+            &domain,
+            CreateReingestor {
+                name: reingestor.clone(),
+                from: ProcessorInputs::single(input_relay.clone()),
+                output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
+                    .with_flush_policy(FlushPolicy::Each {
+                        interval: "10s".to_string(),
+                        max_batch_size: "1MiB".to_string(),
+                    })
+                    .with_branch(OutputBranch::Unbranched),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            },
+        );
+        let routing = runtime
+            .domain_routing(&domain)
+            .expect("the test domain routing is installed")
+            .load_full();
+        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
+            .bind_reingestor_input(&plan, &plan.inputs[0])
+            .expect("the planned reingestor input binds");
+        let task = runtime.spawn_reingestor_task(
+            &domain,
+            &shutdown_tx,
+            [(output_relay.clone(), output_tx)].into_iter().collect(),
+            input,
+            fan_in,
+        );
         let input_batch = |user_id, acks| {
             RelayRecordBatch::single(
                 schema.clone(),
@@ -2122,7 +1942,7 @@ mod tests {
         );
         timeout(Duration::from_secs(1), async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let pending = runtime
                     .inner
                     .force_flush_by_domain
@@ -2132,7 +1952,7 @@ mod tests {
                 if pending == 0 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

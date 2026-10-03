@@ -7,18 +7,16 @@
 //! - **Depends on.** The schema Models and the VM's type system.
 //! - **Must not know.** Which model asked for the comparison.
 
-use std::sync::Arc as StdArc;
-
 use arrow_schema::{
-    DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
-    Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+    TimeUnit as ArrowTimeUnit,
 };
 use error_stack::Report;
-use meticulous::ResultExt;
 use nervix_models::{
-    CreateSchema, CreateWireSchema, DomainName, ModelIndex, ModelKind, ModelName, ParseAsType,
-    SchemaField, SchemaName,
+    CreateSchema, CreateWireSchema, DomainName, ModelIndex, ModelKind, ModelName, SchemaField,
+    SchemaName,
 };
+use nervix_primitives::sync::StdArc;
 use nervix_vm::{CompileBinding, SchemaSensitivity};
 
 use crate::registry::error::RegistryError;
@@ -80,7 +78,7 @@ pub(in crate::registry) fn arrow_schema_for_internal_schema(
 pub(in crate::registry) fn arrow_field_for_schema_field(field: &SchemaField) -> ArrowField {
     ArrowField::new(
         field.name.as_str(),
-        arrow_data_type_for_parse_as(&field.ty),
+        field.ty.arrow_data_type(),
         field.optional,
     )
 }
@@ -122,43 +120,6 @@ pub(in crate::registry) fn readonly_binding_for_internal_schema(
         CompileBinding::readonly(namespace, arrow_schema_for_internal_schema(schema)),
         schema,
     )
-}
-
-pub(in crate::registry) fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
-    match ty {
-        ParseAsType::U8 => ArrowDataType::UInt8,
-        ParseAsType::I8 => ArrowDataType::Int8,
-        ParseAsType::U16 => ArrowDataType::UInt16,
-        ParseAsType::I16 => ArrowDataType::Int16,
-        ParseAsType::U32 => ArrowDataType::UInt32,
-        ParseAsType::I32 => ArrowDataType::Int32,
-        ParseAsType::U64 => ArrowDataType::UInt64,
-        ParseAsType::I64 => ArrowDataType::Int64,
-        ParseAsType::Bool => ArrowDataType::Boolean,
-        ParseAsType::String => ArrowDataType::Utf8,
-        ParseAsType::Bytes => ArrowDataType::Binary,
-        ParseAsType::Datetime => {
-            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into()))
-        }
-        ParseAsType::F32 => ArrowDataType::Float32,
-        ParseAsType::F64 => ArrowDataType::Float64,
-        ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
-            ArrowFieldRef::new(ArrowField::new(
-                "item",
-                arrow_data_type_for_parse_as(element),
-                false,
-            )),
-            i32::try_from(len.get()).verified(
-                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
-                 list",
-            ),
-        ),
-        ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
-            "item",
-            arrow_data_type_for_parse_as(element),
-            false,
-        ))),
-    }
 }
 
 pub(in crate::registry) fn ensure_internal_schema_compatibility(
@@ -304,13 +265,7 @@ pub(in crate::registry) fn all_optional_binding_for_internal_schema(
             schema
                 .fields
                 .iter()
-                .map(|field| {
-                    ArrowField::new(
-                        field.name.as_str(),
-                        arrow_data_type_for_parse_as(&field.ty),
-                        true,
-                    )
-                })
+                .map(|field| ArrowField::new(field.name.as_str(), field.ty.arrow_data_type(), true))
                 .collect::<Vec<_>>(),
         )),
     )
@@ -347,7 +302,7 @@ mod tests {
 
     use nervix_models::{
         AckMode, AlterSchema, AlterSchemaOperation, CreateReingestor, FieldName, JsonType, Model,
-        ProcessorInputs, WireSchemaField,
+        ParseAsType, ProcessorInputs, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 

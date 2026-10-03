@@ -2,6 +2,9 @@
 
 The data plane is the runtime execution engine.
 
+It executes the typed revision of a committed schedule. [Execution Plans](./execution-plans.md)
+describes the decisions, local binding, and publication that prepare its tasks.
+
 [Connector Crates And The Connector Contract](./connector-contract.md) defines how the host
 admits external source messages and publishes through external sinks, including their ACK and
 commit boundaries. This chapter follows the Arrow batches those boundaries hand to the graph.
@@ -27,11 +30,12 @@ remain volatile here.
 [Errors And Diagnostics](./errors-and-diagnostics.md) defines how branch-local failures,
 materialized-state outcomes, message errors, and recovery classes reach their reporting boundary.
 
-Decoded rows are processed in memory and are usually carried between runtime nodes as Apache Arrow batches rather than as individually serialized documents. That gives the runtime a columnar format suitable for fast vectorized processing and cheap batch serialization/deserialization.
+Decoded messages are processed in memory as Apache Arrow batches, including batches with one row.
+That gives the runtime a columnar format suitable for vectorized processing and batch transfer.
 
 Nervix has three separate persistence boundaries:
 
-- Execution graph configuration is control-plane state. NSPL models, domain lifecycle, and schedules are persisted with strong consistency guarantees before runtime nodes execute them.
+- Execution graph configuration is control-plane state. NSPL models, domain lifecycle, and schedules are persisted with strong consistency guarantees before runtime nodes execute them. The control plane turns each committed schedule into a complete typed execution revision; the runtime retains its planned nodes, placement, and executable plans together and does not reread Models during application or recovery.
 - Execution node state is runtime state. Selected state such as domain offsets, deduplicator history, materialized relay entries, window accumulators, and metric summaries is persisted through periodic snapshot/replication mechanisms, and WASM guest state through a durable checkpoint at the end of every guest callback. Each persisted state is keyed by the identity the committed schedule publishes for its node. Domain offsets and metric summaries depend on no schema and are keyed by their node alone, so they survive schema changes. Every other state is also keyed by the fingerprint of the schemas it is laid out by, so a schema change starts it anew, and a node without a published fingerprint for an entity cannot place that entity's schema-bound state at all.
   A materialized relay's snapshot is columnar: it carries the relay's records as Arrow sections under the relay's exact schema, with each record's concrete branch key, watermarks, and the state revision, ownership assignment, and branch lifecycle it was captured at described beside them. A snapshot holds exactly the branches of the branch lifecycle it names and at least the committed revision it names: an update to an existing branch's record that lands while the records are read may already be present, and the next revision carries it again. Updates to existing records continue while a snapshot is captured and written out; a branch that arrives or is evicted waits only while the records are read, and a snapshot taken before a branch was evicted never restores that branch.
   A snapshot larger than the transfer budget crosses the bulk pool in bounded chunks and lands on the receiving node's staging disk, where its length and digest are checked before anything reads it. A cancelled, truncated, or corrupted transfer leaves the state it would have replaced untouched.
@@ -76,6 +80,26 @@ Relay fan-out gives each attached runtime consumer a descendant of the incoming 
 Detached consumers receive the batch without an upstream ACK dependency. The source ACK succeeds
 only when all attached descendants succeed. Any attached failure fails the shared source attempt,
 even when another descendant has already completed an external side effect.
+
+The relay owner holds a dispatch permit while it selects and fans out to attached consumers. If a
+schedule swap has already closed that gate before a buffered batch begins fan-out, the owner fails
+the batch's ACKs and lets the source retry under the new schedule. This prevents a sibling attached
+consumer on the old node from completing the source ACK while a moving consumer is absent from the
+owner's routes.
+
+A batch that a relay owner routes to another node for its attached consumers carries record
+acknowledgements for them. If no attached consumer of the relay runs on that node when the batch
+reaches its runtime, because the consumer moved away after the owner routed the batch, the batch
+fails those acknowledgements instead of completing them, and the source redelivers the record along
+the current routes. See
+[Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
+
+A node that sent a record's acknowledgement to another node waits for it only while that node keeps
+reporting it. When the other node reports nothing about it for fifteen seconds after admitting the
+batch, because its outcome was lost on the way back or its process ended, the acknowledgement fails
+and the source redelivers the record. An acknowledgement lost between two nodes on a record's path
+therefore fails the source attempt instead of keeping it waiting. See
+[Record Acknowledgements The Receiver Stops Reporting](interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
 
 ACK guards, tokens, and maps remain in memory. They do not record a transactional per-sink commit
 ledger. After source redelivery, every attached path processes the record again. This is why an

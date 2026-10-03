@@ -1,9 +1,32 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "runtime construction, binding and teardown install or withdraw node-owned \
+                  services"
+    )
+)]
+
 use super::*;
 
 impl Runtime {
     pub(crate) fn new() -> Self {
         Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL)
             .verified("the None persistence path has no fallible step")
+    }
+
+    /// A runtime without persistence whose admitted work goes through `executor`.
+    #[cfg(test)]
+    pub(crate) fn with_executor(executor: Executor) -> Self {
+        Self::with_persistence_and_temp_dir(
+            executor,
+            None,
+            None,
+            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+            ConfiguredFaultInjection::default(),
+            PathBuf::from(DEFAULT_TEMP_DIR),
+        )
+        .verified("the None persistence path has no fallible step")
     }
 
     pub(in crate::runtime) fn with_persistence(
@@ -83,13 +106,11 @@ impl Runtime {
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
                 ingestors_paused_for_memory_pressure: AtomicBool::new(false),
-                ingestor_transient_errors: DashMap::default(),
-                ingestor_reconnect_backoffs: DashMap::default(),
+                ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),
-                emitter_transient_errors: DashMap::default(),
+                emitter_statuses: DashMap::default(),
                 shared_clients: DashMap::default(),
                 pool_waits: DashMap::default(),
-                emitter_retry_statuses: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),
                 executions: DashMap::default(),
                 domain_routings: DashMap::default(),
@@ -97,6 +118,8 @@ impl Runtime {
                 compiled_domain_udfs: DashMap::default(),
                 compiled_wasm_modules: DashMap::default(),
                 schedule_application: Mutex::new(ScheduleApplication::default()),
+                #[cfg(test)]
+                test_applied_schedule: ArcSwapOption::empty(),
                 applied_recovery_expansions: ArcSwapOption::empty(),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
@@ -110,35 +133,29 @@ impl Runtime {
                 node_quiesce_counters: DashMap::default(),
                 entity_gate_holds: Arc::new(DashMap::default()),
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
-                ownership_handoff_freeze_changed: Arc::new(Notify::new()),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
-                domain_graphs: DashMap::default(),
-                endpoint_bindings: DashMap::default(),
-                routed_endpoints: DashMap::default(),
+                client_ingestors: DashMap::default(),
+                client_producer_budget: client_ingestor::ClientProducerBudget::default(),
+                client_emitters: DashMap::default(),
+                client_emitter_budget: client_emitter::ClientEmitterBudget::default(),
+                endpoint_intake_routes: EndpointIntakeRoutes::default(),
                 relay_boundary_fanouts: DashMap::default(),
                 events,
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry {
-                    next_ack_id: AtomicU64::new(1),
-                    pending_acks: DashMap::default(),
-                    pending_relay_admissions: DashMap::default(),
-                }),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
-                state_checkpoint_notifications: DashMap::default(),
-                pending_state_replica_syncs: DashMap::default(),
-                pending_state_checkpoint_announcements: DashMap::default(),
                 state_replication_tasks: TaskTracker::new(),
                 passive_runtime_state_snapshots: DashMap::default(),
-                replicated_branch_lru_snapshots: DashMap::default(),
+                replicated_branch_lifecycles: DashMap::default(),
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
                 prepared_runtime_state_snapshots: DashMap::default(),
-                expiring_stream_states: DashMap::default(),
+                relay_branch_presences: DashMap::default(),
                 replicated_deduplicator_states: DashMap::default(),
                 replicated_kafka_offset_states: DashMap::default(),
                 replicated_materialized_stream_states: DashMap::default(),
@@ -176,8 +193,34 @@ impl Runtime {
     }
 
     /// The node's bounded execution and transient-memory admission.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(crate) fn executor(&self) -> &Executor {
         &self.inner.executor
+    }
+
+    /// Reserve staging space for an artifact of exactly `length` bytes this node assembles, under
+    /// the same quota incoming snapshot transfers share.
+    pub(crate) async fn stage_artifact(
+        &self,
+        length: u64,
+    ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
+        self.inner.snapshot_staging.stage(length).await
+    }
+
+    /// Stages an artifact of `length` bytes, refusing rather than waiting when the node's staging
+    /// quota cannot hold it now.
+    pub(crate) async fn try_stage_artifact(
+        &self,
+        length: u64,
+    ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
+        self.inner.snapshot_staging.try_stage(length).await
     }
 
     pub(crate) fn dns(&self) -> Option<&DnsResolver> {
@@ -185,11 +228,27 @@ impl Runtime {
     }
 
     /// The directory connectors stage local files in before they publish them.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(in crate::runtime) fn temp_dir(&self) -> &Path {
         self.inner.temp_dir.as_path()
     }
 
     /// The node's runtime event bus. Connectors report transient failures here.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(in crate::runtime) fn events(&self) -> &RuntimeEvents {
         &self.inner.events
     }
@@ -261,6 +320,34 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_command_admission_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_step_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        step: &nervix_models::RestoreStep,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_restore_step_if_armed(node_id, step)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_runtime_preparation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_runtime_preparation_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_command_reference_lookup_if_armed(node_id)
             .await;
     }
 
@@ -356,10 +443,10 @@ impl Runtime {
         domain: &DomainName,
         execution: DomainExecution,
     ) {
-        self.withdraw_routed_endpoints(domain, &execution);
+        self.inner.endpoint_intake_routes.withdraw_domain(domain);
         execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
                 warn!(
                     domain = domain.as_str(),
@@ -370,7 +457,7 @@ impl Runtime {
             }
         }
         for (relay, task) in execution.relay_state_tasks {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
                 warn!(
                     domain = domain.as_str(),
@@ -465,7 +552,6 @@ impl Runtime {
             execution.routing.deactivate();
             self.stop_domain_execution(domain, execution).await;
         }
-        self.clear_domain_graph_handle(domain).await;
     }
 
     pub(in crate::runtime) async fn stop_domain_ingestors(&self, domain: &DomainName) {
@@ -493,6 +579,8 @@ impl Runtime {
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
+            .await;
         let domains = self
             .inner
             .executions
@@ -509,18 +597,16 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
-        self.inner.endpoint_bindings.clear();
+        self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.compiled_wasm_modules.clear();
         self.inner.ingestor_readiness.clear();
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();
         self.inner.remote_ack_watcher_tasks.wait().await;
-        self.inner.pending_state_replica_syncs.clear();
-        self.inner.pending_state_checkpoint_announcements.clear();
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
-        self.inner.expiring_stream_states.clear();
+        self.inner.relay_branch_presences.clear();
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
         self.inner.replicated_materialized_stream_states.clear();
@@ -529,19 +615,27 @@ impl Runtime {
         self.inner.replicated_branch_aggregated_states.clear();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running tasks borrow retained node services or await their selected \
+                      acknowledgement root"
+        )
+    )]
     pub(in crate::runtime) async fn await_ack_completion(
         shutdown_rx: &mut watch::Receiver<bool>,
         mut completion: AckCompletion,
         timeout_duration: Duration,
     ) -> Option<AckOutcome> {
         loop {
-            tokio::select! {
+            nervix_primitives::select! {
                 // A signalled stop and a dropped sender both end this wait, so the outcome
                 // carries nothing the caller could act on differently.
                 _ = shutdown_rx.changed() => {
                     return None;
                 }
-                progress = tokio::time::timeout(timeout_duration, completion.wait_for_progress()) => {
+                progress = nervix_primitives::time::timeout(timeout_duration, completion.wait_for_progress()) => {
                     match progress {
                         Ok(AckProgress::Alive) => {}
                         Ok(AckProgress::Complete(outcome)) => return Some(outcome),
@@ -582,7 +676,7 @@ impl Runtime {
         task_kind: &str,
         grace_period: Duration,
     ) {
-        match tokio::time::timeout(grace_period, &mut task).await {
+        match nervix_primitives::time::timeout(grace_period, &mut task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {

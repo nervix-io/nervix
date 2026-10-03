@@ -9,32 +9,47 @@
 //!   operations and rounding to decimal digits. Each kernel is one pass over its operands' value
 //!   buffers that yields the result column, the lanes whose operation failed, and why a failed lane
 //!   failed.
-//! - **Depends on.** Arrow arrays and buffers, the value contracts of the semantic catalog, and the
-//!   side-error reasons of the VM.
+//! - **Depends on.** Arrow arrays and buffers, the value contracts of the semantic catalog, the
+//!   side-error reasons of the VM, and the flag packing and checked integer arithmetic of the SIMD
+//!   kernel crate.
 //! - **Must not know.** Registers, programs, spans, or how a failed lane is recorded as a row
 //!   error.
 //!
-//! A kernel computes every lane in one branch-free loop, packing whether each lane failed into a
-//! bitmap 64 lanes at a time, so the loop vectorizes wherever the lane operation itself does. It
-//! never reruns a batch: the failure bitmap, restricted to lanes whose operands are valid, is the
-//! only record of a failure, and its set bits are the only lanes an error is built for.
+//! A kernel computes a block of up to 1,024 lanes in one branch-free loop that stores every lane's
+//! value and a byte saying whether the lane failed, so the loop vectorizes wherever the lane
+//! operation itself does. One call to the kernel crate then packs the block's failure bytes into
+//! bitmap words with vector compares, so no lane shifts its failure into a word. A kernel never
+//! reruns a batch: the failure bitmap, restricted to lanes whose operands are valid, is the only
+//! record of a failure, and its set bits are the only lanes an error is built for.
 //!
-//! Vectorization here is LLVM's auto-vectorization, not explicit SIMD. No kernel names a SIMD
-//! instruction set or intrinsic. A loop whose lane operation compiles to a few instructions, such
-//! as an integer operation, a comparison, `sqrt`, `trunc` or a multiplication by a constant, is
-//! written so the compiler can widen it to the vector instructions of the CPU the binary targets,
-//! and its results are the same whether or not it does. A function the platform math library
+//! Checked integer addition and subtraction of every width, and multiplication of 8-, 16- and
+//! 32-bit integers, are explicit SIMD: the kernel crate computes them in vector registers at the
+//! level the process selected, with a scalar fallback, and hands back each lane's value together
+//! with the failure words, so they need no packing call. Integer division and remainder by a
+//! shared scalar use the same kernel crate's prepared reciprocal lanes, with a measured scalar
+//! multiply-high path for U64 and I64 remainder. Every other lane loop is LLVM's
+//! auto-vectorization: no lane operation of this module names a SIMD instruction set or
+//! intrinsic. A loop whose lane operation compiles to a few instructions, such as a negation, a
+//! comparison, `sqrt`, `trunc` or a multiplication by a constant, is written so the compiler can
+//! widen it to the vector instructions of the CPU the binary targets, and its results are the same
+//! whether or not it does. The failure packing is explicit SIMD, selected at run time with a scalar
+//! fallback, and gives the same word at every level. A function the platform math library
 //! computes, such as `sin` or `log2`, is an opaque call per lane that no loop vectorizes, so those
-//! kernels skip null lanes instead.
+//! kernels read validity a word at a time and compute valid lanes only.
 
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
+use arch_into::ArchInto as _;
 use arrow_array::{Array, ArrowPrimitiveType, BooleanArray, PrimitiveArray, types::Float64Type};
 use arrow_buffer::{
     ArrowNativeType, BooleanBuffer, Buffer, NullBuffer, ScalarBuffer,
     bit_iterator::BitIndexIterator,
 };
 use nervix_approx_into::ApproxInto as _;
+use nervix_simd_kernels::{
+    CheckedArithmetic, CheckedLanes, ConstantDivision, DivisionLane, FlagPacker, LaneOperands,
+    WORD_LANES, lane_mask,
+};
 
 use crate::{
     batch::TypedArray,
@@ -49,8 +64,9 @@ mod decimal_rounding;
 pub(crate) use bitwise::{Shift, ShiftCounts, ShiftedInteger, bit_count, bitwise_complement};
 pub(crate) use decimal_rounding::{DecimalRounding, IntegerRounding, RoundingDigits};
 
-/// The lanes one failure bitmap word covers.
-const LANES_PER_WORD: usize = 64;
+/// The lanes whose failure bytes one call to the kernel crate packs: sixteen bitmap words, so the
+/// call is paid once per 1,024 lanes rather than once per word.
+const BLOCK_LANES: usize = 16 * WORD_LANES;
 
 /// The values a lane operation computed for every lane of a batch, and which lanes failed.
 ///
@@ -62,88 +78,198 @@ pub(crate) struct Lanes<N> {
 }
 
 impl<N: Copy + Default> Lanes<N> {
-    /// Computes `lane` for every operand. Each bitmap word is filled by a loop with a fixed,
-    /// branch-free body, which the compiler vectorizes whenever `lane` is vectorizable.
+    /// Computes `lane` for every operand. The lanes of each block run in one loop with a fixed,
+    /// branch-free body, which the compiler vectorizes whenever `lane` is vectorizable, and one call
+    /// packs the block's failure bytes into its failure words through vector compares.
     pub(crate) fn unary<I: Copy>(operands: &[I], mut lane: impl FnMut(I) -> (N, bool)) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); operands.len()];
-        let mut words = Vec::with_capacity(operands.len().div_ceil(LANES_PER_WORD));
-        let value_words = values.chunks_mut(LANES_PER_WORD);
-        let operand_words = operands.chunks(LANES_PER_WORD);
-        for (value_word, operand_word) in value_words.zip(operand_words) {
-            let mut failed_word = 0_u64;
-            for (bit, (value, operand)) in value_word.iter_mut().zip(operand_word).enumerate() {
-                let (result, failed) = lane(*operand);
-                *value = result;
-                failed_word |= u64::from(failed) << bit;
-            }
-            words.push(failed_word);
+        let mut words = Vec::with_capacity(operands.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; BLOCK_LANES];
+        let value_blocks = values.chunks_mut(BLOCK_LANES);
+        let operand_blocks = operands.chunks(BLOCK_LANES);
+        for (value_block, operand_block) in value_blocks.zip(operand_blocks) {
+            let block_flags = &mut flags[..value_block.len()];
+            Self::unary_run(value_block, operand_block, block_flags, &mut lane);
+            packer.pack(block_flags, &mut words);
         }
         Self::new(values, words)
     }
 
-    /// Computes `lane` for every pair of operands. Both operand slices hold one value per lane of
-    /// the same batch, so they have the same length.
+    /// Computes `lane` for every pair of operands, one block of lanes at a time as
+    /// [`Lanes::unary`] does. Both operand slices hold one value per lane of the same batch, so
+    /// they have the same length.
     pub(crate) fn binary<L: Copy, R: Copy>(
         left: &[L],
         right: &[R],
         mut lane: impl FnMut(L, R) -> (N, bool),
     ) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); left.len()];
-        let mut words = Vec::with_capacity(left.len().div_ceil(LANES_PER_WORD));
-        let value_words = values.chunks_mut(LANES_PER_WORD);
-        let left_words = left.chunks(LANES_PER_WORD);
-        let right_words = right.chunks(LANES_PER_WORD);
-        for ((value_word, left_word), right_word) in value_words.zip(left_words).zip(right_words) {
-            let mut failed_word = 0_u64;
-            let operands = left_word.iter().zip(right_word);
-            for (bit, (value, (left, right))) in value_word.iter_mut().zip(operands).enumerate() {
-                let (result, failed) = lane(*left, *right);
-                *value = result;
-                failed_word |= u64::from(failed) << bit;
-            }
-            words.push(failed_word);
+        let mut words = Vec::with_capacity(left.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; BLOCK_LANES];
+        let value_blocks = values.chunks_mut(BLOCK_LANES);
+        let left_blocks = left.chunks(BLOCK_LANES);
+        let right_blocks = right.chunks(BLOCK_LANES);
+        for ((value_block, left_block), right_block) in
+            value_blocks.zip(left_blocks).zip(right_blocks)
+        {
+            let block_flags = &mut flags[..value_block.len()];
+            Self::binary_run(value_block, left_block, right_block, block_flags, &mut lane);
+            packer.pack(block_flags, &mut words);
         }
         Self::new(values, words)
     }
 
+    /// Computes `lane` for every lane of a binary operation's operands. A shared operand is read
+    /// once and folded into the lane operation, so a run combined with a constant is one pass over
+    /// the run, which the compiler vectorizes as it does a pass over two runs.
+    pub(crate) fn of_operands<V: Copy>(
+        operands: LaneOperands<'_, V>,
+        mut lane: impl FnMut(V, V) -> (N, bool),
+    ) -> Self {
+        match operands {
+            LaneOperands::Runs { left, right } => Self::binary(left, right, lane),
+            LaneOperands::SharedLeft { left, right } => {
+                Self::unary(right, |right| lane(left, right))
+            }
+            LaneOperands::SharedRight { left, right } => {
+                Self::unary(left, |left| lane(left, right))
+            }
+        }
+    }
+
     /// Computes `lane` only for the lanes `valid` marks valid, leaving every other lane at its
-    /// default value and unfailed. Valid lanes are visited one contiguous run at a time, so a
-    /// column with few nulls pays for each run rather than for each lane.
+    /// default value and unfailed.
+    ///
+    /// Validity is read one word at a time. A word with no valid lane computes nothing and fails
+    /// no lane. A word whose lanes are all valid runs the loop [`Lanes::unary`] runs, and any other
+    /// word computes its valid lanes only, with the failure bytes of the rest cleared. The words'
+    /// failure bytes fill the same blocks [`Lanes::unary`] packs, so no lane writes a failure word
+    /// and a word with few valid lanes pays for no call of its own.
     pub(crate) fn unary_valid<I: Copy>(
         operands: &[I],
         valid: &NullBuffer,
         mut lane: impl FnMut(I) -> (N, bool),
     ) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); operands.len()];
-        let mut words = vec![0_u64; operands.len().div_ceil(LANES_PER_WORD)];
-        for (start, end) in valid.valid_slices() {
-            for index in start..end {
-                let (result, failed) = lane(operands[index]);
-                values[index] = result;
-                words[index / LANES_PER_WORD] |= u64::from(failed) << (index % LANES_PER_WORD);
+        let mut words = Vec::with_capacity(operands.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; BLOCK_LANES];
+        let mut block_lanes = 0;
+        let validity = valid.inner().bit_chunks();
+        let value_words = values.chunks_mut(WORD_LANES);
+        let operand_words = operands.chunks(WORD_LANES);
+        let valid_words = validity.iter_padded();
+        for ((value_word, operand_word), valid_bits) in
+            value_words.zip(operand_words).zip(valid_words)
+        {
+            let word_end = block_lanes + value_word.len();
+            let word_flags = &mut flags[block_lanes..word_end];
+            match WordValidity::of(valid_bits, value_word.len()) {
+                WordValidity::Empty => word_flags.fill(0),
+                WordValidity::Full => {
+                    Self::unary_run(value_word, operand_word, word_flags, &mut lane);
+                }
+                WordValidity::Partial(valid_bits) => {
+                    word_flags.fill(0);
+                    for index in SetLanes(valid_bits) {
+                        let (result, failed) = lane(operand_word[index]);
+                        value_word[index] = result;
+                        word_flags[index] = u8::from(failed);
+                    }
+                }
+            }
+            block_lanes = word_end;
+            if block_lanes == BLOCK_LANES {
+                packer.pack(&flags, &mut words);
+                block_lanes = 0;
             }
         }
+        packer.pack(&flags[..block_lanes], &mut words);
         Self::new(values, words)
     }
 
-    /// Computes `lane` only for the pairs of operands `valid` marks valid, one contiguous run of
-    /// valid lanes at a time.
+    /// Computes `lane` only for the pairs of operands `valid` marks valid, reading validity one
+    /// word at a time as [`Lanes::unary_valid`] does.
     pub(crate) fn binary_valid<L: Copy, R: Copy>(
         left: &[L],
         right: &[R],
         valid: &NullBuffer,
         mut lane: impl FnMut(L, R) -> (N, bool),
     ) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); left.len()];
-        let mut words = vec![0_u64; left.len().div_ceil(LANES_PER_WORD)];
-        for (start, end) in valid.valid_slices() {
-            for index in start..end {
-                let (result, failed) = lane(left[index], right[index]);
-                values[index] = result;
-                words[index / LANES_PER_WORD] |= u64::from(failed) << (index % LANES_PER_WORD);
+        let mut words = Vec::with_capacity(left.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; BLOCK_LANES];
+        let mut block_lanes = 0;
+        let validity = valid.inner().bit_chunks();
+        let value_words = values.chunks_mut(WORD_LANES);
+        let left_words = left.chunks(WORD_LANES);
+        let right_words = right.chunks(WORD_LANES);
+        let valid_words = validity.iter_padded();
+        for (((value_word, left_word), right_word), valid_bits) in value_words
+            .zip(left_words)
+            .zip(right_words)
+            .zip(valid_words)
+        {
+            let word_end = block_lanes + value_word.len();
+            let word_flags = &mut flags[block_lanes..word_end];
+            match WordValidity::of(valid_bits, value_word.len()) {
+                WordValidity::Empty => word_flags.fill(0),
+                WordValidity::Full => {
+                    Self::binary_run(value_word, left_word, right_word, word_flags, &mut lane);
+                }
+                WordValidity::Partial(valid_bits) => {
+                    word_flags.fill(0);
+                    for index in SetLanes(valid_bits) {
+                        let (result, failed) = lane(left_word[index], right_word[index]);
+                        value_word[index] = result;
+                        word_flags[index] = u8::from(failed);
+                    }
+                }
+            }
+            block_lanes = word_end;
+            if block_lanes == BLOCK_LANES {
+                packer.pack(&flags, &mut words);
+                block_lanes = 0;
             }
         }
+        packer.pack(&flags[..block_lanes], &mut words);
         Self::new(values, words)
+    }
+
+    /// Computes `lane` for every lane of one run, storing each lane's value and failure byte.
+    fn unary_run<I: Copy>(
+        values: &mut [N],
+        operands: &[I],
+        flags: &mut [u8],
+        lane: &mut impl FnMut(I) -> (N, bool),
+    ) {
+        let run_lanes = values.iter_mut().zip(operands).zip(flags);
+        for ((value, operand), flag) in run_lanes {
+            let (result, failed) = lane(*operand);
+            *value = result;
+            *flag = u8::from(failed);
+        }
+    }
+
+    /// Computes `lane` for every pair of operands of one run, storing each lane's value and
+    /// failure byte.
+    fn binary_run<L: Copy, R: Copy>(
+        values: &mut [N],
+        left: &[L],
+        right: &[R],
+        flags: &mut [u8],
+        lane: &mut impl FnMut(L, R) -> (N, bool),
+    ) {
+        let operands = left.iter().zip(right);
+        let run_lanes = values.iter_mut().zip(operands).zip(flags);
+        for ((value, (left, right)), flag) in run_lanes {
+            let (result, failed) = lane(*left, *right);
+            *value = result;
+            *flag = u8::from(failed);
+        }
     }
 
     fn new(values: Vec<N>, words: Vec<u64>) -> Self {
@@ -152,6 +278,55 @@ impl<N: Copy + Default> Lanes<N> {
             values,
             failed: BooleanBuffer::new(Buffer::from_vec(words), 0, lanes),
         }
+    }
+}
+
+/// The lanes an explicit SIMD kernel computed already carry their failures as bitmap words, so
+/// they become a batch's lanes without a packing pass of their own.
+impl<N: Copy + Default> From<CheckedLanes<N>> for Lanes<N> {
+    fn from(lanes: CheckedLanes<N>) -> Self {
+        Self::new(lanes.values, lanes.failed)
+    }
+}
+
+/// Which lanes of one word have valid operands, which decides how the word is computed.
+enum WordValidity {
+    /// No lane is valid, so no lane is computed and none fails.
+    Empty,
+    /// Every lane is valid, so the word runs the loop the compiler can vectorize.
+    Full,
+    /// The set bits are the valid lanes, and only those lanes are computed.
+    Partial(u64),
+}
+
+impl WordValidity {
+    /// Classifies the validity bits of a word of `lanes` lanes. The bits of lanes past the end of
+    /// the batch are clear, as the bitmap's padded remainder leaves them.
+    fn of(valid_bits: u64, lanes: usize) -> Self {
+        if valid_bits == 0 {
+            Self::Empty
+        } else if valid_bits == lane_mask(lanes) {
+            Self::Full
+        } else {
+            Self::Partial(valid_bits)
+        }
+    }
+}
+
+/// The set lanes of one validity word, lowest first.
+struct SetLanes(u64);
+
+impl Iterator for SetLanes {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if self.0 == 0 {
+            return None;
+        }
+        let lane = self.0.trailing_zeros();
+        // Clearing the lowest set bit moves to the next valid lane.
+        self.0 &= self.0 - 1;
+        Some(lane.arch_into())
     }
 }
 
@@ -253,15 +428,15 @@ impl Arithmetic {
         T: ArrowPrimitiveType,
         T::Native: CheckedInteger,
     {
-        // Each arm hands the loop its own lane function, so the lane call is inlined into a loop
-        // the compiler can vectorize. Selecting the function first would coerce the five
-        // functions into one function pointer and call it once per lane.
+        // Each arm hands over its own operation: a SIMD kernel's, or a lane function that is
+        // inlined into a loop the compiler can vectorize. Selecting a function first would coerce
+        // the five into one function pointer and call it once per lane.
         match self {
-            Self::Add => evaluate_binary(left, right, T::Native::lane_sum),
-            Self::Sub => evaluate_binary(left, right, T::Native::lane_difference),
-            Self::Mul => evaluate_binary(left, right, T::Native::lane_product),
-            Self::Div => evaluate_binary(left, right, T::Native::lane_quotient),
-            Self::Rem => evaluate_binary(left, right, T::Native::lane_remainder),
+            Self::Add => evaluate_operands(left, right, T::Native::sums),
+            Self::Sub => evaluate_operands(left, right, T::Native::differences),
+            Self::Mul => evaluate_operands(left, right, T::Native::products),
+            Self::Div => evaluate_operands(left, right, T::Native::quotients),
+            Self::Rem => evaluate_operands(left, right, T::Native::remainders),
         }
     }
 
@@ -304,15 +479,28 @@ impl Arithmetic {
     }
 }
 
-/// Computes `lane` for every lane of a binary operation whose operands are columns or scalars.
-///
-/// A scalar operand is read once and folded into the lane operation, so a column combined with a
-/// constant is one pass over the column's buffer, which the compiler vectorizes as it does the
-/// two-column pass. A null scalar makes every lane null without running the operation.
+/// Computes `lane` for every lane of a binary operation whose operands are columns or scalars, one
+/// lane at a time through [`Lanes::of_operands`].
 fn evaluate_binary<T>(
     left: Operand<'_, PrimitiveArray<T>>,
     right: Operand<'_, PrimitiveArray<T>>,
-    mut lane: impl FnMut(T::Native, T::Native) -> (T::Native, bool),
+    lane: impl FnMut(T::Native, T::Native) -> (T::Native, bool),
+) -> Checked<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + Default,
+{
+    evaluate_operands(left, right, |operands| Lanes::of_operands(operands, lane))
+}
+
+/// Computes every lane of a binary operation whose operands are columns or scalars: `lanes` is
+/// handed the operands' value buffers, and a scalar operand as the one value every lane shares.
+///
+/// A null scalar makes every lane null without running the operation.
+fn evaluate_operands<T>(
+    left: Operand<'_, PrimitiveArray<T>>,
+    right: Operand<'_, PrimitiveArray<T>>,
+    lanes: impl FnOnce(LaneOperands<'_, T::Native>) -> Lanes<T::Native>,
 ) -> Checked<T>
 where
     T: ArrowPrimitiveType,
@@ -323,22 +511,32 @@ where
             if scalar.is_null(0) {
                 return Checked::all_null(column.len());
             }
-            let value = scalar.value(0);
-            let lanes = Lanes::unary(column.values(), |right| lane(value, right));
-            Checked::from_lanes(lanes, column.nulls().cloned())
+            let operands = LaneOperands::SharedLeft {
+                left: scalar.value(0),
+                right: column.values(),
+            };
+            Checked::from_lanes(lanes(operands), column.nulls().cloned())
         }
         (Operand::Column(column), Operand::Scalar(scalar)) => {
             if scalar.is_null(0) {
                 return Checked::all_null(column.len());
             }
-            let value = scalar.value(0);
-            let lanes = Lanes::unary(column.values(), |left| lane(left, value));
-            Checked::from_lanes(lanes, column.nulls().cloned())
+            let operands = LaneOperands::SharedRight {
+                left: column.values(),
+                right: scalar.value(0),
+            };
+            Checked::from_lanes(lanes(operands), column.nulls().cloned())
         }
         (Operand::Column(left), Operand::Column(right))
         | (Operand::Scalar(left), Operand::Scalar(right)) => {
-            let lanes = Lanes::binary(left.values(), right.values(), lane);
-            Checked::from_lanes(lanes, NullBuffer::union(left.nulls(), right.nulls()))
+            let operands = LaneOperands::Runs {
+                left: left.values(),
+                right: right.values(),
+            };
+            Checked::from_lanes(
+                lanes(operands),
+                NullBuffer::union(left.nulls(), right.nulls()),
+            )
         }
     }
 }
@@ -347,11 +545,12 @@ where
 ///
 /// Every lane operation returns its result and whether it failed. The `overflowing_*` operations
 /// compute a result and its overflow flag without a branch, and the flag fails the lane, so the
-/// wrapped result of an overflowing lane never reaches a column.
-pub(crate) trait CheckedInteger: ArrowNativeType + Default {
+/// wrapped result of an overflowing lane never reaches a column. Sums, differences and products
+/// of whole runs come from the explicit SIMD kernels of `nervix-simd-kernels`, which give every
+/// lane the same value and the same failure as the `overflowing_*` operation, except the product
+/// of 64-bit lanes, which has no wider lane to be exact in and is computed one lane at a time.
+pub(crate) trait CheckedInteger: ArrowNativeType + Default + DivisionLane {
     fn lane_sum(self, right: Self) -> (Self, bool);
-
-    fn lane_difference(self, right: Self) -> (Self, bool);
 
     fn lane_product(self, right: Self) -> (Self, bool);
 
@@ -362,6 +561,34 @@ pub(crate) trait CheckedInteger: ArrowNativeType + Default {
     fn lane_remainder(self, right: Self) -> (Self, bool);
 
     fn is_zero_divisor(self) -> bool;
+
+    /// Every lane's sum, failed where the sum does not fit the type.
+    fn sums(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
+
+    /// Every lane's difference, failed where the difference does not fit the type.
+    fn differences(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
+
+    /// Every lane's product, failed where the product does not fit the type.
+    fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self>;
+
+    /// A shared right operand prepares one reciprocal; a divisor column stays scalar.
+    fn quotients(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+        match operands {
+            LaneOperands::SharedRight { left, right } => {
+                Lanes::from(ConstantDivision::new().quotients(left, right))
+            }
+            operands => Lanes::of_operands(operands, Self::lane_quotient),
+        }
+    }
+
+    fn remainders(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+        match operands {
+            LaneOperands::SharedRight { left, right } => {
+                Lanes::from(ConstantDivision::new().remainders(left, right))
+            }
+            operands => Lanes::of_operands(operands, Self::lane_remainder),
+        }
+    }
 }
 
 /// A signed integer type, which alone has a negation and an absolute value that can overflow.
@@ -371,50 +598,86 @@ pub(crate) trait SignedInteger: CheckedInteger {
     fn lane_absolute_value(self) -> (Self, bool);
 }
 
-macro_rules! checked_integer {
+/// The operations of [`CheckedInteger`] that every integer type computes alike: the lane
+/// operations, and the sums and differences of the SIMD kernels, which cover every width.
+macro_rules! checked_integer_operations {
+    () => {
+        fn lane_sum(self, right: Self) -> (Self, bool) {
+            self.overflowing_add(right)
+        }
+
+        fn lane_product(self, right: Self) -> (Self, bool) {
+            self.overflowing_mul(right)
+        }
+
+        fn lane_quotient(self, right: Self) -> (Self, bool) {
+            match self.checked_div(right) {
+                Some(quotient) => (quotient, false),
+                None => (0, true),
+            }
+        }
+
+        fn lane_remainder(self, right: Self) -> (Self, bool) {
+            if right == 0 {
+                return (0, true);
+            }
+            match self.checked_rem(right) {
+                Some(remainder) => (remainder, false),
+                // A nonzero divisor fails `checked_rem` only for the minimum signed value over -1.
+                // Its quotient overflows, but its remainder is exactly 0.
+                None => (0, false),
+            }
+        }
+
+        fn is_zero_divisor(self) -> bool {
+            self == 0
+        }
+
+        fn sums(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+            Lanes::from(CheckedArithmetic::new().sums(operands))
+        }
+
+        fn differences(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+            Lanes::from(CheckedArithmetic::new().differences(operands))
+        }
+    };
+}
+
+/// An integer type of 8, 16 or 32 bits, whose products the SIMD kernels compute in lanes of twice
+/// its width.
+macro_rules! widened_checked_integer {
     ($($native:ty),+ $(,)?) => {
         $(
             impl CheckedInteger for $native {
-                fn lane_sum(self, right: Self) -> (Self, bool) {
-                    self.overflowing_add(right)
-                }
+                checked_integer_operations!();
 
-                fn lane_difference(self, right: Self) -> (Self, bool) {
-                    self.overflowing_sub(right)
-                }
-
-                fn lane_product(self, right: Self) -> (Self, bool) {
-                    self.overflowing_mul(right)
-                }
-
-                fn lane_quotient(self, right: Self) -> (Self, bool) {
-                    match self.checked_div(right) {
-                        Some(quotient) => (quotient, false),
-                        None => (0, true),
-                    }
-                }
-
-                fn lane_remainder(self, right: Self) -> (Self, bool) {
-                    if right == 0 {
-                        return (0, true);
-                    }
-                    match self.checked_rem(right) {
-                        Some(remainder) => (remainder, false),
-                        // A nonzero divisor fails `checked_rem` only for the minimum signed value
-                        // over -1. Its quotient overflows, but its remainder is exactly 0.
-                        None => (0, false),
-                    }
-                }
-
-                fn is_zero_divisor(self) -> bool {
-                    self == 0
+                fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+                    Lanes::from(CheckedArithmetic::new().products(operands))
                 }
             }
         )+
     };
 }
 
-checked_integer!(u8, i8, u16, i16, u32, i32, u64, i64);
+widened_checked_integer!(u8, i8, u16, i16, u32, i32);
+
+/// A 64-bit integer type, whose products have no wider lane to be exact in, so they are computed
+/// one lane at a time.
+macro_rules! wide_checked_integer {
+    ($($native:ty),+ $(,)?) => {
+        $(
+            impl CheckedInteger for $native {
+                checked_integer_operations!();
+
+                fn products(operands: LaneOperands<'_, Self>) -> Lanes<Self> {
+                    Lanes::of_operands(operands, Self::lane_product)
+                }
+            }
+        )+
+    };
+}
+
+wide_checked_integer!(u64, i64);
 
 macro_rules! signed_integer {
     ($($native:ty),+ $(,)?) => {

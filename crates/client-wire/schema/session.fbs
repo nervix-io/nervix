@@ -1,8 +1,10 @@
 // The Nervix client session protocol.
 //
 // Every shape of the public client boundary is declared in this file, once. The root files
-// client_message.fbs, server_message.fbs, upload_message.fbs and upload_reply.fbs name the table a
-// frame is rooted at and the file identifier it carries; they declare no shapes of their own.
+// client_message.fbs, server_message.fbs, upload_message.fbs, upload_reply.fbs,
+// backup_download_request.fbs, backup_download_message.fbs, restore_message.fbs and
+// restore_reply.fbs name the table a frame is rooted at and the file identifier it carries; they
+// declare no shapes of their own.
 //
 // Framing
 //
@@ -13,6 +15,10 @@
 //   bidirectional stream of ClientMessage frames ("NXCM") answered by ServerMessage frames
 //   ("NXSM"). `/nervix.session.Session/UploadResource` is a client stream of UploadMessage frames
 //   ("NXUM") answered by exactly one UploadReply frame ("NXUR").
+//   `/nervix.session.Session/DownloadBackup` is one BackupDownloadRequest frame ("NXBQ") answered
+//   by a server stream of BackupDownloadMessage frames ("NXBD").
+//   `/nervix.session.Session/RestoreBackup` is a client stream of RestoreMessage frames ("NXRM")
+//   answered by exactly one RestoreReply frame ("NXRR").
 // * WebSocket. Each binary message holds exactly one ClientMessage frame from the client or one
 //   ServerMessage frame from the server. A text message is a protocol violation.
 //
@@ -81,7 +87,8 @@ table LeaderRedirect {
   leader: LeaderEndpoints;
 }
 
-/// A request failed definitively. The enclosing outcome's message and diagnostics say why.
+/// A request failed definitively. The enclosing outcome's message, and its diagnostics where it
+/// carries them, say why.
 table RequestFailed {}
 
 /// Whether an outcome was produced now or recovered from the durable record of an earlier
@@ -129,7 +136,53 @@ table NodeRef {
 /// The semantic question a structured control asks without manufacturing partial NSPL.
 enum ChoiceTarget : ubyte {
   DomainPace,
-  PlacementPolicy
+  PlacementPolicy,
+  Schema,
+  Branch,
+  Relay,
+  /// The fields of one relay's records. Requires a domain and then a relay model reference.
+  RelayField,
+  WireJsonSchema,
+  WireCborSchema,
+  WireAvroSchema,
+  Resource,
+  /// Completed versions of a resource. Requires a domain and then a resource reference.
+  CompletedResourceVersion,
+  /// Configured VHOSTs in a domain.
+  Vhost,
+  /// Configured signaling protocols in a domain.
+  SignalingProtocol,
+  /// Configured codecs in a domain.
+  Codec,
+  /// Fields of a codec's output schema. Requires a domain and then a codec model reference.
+  CodecField,
+  /// A source-specific configured client or endpoint in the selected domain.
+  IngestHttpSource,
+  IngestKafkaSource,
+  IngestPulsarSource,
+  IngestMqttSource,
+  IngestNatsSource,
+  IngestRabbitMqSource,
+  IngestRedisPubSubSource,
+  IngestPrometheusSource,
+  IngestZeroMqSource,
+  IngestSqsSource,
+  IngestEndpointSource,
+  IngestWebsocketsSource,
+  IngestSyslogSource,
+  /// Codecs whose wire format can decode an ingestor payload.
+  IngestCodec,
+  /// Relays with the exact route branch declaration; branched requires a branch reference.
+  IngestUnbranchedRelay,
+  IngestBranchedRelay,
+  /// Fields of the key schema selected by one branch reference.
+  BranchField,
+  /// Relays with the same declared schema and exact branch as one selected input relay.
+  ProcessorCompatibleInputRelay,
+  /// Relays with the same exact branch as one selected input relay.
+  ProcessorInputBranchRelay,
+  /// Materialized relays with the same exact branch as one selected input relay.
+  ProcessorMaterializedRelay
 }
 
 enum DomainPaceChoice : ubyte {
@@ -164,6 +217,11 @@ table ModelChoiceReference {
   node: NodeRef (required);
 }
 
+/// A field of the record the lookup's dependencies select, such as a relay's.
+table FieldChoiceReference {
+  field: string (required);
+}
+
 /// One typed selection. Requests use these as dependent selections and replies use them as the
 /// semantic value of an offered choice.
 union ChoiceValue {
@@ -171,7 +229,10 @@ union ChoiceValue {
   PlacementPolicyVariant,
   DomainChoiceReference,
   ResourceChoiceReference,
-  ModelChoiceReference
+  ModelChoiceReference,
+  FieldChoiceReference,
+  ResourceVersionNumber,
+  LatestResourceVersion
 }
 
 table ChoiceSelection {
@@ -1098,6 +1159,223 @@ table RowBatch {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Domain clocks
+// ---------------------------------------------------------------------------------------------
+//
+// A session attached to a domain's clock receives the clock as the serving node has it installed:
+// the START generation and the state of that generation's installation. Timestamps are signed
+// nanoseconds since the Unix epoch in UTC.
+
+/// The generation is stopped and runs no domain work.
+table StoppedDomainClock {}
+
+/// The generation is paced and running, and the serving node lacks its committed mapping or an
+/// assigned clock authority, so its clock cannot be read.
+table UninstalledDomainClock {}
+
+/// The generation reads actual UTC.
+table UnpacedDomainClock {}
+
+/// The generation projects UTC through its committed mapping:
+/// logical = logical_origin + floor(max(0, utc - utc_anchor) * time_rate).
+table PacedDomainClock {
+  /// The tick period. Non-zero.
+  period_nanos: ulong;
+  /// The inclusive admission tolerance around each reached tick center.
+  skew_nanos: ulong;
+  /// The logical instant the generation started at.
+  logical_origin_unix_nanos: long;
+  /// The UTC instant the generation was established at.
+  utc_anchor_unix_nanos: long;
+  /// Required. Positive and finite.
+  time_rate: double = null;
+}
+
+union DomainClockObservedState {
+  StoppedDomainClock,
+  UninstalledDomainClock,
+  UnpacedDomainClock,
+  PacedDomainClock
+}
+
+/// A domain clock as the serving node has it installed.
+table DomainClockObservation {
+  /// The number of STARTs the domain has committed; zero before its first.
+  generation: ulong;
+  state: DomainClockObservedState (required);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Client producers
+// ---------------------------------------------------------------------------------------------
+//
+// A producer submits typed batches to one client ingestor. An OpenIngestorRequest opens it, and
+// every later request and event about it names it by that request's request_id, which the session
+// never reuses. A producer belongs to the session that opened it; no other session can submit to
+// it or close it.
+//
+// A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch message
+// and the end-of-stream marker, each message opened by the continuation marker. The schema is the
+// ingestor's input schema field for field, without schema or field metadata, and the batch is
+// uncompressed and carries no dictionary. The server validates the whole batch before any row of
+// it enters the graph, so a batch is admitted whole or not at all.
+//
+// A producer submits within the credit its open was granted: a batch holds one of the granted
+// batches and its payload bytes from the moment it is sent until its terminal reply is sent back.
+// A batch beyond that credit is refused and ends the producer.
+
+/// Every client ingestor's batches share one acknowledgement window across its producers.
+table SequentialProducerWindow {}
+
+table ParallelProducerWindow {
+  /// Non-zero.
+  max: ulong;
+}
+
+union ProducerWindow {
+  SequentialProducerWindow,
+  ParallelProducerWindow
+}
+
+enum ProducerAdmission : ubyte {
+  /// Batches are admitted.
+  Open,
+  /// A quiesce, memory pressure or a drain holds admission. A batch sent now is refused as not
+  /// admitted; the producer keeps it and sends it again once admission opens.
+  Suspended
+}
+
+// ---------------------------------------------------------------------------------------------
+// Backups
+// ---------------------------------------------------------------------------------------------
+
+/// Whether a backup archive carries the original bytes of every resource version.
+enum BackupResources : ubyte {
+  Included,
+  /// `WITHOUT RESOURCES`: every version's catalog metadata and checksums, without its bytes.
+  Omitted
+}
+
+/// One domain of a completed backup.
+table BackupDomainSummary {
+  domain: string (required);
+  /// The applied consensus revision the domain's configuration was read at.
+  revision: ulong;
+  /// The sections the archive holds for the domain.
+  sections: ulong;
+  /// The bytes those sections hold.
+  section_bytes: ulong;
+}
+
+/// The archive a completed BACKUP assembled, which the serving leader retains for download until
+/// a complete download collects it or `retained_until` passes.
+table BackupArchiveSummary {
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+  /// When the archive's contents were read, in nanoseconds since the Unix epoch.
+  captured_at: long;
+  /// The instant after which the archive can no longer be downloaded, in nanoseconds since the
+  /// Unix epoch.
+  retained_until: long;
+  /// Required.
+  resources: BackupResources = null;
+  /// The users the archive holds. Absent for a domain backup, which holds none.
+  users: ulong = null;
+  /// In strictly ascending domain name order.
+  domains: [BackupDomainSummary] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Restores
+// ---------------------------------------------------------------------------------------------
+
+/// Whether a restore applied what it planned.
+enum RestoreMode : ubyte {
+  Apply,
+  /// `DRY RUN`: verified and planned, and nothing changed.
+  DryRun
+}
+
+/// What a step of a restore changes.
+enum RestoreStepKind : ubyte {
+  /// Imports the archived users.
+  Users,
+  /// Creates a domain, stopped, with its declared resources.
+  CreateDomain,
+  /// Imports every completed resource version of a domain under its archived number.
+  ImportResources,
+  /// Applies a domain's models.
+  ApplyModels
+}
+
+enum RestoreStepOutcome : ubyte {
+  /// The step's effects are in place.
+  Applied,
+  /// A dry run planned the step and applied nothing.
+  Planned,
+  /// The step failed. The steps before it stay applied, and none after it was attempted.
+  Failed,
+  /// An earlier step failed before this one was reached.
+  NotAttempted
+}
+
+table RestoreStepReport {
+  /// Required.
+  kind: RestoreStepKind = null;
+  /// The domain the step changes, by the name it is restored under. Absent for Users, which
+  /// changes no domain, and present for every other kind.
+  domain: string;
+  /// Required.
+  outcome: RestoreStepOutcome = null;
+}
+
+/// The users a cluster restore imports, by what it did with each.
+table RestoredUsers {
+  /// Archived users the cluster did not have.
+  created: ulong;
+  /// Existing users kept under `ON EXISTING USER SKIP`.
+  skipped: ulong;
+  /// Existing users given the archived password hash under `ON EXISTING USER REPLACE`.
+  replaced: ulong;
+}
+
+/// One domain a restore recreates.
+table RestoredDomain {
+  /// The domain's name in the archive.
+  source: string (required);
+  /// The name the domain is restored under.
+  domain: string (required);
+  /// The completed resource versions imported, each under its archived number.
+  resource_versions: ulong;
+  /// The models applied.
+  models: ulong;
+  /// For a dry run, the transaction planner's report on the domain's model run. Absent when the
+  /// restore applies, and when the domain holds no models.
+  planned_models: TransactionImpactReport;
+}
+
+/// What a restore applied, or for a dry run what it would apply.
+table RestoreReport {
+  /// Required.
+  mode: RestoreMode = null;
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+  /// When the backup that wrote the archive read its contents, in nanoseconds since the Unix
+  /// epoch.
+  captured_at: long;
+  /// The users a cluster restore imports. Absent for a domain restore, which imports none.
+  users: RestoredUsers;
+  /// Every domain the restore recreates, in archive order.
+  domains: [RestoredDomain] (required);
+  /// Every step, in the order the restore applies them.
+  steps: [RestoreStepReport] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Client requests
 // ---------------------------------------------------------------------------------------------
 
@@ -1183,6 +1461,80 @@ table CancelRequest {
   target_request_id: ulong;
 }
 
+/// Attaches the session to a domain's clock.
+table AttachDomainClockRequest {
+  domain: string (required);
+}
+
+/// Detaches the session from a domain's clock.
+table DetachDomainClockRequest {
+  domain: string (required);
+}
+
+/// Attaches a producer to a client ingestor of a running domain.
+table OpenIngestorRequest {
+  domain: string (required);
+  ingestor: string (required);
+  /// The fields every batch carries, in order, with their types, nullability and sensitivity.
+  /// Never empty. The open is refused unless they are exactly the ingestor's input schema.
+  expected_fields: [RowField] (required);
+  /// The most batches the producer may have without a terminal reply. Non-zero. An open asking
+  /// for more than 1024 is refused with InvalidLimits.
+  max_outstanding_batches: uint;
+  /// The most Arrow IPC bytes those batches may carry together. Non-zero. An open asking for more
+  /// than 32 MiB is refused with InvalidLimits.
+  max_outstanding_bytes: ulong;
+}
+
+/// Submits one batch of an open producer. Its terminal reply is a SubmissionOutcome, which always
+/// follows: a CancelRequest cannot withdraw a submitted batch.
+table SubmitBatchRequest {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+  /// One canonical Arrow IPC stream. Never empty.
+  batch: [ubyte] (required);
+}
+
+/// Stops admission for a producer and releases it once every batch it submitted has its terminal
+/// reply, all of which precede this request's reply.
+table CloseIngestorRequest {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+}
+
+// Client emitters are a separate graph-output operation family. A consumer is the request_id of
+// its OpenEmitterRequest. Read requests wait without occupying the ordered command lane; results
+// are settled by an application decision, never by reading the frame.
+
+table OpenEmitterRequest {
+  domain: string (required);
+  emitter: string (required);
+  /// The exact declared output schema, including sensitivity. Never empty.
+  expected_fields: [RowField] (required);
+  /// Non-zero; at most 1024.
+  max_outstanding_batches: uint;
+  /// Non-zero; at most 32 MiB and large enough for one maximum-sized delivery.
+  max_outstanding_bytes: ulong;
+}
+
+table ReadEmitterBatchRequest {
+  /// The request_id that opened this consumer. Non-zero.
+  consumer: ulong;
+}
+
+enum EmitterBatchDecision : ubyte { Ack, Retry, Reject }
+
+table SettleEmitterBatchRequest {
+  consumer: ulong;
+  /// Exactly 16 bytes. A replacement attempt has a different reference.
+  reference: [ubyte] (required);
+  decision: EmitterBatchDecision = null;
+  /// Required; empty except for Reject, whose bounded non-sensitive reason is nonempty.
+  reason: string (required);
+}
+
+table CloseEmitterRequest { consumer: ulong; }
+
 union ClientRequest {
   CommandRequest,
   SuggestRequest,
@@ -1193,7 +1545,16 @@ union ClientRequest {
   SubscribeRequest,
   UnsubscribeRequest,
   CancelRequest,
-  ChoiceLookupRequest
+  ChoiceLookupRequest,
+  AttachDomainClockRequest,
+  DetachDomainClockRequest,
+  OpenIngestorRequest,
+  SubmitBatchRequest,
+  CloseIngestorRequest,
+  OpenEmitterRequest,
+  ReadEmitterBatchRequest,
+  SettleEmitterBatchRequest,
+  CloseEmitterRequest
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1304,6 +1665,12 @@ table CommandOutcome {
   /// Present when the command described every version of a resource, beside the text its message
   /// renders.
   resource: ResourceDescription;
+  /// Present when the command was a completed BACKUP. Download the archive with the command's
+  /// execution_reference.
+  backup: BackupArchiveSummary;
+  /// Present when the command was a RESTORE that verified its archive: what it applied, the step
+  /// it failed at if one failed, or for a dry run what it would apply.
+  restore: RestoreReport;
 }
 
 table TransactionAttached {
@@ -1569,6 +1936,304 @@ table TransferPart {
   chunk: [ubyte] (required);
 }
 
+/// The session is attached, and the domain's clock is as the serving node has it installed.
+table DomainClockAttached {
+  domain: string (required);
+  clock: DomainClockObservation (required);
+}
+
+/// The session already follows the domain's clock. Nothing changed.
+table DomainClockAlreadyAttached {
+  domain: string (required);
+}
+
+union DomainClockAttachDisposition {
+  DomainClockAttached,
+  DomainClockAlreadyAttached,
+  DomainNotFound,
+  RequestFailed
+}
+
+table DomainClockAttachOutcome {
+  disposition: DomainClockAttachDisposition (required);
+  message: string (required);
+}
+
+/// The session no longer follows the domain's clock. No frame about it follows this reply.
+table DomainClockDetached {
+  domain: string (required);
+}
+
+/// The session does not follow the domain's clock. Nothing changed.
+table DomainClockNotAttached {
+  domain: string (required);
+}
+
+union DomainClockDetachDisposition {
+  DomainClockDetached,
+  DomainClockNotAttached,
+  RequestFailed
+}
+
+table DomainClockDetachOutcome {
+  disposition: DomainClockDetachDisposition (required);
+  message: string (required);
+}
+
+/// The producer is attached, and its batches are admitted into the ingestor's graph from now on.
+table ProducerOpened {
+  domain: string (required);
+  ingestor: string (required);
+  /// The ingestor's input schema. Every batch carries exactly these fields. Never empty.
+  fields: [RowField] (required);
+  /// The number of STARTs the domain had committed when the producer attached. A new START ends
+  /// the producer.
+  generation: ulong;
+  /// The endpoint contract the producer is bound to: the ingestor, its input schema and the
+  /// branches its routes construct.
+  contract: Fingerprint (required);
+  /// The attachment on the node that executes the ingestor. Exactly 16 bytes.
+  attachment: [ubyte] (required);
+  window: ProducerWindow (required);
+  /// The ingestor's ACK TIMEOUT, in nanoseconds. Non-zero.
+  ack_timeout_nanos: ulong;
+  /// The first delay before a batch refused as suspended or busy is sent again, in nanoseconds.
+  /// Non-zero.
+  retry_backoff_nanos: ulong;
+  /// The longest such delay, in nanoseconds. At least retry_backoff_nanos.
+  retry_max_backoff_nanos: ulong;
+  /// The batches the producer may have without a terminal reply. Non-zero.
+  granted_batches: uint;
+  /// The Arrow IPC bytes those batches may carry together. Non-zero.
+  granted_bytes: ulong;
+  /// The largest batch one submission carries, in bytes. Non-zero, and at most granted_bytes.
+  max_batch_bytes: ulong;
+  /// The most rows one batch carries. Non-zero.
+  max_batch_rows: uint;
+  /// Required.
+  admission: ProducerAdmission = null;
+}
+
+/// Why a producer was not opened. Nothing is left attached after any of them.
+enum ProducerRefusal : ubyte {
+  DomainNotFound,
+  /// The domain exists but is not running.
+  DomainStopped,
+  IngestorNotFound,
+  /// The ingestor reads an external transport rather than client batches.
+  NotClientIngestor,
+  /// The ingestor's execution is not running where it is scheduled, or its node could not be
+  /// reached. Opening again later may succeed.
+  EndpointUnavailable,
+  /// The expected fields are not exactly the ingestor's input schema.
+  SchemaMismatch,
+  /// The session already holds 32 producers.
+  TooManyProducers,
+  /// The session's 32 MiB producer budget cannot hold the requested bytes.
+  SessionCapacityExhausted,
+  /// The producer budget of the serving node, or of the node the producer is forwarded to, cannot
+  /// hold the requested bytes.
+  NodeCapacityExhausted,
+  /// The requested limits exceed what one producer may ask for.
+  InvalidLimits,
+  /// The session holds a transaction. Producers belong to the session, not to a transaction.
+  InTransaction
+}
+
+table ProducerRefused {
+  /// Required.
+  refusal: ProducerRefusal = null;
+}
+
+union OpenIngestorDisposition {
+  ProducerOpened,
+  ProducerRefused
+}
+
+table OpenIngestorOutcome {
+  disposition: OpenIngestorDisposition (required);
+  message: string (required);
+}
+
+/// Why no row of a batch entered the graph.
+enum SubmissionRefusal : ubyte {
+  /// The batch is not an Arrow IPC stream.
+  MalformedBatch,
+  /// The stream carries a message besides its schema and one record batch.
+  UnexpectedMessage,
+  /// The record batch is compressed.
+  CompressedBatch,
+  /// The stream's schema is not the producer's.
+  SchemaMismatch,
+  /// The stream carries no record batch, or more than one.
+  NotOneBatch,
+  /// The batch carries more rows than max_batch_rows.
+  TooManyRows,
+  /// The batch, or the columns it decodes to, is larger than one submission may carry.
+  BatchTooLarge,
+  /// The columns do not satisfy their declared types, nullability or buffer bounds.
+  InvalidData,
+  /// Admission is suspended. The same batch can succeed once admission opens.
+  Suspended,
+  /// The node executing the ingestor had no capacity to validate the batch. The same batch can
+  /// succeed after the retry backoff.
+  Busy,
+  /// The ingestor's execution is stopping or moving. The producer ends.
+  Draining,
+  /// The producer was closing, closed or ended, or this session never opened it.
+  ProducerEnded,
+  /// The batch exceeded the producer's granted credit. The producer ends.
+  CreditExceeded
+}
+
+table SubmissionNotAdmitted {
+  /// Required.
+  refusal: SubmissionRefusal = null;
+}
+
+/// The batch's source acknowledgement resolved successfully under the graph's policies.
+table SubmissionCompleted {}
+
+enum ProcessingFailure : ubyte {
+  /// The acknowledgement made no progress within the ACK TIMEOUT. Admitted work may still
+  /// complete.
+  AckTimedOut,
+  /// A route, a policy or a downstream node negatively acknowledged the batch.
+  Rejected
+}
+
+/// The batch was admitted and its source acknowledgement failed. Some of its effects may have
+/// happened.
+table SubmissionFailed {
+  /// Required.
+  failure: ProcessingFailure = null;
+}
+
+enum OutcomeUncertainty : ubyte {
+  /// The ingestor's execution stopped, or the producer ended, while the acknowledgement was
+  /// unresolved.
+  Interrupted,
+  /// The node executing the ingestor, or the connection to it, was lost.
+  OwnerLost
+}
+
+/// The batch may have been admitted and processed, and no terminal result can be established.
+table SubmissionOutcomeUnknown {
+  /// Required.
+  cause: OutcomeUncertainty = null;
+}
+
+union SubmissionDisposition {
+  SubmissionNotAdmitted,
+  SubmissionCompleted,
+  SubmissionFailed,
+  SubmissionOutcomeUnknown
+}
+
+/// The terminal reply to a SubmitBatchRequest.
+table SubmissionOutcome {
+  disposition: SubmissionDisposition (required);
+  /// A non-sensitive description, empty for a completed batch.
+  message: string (required);
+}
+
+/// Every batch the producer submitted has its terminal reply, and the producer is released.
+table ProducerClosed {}
+
+/// The session holds no open producer by that identity. Nothing changed.
+table ProducerNotOpen {}
+
+union CloseIngestorDisposition {
+  ProducerClosed,
+  ProducerNotOpen
+}
+
+table CloseIngestorOutcome {
+  disposition: CloseIngestorDisposition (required);
+  message: string (required);
+}
+
+table SequentialConsumerWindow {}
+table ParallelConsumerWindow { max: ulong; }
+union ConsumerWindow { SequentialConsumerWindow, ParallelConsumerWindow }
+
+table EmitterOpened {
+  domain: string (required);
+  emitter: string (required);
+  fields: [RowField] (required);
+  /// The committed START generation and endpoint contract this consumer is bound to.
+  generation: ulong;
+  contract: Fingerprint (required);
+  window: ConsumerWindow (required);
+  ack_timeout_nanos: ulong;
+  retry_backoff_nanos: ulong;
+  retry_max_backoff_nanos: ulong;
+  granted_batches: uint;
+  granted_bytes: ulong;
+  max_batch_bytes: ulong;
+  max_batch_rows: uint;
+}
+
+enum EmitterOpenRefusal : ubyte {
+  DomainNotFound,
+  DomainStopped,
+  EmitterNotFound,
+  NotClientEmitter,
+  EndpointUnavailable,
+  SchemaMismatch,
+  TooManyConsumers,
+  SessionCapacityExhausted,
+  NodeCapacityExhausted,
+  InvalidLimits,
+  InTransaction
+}
+
+table EmitterRefused { refusal: EmitterOpenRefusal = null; }
+union OpenEmitterDisposition { EmitterOpened, EmitterRefused }
+table OpenEmitterOutcome {
+  disposition: OpenEmitterDisposition (required);
+  message: string (required);
+}
+
+table EmitterBatchReceived {
+  /// Stable through retries of this delivery. Exactly 16 bytes.
+  identity: [ubyte] (required);
+  /// Unique to this attempt. Exactly 16 bytes.
+  reference: [ubyte] (required);
+  source_relay: string (required);
+  /// Absent for unbranched output; otherwise an opaque 32-byte branch fingerprint.
+  branch_fingerprint: [ubyte];
+  /// One uncompressed Arrow IPC stream with exactly one record batch.
+  batch: [ubyte] (required);
+  members: uint;
+  execution_now_unix_nanos: long;
+}
+
+table EmitterConsumerEnded {}
+union ReadEmitterDisposition { EmitterBatchReceived, EmitterConsumerEnded }
+table ReadEmitterBatchOutcome {
+  disposition: ReadEmitterDisposition (required);
+  message: string (required);
+}
+
+enum EmitterSettlement : ubyte {
+  Confirmed,
+  StaleReference,
+  WrongConsumer,
+  InvalidReason,
+  ConsumerEnded
+}
+table SettleEmitterBatchOutcome {
+  disposition: EmitterSettlement = null;
+  message: string (required);
+}
+
+enum EmitterCloseDisposition : ubyte { Closed, NotOpen }
+table CloseEmitterOutcome {
+  disposition: EmitterCloseDisposition = null;
+  message: string (required);
+}
+
 union ReplyBody {
   CommandOutcome,
   AttachOutcome,
@@ -1582,7 +2247,16 @@ union ReplyBody {
   RequestCancelled,
   RequestRejected,
   TransferPart,
-  ChoiceOutcome
+  ChoiceOutcome,
+  DomainClockAttachOutcome,
+  DomainClockDetachOutcome,
+  OpenIngestorOutcome,
+  SubmissionOutcome,
+  CloseIngestorOutcome,
+  OpenEmitterOutcome,
+  ReadEmitterBatchOutcome,
+  SettleEmitterBatchOutcome,
+  CloseEmitterOutcome
 }
 
 table Reply {
@@ -1710,6 +2384,70 @@ table SubscriptionEnded {
   message: string (required);
 }
 
+/// The installation of an attached domain clock changed on the serving node.
+table DomainClockObserved {
+  domain: string (required);
+  clock: DomainClockObservation (required);
+}
+
+/// Newest tick accepted for an attached domain's paced clock generation.
+table DomainClockTicked {
+  domain: string (required);
+  generation: ulong;
+  tick_id: ulong;
+  logical_boundary_unix_nanos: long;
+  authority_utc_unix_nanos: long;
+  serving_logical_unix_nanos: long;
+}
+
+enum DomainClockAttachmentEndReason : ubyte {
+  /// The domain no longer exists on the serving node.
+  DomainRemoved
+}
+
+/// The server ended the session's attachment to a domain clock. It is the last frame about that
+/// attachment.
+table DomainClockAttachmentEnded {
+  domain: string (required);
+  /// Required.
+  reason: DomainClockAttachmentEndReason = null;
+}
+
+/// Whether an open producer's batches are admitted changed.
+table ProducerAdmissionChanged {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+  /// Required.
+  admission: ProducerAdmission = null;
+}
+
+enum ProducerEndReason : ubyte {
+  /// An alteration changed the endpoint contract. Opening again validates the new contract.
+  EndpointChanged,
+  /// The ingestor or its domain was removed.
+  EndpointRemoved,
+  /// The domain stopped, or a new START replaced the generation the producer attached under.
+  DomainStopped,
+  /// A planned handoff moved the ingestor's execution to another node.
+  Relocated,
+  /// The serving node, or the node executing the ingestor, is shutting down.
+  ShuttingDown,
+  /// The node executing the ingestor, or the connection to it, was lost.
+  OwnerLost,
+  /// The producer submitted a batch beyond its granted credit.
+  ProtocolViolated
+}
+
+/// The server ended a producer. Every batch it submitted already has its terminal reply, and this
+/// is the last frame about the producer.
+table ProducerEnded {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+  /// Required.
+  reason: ProducerEndReason = null;
+  message: string (required);
+}
+
 table ServerShuttingDown {}
 
 table ProtocolViolated {
@@ -1738,7 +2476,12 @@ union ServerBody {
   SubscriptionDeliveryLost,
   SubscriptionRowsSkipped,
   SubscriptionEnded,
-  SessionEnding
+  SessionEnding,
+  DomainClockObserved,
+  DomainClockAttachmentEnded,
+  DomainClockTicked,
+  ProducerAdmissionChanged,
+  ProducerEnded
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1802,6 +2545,129 @@ union UploadDisposition {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Backup download
+// ---------------------------------------------------------------------------------------------
+//
+// A download is one BackupDownloadRequest answered by a stream that is exactly one of:
+// BackupDownloadFailed; LeaderRedirect; or BackupArchiveStart, then BackupArchiveChunk frames whose
+// bytes add up to total_bytes, then BackupArchiveComplete. A stream may also end with
+// BackupDownloadFailed after its start, when the server cannot read the rest of the archive. A
+// stream that ends any other way was cut short; download again with the same reference.
+
+/// Asks for the archive a completed BACKUP retains, by that command's execution reference.
+table BackupDownloadRequest {
+  execution_reference: string (required);
+}
+
+/// The archive's size and digest, before its bytes.
+table BackupArchiveStart {
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+}
+
+/// Archive bytes, in order after BackupArchiveStart.
+table BackupArchiveChunk {
+  /// Never empty.
+  bytes: [ubyte] (required);
+}
+
+/// Every byte of the archive was sent, and the server collected it: a later download of the same
+/// reference is refused.
+table BackupArchiveComplete {}
+
+enum BackupDownloadFailure : ubyte {
+  /// The request is malformed.
+  InvalidRequest,
+  /// The serving node retains no archive under the reference: it assembled none, a complete
+  /// download already collected it, or the command is not a completed backup.
+  NotRetained,
+  /// The reference's retry validity ended, and the archive with it.
+  Expired,
+  /// Another user ran the backup.
+  NotOwner,
+  /// The serving node could not read its retained archive.
+  ReadFailed
+}
+
+table BackupDownloadFailed {
+  /// Required.
+  failure: BackupDownloadFailure = null;
+  message: string (required);
+}
+
+union BackupDownloadPart {
+  BackupArchiveStart,
+  BackupArchiveChunk,
+  BackupArchiveComplete,
+  BackupDownloadFailed,
+  LeaderRedirect
+}
+
+// ---------------------------------------------------------------------------------------------
+// Restore upload
+// ---------------------------------------------------------------------------------------------
+//
+// A restore is one RestoreStart, then RestoreChunk frames whose bytes add up to total_bytes,
+// answered by exactly one RestoreReply. The reply is RestoreUploadFailed for everything the
+// stream itself gets wrong, and otherwise the CommandOutcome of the RESTORE the start names, which
+// is recorded under its execution_reference like every other persistent command. A node answers
+// from the start frame alone, reading no chunk, when it does not lead, when the reference already
+// recorded an outcome, and when it already holds the archive of the applying restore.
+
+/// The first frame of a restore stream.
+table RestoreStart {
+  /// Non-zero. The RestoreReply carries it back.
+  request_id: ulong;
+  /// The durable identity of the restore across retries, reconnects and leader changes.
+  execution_reference: string (required);
+  /// One RESTORE statement, as NSPL.
+  statement: string (required);
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+}
+
+/// Archive bytes following RestoreStart, in order.
+table RestoreChunk {
+  /// Never empty.
+  bytes: [ubyte] (required);
+}
+
+union RestorePart {
+  RestoreStart,
+  RestoreChunk
+}
+
+enum RestoreUploadFailure : ubyte {
+  /// The stream did not begin with a valid RestoreStart, or a later frame was not a chunk.
+  InvalidStream,
+  /// The start's statement is not one RESTORE statement.
+  InvalidStatement,
+  /// The chunks did not add up to total_bytes.
+  SizeMismatch,
+  /// The chunks do not have the declared digest.
+  DigestMismatch,
+  /// The declared size exceeds what the leader stages for one archive.
+  QuotaExceeded,
+  /// The leader could not stage the archive.
+  StagingFailed
+}
+
+table RestoreUploadFailed {
+  /// Required.
+  failure: RestoreUploadFailure = null;
+  message: string (required);
+}
+
+union RestoreDisposition {
+  CommandOutcome,
+  RestoreUploadFailed
+}
+
+// ---------------------------------------------------------------------------------------------
 // Frame roots
 // ---------------------------------------------------------------------------------------------
 
@@ -1822,6 +2688,11 @@ table UploadMessage {
   part: UploadPart (required);
 }
 
+/// Root of a backup download stream frame ("NXBD").
+table BackupDownloadMessage {
+  part: BackupDownloadPart (required);
+}
+
 /// Root of the frame that answers an upload stream ("NXUR").
 table UploadReply {
   /// The request_id of the stream's UploadStart. Absent when the stream carried none.
@@ -1829,4 +2700,16 @@ table UploadReply {
   disposition: UploadDisposition (required);
   message: string (required);
   diagnostics: [Diagnostic] (required);
+}
+
+/// Root of a restore stream frame ("NXRM").
+table RestoreMessage {
+  part: RestorePart (required);
+}
+
+/// Root of the frame that answers a restore stream ("NXRR").
+table RestoreReply {
+  /// The request_id of the stream's RestoreStart. Absent when the stream carried none.
+  request_id: ulong = null;
+  disposition: RestoreDisposition (required);
 }

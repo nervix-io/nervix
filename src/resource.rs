@@ -11,7 +11,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::{self, Read as _, Write as _},
+    io::{self, Read as _, Seek as _, Write as _},
     path::{Component, Path, PathBuf},
 };
 
@@ -192,8 +192,59 @@ struct PendingInstall {
     created_at: Timestamp,
 }
 
+/// Where an archive to install is read from.
+enum ArchiveSource {
+    /// A whole file.
+    File(PathBuf),
+    /// `length` bytes of a larger file, starting `offset` bytes into it, such as one section of a
+    /// backup archive.
+    Section {
+        path: PathBuf,
+        offset: u64,
+        length: u64,
+    },
+}
+
+impl ArchiveSource {
+    /// The exact size of the archive.
+    fn length(&self) -> Result<u64, Report<ResourceStoreError>> {
+        match self {
+            Self::File(path) => Ok(fs::metadata(path)
+                .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                .len()),
+            Self::Section { length, .. } => Ok(*length),
+        }
+    }
+
+    /// A reader of exactly the archive's bytes.
+    fn open(&self) -> Result<io::Take<fs::File>, Report<ResourceStoreError>> {
+        match self {
+            Self::File(path) => {
+                let file = fs::File::open(path)
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                let length = file
+                    .metadata()
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                    .len();
+                Ok(file.take(length))
+            }
+            Self::Section {
+                path,
+                offset,
+                length,
+            } => {
+                let mut file = fs::File::open(path)
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                file.seek(io::SeekFrom::Start(*offset))
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                Ok(file.take(*length))
+            }
+        }
+    }
+}
+
 struct ArchiveInstallPlan<'a> {
-    source_archive_path: &'a Path,
+    source: &'a ArchiveSource,
     declared_archive_bytes: u64,
     declared_root_checksum: &'a str,
     limits: ResourceStoreLimits,
@@ -632,7 +683,7 @@ impl Drop for ResourceBundleStager {
         let Some(root) = self.root.take() else {
             return;
         };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let Ok(runtime) = nervix_primitives::runtime::Handle::try_current() else {
             warn!(
                 path = %root.display(),
                 "resource bundle staging cleanup will resume during the next store startup"
@@ -1025,7 +1076,7 @@ impl ResourceStore {
     ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         self.install_archive_path(
             id,
-            archive_path.as_ref().to_path_buf(),
+            ArchiveSource::File(archive_path.as_ref().to_path_buf()),
             root_checksum,
             created_by_node,
             created_at,
@@ -1042,7 +1093,31 @@ impl ResourceStore {
     ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         self.install_archive_path(
             resource.id.clone(),
-            archive_path.as_ref().to_path_buf(),
+            ArchiveSource::File(archive_path.as_ref().to_path_buf()),
+            resource.root_checksum.clone(),
+            resource.created_by_node.clone(),
+            resource.created_at,
+            Some(resource),
+        )
+        .await
+    }
+
+    /// Verify every published field of `resource` before atomically installing the archive that
+    /// `length` bytes of `archive_path` hold from `offset`, such as a section of a backup archive.
+    pub async fn install_replica_from_archive_section(
+        &self,
+        resource: ResourceVersion,
+        archive_path: impl AsRef<Path>,
+        offset: u64,
+        length: u64,
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
+        self.install_archive_path(
+            resource.id.clone(),
+            ArchiveSource::Section {
+                path: archive_path.as_ref().to_path_buf(),
+                offset,
+                length,
+            },
             resource.root_checksum.clone(),
             resource.created_by_node.clone(),
             resource.created_at,
@@ -1054,7 +1129,7 @@ impl ResourceStore {
     async fn install_archive_path(
         &self,
         id: ResourceId,
-        archive_path: PathBuf,
+        source: ArchiveSource,
         root_checksum: String,
         created_by_node: ClusterNodeName,
         created_at: Timestamp,
@@ -1088,7 +1163,7 @@ impl ResourceStore {
                 move |_charge, cancellation| {
                     install_archive(
                         install,
-                        &archive_path,
+                        &source,
                         &root_checksum,
                         limits,
                         chunk_bytes,
@@ -1249,7 +1324,7 @@ async fn write_archive_file(
     archive.mode(HeaderMode::Deterministic);
 
     for entry in entries {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut header = Header::new_ustar();
         header.set_mtime(0);
         header.set_uid(0);
@@ -1297,7 +1372,7 @@ async fn write_archive_file(
 
 fn install_archive(
     install: PendingInstall,
-    source_archive_path: &Path,
+    source: &ArchiveSource,
     declared_root_checksum: &str,
     limits: ResourceStoreLimits,
     chunk_bytes: u64,
@@ -1305,9 +1380,7 @@ fn install_archive(
     cancellation: &Cancellation,
 ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
     let result = (|| {
-        let declared_archive_bytes = fs::metadata(source_archive_path)
-            .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
-            .len();
+        let declared_archive_bytes = source.length()?;
         if install.staging_root.exists() {
             remove_tree(&install.staging_root, cancellation)?;
         }
@@ -1323,7 +1396,7 @@ fn install_archive(
         install_archive_into_staging(
             &install,
             ArchiveInstallPlan {
-                source_archive_path,
+                source,
                 declared_archive_bytes,
                 declared_root_checksum,
                 limits,
@@ -1356,7 +1429,7 @@ fn install_archive_into_staging(
     let mut buffer = vec![0_u8; buffer_bytes];
     let staged_archive_path = install.staging_root.join("archive.tar");
     let (root_checksum, archive_bytes) = copy_archive_to_staging(
-        plan.source_archive_path,
+        plan.source,
         &staged_archive_path,
         plan.limits.max_archive_bytes,
         &mut buffer,
@@ -1663,14 +1736,13 @@ fn collect_staged_bundle_entries_recursive(
 }
 
 fn copy_archive_to_staging(
-    source: &Path,
+    source: &ArchiveSource,
     destination: &Path,
     max_archive_bytes: u64,
     buffer: &mut [u8],
     cancellation: &Cancellation,
 ) -> Result<(String, u64), Report<ResourceStoreError>> {
-    let mut source =
-        fs::File::open(source).map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+    let mut source = source.open()?;
     let mut destination =
         fs::File::create(destination).map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
     let mut hasher = Hasher::new();
@@ -1994,7 +2066,7 @@ async fn copy_directory_recursive(
         .await
         .map_err(|_| Report::new(ResourceStoreError::ReadDirectory))?
     {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let file_type = entry
@@ -2101,7 +2173,7 @@ async fn checksum_path(path: &Path) -> Result<String, Report<ResourceStoreError>
     let mut hasher = Hasher::new();
     let mut buffer = [0u8; 8192];
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let read = file
             .read(&mut buffer)
             .await
@@ -2169,7 +2241,7 @@ mod tests {
         archive
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn archive_stager_writes_bounded_chunks_and_reports_their_digest() {
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open(install_root.path(), Executor::default())
@@ -2203,7 +2275,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn bundle_stager_builds_an_installable_archive_and_removes_its_source_tree() {
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open(install_root.path(), Executor::default())
@@ -2261,7 +2333,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn bundle_stager_checks_extracted_quota_before_writing_a_chunk() {
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open_with_limits(
@@ -2315,7 +2387,7 @@ mod tests {
         assert!(!staging_root.exists());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_bundle_stager_removes_its_source_tree() {
         let install_root = tempdir().expect("install tempdir");
         let store = ResourceStore::open(install_root.path(), Executor::default())
@@ -2332,16 +2404,16 @@ mod tests {
 
         drop(stager);
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        nervix_primitives::time::timeout(Duration::from_secs(5), async {
             while staging_root.exists() {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
         .expect("dropping a bundle stager should schedule source-tree cleanup");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn install_from_directory_writes_manifest_and_preserves_tree() {
         let source = tempdir().expect("source tempdir");
         std::fs::create_dir_all(source.path().join("proto"))
@@ -2393,7 +2465,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn install_from_archive_path_rehydrates_same_resource_content() {
         let source = tempdir().expect("source tempdir");
         std::fs::create_dir_all(source.path().join("proto/nested"))
@@ -2457,7 +2529,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn install_from_archive_path_preserves_streamed_checksum() {
         let source = tempdir().expect("source tempdir");
         std::fs::create_dir_all(source.path().join("proto"))
@@ -2510,7 +2582,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn replica_metadata_is_verified_before_atomic_install() {
         let source = tempdir().expect("source tempdir");
         std::fs::write(source.path().join("model.bin"), b"model")
@@ -2551,7 +2623,7 @@ mod tests {
         assert!(!replica_store.version_root(&replica_id).exists());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn failed_archive_install_removes_staging() {
         let source = tempdir().expect("source tempdir");
         std::fs::write(source.path().join("model.bin"), b"model")
@@ -2604,7 +2676,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn archive_quota_is_checked_before_staging_is_created() {
         let archive = NamedTempFile::new().expect("temporary archive should open");
         std::fs::write(archive.path(), b"too large").expect("archive should be written");
@@ -2641,7 +2713,7 @@ mod tests {
         assert!(!store.staging_root(&id).exists());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn extraction_failure_removes_staging() {
         let archive = NamedTempFile::new().expect("temporary archive should open");
         let bytes = b"this is not a tar archive";
@@ -2671,7 +2743,7 @@ mod tests {
         assert!(!store.version_root(&id).exists());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn extracted_quota_failure_removes_staging() {
         let source = tempdir().expect("source tempdir");
         std::fs::write(source.path().join("model.bin"), b"model")
@@ -2723,7 +2795,7 @@ mod tests {
         assert!(!replica_store.version_root(&replica_id).exists());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn file_count_quota_failure_removes_staging() {
         let source = tempdir().expect("source tempdir");
         std::fs::write(source.path().join("model.bin"), b"model")
@@ -2775,7 +2847,7 @@ mod tests {
         assert!(!replica_store.version_root(&replica_id).exists());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn startup_cleanup_removes_abandoned_staging_trees() {
         let install_root = tempdir().expect("install tempdir");
         let staging = install_root.path().join("tenant/model/.7.staging/content");
@@ -2812,7 +2884,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cancelled_archive_install_removes_staging() {
         let source = tempdir().expect("source tempdir");
         std::fs::write(source.path().join("model.bin"), vec![0_u8; 64 * 1024])
@@ -2842,7 +2914,7 @@ mod tests {
         let installing_id = replica_id.clone();
         let archive_path = source_store.archive_path(&source_id);
         let root_checksum = source_manifest.resource.root_checksum;
-        let install = tokio::spawn(async move {
+        let install = nervix_primitives::task::spawn(async move {
             installing_store
                 .install_from_archive_path(
                     installing_id,
@@ -2853,9 +2925,9 @@ mod tests {
                 )
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        nervix_primitives::time::timeout(Duration::from_secs(2), async {
             while !staging_root.exists() {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -2866,9 +2938,9 @@ mod tests {
             Err(error) if error.is_cancelled() => {}
             result => panic!("the install task should be cancelled, got {result:?}"),
         }
-        tokio::time::timeout(Duration::from_secs(5), async {
+        nervix_primitives::time::timeout(Duration::from_secs(5), async {
             while staging_root.exists() {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

@@ -13,17 +13,20 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     process::Command,
-    sync::Arc as StdArc,
     time::{Duration, SystemTime},
 };
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::{
+    sync::StdArc,
+    time::{Instant, sleep_until},
+};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,
 };
-use tokio::time::{Instant, sleep_until};
 
 use crate::{
     TlsConfigBundle, TransportClock, TransportEntropy, TransportError,
@@ -151,13 +154,14 @@ fn outcome(error: &TransportError) -> String {
 /// every accepted session until its certificate deadline drains it.
 async fn serve(tls: TlsConfigBundle, trace: SemanticTrace) -> io::Result<()> {
     let listener =
-        turmoil::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT))).await?;
+        nervix_primitives::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)))
+            .await?;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let (tcp, peer_addr) = listener.accept().await?;
         let tls = tls.clone();
         let trace = trace.clone();
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             match tls.accept(tcp, peer_addr, SETUP_TIMEOUT, CLUSTER).await {
                 Ok(session) => {
                     trace.record("server", format!("accepted {}", session.peer.node_id));
@@ -173,7 +177,7 @@ async fn serve(tls: TlsConfigBundle, trace: SemanticTrace) -> io::Result<()> {
 
 /// Open one authenticated session to the server, recording the decision. An accepted session is
 /// held until its certificate deadline drains it.
-async fn dial(tls: &TlsConfigBundle, trace: &SemanticTrace) -> Option<TransportError> {
+async fn dial(tls: &TlsConfigBundle, trace: &SemanticTrace) -> Option<Report<TransportError>> {
     dial_expecting(tls, trace, "server").await
 }
 
@@ -182,8 +186,8 @@ async fn dial_expecting(
     tls: &TlsConfigBundle,
     trace: &SemanticTrace,
     expected_node: &str,
-) -> Option<TransportError> {
-    let tcp = match turmoil::net::TcpStream::connect(("server", PORT)).await {
+) -> Option<Report<TransportError>> {
+    let tcp = match nervix_primitives::net::TcpStream::connect(("server", PORT)).await {
         Ok(tcp) => tcp,
         Err(error) => {
             trace.record("client", format!("connect failed: {:?}", error.kind()));
@@ -195,7 +199,7 @@ async fn dial_expecting(
         Ok(session) => {
             trace.record("client", format!("accepted {}", session.peer.node_id));
             let trace = trace.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 sleep_until(session.expires_at).await;
                 trace.record("client", "certificate deadline drained the session");
                 drop(session.stream);
@@ -203,7 +207,7 @@ async fn dial_expecting(
             None
         }
         Err(error) => {
-            trace.record("client", outcome(&error));
+            trace.record("client", outcome(error.current_context()));
             Some(error)
         }
     }
@@ -466,7 +470,7 @@ fn stalled_handshake_times_out_after_the_simulated_setup_deadline() {
             let trace = server_trace.clone();
             async move {
                 HostSupervisor::run(async move {
-                    let listener = turmoil::net::TcpListener::bind(SocketAddr::from((
+                    let listener = nervix_primitives::net::TcpListener::bind(SocketAddr::from((
                         Ipv4Addr::UNSPECIFIED,
                         PORT,
                     )))
@@ -498,7 +502,7 @@ fn stalled_handshake_times_out_after_the_simulated_setup_deadline() {
         });
         sim.client("client", async move {
             // Connect, then say nothing, holding the connection past the server's deadline.
-            let tcp = turmoil::net::TcpStream::connect(("server", PORT)).await?;
+            let tcp = nervix_primitives::net::TcpStream::connect(("server", PORT)).await?;
             sleep_until(Instant::now() + Duration::from_secs(10)).await;
             drop(tcp);
             Ok(())
@@ -576,7 +580,7 @@ fn a_server_certificate_for_another_node_is_rejected() {
             );
             let error = dial_expecting(&tls, &client_trace, "elsewhere").await;
             assert!(
-                matches!(error, Some(TransportError::InvalidHandshake(_))),
+                matches!(error.as_ref(), Some(report) if matches!(report.current_context(), TransportError::InvalidHandshake(_))),
                 "{error:?}"
             );
             Ok(())

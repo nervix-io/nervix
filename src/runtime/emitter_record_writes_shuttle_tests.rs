@@ -3,33 +3,30 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The invariants the members of a batch payload are held to while the sink's answers,
-//!   a retry, a cancelled attempt, a sibling emitter and a drain race one another: every member
-//!   resolves once, no source acknowledgement completes before every attached emitter confirmed
-//!   it, a retry writes a retained payload with exactly the bytes it was first written with, and a
-//!   drain never reads the emitter empty while one of its members is unresolved.
+//!   a retry, a cancelled attempt, terminal shutdown, a sibling emitter and a drain race one
+//!   another: every member resolves once, no source acknowledgement completes before every
+//!   attached emitter confirmed it, a retry writes a retained payload with exactly the bytes it
+//!   was first written with, and a drain never reads the emitter empty while one of its members
+//!   is unresolved.
 //! - **Depends on.** The emitter's buffer, its buffered batches and their row states, its retained
 //!   batch payloads and the answers applied to them, acknowledgement sets, and the server Shuttle
 //!   runner.
 //! - **Must not know.** Which connector writes a payload, how rows are encoded or packed, or how the
 //!   emitter task schedules its attempts.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records.
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records. The emitter's own counts are the production owner's
+// state, so they are the selected, modeled atomics.
 use futures_util::FutureExt as _;
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkPublishError;
-use nervix_recovery::NoReceiver as _;
+use nervix_model_harness::shuttle::check_interleavings;
+use nervix_primitives::{
+    sync::{StdArc, atomic as selected},
+    unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use super::*;
-use crate::{
-    runtime::test_fixtures::input_schema, runtime_ack::AckProgress,
-    shuttle_test::check_interleavings,
-};
+use crate::{runtime::test_fixtures::input_schema, runtime_ack::AckProgress};
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";
@@ -62,20 +59,22 @@ fn one_batch(acks: Vec<AckSet>) -> EmitterPublishBatch {
     EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(1))
 }
 
-fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload {
+fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
     let mut members = Vec::with_capacity(rows.len());
     for row in rows {
         members.push(position(*row));
     }
     PreparedPayload {
         members,
-        envelope: BatchEnvelope {
-            key: None,
-            headers: Vec::new(),
-            message_group: None,
-        },
         occurred_at: Timestamp::from_unix_nanos(1),
-        payload: bytes.to_vec(),
+        content: EncodedPayload {
+            envelope: BatchEnvelope {
+                key: None,
+                headers: Vec::new(),
+                message_group: None,
+            },
+            payload: bytes.to_vec(),
+        },
     }
 }
 
@@ -124,7 +123,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
             sibling_shares.push(root);
             let emitter_confirmed = emitter_confirmed.clone();
             let sibling_confirmed = sibling_confirmed.clone();
-            observers.push(tokio::spawn(async move {
+            observers.push(nervix_primitives::task::spawn(async move {
                 let outcome = completion.wait().await;
                 if outcome == AckOutcome::Ack {
                     assert!(
@@ -142,7 +141,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
             }));
         }
 
-        let emitter = tokio::spawn(async move {
+        let emitter = nervix_primitives::task::spawn(async move {
             let mut batches = vec![one_batch(emitter_shares)];
             let mut prepared = PreparedPayloads::default();
             prepared
@@ -155,7 +154,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 .assured("one retained payload makes one record")
                 .payload
                 .clone();
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             let answers = prepared
                 .answers(&mut batches, first.payloads, stalled())
                 .assured("a stalled write answers for no record");
@@ -163,7 +162,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 answers.unresolved.is_some(),
                 "a write the sink never answered must stay unresolved"
             );
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
 
             let retry = prepared.next_write();
             let retried = retry
@@ -185,8 +184,8 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
             assert!(answers.unresolved.is_none());
             assert!(prepared.is_empty());
         });
-        let sibling = tokio::spawn(async move {
-            tokio::task::yield_now().await;
+        let sibling = nervix_primitives::task::spawn(async move {
+            nervix_primitives::task::yield_now().await;
             match sibling_end {
                 SiblingEnd::Confirmed => {
                     sibling_confirmed.store(true, Ordering::SeqCst);
@@ -238,17 +237,17 @@ struct AttemptRecord {
     /// Message errors delivered for each row.
     deliveries: [AtomicUsize; 4],
     /// Every payload a write carried, in the order the writes carried them.
-    written: parking_lot::Mutex<Vec<Vec<u8>>>,
+    written: nervix_primitives::sync::blocking::Mutex<Vec<Vec<u8>>>,
     /// Every payload the sink answered for.
-    answered: parking_lot::Mutex<Vec<Vec<u8>>>,
+    answered: nervix_primitives::sync::blocking::Mutex<Vec<Vec<u8>>>,
 }
 
 impl AttemptRecord {
     fn new() -> Self {
         Self {
             deliveries: [const { AtomicUsize::new(0) }; 4],
-            written: parking_lot::Mutex::new(Vec::new()),
-            answered: parking_lot::Mutex::new(Vec::new()),
+            written: nervix_primitives::sync::blocking::Mutex::new(Vec::new()),
+            answered: nervix_primitives::sync::blocking::Mutex::new(Vec::new()),
         }
     }
 }
@@ -270,7 +269,7 @@ async fn deliver_message_error(
     let deliveries = record.deliveries.get(row).assured(MODEL_ROWS);
     batch
         .mark_rejected_after_delivery(row, async move {
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             deliveries.fetch_add(1, Ordering::SeqCst);
             acks.no_ack("refused");
         })
@@ -282,7 +281,7 @@ async fn deliver_message_error(
 /// errors of the members it rejected.
 async fn attempt(
     batches: &mut [EmitterPublishBatch],
-    prepared: &mut PreparedPayloads,
+    prepared: &mut PreparedPayloads<EncodedPayload>,
     record: &AttemptRecord,
 ) {
     let write = prepared.next_write();
@@ -290,7 +289,7 @@ async fn attempt(
         .written
         .lock()
         .extend(write.records.iter().map(|record| record.payload.clone()));
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     let outcome = answered(&write.records);
     let answers = prepared
         .answers(batches, write.payloads, outcome)
@@ -319,7 +318,7 @@ fn a_cancelled_attempt_leaves_each_member_to_resolve_once() {
             emitter_shares.push(root.attached());
             source_shares.push(root);
             let source_released = source_released.clone();
-            observers.push(tokio::spawn(async move {
+            observers.push(nervix_primitives::task::spawn(async move {
                 let outcome = completion.wait().await;
                 if row < 2 {
                     assert!(
@@ -332,10 +331,10 @@ fn a_cancelled_attempt_leaves_each_member_to_resolve_once() {
             }));
         }
         let record = StdArc::new(AttemptRecord::new());
-        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let (cancel, cancelled) = nervix_primitives::sync::oneshot::channel::<()>();
 
         let attempt_record = record.clone();
-        let emitter = tokio::spawn(async move {
+        let emitter = nervix_primitives::task::spawn(async move {
             let record = attempt_record;
             let mut batches = vec![one_batch(emitter_shares)];
             let mut prepared = PreparedPayloads::default();
@@ -344,7 +343,7 @@ fn a_cancelled_attempt_leaves_each_member_to_resolve_once() {
                     .retain(payload(rows, bytes), &mut batches)
                     .assured("every member is a pending row of the modeled batch");
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 () = attempt(&mut batches, &mut prepared, &record) => {}
                 _ = cancelled => {}
@@ -383,8 +382,8 @@ fn a_cancelled_attempt_leaves_each_member_to_resolve_once() {
                 "every member must be resolved once the retry finished"
             );
         });
-        let canceller = tokio::spawn(async move {
-            tokio::task::yield_now().await;
+        let canceller = nervix_primitives::task::spawn(async move {
+            nervix_primitives::task::yield_now().await;
             cancel
                 .send(())
                 .means_peer_left("the modeled attempt finished before its stop deadline");
@@ -420,12 +419,62 @@ fn shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once() {
     check_interleavings(a_cancelled_attempt_leaves_each_member_to_resolve_once);
 }
 
+/// Terminal teardown can arrive after a request entered its connector await. The emitter's
+/// shutdown signal must end that await, drop its prepared request, and leave its attached source
+/// share unconfirmed. The source may then redeliver after restart.
+fn terminal_shutdown_drops_an_unanswered_request_without_source_ack() {
+    shuttle::future::block_on(async {
+        let (source, completion) = AckSet::root();
+        let emitter_share = source.attached();
+        let (shutdown, mut shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let (entered_attempt, attempt_started) = nervix_primitives::sync::oneshot::channel();
+
+        let emitter = nervix_primitives::task::spawn(async move {
+            let mut batches = vec![one_batch(vec![emitter_share])];
+            let mut prepared = PreparedPayloads::default();
+            prepared
+                .retain(payload(&[0], b"/events/1"), &mut batches)
+                .assured("the prepared request has one pending source member");
+            nervix_primitives::select! {
+                biased;
+                _ = crate::runtime::emitter_publishing::wait_for_emitter_work_cancel(&mut shutdown_rx) => {}
+                _ = async {
+                    entered_attempt.send(()).means_peer_left(
+                        "the modeled connector attempt has not been canceled yet"
+                    );
+                    std::future::pending::<()>().await;
+                } => unreachable!("the modeled connector never answers"),
+            }
+            drop(prepared);
+            drop(batches);
+        });
+
+        attempt_started
+            .await
+            .assured("the modeled emitter enters its connector await before shutdown");
+        source.ack_success();
+        drop(source);
+        shutdown.send_replace(true);
+        emitter.await.assured(MODEL_TASK_JOINS);
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck("ack completion sender dropped".to_string()),
+            "terminal cancellation cannot confirm an unanswered attached request"
+        );
+    });
+}
+
+#[test]
+fn shuttle_terminal_shutdown_leaves_an_unanswered_request_unacknowledged() {
+    check_interleavings(terminal_shutdown_drops_an_unanswered_request_without_source_ack);
+}
+
 /// A drain reads the emitter's buffered count while the emitter's first write of a payload stalls
 /// and a force flush writes it again. The drain never reads the emitter empty while a member of the
 /// retained payload is unresolved: the members resolve before the buffer lets its batch go.
 fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
     shuttle::future::block_on(async {
-        let reported = Arc::new(AtomicUsize::new(0));
+        let reported = Arc::new(selected::AtomicUsize::new(0));
         let buffered = Arc::new(EmitterBufferedMessages::new(reported.clone()));
         let mut shares = Vec::with_capacity(2);
         let mut completions = Vec::with_capacity(2);
@@ -438,15 +487,19 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
         buffer
             .retain_without_cadence(one_batch(shares))
             .assured("the modeled buffer has a flush policy");
-        let (request_flush, flush_requested) = tokio::sync::oneshot::channel::<()>();
+        let (request_flush, flush_requested) = nervix_primitives::sync::oneshot::channel::<()>();
 
-        let emitter = tokio::spawn(async move {
-            let EmitterPublication { batches, prepared } = buffer.publication_mut();
+        let emitter = nervix_primitives::task::spawn(async move {
+            let EmitterPublication {
+                batches,
+                payloads: prepared,
+                ..
+            } = buffer.publication_mut();
             prepared
                 .retain(payload(&[0, 1], CONFIRMED_PAYLOAD), batches)
                 .assured("both members are pending rows of the buffered batch");
             let first = prepared.next_write();
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             let answers = prepared
                 .answers(batches, first.payloads, stalled())
                 .assured("a stalled write answers for no record");
@@ -455,9 +508,13 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
             flush_requested
                 .await
                 .assured("the force flush task requests exactly one flush");
-            let EmitterPublication { batches, prepared } = buffer.publication_mut();
+            let EmitterPublication {
+                batches,
+                payloads: prepared,
+                ..
+            } = buffer.publication_mut();
             let retry = prepared.next_write();
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             let mut confirmed = PerRecordOutcome::with_capacity(1);
             confirmed.deliver(SinkRecordId::new(0));
             let answers = prepared
@@ -467,18 +524,18 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
             // A publish that resolved everything lets the buffer go, as the flush does.
             buffer.clear();
         });
-        let force_flush = tokio::spawn(async move {
-            tokio::task::yield_now().await;
+        let force_flush = nervix_primitives::task::spawn(async move {
+            nervix_primitives::task::yield_now().await;
             request_flush
                 .send(())
                 .assured("the emitter waits for the force flush before it finishes");
         });
         // The drain spins until it reads the emitter empty, so it is spawned after the tasks it
         // waits for: the depth-first search runs the lowest-numbered runnable task first.
-        let drain = tokio::spawn(async move {
+        let drain = nervix_primitives::task::spawn(async move {
             let mut completions = completions;
             while reported.load(Ordering::SeqCst) != 0 {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
             for completion in &mut completions {
                 let progress = completion.wait_for_progress().now_or_never();

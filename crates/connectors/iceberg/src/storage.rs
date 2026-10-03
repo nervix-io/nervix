@@ -6,8 +6,6 @@
 //! - **Depends on.** Iceberg's storage contract, OpenDAL, and the node DNS resolver.
 //! - **Must not know.** Runtime tasks, branches, schedules, or registry state.
 
-use std::sync::Arc;
-
 use ahash::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -28,6 +26,7 @@ use iceberg::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::IcebergStorageBackend;
+use nervix_primitives::sync::StdArc;
 use opendal::{
     Operator,
     layers::{HttpClientLayer, RetryLayer, TimeoutLayer},
@@ -49,7 +48,7 @@ pub(super) struct DnsStorageFactory {
 impl DnsStorageFactory {
     pub(super) fn new(backend: IcebergStorageBackend, dns: &DnsResolver) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .dns_resolver(Arc::new(dns.clone()))
+            .dns_resolver(StdArc::new(dns.clone()))
             .build()
             .map_err(|error| {
                 Error::new(
@@ -85,7 +84,7 @@ impl<'de> Deserialize<'de> for DnsStorageFactory {
 
 #[typetag::serde]
 impl StorageFactory for DnsStorageFactory {
-    fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>> {
+    fn build(&self, config: &StorageConfig) -> Result<StdArc<dyn Storage>> {
         let props: HashMap<_, _> = config
             .props()
             .iter()
@@ -96,7 +95,7 @@ impl StorageFactory for DnsStorageFactory {
             IcebergStorageBackend::Gcs => Backend::Gcs(gcs_config(&props)),
             IcebergStorageBackend::AzureBlob => Backend::Azure(azure_config(&props)?),
         };
-        Ok(Arc::new(DnsStorage {
+        Ok(StdArc::new(DnsStorage {
             backend,
             client: self.client.clone(),
         }))
@@ -277,7 +276,7 @@ impl Storage for DnsStorage {
     async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
         let mut deleters = HashMap::<String, opendal::Deleter>::default();
         while let Some(path) = paths.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let url = Url::parse(&path).map_err(|error| {
                 Error::new(ErrorKind::DataInvalid, "invalid Iceberg object URL").with_source(error)
             })?;
@@ -304,18 +303,18 @@ impl Storage for DnsStorage {
             }
         }
         for (_, mut deleter) in deleters {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             deleter.close().await.map_err(from_opendal_error)?;
         }
         Ok(())
     }
 
     fn new_input(&self, path: &str) -> Result<InputFile> {
-        Ok(InputFile::new(Arc::new(self.clone()), path.to_string()))
+        Ok(InputFile::new(StdArc::new(self.clone()), path.to_string()))
     }
 
     fn new_output(&self, path: &str) -> Result<OutputFile> {
-        Ok(OutputFile::new(Arc::new(self.clone()), path.to_string()))
+        Ok(OutputFile::new(StdArc::new(self.clone()), path.to_string()))
     }
 }
 
@@ -681,7 +680,7 @@ mod tests {
         assert!(serde_json::to_string(&storage).is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn opendal_credential_sender_uses_the_node_dns_client() {
         const NAME: &str = "credential.nervix.test";
         let authority = DnsAuthority::start_on_loopback()
@@ -710,14 +709,15 @@ mod tests {
         })
         .await
         .expect("the fixture DNS configuration is valid");
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("the token endpoint can bind");
+        let listener =
+            nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("the token endpoint can bind");
         let port = listener
             .local_addr()
             .expect("the token endpoint has an address")
             .port();
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("the token request connects");
             let mut request = [0_u8; 2048];
             let bytes_read = stream

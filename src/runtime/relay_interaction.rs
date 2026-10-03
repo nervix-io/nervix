@@ -35,9 +35,8 @@ use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use nervix_models::RelayName;
+use nervix_primitives::sync::{Arc, mpsc, watch};
 use thiserror::Error;
-use tokio::sync::{mpsc, watch};
-use triomphe::Arc;
 
 use super::{
     BranchBufferTimingResult, BranchKey, DomainClock, DomainForceFlushCompletion,
@@ -77,6 +76,13 @@ impl RelayInteractionError {
 }
 
 /// Commands classify whether already accepted relay input must be handled before the command.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the installed relay loop handles each admitted command and drain transition"
+    )
+)]
 pub(super) trait RelayInteractionCommand: Send {
     fn drain_inputs_before_handling(&self) -> bool {
         false
@@ -497,14 +503,11 @@ impl RelayInteractionInputs {
             .collect()
     }
 
-    fn take_due(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
-        self.take_collection(RelayInputCollection::take_due)
-    }
-
-    fn take_any(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
-        self.take_collection(RelayInputCollection::take_any)
-    }
-
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained relay collection invokes its provided take \
+                                   callback; local callback bodies remain checked")
+    )]
     fn take_collection(
         &mut self,
         mut take: impl FnMut(
@@ -659,7 +662,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
             self.terminal_drain = false;
         }
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
 
             if self.drain.is_some() {
                 return self.next_drain_work().await;
@@ -709,13 +712,16 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 }
             }
             let work = self.begin_work();
-            if let Some((relay, batch)) = self.inputs.take_due()? {
+            if let Some((relay, batch)) = self
+                .inputs
+                .take_collection(RelayInputCollection::take_due)?
+            {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
 
             let collection_deadlines = self.inputs.collection_deadlines();
-            let selected = tokio::select! {
+            let selected = nervix_primitives::select! {
                 biased;
                 command = recv_optional_command(&mut self.commands) => Selected::Command(command),
                 changed = self.shutdown_rx.changed() => {
@@ -855,7 +861,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
 
     async fn next_drain_work(&mut self) -> Result<RelayInteractionWork<C>, RelayInteractionError> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let ready = {
                 let drain = self
                     .drain
@@ -874,7 +880,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 continue;
             }
             let work = self.begin_work();
-            if let Some((relay, batch)) = self.inputs.take_any()? {
+            if let Some((relay, batch)) = self
+                .inputs
+                .take_collection(RelayInputCollection::take_any)?
+            {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
@@ -946,7 +955,7 @@ async fn wait_for_collection_deadlines(
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::OnceLock};
+    use std::num::NonZeroUsize;
 
     use arch_into::ArchInto as _;
     use meticulous::ResultExt as _;
@@ -954,6 +963,7 @@ mod tests {
     use nervix_models::{
         CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
     };
+    use nervix_primitives::unmodeled::sync::OnceLock;
 
     use super::*;
     use crate::{
@@ -965,11 +975,11 @@ mod tests {
         runtime_schema::{CompiledSchema, RuntimeValue, compile_schema, test_runtime_row},
     };
 
-    fn schema() -> triomphe::Arc<CompiledSchema> {
-        static SCHEMA: OnceLock<triomphe::Arc<CompiledSchema>> = OnceLock::new();
+    fn schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
+        static SCHEMA: OnceLock<nervix_primitives::sync::Arc<CompiledSchema>> = OnceLock::new();
         SCHEMA
             .get_or_init(|| {
-                triomphe::Arc::new(compile_schema(&CreateSchema {
+                nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
                     name: SchemaName::from(
                         &ModelName::parse("relay_interaction_test").expect("valid schema"),
                     ),
@@ -1000,7 +1010,7 @@ mod tests {
     }
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
-        let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
+        let alternate_schema = nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
             name: SchemaName::from(
                 &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
             ),
@@ -1062,8 +1072,11 @@ mod tests {
     }
 
     fn force_flush_participant(
-        counters: Option<triomphe::Arc<NodeQuiesceCounters>>,
-    ) -> (triomphe::Arc<DomainForceFlush>, DomainForceFlushParticipant) {
+        counters: Option<nervix_primitives::sync::Arc<NodeQuiesceCounters>>,
+    ) -> (
+        nervix_primitives::sync::Arc<DomainForceFlush>,
+        DomainForceFlushParticipant,
+    ) {
         let coordinator = DomainForceFlush::new();
         let participant = DomainForceFlush::subscribe(&coordinator, counters);
         (coordinator, participant)
@@ -1088,7 +1101,7 @@ mod tests {
         event
     }
 
-    fn wake_in(timeout: tokio::time::Duration) -> RuntimeWake {
+    fn wake_in(timeout: std::time::Duration) -> RuntimeWake {
         RuntimeWake::never().with_physical(
             PhysicalDeadlineCapability::operational()
                 .after(timeout)
@@ -1097,25 +1110,25 @@ mod tests {
     }
 
     fn wake_now() -> RuntimeWake {
-        wake_in(tokio::time::Duration::ZERO)
+        wake_in(std::time::Duration::ZERO)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn consumes_every_batch_that_is_already_ready() {
         let (input, broadcast) = source("events", 3, None);
         for value in 1..=3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             broadcast
                 .broadcast(batch(value))
                 .await
                 .expect("batch must queue");
         }
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
         for expected in 1..=3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RelayInteractionEvent::Batch { batch, .. } =
                 event(&mut interaction, RuntimeWake::never()).await
             else {
@@ -1125,7 +1138,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn multiple_sources_remain_independent_and_make_progress() {
         let (left, left_broadcast) = source("left", 2, None);
         let (right, right_broadcast) = source("right", 2, None);
@@ -1137,13 +1150,13 @@ mod tests {
             .broadcast(batch(2))
             .await
             .expect("right must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![left, right], shutdown_rx, None, None)
             .expect("interaction must build");
 
         let mut observed = Vec::new();
         for _ in 0..2 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RelayInteractionEvent::Batch { relay, batch } =
                 event(&mut interaction, RuntimeWake::never()).await
             else {
@@ -1158,7 +1171,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wake_precedes_ready_input_and_the_next_call_consumes_it() {
         let (input, broadcast) = source("events", 2, None);
         broadcast
@@ -1169,7 +1182,7 @@ mod tests {
             .broadcast(batch(2))
             .await
             .expect("second batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
@@ -1178,7 +1191,7 @@ mod tests {
             RelayInteractionEvent::Wake
         ));
         for expected in [1, 2] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RelayInteractionEvent::Batch { batch, .. } =
                 event(&mut interaction, RuntimeWake::never()).await
             else {
@@ -1188,12 +1201,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn round_robin_mux_services_eight_ready_sources() {
         let mut inputs = Vec::new();
         let mut broadcasts = Vec::new();
         for index in 0..8 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let (input, broadcast) = source(&format!("source_{index}"), 1, None);
             broadcast
                 .broadcast(batch(index))
@@ -1202,13 +1215,13 @@ mod tests {
             inputs.push(input);
             broadcasts.push(broadcast);
         }
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction =
             RelayInteraction::new(inputs, shutdown_rx, None, None).expect("interaction must build");
 
         let mut observed = Vec::new();
         for _ in 0..8 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RelayInteractionEvent::Batch { relay, batch } =
                 event(&mut interaction, RuntimeWake::never()).await
             else {
@@ -1225,12 +1238,12 @@ mod tests {
         drop(broadcasts);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ready_hot_source_cannot_starve_another_source() {
         let (hot, hot_broadcast) = source("hot", 3, None);
         let (other, other_broadcast) = source("other", 1, None);
         for value in 1..=3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             hot_broadcast
                 .broadcast(batch(value))
                 .await
@@ -1240,13 +1253,13 @@ mod tests {
             .broadcast(batch(10))
             .await
             .expect("other-source batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![hot, other], shutdown_rx, None, None)
             .expect("interaction must build");
 
         let mut observed = Vec::new();
         for _ in 0..4 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RelayInteractionEvent::Batch { relay, batch } =
                 event(&mut interaction, RuntimeWake::never()).await
             else {
@@ -1265,10 +1278,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn output_wake_wins_without_discarding_a_due_collection() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_millis(1),
+            interval: std::time::Duration::from_millis(1),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -1276,7 +1289,7 @@ mod tests {
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
@@ -1285,7 +1298,7 @@ mod tests {
             tokio::pin!(receive);
             assert!(futures_util::poll!(&mut receive).is_pending());
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        nervix_primitives::time::sleep(std::time::Duration::from_millis(2)).await;
 
         assert!(matches!(
             event(&mut interaction, wake_now()).await,
@@ -1299,7 +1312,7 @@ mod tests {
         assert_eq!(value(&batch), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paused_input_preserves_ready_relay_backpressure_until_resumed() {
         let (input, sender) = source("orders", 2, None);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1326,7 +1339,7 @@ mod tests {
         assert_eq!(value(&batch), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_respects_a_normal_input_pause() {
         let (input, sender) = source("orders", 2, None);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1356,10 +1369,10 @@ mod tests {
         assert_eq!(value(&batch), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn collection_deadline_releases_every_row_for_its_branch() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_millis(50),
+            interval: std::time::Duration::from_millis(50),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -1371,8 +1384,8 @@ mod tests {
             .broadcast(batch(2))
             .await
             .expect("second batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, None, Some(counters.clone()))
                 .expect("interaction must build");
@@ -1408,10 +1421,10 @@ mod tests {
         assert_eq!(batch.message_count(), 2);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn collection_size_boundary_releases_without_waiting_for_timer() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: Some(0),
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -1423,12 +1436,12 @@ mod tests {
             .broadcast(batch(2))
             .await
             .expect("second batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
         for expected in [1, 2] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RelayInteractionEvent::Batch { batch, .. } =
                 event(&mut interaction, RuntimeWake::never()).await
             else {
@@ -1438,16 +1451,16 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_latches_and_drains_every_source_before_firing() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (left, left_broadcast) = source("left", 2, Some(policy));
         let (right, right_broadcast) = source("right", 2, Some(policy));
         for value in [1, 2] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             left_broadcast
                 .broadcast(batch(value))
                 .await
@@ -1457,7 +1470,7 @@ mod tests {
             .broadcast(batch(3))
             .await
             .expect("right must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction = RelayInteraction::new(
             vec![left, right],
@@ -1470,7 +1483,7 @@ mod tests {
 
         let mut rows = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match event(&mut interaction, RuntimeWake::never()).await {
                 RelayInteractionEvent::Batch { batch, .. } => {
                     for row in 0..batch.message_count().arch_into() {
@@ -1492,21 +1505,21 @@ mod tests {
         assert_eq!(rows, [1, 2, 3]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_preserves_source_and_branch_collection_boundaries() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 4, Some(policy));
         for (value, tenant) in [(1, "alpha"), (2, "beta"), (3, "alpha"), (4, "beta")] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             broadcast
                 .broadcast(batch_with(value, branch(tenant), AckSet::empty()))
                 .await
                 .expect("branched batch must queue");
         }
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -1515,7 +1528,7 @@ mod tests {
 
         let mut groups = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match event(&mut interaction, RuntimeWake::never()).await {
                 RelayInteractionEvent::Batch { relay, batch } => {
                     let Some(key) = batch.key.as_ref() else {
@@ -1547,14 +1560,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_uses_a_finite_ready_snapshot() {
         let (input, broadcast) = source("events", 2, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("pre-cut batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -1582,14 +1595,14 @@ mod tests {
         assert_eq!(value(&batch), 2);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_drain_remains_interruptible_by_later_shutdown() {
         let (input, broadcast) = source("events", 1, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("pre-cut batch must queue");
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -1603,8 +1616,8 @@ mod tests {
         assert!(interaction.is_draining());
         assert!(!interaction.is_terminal_drain());
         shutdown_tx.send(true).expect("shutdown must send");
-        tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
+        nervix_primitives::time::timeout(
+            std::time::Duration::from_millis(100),
             interaction.shutdown_receiver().changed(),
         )
         .await
@@ -1618,21 +1631,21 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn shutdown_drains_queued_and_collected_batches_before_stopping() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 3, Some(policy));
         for value in 1..=3 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             broadcast
                 .broadcast(batch(value))
                 .await
                 .expect("batch must queue");
         }
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
         shutdown_tx.send(true).expect("shutdown must send");
@@ -1649,20 +1662,20 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closed_shutdown_channel_drains_then_stops() {
         let (input, broadcast) = source("events", 1, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         drop(shutdown_tx);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
-        let first = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
+        let first = nervix_primitives::time::timeout(
+            std::time::Duration::from_millis(100),
             interaction.next(RuntimeWake::never()),
         )
         .await
@@ -1685,7 +1698,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn one_closed_source_does_not_stop_other_sources() {
         let (left, left_broadcast) = source("left", 1, None);
         let (right, right_broadcast) = source("right", 1, None);
@@ -1694,7 +1707,7 @@ mod tests {
             .broadcast(batch(9))
             .await
             .expect("open source must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![left, right], shutdown_rx, None, None)
             .expect("interaction must build");
 
@@ -1763,10 +1776,10 @@ mod tests {
         assert!(inputs.sources[0].closed);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn first_terminal_drain_reason_is_latched() {
         let (input, _broadcast) = source("events", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
@@ -1779,15 +1792,15 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn graceful_command_drains_but_regular_command_is_immediate() {
         let (input, broadcast) = source("events", 1, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(2);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let (command_tx, command_rx) = nervix_primitives::sync::mpsc::channel(2);
         let mut interaction =
             RelayInteraction::with_commands(vec![input], shutdown_rx, None, None, command_rx)
                 .expect("interaction must build");
@@ -1818,11 +1831,11 @@ mod tests {
         assert!(interaction.is_terminal_drain());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn command_arriving_while_waiting_uses_the_same_drain_contract() {
         let (input, broadcast) = source("events", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(2);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let (command_tx, command_rx) = nervix_primitives::sync::mpsc::channel(2);
         let mut interaction =
             RelayInteraction::with_commands(vec![input], shutdown_rx, None, None, command_rx)
                 .expect("interaction must build");
@@ -1869,10 +1882,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn shutdown_arriving_while_waiting_drains_ready_input() {
         let (input, broadcast) = source("events", 1, None);
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
         assert!(!*interaction.shutdown_receiver().borrow());
@@ -1897,10 +1910,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_arriving_while_waiting_drains_ready_input() {
         let (input, broadcast) = source("events", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -1923,28 +1936,28 @@ mod tests {
         complete_force_flush(event(&mut interaction, RuntimeWake::never()).await);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn future_wake_deadline_interrupts_an_idle_input_wait() {
         let (input, _broadcast) = source("events", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
         assert!(matches!(
             event(
                 &mut interaction,
-                wake_in(tokio::time::Duration::from_millis(1))
+                wake_in(std::time::Duration::from_millis(1))
             )
             .await,
             RelayInteractionEvent::Wake
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closed_command_channel_drains_then_stops() {
         let (input, broadcast) = source("events", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel::<TestCommand>(1);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let (command_tx, command_rx) = nervix_primitives::sync::mpsc::channel::<TestCommand>(1);
         let mut interaction =
             RelayInteraction::with_commands(vec![input], shutdown_rx, None, None, command_rx)
                 .expect("interaction must build");
@@ -1970,15 +1983,15 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn command_channel_closed_before_poll_stops_after_the_ready_cut() {
         let (input, broadcast) = source("events", 1, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel::<TestCommand>(1);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let (command_tx, command_rx) = nervix_primitives::sync::mpsc::channel::<TestCommand>(1);
         drop(command_tx);
         let mut interaction =
             RelayInteraction::with_commands(vec![input], shutdown_rx, None, None, command_rx)
@@ -1994,10 +2007,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closed_force_flush_channel_stops_after_draining() {
         let (input, broadcast) = source("events", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -2024,14 +2037,14 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_closed_before_poll_stops_after_the_ready_cut() {
         let (input, broadcast) = source("events", 1, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         force_flush.close();
         let mut interaction =
@@ -2048,10 +2061,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn quiesce_counts_collected_and_in_flight_work() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -2059,8 +2072,8 @@ mod tests {
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let (force_flush, force_participant) = force_flush_participant(Some(counters.clone()));
         let mut interaction = RelayInteraction::new(
             vec![input],
@@ -2088,14 +2101,14 @@ mod tests {
         assert_eq!(counters.outstanding_work(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ready_dequeue_owns_work_before_receiver_becomes_empty() {
         let (input, broadcast) = source("events", 1, None);
         broadcast
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
@@ -2108,10 +2121,10 @@ mod tests {
         assert_eq!(counters.outstanding_work(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dequeue_to_collection_has_overlapping_quiesce_accounting() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -2119,7 +2132,7 @@ mod tests {
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
@@ -2137,10 +2150,10 @@ mod tests {
         assert_eq!(counters.outstanding_work(), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_interaction_releases_collected_quiesce_work() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -2149,8 +2162,8 @@ mod tests {
             .broadcast(batch_with(1, None, acks))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, None, Some(counters.clone()))
                 .expect("interaction must build");
@@ -2168,7 +2181,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn dropping_interaction_terminally_resolves_queued_input() {
         let (input, broadcast) = source("events", 1, None);
         let (acks, completion) = AckSet::root();
@@ -2176,7 +2189,7 @@ mod tests {
             .broadcast(batch_with(1, None, acks))
             .await
             .expect("batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
@@ -2188,10 +2201,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn concatenated_batches_preserve_and_complete_every_ack_root() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -2205,7 +2218,7 @@ mod tests {
             .broadcast(batch_with(2, None, second_acks))
             .await
             .expect("second batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -2223,10 +2236,10 @@ mod tests {
         assert_eq!(second_completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn concatenation_failure_preserves_every_ack_root_for_error_handling() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -2241,7 +2254,7 @@ mod tests {
             .broadcast(alternate)
             .await
             .expect("second batch must queue");
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let (force_flush, force_participant) = force_flush_participant(None);
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, Some(force_participant), None)
@@ -2265,7 +2278,7 @@ mod tests {
         assert_eq!(second_completion.wait().await, AckOutcome::NoAck(reason));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn size_triggered_concatenation_failure_preserves_ack_roots() {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
@@ -2277,7 +2290,7 @@ mod tests {
         let mut collection = RelayInputCollection::new(
             RelayInputCollectionMode::Collect {
                 policy: RuntimeInputCollectPolicy {
-                    interval: tokio::time::Duration::from_secs(60),
+                    interval: std::time::Duration::from_secs(60),
                     max_batch_size: Some(max_batch_size),
                 },
                 domain_clock: test_domain_clock(&domain("relay_interaction")),
@@ -2308,7 +2321,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_duplicate_input_sets() {
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let no_inputs = match RelayInteraction::new(Vec::new(), shutdown_rx, None, None) {
             Ok(_) => panic!("empty interaction must fail"),
             Err(error) => error,
@@ -2318,7 +2331,7 @@ mod tests {
 
         let (first, _first_broadcast) = source("same", 1, None);
         let (second, _second_broadcast) = source("same", 1, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         assert!(matches!(
             RelayInteraction::new(vec![first, second], shutdown_rx, None, None),
             Err(RelayInteractionError::DuplicateInput { .. })

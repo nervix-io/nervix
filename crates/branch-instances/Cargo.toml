@@ -1,0 +1,26 @@
+[package]
+description = "Concrete branch instance lifetimes and the branch membership their owner publishes"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-branch-instances"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+imbl = { workspace = true }
+indexmap = { workspace = true }
+meticulous = { workspace = true }
+nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
+
+[dev-dependencies]
+alloc_count = { workspace = true }
+bolero = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+harness = false
+name = "owned_branches"

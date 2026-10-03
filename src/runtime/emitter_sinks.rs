@@ -5,20 +5,21 @@
 //!   and pairing the connector it opens with the input the host prepares for its contract. It is
 //!   the only place that names every sink crate.
 //! - **Depends on.** The emitter start plan, the connector crates and their contract, the host's
-//!   values projection and record encoding, and the pooled client leases.
+//!   values projection, record encoding and request preparation, and the pooled client leases.
 //! - **Must not know.** When the emitter publishes, how it buffers or retries, or how a batch is
 //!   encoded or mapped.
 
 use error_stack::ResultExt as _;
-use nervix_connector::{RecordSink, RowSink, SinkStartResult};
+use nervix_connector::{HttpRequestSink, RecordSink, RowRequestSink, RowSink, SinkStartResult};
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
-use nervix_connector_iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
+use nervix_connector_http::{HttpSink, HttpSinkConfig};
+use nervix_connector_iceberg::{IcebergSink, IcebergSinkConfig};
 use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
 use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
 use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
 use nervix_connector_mysql::{MySqlSink, MySqlSinkConfig};
 use nervix_connector_nats::{NatsSink, NatsSinkConfig};
-use nervix_connector_otel::{OtelLiteral, OtelResourceAttribute, OtelSink, OtelSinkConfig};
+use nervix_connector_otel::{OtelSink, OtelSinkConfig};
 use nervix_connector_postgres::{PostgresSink, PostgresSinkConfig};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
 use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
@@ -29,97 +30,18 @@ use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 use nervix_models::EmitterBatchPolicy;
 
-use super::{pooled_sink_clients::PooledSinkClient, *};
-
-fn mapped_column_names(mappings: &[ClickHouseValueMapping]) -> Vec<String> {
-    mappings
-        .iter()
-        .map(|mapping| mapping.column.clone())
-        .collect()
-}
-
-/// The `RESOURCE` attributes an OTEL emitter exports with, which are fixed for its lifetime.
-///
-/// A resource value describes the emitting service rather than a record, so only a literal or a
-/// literal array can supply one.
-fn otel_resource_attributes(
-    resource: &[OtelValueMapping],
-) -> EmitterRuntimeResult<Vec<OtelResourceAttribute>> {
-    let mut attributes = Vec::with_capacity(resource.len());
-    for mapping in resource {
-        let value = otel_literal(&mapping.expression).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::InvalidOtelResource {
-                attribute: mapping.column.clone(),
-            })
-        })?;
-        attributes.push(OtelResourceAttribute {
-            key: mapping.column.clone(),
-            value,
-        });
-    }
-    Ok(attributes)
-}
-
-/// The literal a `RESOURCE` value carries, or nothing for an expression that reads a record.
-fn otel_literal(expression: &nervix_models::Expression) -> Option<OtelLiteral> {
-    match expression {
-        nervix_models::Expression::Literal(ModelLiteral::I64(value)) => {
-            Some(OtelLiteral::I64(*value))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::F64(value)) => {
-            Some(OtelLiteral::F64(value.value()))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::Bool(value)) => {
-            Some(OtelLiteral::Bool(*value))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::String(value)) => {
-            Some(OtelLiteral::String(value.clone()))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::Null) => Some(OtelLiteral::Null),
-        nervix_models::Expression::Array(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(otel_literal(item)?);
-            }
-            Some(OtelLiteral::Array(values))
-        }
-        _ => None,
-    }
-}
-
-impl EmitterSinkContext {
-    /// The commit cadence and maximum commit size a sink that publishes on its own commit
-    /// boundary was declared with, resolved here so the connector receives typed policy.
-    fn parse_commit_policy(
-        &self,
-        kind: &str,
-        commit_each: &str,
-        max_commit_size: &str,
-    ) -> EmitterRuntimeResult<IcebergCommitPolicy> {
-        let interval = Runtime::parse_runtime_node_duration_setting(
-            &self.domain,
-            kind,
-            &self.emitter,
-            "commit_each",
-            commit_each,
-        )
-        .map_err(|error| emitter_report(EmitterRuntimeError::InvalidSinkConfig, error))?;
-        let max_size = max_commit_size
-            .parse::<ubyte::ByteUnit>()
-            .map_err(|error| {
-                Report::new(EmitterRuntimeError::InvalidSinkConfig)
-                    .attach_printable(format!("max_commit_size '{max_commit_size}': {error}"))
-            })?
-            .as_u64();
-        Ok(IcebergCommitPolicy { interval, max_size })
-    }
-}
+use super::{
+    emitter_http_requests::{HttpRequestBody, PreparedRequestSink},
+    pooled_sink_clients::PooledSinkClient,
+    *,
+};
 
 /// The composition root of the sink side, and the only place that names every sink crate.
 ///
 /// Each variant of an emitter's sink plan maps to its crate's constructor, and the connector that
 /// constructor opens is paired with what the host prepares its input with: a record sink with the
-/// codec its records are encoded by, a row sink with the projection that maps its columns.
+/// codec its records are encoded by, a row sink or a row request sink with the projection that maps
+/// its columns, and an HTTP sink with the body its requests carry.
 pub(super) struct EmitterSinkStarter;
 
 impl EmitterSinkStarter {
@@ -134,7 +56,9 @@ impl EmitterSinkStarter {
                 SyslogSink::check_client_config(&sink.client.config.entries)
                     .change_context(EmitterRuntimeError::InvalidSinkConfig)
             }
-            EmitterSinkPlan::Kafka(_)
+            EmitterSinkPlan::Client(_)
+            | EmitterSinkPlan::Http(_)
+            | EmitterSinkPlan::Kafka(_)
             | EmitterSinkPlan::Pulsar(_)
             | EmitterSinkPlan::RabbitMq(_)
             | EmitterSinkPlan::Redis(_)
@@ -157,11 +81,28 @@ impl EmitterSinkStarter {
         plan: &EmitterStartPlan,
         context: &EmitterSinkContext,
         input_schema: &CompiledSchema,
+        output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterSink>> {
         let label = plan.sink.label();
         let batch = plan.sink.batch();
-        let sink = match &plan.sink {
+        let sink: Box<dyn EmitterSink> = match &plan.sink {
+            EmitterSinkPlan::Client(sink) => Box::new(nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "sink initialization publishes one concrete client-emitter endpoint lifetime \
+                 before processing records",
+                ClientEmitterSink::new(context, sink, output_schema.clone(), plan.retry_policy,)
+            )),
+            EmitterSinkPlan::Http(sink) => Self::http_request(
+                codec,
+                HttpSink::new(
+                    HttpSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
+                    },
+                    context.sink_host(),
+                ),
+            )?,
             EmitterSinkPlan::Kafka(sink) => Self::record(
                 label,
                 codec,
@@ -196,6 +137,7 @@ impl EmitterSinkStarter {
                 RabbitMqSink::new(
                     RabbitMqSinkConfig {
                         config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
                         queue: sink.queue.clone(),
                         mode: sink.mode,
                     },
@@ -233,6 +175,7 @@ impl EmitterSinkStarter {
                             context.domain.as_str(),
                             context.emitter.as_str()
                         ),
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 ),
@@ -271,6 +214,7 @@ impl EmitterSinkStarter {
                 SyslogSink::new(
                     SyslogSinkConfig {
                         config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 )
@@ -285,6 +229,7 @@ impl EmitterSinkStarter {
                         config: sink.client.config.entries.clone(),
                         queue: sink.queue.clone(),
                         mode: sink.mode,
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 )
@@ -305,36 +250,27 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Otel(sink) => {
                 // The signal's own values and its attributes are mapped as one program, so the
                 // attribute columns follow the signal's own in the batch the host projects.
-                let mut mappings = Vec::with_capacity(
-                    sink.values
-                        .len()
-                        .checked_add(sink.attributes.len())
-                        .assured("an emitter maps fewer columns than usize can count"),
-                );
-                mappings.extend_from_slice(&sink.values);
-                mappings.extend_from_slice(&sink.attributes);
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "OTEL",
                     namespace: "otel",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &mappings,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: None,
                 })?;
-                let resource = otel_resource_attributes(&sink.resource)?;
                 let config = OtelSinkConfig {
                     config: sink.client.config.entries.clone(),
                     dns: context.dns()?,
                     signal: sink.signal.clone(),
-                    values: mapped_column_names(&sink.values),
-                    attributes: mapped_column_names(&sink.attributes),
-                    resource,
+                    batch: sink.batch,
+                    values: sink.values.clone(),
+                    attributes: sink.attributes.clone(),
+                    resource: sink.resource.clone(),
                     scope: sink.scope.clone(),
                     mapped_schema: projection.mapped_schema().clone(),
                 };
-                Self::row(projection, OtelSink::new(config, context.sink_host()))?
+                Self::row_request(projection, OtelSink::new(config, context.sink_host()))?
             }
             EmitterSinkPlan::ClickHouse(sink) => {
                 let projection = Self::projection(MappedValuesProjectionInit {
@@ -342,10 +278,9 @@ impl EmitterSinkStarter {
                     namespace: "clickhouse",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 Self::row(
                     projection,
@@ -353,6 +288,8 @@ impl EmitterSinkStarter {
                         ClickHouseSinkConfig {
                             config: sink.client.config.entries.clone(),
                             table: sink.table.clone(),
+                            dns: context.dns()?,
+                            batch: sink.batch,
                         },
                         context.sink_host(),
                     ),
@@ -364,10 +301,9 @@ impl EmitterSinkStarter {
                     namespace: "postgres",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -379,6 +315,7 @@ impl EmitterSinkStarter {
                         PostgresSinkConfig {
                             table: sink.table.clone(),
                             conflict_action: sink.conflict_action.clone(),
+                            batch: sink.batch,
                         },
                         Box::new(connections),
                         context.sink_host(),
@@ -391,10 +328,9 @@ impl EmitterSinkStarter {
                     namespace: "mysql",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -406,6 +342,7 @@ impl EmitterSinkStarter {
                         MySqlSinkConfig {
                             table: sink.table.clone(),
                             conflict_action: sink.conflict_action,
+                            batch: sink.batch,
                         },
                         Box::new(connections),
                         context.sink_host(),
@@ -418,10 +355,9 @@ impl EmitterSinkStarter {
                     namespace: "mongodb",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let client = PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
                     .await
@@ -433,6 +369,7 @@ impl EmitterSinkStarter {
                             config: sink.client.config.entries.clone(),
                             collection: sink.collection.clone(),
                             conflict_action: sink.conflict_action.clone(),
+                            batch: sink.batch,
                         },
                         Box::new(client),
                         context.sink_host(),
@@ -445,18 +382,10 @@ impl EmitterSinkStarter {
                     namespace: "iceberg",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    // One commit reads every staged file back at once, so a staged write carries
-                    // the whole batch the host released to it.
-                    max_batch: None,
                 })?;
-                let commit = context.parse_commit_policy(
-                    "iceberg emitter",
-                    &sink.commit_each,
-                    &sink.max_commit_size,
-                )?;
                 let mapped_schema = projection.mapped_schema().clone();
                 let opened = IcebergSink::new(
                     IcebergSinkConfig {
@@ -469,7 +398,7 @@ impl EmitterSinkStarter {
                         table: sink.table.clone(),
                         location: sink.location.clone(),
                         mapped_schema,
-                        commit,
+                        commit: sink.commit,
                         writer: context.emitter.as_str().to_string(),
                     },
                     context.sink_host(),
@@ -508,6 +437,25 @@ impl EmitterSinkStarter {
         Ok(sink)
     }
 
+    /// Pairs an HTTP sink with the body the host prepares each of its requests with: the bytes of
+    /// the codec an emitter encodes its records with, or no content for an emitter declared
+    /// `WITHOUT BODY`, which names no codec.
+    fn http_request<T>(
+        codec: Option<&Arc<CompiledCodec>>,
+        started: SinkStartResult<T>,
+    ) -> EmitterRuntimeResult<Box<dyn EmitterSink>>
+    where
+        T: HttpRequestSink + 'static,
+    {
+        let sink = started.change_context(EmitterRuntimeError::InitializeSink)?;
+        let body = match codec {
+            Some(codec) => HttpRequestBody::Encoded(codec.clone()),
+            None => HttpRequestBody::Absent,
+        };
+        let sink: Box<dyn EmitterSink> = Box::new(PreparedRequestSink::new(Box::new(sink), body));
+        Ok(sink)
+    }
+
     /// Pairs a row sink with the projection whose mapped columns it writes.
     fn row<T>(
         projection: MappedValuesProjection,
@@ -521,6 +469,20 @@ impl EmitterSinkStarter {
         Ok(sink)
     }
 
+    /// Pairs a row request sink with the projection whose mapped columns it prepares requests from.
+    fn row_request<T>(
+        projection: MappedValuesProjection,
+        started: SinkStartResult<T>,
+    ) -> EmitterRuntimeResult<Box<dyn EmitterSink>>
+    where
+        T: RowRequestSink + 'static,
+    {
+        let sink = started.change_context(EmitterRuntimeError::InitializeSink)?;
+        let sink: Box<dyn EmitterSink> =
+            Box::new(MappedRequestSink::new(Box::new(sink), projection));
+        Ok(sink)
+    }
+
     /// Compiles one row sink's `VALUES` mapping before the sink it feeds is opened.
     ///
     /// A mapping that cannot compile never produces a column, so the emitter reports the failure
@@ -528,7 +490,7 @@ impl EmitterSinkStarter {
     fn projection(
         init: MappedValuesProjectionInit<'_>,
     ) -> EmitterRuntimeResult<MappedValuesProjection> {
-        MappedValuesProjection::compile(init).map_err(emitter_init_error)
+        MappedValuesProjection::compile(init).change_context(EmitterRuntimeError::InitializeSink)
     }
 }
 

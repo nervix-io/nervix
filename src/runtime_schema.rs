@@ -11,10 +11,10 @@
 //!   answers; it decides nothing about where the result goes.
 
 use std::{
-    fmt,
-    io::{self, Cursor, Write as _},
+    cell::Cell,
+    fmt, io,
+    io::{Cursor, Write as _},
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc as StdArc,
 };
 
 use ahash::HashMap;
@@ -37,8 +37,8 @@ use arrow_array::{
 };
 use arrow_data::transform::MutableArrayData;
 use arrow_schema::{
-    ArrowError, DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
-    Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    ArrowError, DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+    TimeUnit as ArrowTimeUnit,
 };
 use arrow_select::{
     concat::concat as concat_arrow_arrays,
@@ -48,17 +48,19 @@ use arrow_select::{
 use base64_simd::AsOut as _;
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
-use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
+use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls};
+use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqNativeFormat, JaqProgramError};
 use nervix_models::{
     AvroType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec, CreateSchema,
     CreateWireSchema, JsonType, ModelName, ParseAsType, PayloadSizeLimit,
     RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
     ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
 use prost::Message as ProstMessage;
@@ -73,16 +75,17 @@ use serde::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
-use triomphe::Arc;
 
 mod arrow_body;
 mod batch_container;
+mod client_batch;
 mod jaq_unfold;
 mod syslog;
 
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
+pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +112,8 @@ pub struct CompiledCodec {
 pub(crate) struct CompiledCodecBatchEncoder<'a> {
     codec: &'a CompiledCodec,
     batch: &'a RuntimeRecordBatch,
+    json_columns: Option<JsonColumns<'a>>,
+    previous_row_bytes: Cell<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +145,7 @@ struct CompiledJsonWireSchema {
     strictness: WireSchemaStrictness,
     fields: HashMap<String, CompiledJsonWireField>,
     decode_fields: Vec<CompiledJsonDecodeField>,
+    encode_fields: Vec<JsonColumnSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,24 +188,33 @@ impl CompiledJaqTransformations {
     fn compile(
         codec: &CodecName,
         transformations: &CodecJaqTransformations,
-    ) -> Result<Self, CodecError> {
-        let compile = |program: Option<&str>| {
-            program
-                .map(|program| {
-                    CompiledJaqProgram::compile(program)
-                        .map(Arc::new)
-                        .map_err(|error| CodecError::InvalidJaqTransformation {
-                            codec: codec.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
-                })
-                .transpose()
-        };
+    ) -> error_stack::Result<Self, CodecError> {
         Ok(Self {
-            on_ingestion: compile(transformations.on_ingestion.as_deref())?,
-            on_emitting: compile(transformations.on_emitting.as_deref())?,
-            on_emitting_batch: compile(transformations.on_emitting_batch.as_deref())?,
+            on_ingestion: Self::compile_program(codec, transformations.on_ingestion.as_deref())?,
+            on_emitting: Self::compile_program(codec, transformations.on_emitting.as_deref())?,
+            on_emitting_batch: Self::compile_program(
+                codec,
+                transformations.on_emitting_batch.as_deref(),
+            )?,
         })
+    }
+
+    /// Compiles one declared direction's program, which a codec may leave undeclared.
+    fn compile_program(
+        codec: &CodecName,
+        program: Option<&str>,
+    ) -> error_stack::Result<Option<Arc<CompiledJaqProgram>>, CodecError> {
+        let Some(program) = program else {
+            return Ok(None);
+        };
+        match CompiledJaqProgram::compile(program) {
+            Ok(compiled) => Ok(Some(Arc::new(compiled))),
+            Err(error) => Err(Report::new(CodecError::InvalidJaqTransformation {
+                codec: codec.as_str().to_string(),
+                reason: error.to_string(),
+                report: error,
+            })),
+        }
     }
 }
 
@@ -309,7 +324,7 @@ pub(crate) struct RuntimeRecordBatchBuilder {
 // Counted per thread so a test observes only the batches it built itself, while the rest of the
 // suite exercises the same builders in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(crate) static RECORD_BUILDER_SETS_OPENED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(crate) static RECORD_COLUMN_SETS_BUILT: std::cell::Cell<usize> =
@@ -372,39 +387,48 @@ enum SerializableRuntimeValue {
     Vec(Vec<SerializableRuntimeValue>),
 }
 
+/// Why a codec could not be compiled, or could not decode or encode one payload.
+///
+/// A variant that names only the codec, or the codec and a field, is a context: the report carries
+/// the cause beneath it, such as the `CodecContractError`, `FieldDecodeError`, `FieldEncodeError`
+/// or [`RuntimeSchemaError`] that failed, and a diagnostic renders the whole chain.
 #[derive(Debug, Error)]
 pub enum CodecError {
-    #[error("codec '{codec}' is incompatible: {reason}")]
-    InvalidCodec { codec: String, reason: String },
-    #[error("failed to parse json payload for codec '{codec}': {source}")]
+    #[error("codec '{codec}' is incompatible")]
+    InvalidCodec { codec: String },
+    #[error("failed to parse json payload for codec '{codec}'")]
     JsonDecode {
         codec: String,
         #[source]
         source: simd_json::Error,
     },
-    #[error("failed to encode json payload for codec '{codec}': {source}")]
+    #[error("failed to encode json payload for codec '{codec}'")]
     JsonEncode {
         codec: String,
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to encode json payload for codec '{codec}': {source}")]
-    SimdJsonEncode {
+    #[error("failed to encode json payload for codec '{codec}'")]
+    ColumnarJsonEncode { codec: String },
+    #[error("failed to parse cbor payload for codec '{codec}'")]
+    CborDecode {
         codec: String,
         #[source]
-        source: simd_json::Error,
+        source: ciborium::de::Error<io::Error>,
     },
-    #[error("failed to parse cbor payload for codec '{codec}': {reason}")]
-    CborDecode { codec: String, reason: String },
-    #[error("failed to encode cbor payload for codec '{codec}': {reason}")]
-    CborEncode { codec: String, reason: String },
-    #[error("failed to parse avro payload for codec '{codec}': {source}")]
+    #[error("failed to encode cbor payload for codec '{codec}'")]
+    CborEncode {
+        codec: String,
+        #[source]
+        source: ciborium::ser::Error<io::Error>,
+    },
+    #[error("failed to parse avro payload for codec '{codec}'")]
     AvroDecode {
         codec: String,
         #[source]
         source: apache_avro::Error,
     },
-    #[error("failed to encode avro payload for codec '{codec}': {source}")]
+    #[error("failed to encode avro payload for codec '{codec}'")]
     AvroEncode {
         codec: String,
         #[source]
@@ -415,31 +439,43 @@ pub enum CodecError {
         codec: String,
         format: &'static str,
         reason: String,
+        report: error_stack::Report<JaqFormatError>,
     },
     #[error("failed to encode {format} payload for codec '{codec}': {reason}")]
     JaqNativeEncode {
         codec: String,
         format: &'static str,
         reason: String,
+        report: error_stack::Report<JaqFormatError>,
     },
-    #[error("failed to write the encoded payload for codec '{codec}': {source}")]
+    #[error("failed to write the encoded payload for codec '{codec}'")]
     PayloadWrite {
         codec: String,
         #[source]
         source: io::Error,
     },
+    #[error("failed to parse protobuf payload for codec '{codec}'")]
+    ProtobufDecode { codec: String },
     #[error("failed to parse protobuf payload for codec '{codec}': {reason}")]
-    ProtobufDecode { codec: String, reason: String },
-    #[error("failed to encode protobuf payload for codec '{codec}': {reason}")]
-    ProtobufEncode { codec: String, reason: String },
-    #[error("failed to parse syslog payload for codec '{codec}': {reason}")]
-    SyslogDecode { codec: String, reason: String },
-    #[error("failed to encode syslog payload for codec '{codec}': {reason}")]
-    SyslogEncode { codec: String, reason: String },
+    ProtobufJaqInput {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
+    #[error("failed to encode protobuf payload for codec '{codec}'")]
+    ProtobufEncode { codec: String },
+    #[error("failed to parse syslog payload for codec '{codec}'")]
+    SyslogDecode { codec: String },
+    #[error("failed to encode syslog payload for codec '{codec}'")]
+    SyslogEncode { codec: String },
     #[error("codec '{codec}' expected an object")]
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
-    InvalidJaqTransformation { codec: String, reason: String },
+    InvalidJaqTransformation {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error(
         "protobuf codec '{codec}' declares no BATCH MESSAGE, which a batching emitter publishes in"
     )]
@@ -454,14 +490,24 @@ pub enum CodecError {
         message: String,
     },
     #[error("codec '{codec}' jaq transformation failed: {reason}")]
-    JaqTransform { codec: String, reason: String },
+    JaqTransform {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("codec '{codec}' ON INGESTION program evaluation failed")]
-    JaqIngestionEvaluation { codec: String },
-    #[error("{cause} ({position})")]
+    JaqIngestionEvaluation {
+        codec: String,
+        /// The evaluator may quote input values, so the typed report is retained for trace-level
+        /// diagnosis but excluded from the public error's display and source chain.
+        report: error_stack::Report<JaqProgramError>,
+    },
+    /// One message of an unfolding payload failed. The failure keeps its own report, so the
+    /// position follows its whole description.
+    #[error("{cause:#} ({position})")]
     Unfold {
         position: UnfoldPosition,
-        #[source]
-        cause: Box<CodecError>,
+        cause: Report<CodecError>,
     },
     #[error("codec '{codec}' payload exceeds the unfold limit of {limit} messages")]
     UnfoldLimit { codec: String, limit: usize },
@@ -469,23 +515,126 @@ pub enum CodecError {
     MissingField { codec: String, field: String },
     #[error("codec '{codec}' has unexpected field '{field}'")]
     UnexpectedField { codec: String, field: String },
-    #[error("codec '{codec}' failed to parse field '{field}': {reason}")]
-    ParseField {
-        codec: String,
-        field: String,
-        reason: String,
+    #[error("codec '{codec}' failed to parse field '{field}'")]
+    ParseField { codec: String, field: String },
+    #[error("codec '{codec}' failed to encode field '{field}'")]
+    EncodeField { codec: String, field: String },
+}
+
+/// A rule of a codec's wire format that its declaration, or a use of it, breaks.
+///
+/// It is the cause beneath [`CodecError::InvalidCodec`].
+#[derive(Debug, Error)]
+pub(crate) enum CodecContractError {
+    #[error("JAQ-native codec must declare a JAQ transformation")]
+    JaqNativeTransformationRequired,
+    #[error("protobuf codec must declare a JAQ transformation")]
+    ProtobufTransformationRequired,
+    #[error("protobuf codec is missing compiled descriptor")]
+    ProtobufDescriptorMissing,
+    #[error("JAQ-native codec used for encoding must declare ON EMITTING transformation")]
+    JaqNativeOnEmittingRequired,
+    #[error("protobuf codec used for encoding must declare ON EMITTING transformation")]
+    ProtobufOnEmittingRequired,
+    #[error("codec used for encoding must declare ON EMITTING transformation")]
+    OnEmittingRequired,
+    #[error("JAQ-native codec used for decoding must declare ON INGESTION transformation")]
+    JaqNativeOnIngestionRequired,
+    #[error("protobuf codec used for decoding must declare ON INGESTION transformation")]
+    ProtobufOnIngestionRequired,
+    #[error("codec declares no ON INGESTION transformation to run")]
+    OnIngestionMissing,
+    #[error("columnar encode row {row} is outside batch with {rows} rows")]
+    RowOutsideBatch { row: usize, rows: usize },
+    #[error("missing wire field '{field}'")]
+    MissingWireField { field: String },
+    #[error("wire field position {position} contains '{found}' instead of '{expected}'")]
+    WireFieldPosition {
+        position: usize,
+        found: String,
+        expected: String,
     },
-    #[error("codec '{codec}' failed to encode field '{field}': {reason}")]
-    EncodeField {
-        codec: String,
+    /// The job that unfolded a payload on an extension worker panicked; the executor's report of it
+    /// is the cause beneath.
+    #[error("the payload's unfolding panicked on an extension worker")]
+    UnfoldingPanicked,
+    #[error("SYSLOG codecs do not support ENCODE field rules")]
+    SyslogEncodingRules,
+    #[error("SYSLOG schema field '{field}' is outside the fixed field contract")]
+    SyslogFieldOutsideContract { field: String },
+    #[error("SYSLOG field '{field}' must be {expected}, found {found}")]
+    SyslogFieldShape {
         field: String,
-        reason: String,
+        expected: syslog::SyslogFieldShape,
+        found: syslog::SyslogFieldShape,
     },
+}
+
+/// Why a decoded wire value cannot become the value of its field. It is the cause beneath
+/// [`CodecError::ParseField`].
+#[derive(Debug, Error)]
+pub(crate) enum FieldDecodeError {
+    #[error("null is incompatible with required field")]
+    RequiredNull,
+    #[error("expected {expected:?}, found a JSON {found}")]
+    WireType {
+        expected: JsonType,
+        found: JsonValueKind,
+    },
+}
+
+/// Why a field's value cannot be written in its wire type. It is the cause beneath
+/// [`CodecError::EncodeField`].
+#[derive(Debug, Error)]
+pub(crate) enum FieldEncodeError {
+    #[error("required field is null at row {row}")]
+    RequiredNullAtRow { row: usize },
+    #[error("expected bool")]
+    ExpectedBool,
+    #[error("expected int-compatible value")]
+    ExpectedInt,
+    #[error("U32 value does not fit Avro INT")]
+    U32OutsideInt,
+    #[error("expected long-compatible value")]
+    ExpectedLong,
+    #[error("U64 value does not fit Avro LONG")]
+    U64OutsideLong,
+    #[error("expected f32")]
+    ExpectedF32,
+    #[error("expected float-compatible value")]
+    ExpectedFloat,
+    #[error("expected string-compatible value")]
+    ExpectedString,
+    #[error("list contains null at index {index}")]
+    NullListElement { index: usize },
+    #[error("unsupported avro type {ty:?}")]
+    UnsupportedAvroType { ty: AvroType },
+    #[error("value must be at most {maximum}")]
+    AboveMaximum { maximum: u8 },
+    #[error("text contains trailing content after the SD elements")]
+    TrailingStructuredData,
+    #[error("required field is null")]
+    RequiredNull,
+    #[error("field is not a {expected} column")]
+    ColumnType { expected: ParseAsType },
 }
 
 impl CompiledSchema {
     pub(crate) fn fields(&self) -> &[CompiledSchemaField] {
         &self.fields
+    }
+
+    pub(crate) fn declared_fields(&self) -> Vec<nervix_models::SchemaField> {
+        self.fields
+            .iter()
+            .map(|field| nervix_models::SchemaField {
+                name: nervix_models::FieldName::parse(&field.name)
+                    .assured("compiled schema fields came from validated field names"),
+                ty: field.ty.clone(),
+                optional: field.optional,
+                sensitive: field.sensitive,
+            })
+            .collect()
     }
 
     pub fn arrow_schema(&self) -> StdArc<ArrowSchema> {
@@ -501,6 +650,10 @@ impl CompiledSchema {
         )
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the schema name conversion")
+    )]
     pub(crate) fn wasm_processor_schema(&self, name: impl Into<String>) -> WasmProcessorSchema {
         WasmProcessorSchema {
             name: name.into(),
@@ -526,7 +679,7 @@ impl CompiledSchema {
             builders: self
                 .fields
                 .iter()
-                .map(|field| make_builder(&arrow_data_type(&field.ty), capacity))
+                .map(|field| make_builder(&field.ty.arrow_data_type(), capacity))
                 .collect(),
             keep: Vec::with_capacity(capacity),
             abandoned: 0,
@@ -681,7 +834,7 @@ fn test_runtime_value_arrow_type(
                 })
             })?;
             Ok(ArrowDataType::FixedSizeList(
-                ArrowFieldRef::new(ArrowField::new(
+                arrow_schema::FieldRef::new(ArrowField::new(
                     "item",
                     test_runtime_value_arrow_type(element)?,
                     false,
@@ -695,12 +848,24 @@ fn test_runtime_value_arrow_type(
                     kind: RuntimeValueKind::Vec,
                 })
             })?;
-            Ok(ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
-                "item",
-                test_runtime_value_arrow_type(element)?,
-                false,
-            ))))
+            Ok(ArrowDataType::List(arrow_schema::FieldRef::new(
+                ArrowField::new("item", test_runtime_value_arrow_type(element)?, false),
+            )))
         }
+    }
+}
+
+impl CodecError {
+    /// The context of a failure that breaks the contract of `codec`'s wire format.
+    fn invalid_codec(codec: &str) -> Self {
+        Self::InvalidCodec {
+            codec: codec.to_string(),
+        }
+    }
+
+    /// `codec` breaking `rule` of its wire format.
+    fn contract_violation(codec: &str, rule: CodecContractError) -> Report<Self> {
+        Report::new(rule).change_context(Self::invalid_codec(codec))
     }
 }
 
@@ -709,7 +874,41 @@ impl CompiledCodec {
         self.schema.clone()
     }
 
-    pub fn requires_blocking_decode(&self) -> bool {
+    /// The context of a failure that breaks this codec's wire-format contract.
+    fn invalid(&self) -> CodecError {
+        CodecError::invalid_codec(self.name.as_str())
+    }
+
+    /// This codec breaking `rule` of its wire format.
+    fn contract_violation(&self, rule: CodecContractError) -> Report<CodecError> {
+        CodecError::contract_violation(self.name.as_str(), rule)
+    }
+
+    /// The context of a failure to decode `field` of this codec's schema.
+    fn parse_field(&self, field: &str) -> CodecError {
+        CodecError::ParseField {
+            codec: self.name.as_str().to_string(),
+            field: field.to_string(),
+        }
+    }
+
+    /// `field` of this codec's schema failing to decode because of `issue`.
+    fn field_decode_failure(&self, field: &str, issue: FieldDecodeError) -> Report<CodecError> {
+        Report::new(issue).change_context(self.parse_field(field))
+    }
+
+    /// The job that unfolded a payload through this codec on the node's extension workers
+    /// panicking, with the executor's report of it beneath.
+    pub(crate) fn unfolding_panicked<C: error_stack::Context>(
+        &self,
+        panic: Report<C>,
+    ) -> Report<CodecError> {
+        panic
+            .change_context(CodecContractError::UnfoldingPanicked)
+            .change_context(self.invalid())
+    }
+
+    pub fn transforms_on_ingestion(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_ingestion.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -748,7 +947,7 @@ impl CompiledCodec {
         }))
     }
 
-    pub(crate) fn requires_blocking_encode(&self) -> bool {
+    pub(crate) fn transforms_on_emitting(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_emitting.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -764,14 +963,28 @@ impl CompiledCodec {
     pub(crate) fn batch_encoder<'a>(
         &'a self,
         batch: &'a RuntimeRecordBatch,
-    ) -> Result<CompiledCodecBatchEncoder<'a>, CodecError> {
+    ) -> error_stack::Result<CompiledCodecBatchEncoder<'a>, CodecError> {
         self.schema
             .validate_arrow_batch(batch)
-            .map_err(|reason| CodecError::InvalidCodec {
-                codec: self.name.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-        Ok(CompiledCodecBatchEncoder { codec: self, batch })
+            .change_context_lazy(|| self.invalid())?;
+        let json_columns = match &self.wire_schema {
+            CompiledWireSchema::Json(wire_schema) => {
+                let columns = JsonColumns::new(
+                    &batch.batch,
+                    &wire_schema.encode_fields,
+                    NestedNulls::Reject,
+                )
+                .change_context_lazy(|| self.invalid())?;
+                Some(columns)
+            }
+            _ => None,
+        };
+        Ok(CompiledCodecBatchEncoder {
+            codec: self,
+            batch,
+            json_columns,
+            previous_row_bytes: Cell::new(0),
+        })
     }
 }
 
@@ -783,7 +996,14 @@ impl CompiledCodecBatchEncoder<'_> {
         payload: &mut Vec<u8>,
     ) -> error_stack::Result<(), CodecError> {
         payload.clear();
-        self.write_row(row_index, payload)
+        self.write_row(row_index, payload)?;
+        self.previous_row_bytes.set(payload.len());
+        Ok(())
+    }
+
+    /// Allocates the next row's output from the last encoded row's observed byte length.
+    pub(crate) fn next_payload(&self) -> Vec<u8> {
+        Vec::with_capacity(self.previous_row_bytes.get())
     }
 
     /// Encodes row `row_index` under `limit`, abandoning the encoding at the first write that
@@ -817,12 +1037,12 @@ impl CompiledCodecBatchEncoder<'_> {
         if row_index < row_count {
             return Ok(());
         }
-        Err(Report::new(CodecError::InvalidCodec {
-            codec: self.codec.name.as_str().to_string(),
-            reason: format!(
-                "columnar encode row {row_index} is outside batch with {row_count} rows"
-            ),
-        }))
+        Err(self
+            .codec
+            .contract_violation(CodecContractError::RowOutsideBatch {
+                row: row_index,
+                rows: row_count,
+            }))
     }
 
     /// Writes the encoding of row `row_index` into `output`, piece by piece as the format
@@ -841,18 +1061,20 @@ impl CompiledCodecBatchEncoder<'_> {
         let row = ArrowCodecRow::new(self.codec, self.batch, row_index);
         match &self.codec.wire_schema {
             CompiledWireSchema::Json(_) => {
-                simd_json::to_writer(&mut *output, &row).map_err(|source| {
-                    Report::new(CodecError::SimdJsonEncode {
+                let columns = self.json_columns.as_ref().assured(
+                    "a JSON batch encoder is prepared with typed JSON columns at construction",
+                );
+                columns.write_row(row_index, output).change_context(
+                    CodecError::ColumnarJsonEncode {
                         codec: codec.to_string(),
-                        source,
-                    })
-                })?;
+                    },
+                )?;
             }
             CompiledWireSchema::Cbor(_) => {
                 ciborium::into_writer(&row, &mut *output).map_err(|source| {
                     Report::new(CodecError::CborEncode {
                         codec: codec.to_string(),
-                        reason: source.to_string(),
+                        source,
                     })
                 })?;
             }
@@ -868,12 +1090,9 @@ impl CompiledCodecBatchEncoder<'_> {
             }
             CompiledWireSchema::JaqNative(native) => {
                 let Some(program) = native.transformations.on_emitting.as_deref() else {
-                    return Err(Report::new(CodecError::InvalidCodec {
-                        codec: codec.to_string(),
-                        reason: "JAQ-native codec used for encoding must declare ON EMITTING \
-                                 transformation"
-                            .to_string(),
-                    }));
+                    return Err(self
+                        .codec
+                        .contract_violation(CodecContractError::JaqNativeOnEmittingRequired));
                 };
                 let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
                 native
@@ -884,25 +1103,20 @@ impl CompiledCodecBatchEncoder<'_> {
                             codec: codec.to_string(),
                             format: native.format.name(),
                             reason: error.to_string(),
+                            report: error,
                         })
                     })?;
             }
             CompiledWireSchema::Protobuf(protobuf) => {
                 let Some(program) = protobuf.transformations.on_emitting.as_deref() else {
-                    return Err(Report::new(CodecError::InvalidCodec {
-                        codec: codec.to_string(),
-                        reason: "protobuf codec used for encoding must declare ON EMITTING \
-                                 transformation"
-                            .to_string(),
-                    }));
+                    return Err(self
+                        .codec
+                        .contract_violation(CodecContractError::ProtobufOnEmittingRequired));
                 };
                 let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
-                let encoded =
-                    encode_protobuf_payload(&protobuf.message, &value).map_err(|error| {
-                        Report::new(CodecError::ProtobufEncode {
-                            codec: codec.to_string(),
-                            reason: error.to_string(),
-                        })
+                let encoded = encode_protobuf_payload(&protobuf.message, &value)
+                    .change_context_lazy(|| CodecError::ProtobufEncode {
+                        codec: codec.to_string(),
                     })?;
                 write_payload(codec, output, &encoded)?;
             }
@@ -913,6 +1127,10 @@ impl CompiledCodecBatchEncoder<'_> {
 }
 
 /// Writes an encoding that was built whole into `output`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external writer interface encodes one admitted payload")
+)]
 fn write_payload(
     codec: &str,
     output: &mut impl io::Write,
@@ -1006,6 +1224,12 @@ impl RuntimeRecordBatch {
         batch_payload_bytes(&self.batch)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn from_rows<'a>(
         expected_schema: StdArc<ArrowSchema>,
         rows: impl ExactSizeIterator<Item = &'a RuntimeRow>,
@@ -1405,6 +1629,12 @@ impl RuntimeRecordBatch {
 }
 
 /// The JSON subscription projection of a binary Arrow value, including binary list elements.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn json_value_from_binary_arrow(
     array: &dyn Array,
     ty: &ParseAsType,
@@ -1457,6 +1687,12 @@ fn json_value_from_binary_arrow(
 }
 
 impl RuntimeRow {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn new(
         batch: Arc<RuntimeRecordBatch>,
         row: usize,
@@ -1504,6 +1740,7 @@ impl RuntimeRow {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn value(
         &self,
         name: &str,
@@ -2109,12 +2346,8 @@ pub enum RuntimeSchemaError {
         #[source]
         source: ArrowError,
     },
-    #[error("failed to {operation}: {source}")]
-    VmOperation {
-        operation: RuntimeVmOperation,
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
+    #[error("failed to {operation}")]
+    VmOperation { operation: RuntimeVmOperation },
     #[error("failed to {operation} for field '{field}'")]
     VmProjection {
         operation: RuntimeVmOperation,
@@ -2229,19 +2462,19 @@ pub enum RuntimeSchemaError {
         #[source]
         source: chrono::ParseError,
     },
-    #[error("failed to decode protobuf message '{message}': {source}")]
+    #[error("failed to decode protobuf message '{message}'")]
     ProtobufDecode {
         message: String,
         #[source]
         source: prost::DecodeError,
     },
-    #[error("failed to encode protobuf message '{message}': {source}")]
+    #[error("failed to encode protobuf message '{message}'")]
     ProtobufEncode {
         message: String,
         #[source]
         source: prost::EncodeError,
     },
-    #[error("failed to {operation} for protobuf message '{message}': {source}")]
+    #[error("failed to {operation} for protobuf message '{message}'")]
     ProtobufJson {
         message: String,
         operation: ProtobufJsonOperation,
@@ -2615,7 +2848,7 @@ pub fn compile_schema(schema: &CreateSchema) -> CompiledSchema {
         .collect::<Vec<_>>();
     let arrow_fields = fields
         .iter()
-        .map(|field| ArrowField::new(&field.name, arrow_data_type(&field.ty), field.optional))
+        .map(|field| ArrowField::new(&field.name, field.ty.arrow_data_type(), field.optional))
         .collect::<Vec<_>>();
     CompiledSchema {
         fields,
@@ -2627,7 +2860,7 @@ pub fn compile_codec(
     codec: &CreateCodec,
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
-) -> Result<Arc<CompiledCodec>, CodecError> {
+) -> error_stack::Result<Arc<CompiledCodec>, CodecError> {
     compile_codec_spec_with_protobuf(
         &codec.name,
         &codec.encoding_rules,
@@ -2644,7 +2877,7 @@ pub(crate) fn compile_codec_spec_with_protobuf(
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
     protobuf_descriptors: Option<ProtobufCodecDescriptors>,
-) -> Result<Arc<CompiledCodec>, CodecError> {
+) -> error_stack::Result<Arc<CompiledCodec>, CodecError> {
     let wire_schema = match wire_format {
         ResolvedCodecWireFormat::Json(schema_def) => {
             CompiledWireSchema::Json(compile_json_wire_schema(schema_def, &schema))
@@ -2654,11 +2887,9 @@ pub(crate) fn compile_codec_spec_with_protobuf(
         }
         ResolvedCodecWireFormat::Avro(schema_def) => {
             let schema_json = avro_schema_json(schema_def, schema.fields());
-            let parsed =
-                AvroSchema::parse_str(&schema_json).map_err(|source| CodecError::InvalidCodec {
-                    codec: name.as_str().to_string(),
-                    reason: source.to_string(),
-                })?;
+            let parsed = AvroSchema::parse_str(&schema_json).map_err(|source| {
+                Report::new(source).change_context(CodecError::invalid_codec(name.as_str()))
+            })?;
             let fields = schema_def
                 .fields
                 .iter()
@@ -2684,10 +2915,10 @@ pub(crate) fn compile_codec_spec_with_protobuf(
             transformations,
         } => {
             if !transformations.has_any() {
-                return Err(CodecError::InvalidCodec {
-                    codec: name.as_str().to_string(),
-                    reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
-                });
+                return Err(CodecError::contract_violation(
+                    name.as_str(),
+                    CodecContractError::JaqNativeTransformationRequired,
+                ));
             }
             CompiledWireSchema::JaqNative(CompiledJaqNativeCodec {
                 format: JaqNativeFormat::from(format),
@@ -2696,15 +2927,17 @@ pub(crate) fn compile_codec_spec_with_protobuf(
         }
         ResolvedCodecWireFormat::Protobuf(config) => {
             if !config.transformations.has_any() {
-                return Err(CodecError::InvalidCodec {
-                    codec: name.as_str().to_string(),
-                    reason: "protobuf codec must declare a JAQ transformation".to_string(),
-                });
+                return Err(CodecError::contract_violation(
+                    name.as_str(),
+                    CodecContractError::ProtobufTransformationRequired,
+                ));
             }
-            let descriptors = protobuf_descriptors.ok_or_else(|| CodecError::InvalidCodec {
-                codec: name.as_str().to_string(),
-                reason: "protobuf codec is missing compiled descriptor".to_string(),
-            })?;
+            let Some(descriptors) = protobuf_descriptors else {
+                return Err(CodecError::contract_violation(
+                    name.as_str(),
+                    CodecContractError::ProtobufDescriptorMissing,
+                ));
+            };
             CompiledWireSchema::Protobuf(CompiledProtobufCodec {
                 message: descriptors.message,
                 batch_message: descriptors.batch_message,
@@ -2752,10 +2985,23 @@ fn compile_json_wire_schema(
             wire: fields.get(&field.name).copied(),
         })
         .collect();
+    let encode_fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let nulls = if field.optional {
+                FieldNulls::Omit
+            } else {
+                FieldNulls::Reject
+            };
+            JsonColumnSpec::new(&field.name, nulls)
+        })
+        .collect();
     CompiledJsonWireSchema {
         strictness: schema_def.strictness,
         fields,
         decode_fields,
+        encode_fields,
     }
 }
 
@@ -2774,7 +3020,7 @@ pub(crate) fn decode_with_codec(
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<usize, CodecError> {
+) -> error_stack::Result<usize, CodecError> {
     let appended = match &codec.wire_schema {
         CompiledWireSchema::Json(wire_schema) => {
             decode_json(codec, wire_schema, payload, decoder, builder)
@@ -2795,15 +3041,10 @@ pub(crate) fn decode_with_codec(
 fn finish_decoded_row(
     codec: &CompiledCodec,
     builder: &mut RuntimeRecordBatchBuilder,
-    appended: Result<(), CodecError>,
-) -> Result<(), CodecError> {
+    appended: error_stack::Result<(), CodecError>,
+) -> error_stack::Result<(), CodecError> {
     match appended {
-        Ok(()) => builder
-            .finish_row()
-            .map_err(|reason| CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: reason.to_string(),
-            }),
+        Ok(()) => builder.finish_row().change_context_lazy(|| codec.invalid()),
         Err(error) => {
             builder.abandon_row();
             Err(error)
@@ -2818,6 +3059,12 @@ struct ArrowCodecRow<'a> {
 }
 
 impl<'a> ArrowCodecRow<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     fn new(codec: &'a CompiledCodec, batch: &'a RuntimeRecordBatch, row_index: usize) -> Self {
         Self {
             codec,
@@ -2837,27 +3084,28 @@ impl<'a> ArrowCodecRow<'a> {
         }
     }
 
-    fn to_json_value(&self) -> Result<JsonValue, CodecError> {
-        serde_json::to_value(self).map_err(|source| CodecError::JsonEncode {
-            codec: self.codec.name.as_str().to_string(),
-            source,
+    fn to_json_value(&self) -> error_stack::Result<JsonValue, CodecError> {
+        serde_json::to_value(self).map_err(|source| {
+            Report::new(CodecError::JsonEncode {
+                codec: self.codec.name.as_str().to_string(),
+                source,
+            })
         })
     }
 
     fn to_avro_record(
         &self,
         wire_schema: &CompiledAvroWireSchema,
-    ) -> Result<AvroValue, CodecError> {
+    ) -> error_stack::Result<AvroValue, CodecError> {
         let mut fields = Vec::with_capacity(self.codec.schema.fields.len());
         for (field_index, field) in self.codec.schema.fields.iter().enumerate() {
-            let wire_field =
-                wire_schema
-                    .fields
-                    .get(&field.name)
-                    .ok_or_else(|| CodecError::InvalidCodec {
-                        codec: self.codec.name.as_str().to_string(),
-                        reason: format!("missing wire field '{}'", field.name),
-                    })?;
+            let Some(wire_field) = wire_schema.fields.get(&field.name) else {
+                return Err(self
+                    .codec
+                    .contract_violation(CodecContractError::MissingWireField {
+                        field: field.name.clone(),
+                    }));
+            };
             fields.push((
                 field.name.clone(),
                 self.value(field_index)
@@ -2894,10 +3142,22 @@ struct ArrowCodecValue<'a> {
 }
 
 impl<'a> ArrowCodecValue<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Arrow column interface supplies the selected row null test"
+        )
+    )]
     fn is_null(&self) -> bool {
         self.array.is_null(self.row_index)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Arrow column interface supplies the selected typed row value"
+        )
+    )]
     fn typed<T: 'static>(&self) -> error_stack::Result<&'a T, RuntimeSchemaError> {
         self.array.as_any().downcast_ref::<T>().ok_or_else(|| {
             Report::new(RuntimeSchemaError::ExactTypeMismatch {
@@ -2905,7 +3165,7 @@ impl<'a> ArrowCodecValue<'a> {
                     field: self.field.to_string(),
                     elements: Vec::new(),
                 },
-                expected: arrow_data_type(self.ty),
+                expected: self.ty.arrow_data_type(),
                 found: self.array.data_type().clone(),
             })
         })
@@ -2977,43 +3237,57 @@ impl<'a> ArrowCodecValue<'a> {
         }
     }
 
-    fn encode_field_error(&self, reason: impl fmt::Display) -> CodecError {
+    /// The context of a failure to encode this value's field.
+    fn encode_context(&self) -> CodecError {
         CodecError::EncodeField {
             codec: self.codec.name.as_str().to_string(),
             field: self.field.to_string(),
-            reason: reason.to_string(),
         }
+    }
+
+    /// This value's field failing to encode because of `issue`.
+    fn encode_failure(&self, issue: FieldEncodeError) -> Report<CodecError> {
+        Report::new(issue).change_context(self.encode_context())
+    }
+
+    /// The column holding this value as the concrete Arrow array `T` it is encoded from.
+    fn encoded_array<T: 'static>(&self) -> error_stack::Result<&'a T, CodecError> {
+        self.typed::<T>()
+            .change_context_lazy(|| self.encode_context())
     }
 
     fn to_avro_wire_value(
         &self,
         wire_ty: AvroType,
         optional: bool,
-    ) -> Result<AvroValue, CodecError> {
+    ) -> error_stack::Result<AvroValue, CodecError> {
         if self.is_null() {
             if optional {
                 return Ok(AvroValue::Union(0, Box::new(AvroValue::Null)));
             }
-            return Err(self
-                .encode_field_error(format!("required field is null at row {}", self.row_index)));
+            return Err(self.encode_failure(FieldEncodeError::RequiredNullAtRow {
+                row: self.row_index,
+            }));
         }
 
         let value = match wire_ty {
-            AvroType::Boolean => self.to_avro_boolean(),
-            AvroType::Int => self.to_avro_int(),
-            AvroType::Long => self.to_avro_long(),
-            AvroType::Float => self.to_avro_float(),
-            AvroType::Double => self.to_avro_double(),
-            AvroType::String => self.to_avro_string(),
-            AvroType::Bytes => self
-                .typed::<BinaryArray>()
-                .map(|array| AvroValue::Bytes(array.value(self.row_index).to_vec()))
-                .map_err(|error| self.encode_field_error(error)),
-            AvroType::Array => self.to_avro_array(),
-            unsupported => {
-                Err(self.encode_field_error(format!("unsupported avro type {unsupported:?}")))
+            AvroType::Boolean => self.to_avro_boolean()?,
+            AvroType::Int => self.to_avro_int()?,
+            AvroType::Long => self.to_avro_long()?,
+            AvroType::Float => self.to_avro_float()?,
+            AvroType::Double => self.to_avro_double()?,
+            AvroType::String => self.to_avro_string()?,
+            AvroType::Bytes => {
+                let array = self.encoded_array::<BinaryArray>()?;
+                AvroValue::Bytes(array.value(self.row_index).to_vec())
             }
-        }?;
+            AvroType::Array => self.to_avro_array()?,
+            unsupported => {
+                return Err(
+                    self.encode_failure(FieldEncodeError::UnsupportedAvroType { ty: unsupported })
+                );
+            }
+        };
         if optional {
             Ok(AvroValue::Union(1, Box::new(value)))
         } else {
@@ -3021,156 +3295,115 @@ impl<'a> ArrowCodecValue<'a> {
         }
     }
 
-    fn to_avro_boolean(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_boolean(&self) -> error_stack::Result<AvroValue, CodecError> {
         if let ParseAsType::Bool = self.ty {
-            return self
-                .typed::<BooleanArray>()
-                .map(|array| AvroValue::Boolean(array.value(self.row_index)))
-                .map_err(|reason| self.encode_field_error(reason));
+            let array = self.encoded_array::<BooleanArray>()?;
+            return Ok(AvroValue::Boolean(array.value(self.row_index)));
         }
-        Err(self.encode_field_error("expected bool"))
+        Err(self.encode_failure(FieldEncodeError::ExpectedBool))
     }
 
-    fn to_avro_int(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_int(&self) -> error_stack::Result<AvroValue, CodecError> {
         let value = match self.ty {
-            ParseAsType::I8 => i32::from(
-                self.typed::<Int8Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::I16 => i32::from(
-                self.typed::<Int16Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::I32 => self
-                .typed::<Int32Array>()
-                .map_err(|reason| self.encode_field_error(reason))?
-                .value(self.row_index),
-            ParseAsType::U8 => i32::from(
-                self.typed::<UInt8Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::U16 => i32::from(
-                self.typed::<UInt16Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::U32 => i32::try_from(
-                self.typed::<UInt32Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            )
-            .map_err(|_| self.encode_field_error("U32 value does not fit Avro INT"))?,
-            _ => return Err(self.encode_field_error("expected int-compatible value")),
+            ParseAsType::I8 => i32::from(self.encoded_array::<Int8Array>()?.value(self.row_index)),
+            ParseAsType::I16 => {
+                i32::from(self.encoded_array::<Int16Array>()?.value(self.row_index))
+            }
+            ParseAsType::I32 => self.encoded_array::<Int32Array>()?.value(self.row_index),
+            ParseAsType::U8 => i32::from(self.encoded_array::<UInt8Array>()?.value(self.row_index)),
+            ParseAsType::U16 => {
+                i32::from(self.encoded_array::<UInt16Array>()?.value(self.row_index))
+            }
+            ParseAsType::U32 => {
+                let value = self.encoded_array::<UInt32Array>()?.value(self.row_index);
+                let Ok(value) = i32::try_from(value) else {
+                    return Err(self.encode_failure(FieldEncodeError::U32OutsideInt));
+                };
+                value
+            }
+            _ => return Err(self.encode_failure(FieldEncodeError::ExpectedInt)),
         };
         Ok(AvroValue::Int(value))
     }
 
-    fn to_avro_long(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_long(&self) -> error_stack::Result<AvroValue, CodecError> {
         let value = match self.ty {
-            ParseAsType::I8 => i64::from(
-                self.typed::<Int8Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::I16 => i64::from(
-                self.typed::<Int16Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::I32 => i64::from(
-                self.typed::<Int32Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::I64 => self
-                .typed::<Int64Array>()
-                .map_err(|reason| self.encode_field_error(reason))?
-                .value(self.row_index),
-            ParseAsType::U8 => i64::from(
-                self.typed::<UInt8Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::U16 => i64::from(
-                self.typed::<UInt16Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::U32 => i64::from(
-                self.typed::<UInt32Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            ),
-            ParseAsType::U64 => i64::try_from(
-                self.typed::<UInt64Array>()
-                    .map_err(|reason| self.encode_field_error(reason))?
-                    .value(self.row_index),
-            )
-            .map_err(|_| self.encode_field_error("U64 value does not fit Avro LONG"))?,
-            _ => return Err(self.encode_field_error("expected long-compatible value")),
+            ParseAsType::I8 => i64::from(self.encoded_array::<Int8Array>()?.value(self.row_index)),
+            ParseAsType::I16 => {
+                i64::from(self.encoded_array::<Int16Array>()?.value(self.row_index))
+            }
+            ParseAsType::I32 => {
+                i64::from(self.encoded_array::<Int32Array>()?.value(self.row_index))
+            }
+            ParseAsType::I64 => self.encoded_array::<Int64Array>()?.value(self.row_index),
+            ParseAsType::U8 => i64::from(self.encoded_array::<UInt8Array>()?.value(self.row_index)),
+            ParseAsType::U16 => {
+                i64::from(self.encoded_array::<UInt16Array>()?.value(self.row_index))
+            }
+            ParseAsType::U32 => {
+                i64::from(self.encoded_array::<UInt32Array>()?.value(self.row_index))
+            }
+            ParseAsType::U64 => {
+                let value = self.encoded_array::<UInt64Array>()?.value(self.row_index);
+                let Ok(value) = i64::try_from(value) else {
+                    return Err(self.encode_failure(FieldEncodeError::U64OutsideLong));
+                };
+                value
+            }
+            _ => return Err(self.encode_failure(FieldEncodeError::ExpectedLong)),
         };
         Ok(AvroValue::Long(value))
     }
 
-    fn to_avro_float(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_float(&self) -> error_stack::Result<AvroValue, CodecError> {
         if let ParseAsType::F32 = self.ty {
-            return self
-                .typed::<Float32Array>()
-                .map(|array| AvroValue::Float(array.value(self.row_index)))
-                .map_err(|reason| self.encode_field_error(reason));
+            let array = self.encoded_array::<Float32Array>()?;
+            return Ok(AvroValue::Float(array.value(self.row_index)));
         }
-        Err(self.encode_field_error("expected f32"))
+        Err(self.encode_failure(FieldEncodeError::ExpectedF32))
     }
 
-    fn to_avro_double(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_double(&self) -> error_stack::Result<AvroValue, CodecError> {
         match self.ty {
-            ParseAsType::F32 => self
-                .typed::<Float32Array>()
-                .map(|array| AvroValue::Double(f64::from(array.value(self.row_index))))
-                .map_err(|reason| self.encode_field_error(reason)),
-            ParseAsType::F64 => self
-                .typed::<Float64Array>()
-                .map(|array| AvroValue::Double(array.value(self.row_index)))
-                .map_err(|reason| self.encode_field_error(reason)),
-            _ => Err(self.encode_field_error("expected float-compatible value")),
+            ParseAsType::F32 => {
+                let array = self.encoded_array::<Float32Array>()?;
+                Ok(AvroValue::Double(f64::from(array.value(self.row_index))))
+            }
+            ParseAsType::F64 => {
+                let array = self.encoded_array::<Float64Array>()?;
+                Ok(AvroValue::Double(array.value(self.row_index)))
+            }
+            _ => Err(self.encode_failure(FieldEncodeError::ExpectedFloat)),
         }
     }
 
-    fn to_avro_string(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_string(&self) -> error_stack::Result<AvroValue, CodecError> {
         match self.ty {
-            ParseAsType::String => self
-                .typed::<StringArray>()
-                .map(|array| AvroValue::String(array.value(self.row_index).to_string()))
-                .map_err(|reason| self.encode_field_error(reason)),
-            ParseAsType::Datetime => self
-                .typed::<TimestampNanosecondArray>()
-                .map(|array| {
-                    AvroValue::String(
-                        DateTime::from_timestamp_nanos(array.value(self.row_index))
-                            .fixed_offset()
-                            .to_rfc3339(),
-                    )
-                })
-                .map_err(|reason| self.encode_field_error(reason)),
-            _ => Err(self.encode_field_error("expected string-compatible value")),
+            ParseAsType::String => {
+                let array = self.encoded_array::<StringArray>()?;
+                Ok(AvroValue::String(array.value(self.row_index).to_string()))
+            }
+            ParseAsType::Datetime => {
+                let array = self.encoded_array::<TimestampNanosecondArray>()?;
+                let timestamp = DateTime::from_timestamp_nanos(array.value(self.row_index));
+                Ok(AvroValue::String(timestamp.fixed_offset().to_rfc3339()))
+            }
+            _ => Err(self.encode_failure(FieldEncodeError::ExpectedString)),
         }
     }
 
-    fn to_avro_array(&self) -> Result<AvroValue, CodecError> {
-        self.sequence()
-            .map_err(|reason| self.encode_field_error(reason))?
-            .to_avro_values()
-            .map(AvroValue::Array)
+    fn to_avro_array(&self) -> error_stack::Result<AvroValue, CodecError> {
+        let sequence = self
+            .sequence()
+            .change_context_lazy(|| self.encode_context())?;
+        Ok(AvroValue::Array(sequence.to_avro_values()?))
     }
 
-    fn to_avro_array_item(&self) -> Result<AvroValue, CodecError> {
+    fn to_avro_array_item(&self) -> error_stack::Result<AvroValue, CodecError> {
         if self.is_null() {
-            return Err(
-                self.encode_field_error(format!("list contains null at index {}", self.row_index))
-            );
+            return Err(self.encode_failure(FieldEncodeError::NullListElement {
+                index: self.row_index,
+            }));
         }
         match self.ty {
             ParseAsType::Bool => self.to_avro_boolean(),
@@ -3185,10 +3418,10 @@ impl<'a> ArrowCodecValue<'a> {
             ParseAsType::F32 => self.to_avro_float(),
             ParseAsType::F64 => self.to_avro_double(),
             ParseAsType::String | ParseAsType::Datetime => self.to_avro_string(),
-            ParseAsType::Bytes => self
-                .typed::<BinaryArray>()
-                .map(|array| AvroValue::Bytes(array.value(self.row_index).to_vec()))
-                .map_err(|error| self.encode_field_error(error)),
+            ParseAsType::Bytes => {
+                let array = self.encoded_array::<BinaryArray>()?;
+                Ok(AvroValue::Bytes(array.value(self.row_index).to_vec()))
+            }
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self.to_avro_array(),
         }
     }
@@ -3266,7 +3499,7 @@ struct ArrowCodecSequence<'a> {
 }
 
 impl ArrowCodecSequence<'_> {
-    fn to_avro_values(&self) -> Result<Vec<AvroValue>, CodecError> {
+    fn to_avro_values(&self) -> error_stack::Result<Vec<AvroValue>, CodecError> {
         self.rows
             .clone()
             .map(|row_index| {
@@ -3308,90 +3541,77 @@ fn decode_json(
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     decoder.input.clear();
     decoder.input.extend_from_slice(payload);
     let value = simd_json::to_borrowed_value_with_buffers(
         decoder.input.as_mut_slice(),
         &mut decoder.buffers,
     )
-    .map_err(|source| CodecError::JsonDecode {
-        codec: codec.name.as_str().to_string(),
-        source,
+    .map_err(|source| {
+        Report::new(CodecError::JsonDecode {
+            codec: codec.name.as_str().to_string(),
+            source,
+        })
     })?;
     let Some(object) = value.as_object() else {
-        return Err(CodecError::ExpectedObject {
+        return Err(Report::new(CodecError::ExpectedObject {
             codec: codec.name.as_str().to_string(),
-        });
+        }));
     };
 
     if !wire_schema.strictness.allows_unknown_fields() {
         for field in object.keys() {
             if !wire_schema.fields.contains_key(field.as_ref()) {
-                return Err(CodecError::UnexpectedField {
+                return Err(Report::new(CodecError::UnexpectedField {
                     codec: codec.name.as_str().to_string(),
                     field: field.to_string(),
-                });
+                }));
             }
         }
     }
 
     for (field, decode_field) in codec.schema.fields().iter().zip(&wire_schema.decode_fields) {
         let Some(wire_field) = decode_field.wire else {
-            return Err(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: format!("missing wire field '{}'", field.name),
-            });
+            return Err(
+                codec.contract_violation(CodecContractError::MissingWireField {
+                    field: field.name.clone(),
+                }),
+            );
         };
         let Some(value) = decode_field.key.map_lookup(object) else {
             if field.optional && wire_field.optional {
                 builder
                     .append_null()
-                    .map_err(|reason| CodecError::InvalidCodec {
-                        codec: codec.name.as_str().to_string(),
-                        reason: reason.to_string(),
-                    })?;
+                    .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
-            return Err(CodecError::MissingField {
+            return Err(Report::new(CodecError::MissingField {
                 codec: codec.name.as_str().to_string(),
                 field: field.name.clone(),
-            });
+            }));
         };
         if value.is_null() {
             if field.optional && wire_field.optional {
                 builder
                     .append_null()
-                    .map_err(|reason| CodecError::InvalidCodec {
-                        codec: codec.name.as_str().to_string(),
-                        reason: reason.to_string(),
-                    })?;
+                    .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
-            return Err(CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: "null is incompatible with required field".to_string(),
-            });
+            return Err(codec.field_decode_failure(&field.name, FieldDecodeError::RequiredNull));
         }
         if !borrowed_json_value_matches_wire_type(value, wire_field.ty) {
-            return Err(CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: format!(
-                    "expected {:?}, found a JSON {}",
-                    wire_field.ty,
-                    borrowed_json_value_kind(value)
-                ),
-            });
+            return Err(codec.field_decode_failure(
+                &field.name,
+                FieldDecodeError::WireType {
+                    expected: wire_field.ty,
+                    found: borrowed_json_value_kind(value),
+                },
+            ));
         }
         builder
             .append_borrowed_json_value(value)
-            .map_err(|reason| CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: reason.to_string(),
-            })?;
+            .change_context_lazy(|| codec.parse_field(&field.name))?;
     }
     Ok(())
 }
@@ -3401,12 +3621,12 @@ fn decode_cbor(
     wire_schema: &CompiledJsonWireSchema,
     payload: &[u8],
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     let value = ciborium::from_reader::<JsonValue, _>(Cursor::new(payload)).map_err(|source| {
-        CodecError::CborDecode {
+        Report::new(CodecError::CborDecode {
             codec: codec.name.as_str().to_string(),
-            reason: source.to_string(),
-        }
+            source,
+        })
     })?;
     decode_json_value(codec, &value, Some(wire_schema), builder)
 }
@@ -3499,11 +3719,11 @@ fn decode_json_value(
     value: &JsonValue,
     wire_schema: Option<&CompiledJsonWireSchema>,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     let JsonValue::Object(object) = value else {
-        return Err(CodecError::ExpectedObject {
+        return Err(Report::new(CodecError::ExpectedObject {
             codec: codec.name.as_str().to_string(),
-        });
+        }));
     };
 
     if let Some(wire_schema) = wire_schema
@@ -3511,10 +3731,10 @@ fn decode_json_value(
     {
         for field in object.keys() {
             if !wire_schema.fields.contains_key(field) {
-                return Err(CodecError::UnexpectedField {
+                return Err(Report::new(CodecError::UnexpectedField {
                     codec: codec.name.as_str().to_string(),
                     field: field.clone(),
-                });
+                }));
             }
         }
     }
@@ -3523,62 +3743,47 @@ fn decode_json_value(
         let wire_field =
             wire_schema.and_then(|wire_schema| wire_schema.fields.get(&field.name).copied());
         if wire_schema.is_some() && wire_field.is_none() {
-            return Err(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: format!("missing wire field '{}'", field.name),
-            });
+            return Err(
+                codec.contract_violation(CodecContractError::MissingWireField {
+                    field: field.name.clone(),
+                }),
+            );
         }
         let Some(value) = object.get(&field.name) else {
             if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
                 builder
                     .append_null()
-                    .map_err(|reason| CodecError::InvalidCodec {
-                        codec: codec.name.as_str().to_string(),
-                        reason: reason.to_string(),
-                    })?;
+                    .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
-            return Err(CodecError::MissingField {
+            return Err(Report::new(CodecError::MissingField {
                 codec: codec.name.as_str().to_string(),
                 field: field.name.clone(),
-            });
+            }));
         };
         if value.is_null() {
             if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
                 builder
                     .append_null()
-                    .map_err(|reason| CodecError::InvalidCodec {
-                        codec: codec.name.as_str().to_string(),
-                        reason: reason.to_string(),
-                    })?;
+                    .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
-            return Err(CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: "null is incompatible with required field".to_string(),
-            });
+            return Err(codec.field_decode_failure(&field.name, FieldDecodeError::RequiredNull));
         }
         if let Some(wire_field) = wire_field
             && !json_value_matches_wire_type(value, wire_field.ty)
         {
-            return Err(CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: format!(
-                    "expected {:?}, found a JSON {}",
-                    wire_field.ty,
-                    json_value_kind(value)
-                ),
-            });
+            return Err(codec.field_decode_failure(
+                &field.name,
+                FieldDecodeError::WireType {
+                    expected: wire_field.ty,
+                    found: json_value_kind(value),
+                },
+            ));
         }
         builder
             .append_json_value(value)
-            .map_err(|reason| CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: reason.to_string(),
-            })?;
+            .change_context_lazy(|| codec.parse_field(&field.name))?;
     }
     Ok(())
 }
@@ -3587,13 +3792,14 @@ fn run_jaq_transformation(
     codec: &CompiledCodec,
     program: &CompiledJaqProgram,
     input: JsonValue,
-) -> Result<JsonValue, CodecError> {
-    program
-        .run_single(input)
-        .map_err(|error| CodecError::JaqTransform {
+) -> error_stack::Result<JsonValue, CodecError> {
+    program.run_single(input).map_err(|error| {
+        Report::new(CodecError::JaqTransform {
             codec: codec.name.as_str().to_string(),
             reason: error.to_string(),
+            report: error,
         })
+    })
 }
 
 fn decode_avro(
@@ -3601,76 +3807,61 @@ fn decode_avro(
     wire_schema: &CompiledAvroWireSchema,
     payload: &[u8],
     builder: &mut RuntimeRecordBatchBuilder,
-) -> Result<(), CodecError> {
+) -> error_stack::Result<(), CodecError> {
     let mut cursor = Cursor::new(payload);
     let value = from_avro_datum(&wire_schema.schema, &mut cursor, None).map_err(|source| {
-        CodecError::AvroDecode {
+        Report::new(CodecError::AvroDecode {
             codec: codec.name.as_str().to_string(),
             source,
-        }
+        })
     })?;
     let AvroValue::Record(values) = value else {
-        return Err(CodecError::ExpectedObject {
+        return Err(Report::new(CodecError::ExpectedObject {
             codec: codec.name.as_str().to_string(),
-        });
+        }));
     };
 
     for field in codec.schema.fields() {
-        let wire_field =
-            wire_schema
-                .fields
-                .get(&field.name)
-                .ok_or_else(|| CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
-                    reason: format!("missing wire field '{}'", field.name),
-                })?;
+        let Some(wire_field) = wire_schema.fields.get(&field.name) else {
+            return Err(
+                codec.contract_violation(CodecContractError::MissingWireField {
+                    field: field.name.clone(),
+                }),
+            );
+        };
         let Some((name, value)) = values.get(wire_field.position) else {
             if field.optional && wire_field.optional {
                 builder
                     .append_null()
-                    .map_err(|reason| CodecError::InvalidCodec {
-                        codec: codec.name.as_str().to_string(),
-                        reason: reason.to_string(),
-                    })?;
+                    .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
-            return Err(CodecError::MissingField {
+            return Err(Report::new(CodecError::MissingField {
                 codec: codec.name.as_str().to_string(),
                 field: field.name.clone(),
-            });
+            }));
         };
         if name != &field.name {
-            return Err(CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: format!(
-                    "wire field position {} contains '{}' instead of '{}'",
-                    wire_field.position, name, field.name
-                ),
-            });
+            return Err(
+                codec.contract_violation(CodecContractError::WireFieldPosition {
+                    position: wire_field.position,
+                    found: name.clone(),
+                    expected: field.name.clone(),
+                }),
+            );
         }
         if avro_value_is_null(value) {
             if field.optional && wire_field.optional {
                 builder
                     .append_null()
-                    .map_err(|reason| CodecError::InvalidCodec {
-                        codec: codec.name.as_str().to_string(),
-                        reason: reason.to_string(),
-                    })?;
+                    .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
-            return Err(CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: "null is incompatible with required field".to_string(),
-            });
+            return Err(codec.field_decode_failure(&field.name, FieldDecodeError::RequiredNull));
         }
         builder
             .append_avro_value(value)
-            .map_err(|reason| CodecError::ParseField {
-                codec: codec.name.as_str().to_string(),
-                field: field.name.clone(),
-                reason: reason.to_string(),
-            })?;
+            .change_context_lazy(|| codec.parse_field(&field.name))?;
     }
     Ok(())
 }
@@ -3692,7 +3883,7 @@ fn append_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -3728,7 +3919,7 @@ fn append_json_value_to_arrow(
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Bytes => {
-            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let encoded = value.as_str().ok_or_else(incompatible)?;
             let decoded = base64_simd::STANDARD
                 .decode_to_vec(encoded.as_bytes())
                 .map_err(|_| {
@@ -3755,7 +3946,7 @@ fn append_json_value_to_arrow(
         }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             if values.len() != len.get().arch_into() {
                 return Err(Report::new(
                     RuntimeSchemaError::RuntimeArrayLengthMismatch {
@@ -3789,7 +3980,7 @@ fn append_json_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder, expected, location,
@@ -3830,7 +4021,7 @@ fn append_borrowed_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -3866,15 +4057,15 @@ fn append_borrowed_json_value_to_arrow(
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Bytes => {
-            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let encoded = value.as_str().ok_or_else(incompatible)?;
             let builder = typed_arrow_builder::<BinaryBuilder>(builder, expected, location)?;
             append_base64_to_binary_builder(builder, encoded.as_bytes(), location)?;
             Ok(())
         }
         ParseAsType::Datetime => {
-            let value = value.as_str().ok_or_else(&incompatible)?;
+            let value = value.as_str().ok_or_else(incompatible)?;
             let value = DateTime::parse_from_rfc3339(value).map_err(|_| incompatible())?;
-            let value = value.timestamp_nanos_opt().ok_or_else(&incompatible)?;
+            let value = value.timestamp_nanos_opt().ok_or_else(incompatible)?;
             typed_arrow_builder::<TimestampNanosecondBuilder>(builder, expected, location)?
                 .append_value(value);
             Ok(())
@@ -3885,7 +4076,7 @@ fn append_borrowed_json_value_to_arrow(
         ),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
         ParseAsType::Array { element, len } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             if values.len() != len.get().arch_into() {
                 return Err(Report::new(
                     RuntimeSchemaError::RuntimeArrayLengthMismatch {
@@ -3919,7 +4110,7 @@ fn append_borrowed_json_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder, expected, location,
@@ -3979,7 +4170,7 @@ fn sequence_element_data_type<'a>(
         | (ParseAsType::Vec { .. }, ArrowDataType::List(field)) => Ok(field.data_type()),
         _ => Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
             location: location.to_runtime_location(),
-            expected: arrow_data_type(ty),
+            expected: ty.arrow_data_type(),
             found: expected.clone(),
         })),
     }
@@ -4002,8 +4193,8 @@ fn append_avro_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
-            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+            let parsed = ($parsed).ok_or_else(incompatible)?;
+            typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value(parsed);
             Ok(())
         }};
@@ -4103,7 +4294,7 @@ fn append_avro_value_to_arrow(
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             for (index, value) in values.iter().enumerate() {
@@ -4130,7 +4321,7 @@ fn append_avro_value_to_arrow(
             };
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             for (index, value) in values.iter().enumerate() {
@@ -4151,6 +4342,12 @@ fn append_avro_value_to_arrow(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn typed_arrow_builder<'a, T: 'static>(
     builder: &'a mut dyn ArrayBuilder,
     expected: &ArrowDataType,
@@ -4178,39 +4375,6 @@ fn avro_value_payload(value: &AvroValue) -> &AvroValue {
 
 fn avro_value_is_null(value: &AvroValue) -> bool {
     matches!(avro_value_payload(value), AvroValue::Null)
-}
-
-pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
-    match ty {
-        ParseAsType::U8 => ArrowDataType::UInt8,
-        ParseAsType::I8 => ArrowDataType::Int8,
-        ParseAsType::U16 => ArrowDataType::UInt16,
-        ParseAsType::I16 => ArrowDataType::Int16,
-        ParseAsType::U32 => ArrowDataType::UInt32,
-        ParseAsType::I32 => ArrowDataType::Int32,
-        ParseAsType::U64 => ArrowDataType::UInt64,
-        ParseAsType::I64 => ArrowDataType::Int64,
-        ParseAsType::Bool => ArrowDataType::Boolean,
-        ParseAsType::String => ArrowDataType::Utf8,
-        ParseAsType::Bytes => ArrowDataType::Binary,
-        ParseAsType::Datetime => {
-            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into()))
-        }
-        ParseAsType::F32 => ArrowDataType::Float32,
-        ParseAsType::F64 => ArrowDataType::Float64,
-        ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
-            ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), false)),
-            i32::try_from(len.get()).verified(
-                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
-                 list",
-            ),
-        ),
-        ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
-            "item",
-            arrow_data_type(element),
-            false,
-        ))),
-    }
 }
 
 /// Closes the fixed-size list value an element append failed part-way through.
@@ -4251,7 +4415,7 @@ fn append_placeholder_to_arrow(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     macro_rules! append {
         ($builder:ty, $value:expr) => {{
-            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+            typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value($value);
         }};
     }
@@ -4273,7 +4437,7 @@ fn append_placeholder_to_arrow(
         ParseAsType::Array { element, len } => {
             let list = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             for _ in 0..len.get() {
@@ -4284,7 +4448,7 @@ fn append_placeholder_to_arrow(
         ParseAsType::Vec { .. } => {
             typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?
             .append(true);
@@ -4301,7 +4465,8 @@ fn append_runtime_value_to_arrow(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     macro_rules! append_primitive {
         ($builder:ty, $variant:path, $map:expr) => {{
-            let builder = typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?;
+            let builder =
+                typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?;
             match value {
                 Some($variant(value)) => builder.append_value($map(value).ok_or_else(|| {
                     Report::new(RuntimeSchemaError::RuntimeValueOutOfRange {
@@ -4363,7 +4528,7 @@ fn append_runtime_value_to_arrow(
                     data_type: ArrowDataType::Binary,
                 }));
             }
-            typed_arrow_builder::<BinaryBuilder>(builder, &arrow_data_type(ty), location)?
+            typed_arrow_builder::<BinaryBuilder>(builder, &ty.arrow_data_type(), location)?
                 .append_null();
             Ok(())
         }
@@ -4389,7 +4554,7 @@ fn append_runtime_value_to_arrow(
         ParseAsType::Array { element, len } => {
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             let values = match value {
@@ -4435,7 +4600,7 @@ fn append_runtime_value_to_arrow(
         ParseAsType::Vec { element } => {
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             let values = match value {
@@ -4483,6 +4648,12 @@ pub(crate) struct RuntimeValueColumn {
 impl RuntimeValueColumn {
     /// Reads `array` under the name `field`, which names the column in the errors reading it
     /// raises.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn new(
         field: impl Into<String>,
         array: ArrayRef,
@@ -4504,6 +4675,12 @@ impl RuntimeValueColumn {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 pub(crate) fn runtime_value_from_arrow_array(
     array: &dyn Array,
     ty: &ParseAsType,
@@ -4600,6 +4777,12 @@ pub(crate) fn runtime_value_from_arrow_array(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn typed_arrow_array<'a, T: 'static>(
     array: &'a dyn Array,
     ty: &ParseAsType,
@@ -4611,12 +4794,18 @@ fn typed_arrow_array<'a, T: 'static>(
                 field: field.to_string(),
                 elements: Vec::new(),
             },
-            expected: arrow_data_type(ty),
+            expected: ty.arrow_data_type(),
             found: array.data_type().clone(),
         })
     })
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn runtime_values_from_arrow_slice(
     array: &dyn Array,
     element: &ParseAsType,
@@ -5749,14 +5938,14 @@ mod tests {
     }
 
     /// Decodes one payload into a batch of its own, for a test that asserts on one message.
-    fn decode_one(codec: &CompiledCodec, payload: &[u8]) -> Result<RuntimeRecordBatch, CodecError> {
+    fn decode_one(
+        codec: &CompiledCodec,
+        payload: &[u8],
+    ) -> error_stack::Result<RuntimeRecordBatch, CodecError> {
         let mut builder = codec.schema.batch_builder(1);
         let mut decoder = JsonDecoder::default();
         decode_with_codec(codec, payload, &mut decoder, &mut builder)?;
-        builder.finish().map_err(|reason| CodecError::InvalidCodec {
-            codec: codec.name.as_str().to_string(),
-            reason: reason.to_string(),
-        })
+        builder.finish().change_context_lazy(|| codec.invalid())
     }
 
     fn single_batch_value(batch: &RuntimeRecordBatch, field: &str) -> Option<RuntimeValue> {
@@ -5775,10 +5964,7 @@ mod tests {
         let batch = record
             .one_row_batch()
             .project(codec.schema.arrow_schema())
-            .map_err(|reason| CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
+            .change_context_lazy(|| codec.invalid())?;
         let encoder = codec.batch_encoder(&batch)?;
         let mut payload = Vec::new();
         encoder.encode_row_into(0, &mut payload)?;
@@ -5792,10 +5978,7 @@ mod tests {
         let batch = codec
             .schema
             .batch_from_test_rows([fields])
-            .map_err(|reason| CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
+            .change_context_lazy(|| codec.invalid())?;
         let encoder = codec.batch_encoder(&batch)?;
         let mut payload = Vec::new();
         encoder.encode_row_into(0, &mut payload)?;
@@ -6225,6 +6408,831 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::empty(b"\r\n\0".as_slice(), "payload is empty after trailing delimiters", false)]
+    #[case::invalid_utf8(
+        b"<34>1 \xff".as_slice(),
+        "payload is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 6",
+        false
+    )]
+    #[case::version(
+        b"<34>2 - edge app 1 ID - msg".as_slice(),
+        "RFC 5424 VERSION must be 1",
+        false
+    )]
+    #[case::missing_header_field(
+        b"<34>1 - edge".as_slice(),
+        "RFC 5424 header is missing HOSTNAME",
+        false
+    )]
+    #[case::empty_header_field(
+        b"<34>1  edge app 1 ID - msg".as_slice(),
+        "RFC 5424 TIMESTAMP is empty",
+        false
+    )]
+    #[case::invalid_hostname(
+        b"<34>1 - ed\x01ge app 1 ID - msg".as_slice(),
+        "invalid HOSTNAME: invalid SYSLOG header at byte 2: value contains characters outside \
+         printable US-ASCII",
+        true
+    )]
+    #[case::invalid_structured_data(
+        b"<34>1 - edge app 1 ID [bad=id] msg".as_slice(),
+        "invalid STRUCTURED-DATA: invalid SYSLOG STRUCTURED-DATA at byte 4: SD-ID contains an \
+         invalid character",
+        true
+    )]
+    #[case::structured_data_delimiter(
+        b"<34>1 - edge app 1 ID -msg".as_slice(),
+        "STRUCTURED-DATA must be followed by a space or end of message",
+        false
+    )]
+    #[case::timestamp_offset(
+        b"<34>1 2003-10-11T22:14:15 edge app 1 ID - msg".as_slice(),
+        "invalid RFC 5424 TIMESTAMP time offset",
+        false
+    )]
+    #[case::timestamp_shape(
+        b"<34>1 2003/10/11T22:14:15Z edge app 1 ID - msg".as_slice(),
+        "invalid RFC 5424 TIMESTAMP date or time shape",
+        false
+    )]
+    #[case::timestamp_fraction(
+        b"<34>1 2003-10-11T22:14:15.1234567Z edge app 1 ID - msg".as_slice(),
+        "invalid RFC 5424 TIMESTAMP fractional seconds",
+        false
+    )]
+    #[case::timestamp_value(
+        b"<34>1 2003-13-11T22:14:15Z edge app 1 ID - msg".as_slice(),
+        "invalid RFC 5424 TIMESTAMP: input is out of range",
+        false
+    )]
+    #[case::rfc3164_hostname(
+        b"<13>Feb  5 17:32:18 relay\x01example worker: restarted".as_slice(),
+        "invalid RFC 3164 HOSTNAME: invalid SYSLOG header at byte 5: value contains characters \
+         outside printable US-ASCII",
+        true
+    )]
+    #[case::rfc3164_tag(
+        b"<13>Feb  5 17:32:18 relay aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: restarted".as_slice(),
+        "invalid RFC 3164 TAG: invalid SYSLOG header at byte 32: value exceeds the maximum length \
+         of 32 bytes",
+        true
+    )]
+    fn syslog_codec_rejects_a_malformed_frame_with_its_typed_cause(
+        #[case] payload: &[u8],
+        #[case] reason: &str,
+        #[case] schema_cause: bool,
+    ) {
+        let codec = compiled_syslog_codec();
+
+        let error = decode_one(&codec, payload).expect_err("a malformed frame must be rejected");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                CodecError::SyslogDecode { codec } if codec == "syslog_codec"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.contains::<syslog::SyslogDecodeError>(),
+            "the frame's typed reason must stay beneath the codec: {error:?}"
+        );
+        assert_eq!(
+            error.contains::<RuntimeSchemaError>(),
+            schema_cause,
+            "{error:?}"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            format!("failed to parse syslog payload for codec 'syslog_codec': {reason}")
+        );
+    }
+
+    #[test]
+    fn codec_contract_violations_keep_their_diagnostic_text() {
+        let cases = [
+            (
+                CodecContractError::JaqNativeTransformationRequired,
+                "JAQ-native codec must declare a JAQ transformation",
+            ),
+            (
+                CodecContractError::ProtobufTransformationRequired,
+                "protobuf codec must declare a JAQ transformation",
+            ),
+            (
+                CodecContractError::ProtobufDescriptorMissing,
+                "protobuf codec is missing compiled descriptor",
+            ),
+            (
+                CodecContractError::JaqNativeOnEmittingRequired,
+                "JAQ-native codec used for encoding must declare ON EMITTING transformation",
+            ),
+            (
+                CodecContractError::ProtobufOnEmittingRequired,
+                "protobuf codec used for encoding must declare ON EMITTING transformation",
+            ),
+            (
+                CodecContractError::OnEmittingRequired,
+                "codec used for encoding must declare ON EMITTING transformation",
+            ),
+            (
+                CodecContractError::JaqNativeOnIngestionRequired,
+                "JAQ-native codec used for decoding must declare ON INGESTION transformation",
+            ),
+            (
+                CodecContractError::ProtobufOnIngestionRequired,
+                "protobuf codec used for decoding must declare ON INGESTION transformation",
+            ),
+            (
+                CodecContractError::OnIngestionMissing,
+                "codec declares no ON INGESTION transformation to run",
+            ),
+            (
+                CodecContractError::RowOutsideBatch { row: 3, rows: 2 },
+                "columnar encode row 3 is outside batch with 2 rows",
+            ),
+            (
+                CodecContractError::MissingWireField {
+                    field: "amount".to_string(),
+                },
+                "missing wire field 'amount'",
+            ),
+            (
+                CodecContractError::WireFieldPosition {
+                    position: 1,
+                    found: "currency".to_string(),
+                    expected: "amount".to_string(),
+                },
+                "wire field position 1 contains 'currency' instead of 'amount'",
+            ),
+        ];
+        for (rule, reason) in cases {
+            let report = CodecError::contract_violation("orders_codec", rule);
+            assert!(matches!(
+                report.current_context(),
+                CodecError::InvalidCodec { codec } if codec == "orders_codec"
+            ));
+            assert_eq!(
+                format!("{report:#}"),
+                format!("codec 'orders_codec' is incompatible: {reason}")
+            );
+        }
+    }
+
+    #[test]
+    fn field_encode_failures_keep_their_diagnostic_text() {
+        let cases = [
+            (
+                FieldEncodeError::RequiredNullAtRow { row: 4 },
+                "required field is null at row 4",
+            ),
+            (FieldEncodeError::ExpectedBool, "expected bool"),
+            (
+                FieldEncodeError::ExpectedInt,
+                "expected int-compatible value",
+            ),
+            (
+                FieldEncodeError::U32OutsideInt,
+                "U32 value does not fit Avro INT",
+            ),
+            (
+                FieldEncodeError::ExpectedLong,
+                "expected long-compatible value",
+            ),
+            (
+                FieldEncodeError::U64OutsideLong,
+                "U64 value does not fit Avro LONG",
+            ),
+            (FieldEncodeError::ExpectedF32, "expected f32"),
+            (
+                FieldEncodeError::ExpectedFloat,
+                "expected float-compatible value",
+            ),
+            (
+                FieldEncodeError::ExpectedString,
+                "expected string-compatible value",
+            ),
+            (
+                FieldEncodeError::NullListElement { index: 2 },
+                "list contains null at index 2",
+            ),
+            (
+                FieldEncodeError::UnsupportedAvroType { ty: AvroType::Map },
+                "unsupported avro type Map",
+            ),
+            (
+                FieldEncodeError::ColumnType {
+                    expected: ParseAsType::Datetime,
+                },
+                "field is not a DATETIME column",
+            ),
+            (FieldEncodeError::RequiredNull, "required field is null"),
+        ];
+        for (issue, reason) in cases {
+            let report = Report::new(issue).change_context(CodecError::EncodeField {
+                codec: "orders_codec".to_string(),
+                field: "amount".to_string(),
+            });
+            assert_eq!(
+                format!("{report:#}"),
+                format!("codec 'orders_codec' failed to encode field 'amount': {reason}")
+            );
+        }
+    }
+
+    #[test]
+    fn an_unfolding_that_panicked_keeps_its_failure_beneath_the_codec() {
+        let codec = compiled_syslog_codec();
+
+        let report = codec.unfolding_panicked(Report::new(io::Error::other("the worker stopped")));
+
+        assert!(matches!(
+            report.current_context(),
+            CodecError::InvalidCodec { codec } if codec == "syslog_codec"
+        ));
+        assert!(matches!(
+            report.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::UnfoldingPanicked)
+        ));
+        assert_eq!(
+            format!("{report:#}"),
+            "codec 'syslog_codec' is incompatible: the payload's unfolding panicked on an \
+             extension worker: the worker stopped"
+        );
+    }
+
+    /// One field of an Avro codec fixture: its name, internal type and optionality, and the wire
+    /// type and optionality it is encoded with.
+    struct AvroFieldCase {
+        name: &'static str,
+        ty: ParseAsType,
+        optional: bool,
+        wire: Option<AvroType>,
+        wire_optional: bool,
+    }
+
+    /// A codec named `avro_value_codec` over `fields`, each encoded as its wire type. A field
+    /// without a wire type is left out of the wire schema.
+    fn avro_fixture_codec(
+        fields: &[AvroFieldCase],
+    ) -> error_stack::Result<Arc<CompiledCodec>, CodecError> {
+        let mut schema_fields = Vec::new();
+        let mut wire_fields = Vec::new();
+        for field in fields {
+            schema_fields.push(SchemaField {
+                name: named(field.name),
+                ty: field.ty.clone(),
+                optional: field.optional,
+                sensitive: false,
+            });
+            if let Some(wire) = field.wire {
+                wire_fields.push(WireSchemaField {
+                    name: named(field.name),
+                    ty: wire,
+                    optional: field.wire_optional,
+                });
+            }
+        }
+        let schema = CreateSchema {
+            name: named("avro_value"),
+            fields: schema_fields,
+        };
+        let wire_schema = CreateWireSchema {
+            name: named("avro_value_wire"),
+            strictness: Default::default(),
+            fields: wire_fields,
+        };
+        compile_codec(
+            &CreateCodec {
+                name: named("avro_value_codec"),
+                wire_format: CodecWireFormat::Avro {
+                    wire_schema: wire_schema.name.clone(),
+                },
+                schema: schema.name.clone(),
+                encoding_rules: Vec::new(),
+            },
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Avro(&wire_schema),
+        )
+    }
+
+    /// One required field, `value`, encoded as `wire`.
+    fn avro_value_case(ty: ParseAsType, wire: AvroType) -> AvroFieldCase {
+        AvroFieldCase {
+            name: "value",
+            ty,
+            optional: false,
+            wire: Some(wire),
+            wire_optional: false,
+        }
+    }
+
+    #[test]
+    fn avro_codec_writes_every_narrow_integer_and_float_in_its_declared_wire_type() {
+        let codec = avro_fixture_codec(&[
+            avro_value_case(ParseAsType::I8, AvroType::Int),
+            AvroFieldCase {
+                name: "i16",
+                ..avro_value_case(ParseAsType::I16, AvroType::Int)
+            },
+            AvroFieldCase {
+                name: "i32",
+                ..avro_value_case(ParseAsType::I32, AvroType::Int)
+            },
+            AvroFieldCase {
+                name: "u8",
+                ..avro_value_case(ParseAsType::U8, AvroType::Int)
+            },
+            AvroFieldCase {
+                name: "u16",
+                ..avro_value_case(ParseAsType::U16, AvroType::Int)
+            },
+            AvroFieldCase {
+                name: "u32",
+                ..avro_value_case(ParseAsType::U32, AvroType::Int)
+            },
+            AvroFieldCase {
+                name: "f32",
+                ..avro_value_case(ParseAsType::F32, AvroType::Float)
+            },
+            AvroFieldCase {
+                name: "note",
+                ty: ParseAsType::String,
+                optional: true,
+                wire: Some(AvroType::String),
+                wire_optional: true,
+            },
+        ])
+        .expect("every narrow integer fits an Avro INT");
+        let values = [
+            ("value", RuntimeValue::I8(-8)),
+            ("i16", RuntimeValue::I16(-1_600)),
+            ("i32", RuntimeValue::I32(-320_000)),
+            ("u8", RuntimeValue::U8(8)),
+            ("u16", RuntimeValue::U16(1_600)),
+            ("u32", RuntimeValue::U32(320_000)),
+            ("f32", RuntimeValue::F32(OrderedFloat(1.5))),
+        ];
+
+        let payload = encode_test_fields(
+            &codec,
+            values
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone())),
+        )
+        .expect("every value fits its wire type");
+        let decoded = decode_one(&codec, &payload).expect("the encoding decodes back");
+
+        for (name, value) in values {
+            assert_eq!(single_batch_value(&decoded, name), Some(value), "{name}");
+        }
+        assert_eq!(single_batch_value(&decoded, "note"), None);
+    }
+
+    #[rstest]
+    #[case::u32_outside_int(
+        avro_value_case(ParseAsType::U32, AvroType::Int),
+        Some(RuntimeValue::U32(u32::MAX)),
+        "U32 value does not fit Avro INT"
+    )]
+    #[case::u64_outside_long(
+        avro_value_case(ParseAsType::U64, AvroType::Long),
+        Some(RuntimeValue::U64(u64::MAX)),
+        "U64 value does not fit Avro LONG"
+    )]
+    #[case::bool(
+        avro_value_case(ParseAsType::String, AvroType::Boolean),
+        Some(RuntimeValue::String("yes".to_string())),
+        "expected bool"
+    )]
+    #[case::int(
+        avro_value_case(ParseAsType::String, AvroType::Int),
+        Some(RuntimeValue::String("1".to_string())),
+        "expected int-compatible value"
+    )]
+    #[case::long(
+        avro_value_case(ParseAsType::String, AvroType::Long),
+        Some(RuntimeValue::String("1".to_string())),
+        "expected long-compatible value"
+    )]
+    #[case::float(
+        avro_value_case(ParseAsType::String, AvroType::Float),
+        Some(RuntimeValue::String("1.5".to_string())),
+        "expected f32"
+    )]
+    #[case::double(
+        avro_value_case(ParseAsType::String, AvroType::Double),
+        Some(RuntimeValue::String("1.5".to_string())),
+        "expected float-compatible value"
+    )]
+    #[case::string(
+        avro_value_case(ParseAsType::U8, AvroType::String),
+        Some(RuntimeValue::U8(1)),
+        "expected string-compatible value"
+    )]
+    #[case::unsupported(
+        avro_value_case(ParseAsType::String, AvroType::Null),
+        Some(RuntimeValue::String("x".to_string())),
+        "unsupported avro type Null"
+    )]
+    #[case::required_null(
+        AvroFieldCase {
+            optional: true,
+            ..avro_value_case(ParseAsType::String, AvroType::String)
+        },
+        None,
+        "required field is null at row 0"
+    )]
+    fn avro_codec_rejects_a_value_its_wire_type_cannot_hold(
+        #[case] field: AvroFieldCase,
+        #[case] value: Option<RuntimeValue>,
+        #[case] reason: &str,
+    ) {
+        let codec = avro_fixture_codec(&[field]).expect("the Avro schema parses");
+        let mut fields = Vec::new();
+        if let Some(value) = value {
+            fields.push(("value".to_string(), value));
+        }
+
+        let error = encode_test_fields(&codec, fields).expect_err("the value cannot be encoded");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                CodecError::EncodeField { field, .. } if field == "value"
+            ),
+            "{error:?}"
+        );
+        assert!(error.contains::<FieldEncodeError>(), "{error:?}");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("codec 'avro_value_codec' failed to encode field 'value': {reason}")
+        );
+    }
+
+    #[test]
+    fn avro_codec_keeps_a_schema_the_avro_parser_refuses_beneath_the_codec() {
+        let error = avro_fixture_codec(&[avro_value_case(ParseAsType::String, AvroType::Map)])
+            .expect_err("an Avro map needs the type of its values");
+
+        assert!(matches!(
+            error.current_context(),
+            CodecError::InvalidCodec { codec } if codec == "avro_value_codec"
+        ));
+        assert!(error.contains::<apache_avro::Error>(), "{error:?}");
+        assert!(
+            format!("{error:#}").starts_with("codec 'avro_value_codec' is incompatible: "),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn avro_codec_names_a_field_its_wire_schema_leaves_out() {
+        let codec = avro_fixture_codec(&[
+            avro_value_case(ParseAsType::String, AvroType::String),
+            AvroFieldCase {
+                name: "extra",
+                wire: None,
+                ..avro_value_case(ParseAsType::String, AvroType::String)
+            },
+        ])
+        .expect("the wire schema may describe fewer fields than the schema");
+
+        let error = encode_test_fields(
+            &codec,
+            [
+                ("value".to_string(), RuntimeValue::String("a".to_string())),
+                ("extra".to_string(), RuntimeValue::String("b".to_string())),
+            ],
+        )
+        .expect_err("every schema field needs a wire field");
+
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'avro_value_codec' is incompatible: missing wire field 'extra'"
+        );
+    }
+
+    /// The row the protobuf fixtures encode.
+    fn protobuf_row() -> RuntimeRow {
+        test_runtime_row([
+            ("user_id".to_string(), RuntimeValue::U32(42)),
+            (
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            ),
+            (
+                "payload".to_string(),
+                RuntimeValue::String("hello".to_string()),
+            ),
+        ])
+    }
+
+    fn compiled_protobuf_codec(
+        name: &str,
+        on_ingestion: Option<&str>,
+        on_emitting: Option<&str>,
+    ) -> error_stack::Result<Arc<CompiledCodec>, CodecError> {
+        let codec = protobuf_codec(name, on_ingestion, on_emitting);
+        compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
+            Arc::new(compile_schema(&protobuf_schema())),
+            self_describing(&codec.wire_format),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn transformed_codecs_refuse_a_direction_they_declare_no_program_for() {
+        let bare_jaq =
+            jaq_native_codec("bare_jaq", CodecJaqFormat::Json, "notification", None, None);
+        let error = compile_codec(
+            &bare_jaq,
+            Arc::new(compile_schema(&schema())),
+            self_describing(&bare_jaq.wire_format),
+        )
+        .expect_err("a JAQ-native codec needs a program");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'bare_jaq' is incompatible: JAQ-native codec must declare a JAQ transformation"
+        );
+
+        let error = compiled_protobuf_codec("bare_protobuf", None, None)
+            .expect_err("a protobuf codec needs a program");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'bare_protobuf' is incompatible: protobuf codec must declare a JAQ \
+             transformation"
+        );
+
+        let ingest_only = jaq_native_codec(
+            "ingest_only",
+            CodecJaqFormat::Json,
+            "notification",
+            Some("."),
+            None,
+        );
+        let ingest_only = compile_codec(
+            &ingest_only,
+            Arc::new(compile_schema(&schema())),
+            self_describing(&ingest_only.wire_format),
+        )
+        .expect("an ON INGESTION program compiles");
+        let error = encode_arrow_record(&ingest_only, &record())
+            .expect_err("encoding needs an ON EMITTING program");
+        assert!(matches!(
+            error.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::JaqNativeOnEmittingRequired)
+        ));
+
+        let emit_only = jaq_native_codec(
+            "emit_only",
+            CodecJaqFormat::Json,
+            "notification",
+            None,
+            Some("."),
+        );
+        let emit_only = compile_codec(
+            &emit_only,
+            Arc::new(compile_schema(&schema())),
+            self_describing(&emit_only.wire_format),
+        )
+        .expect("an ON EMITTING program compiles");
+        let error = decode_one(&emit_only, br#"{"user_id":1}"#)
+            .expect_err("decoding needs an ON INGESTION program");
+        assert!(matches!(
+            error.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::JaqNativeOnIngestionRequired)
+        ));
+
+        let protobuf_ingest_only = compiled_protobuf_codec("protobuf_ingest_only", Some("."), None)
+            .expect("an ON INGESTION program compiles");
+        let error = encode_arrow_record(&protobuf_ingest_only, &protobuf_row())
+            .expect_err("encoding needs an ON EMITTING program");
+        assert!(matches!(
+            error.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::ProtobufOnEmittingRequired)
+        ));
+
+        let protobuf_emit_only = compiled_protobuf_codec("protobuf_emit_only", None, Some("."))
+            .expect("an ON EMITTING program compiles");
+        let error = decode_one(&protobuf_emit_only, &[0x08, 42])
+            .expect_err("decoding needs an ON INGESTION program");
+        assert!(matches!(
+            error.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::ProtobufOnIngestionRequired)
+        ));
+
+        let json = compile_codec(
+            &codec("json_codec"),
+            Arc::new(compile_schema(&schema())),
+            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+        )
+        .expect("codec should compile");
+        let error = json
+            .unfold_on_ingestion(Bytes::new())
+            .expect_err("a schemaful codec has no program to unfold with");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'json_codec' is incompatible: codec declares no ON INGESTION transformation to \
+             run"
+        );
+    }
+
+    #[test]
+    fn protobuf_codec_keeps_the_message_decode_failure_beneath_the_codec_once() {
+        let codec = compiled_protobuf_codec("protobuf_decode", Some("."), None)
+            .expect("an ON INGESTION program compiles");
+        let malformed = [0x0a, 0xff];
+        let decode_error = DynamicMessage::decode(protobuf_descriptor(), &malformed[..])
+            .expect_err("a length beyond the payload is malformed")
+            .to_string();
+
+        let error = decode_one(&codec, &malformed).expect_err("the payload is not the message");
+
+        let CodecError::Unfold { position, cause } = error.current_context() else {
+            panic!("the rejection must place its cause in the payload: {error:?}");
+        };
+        assert_eq!(*position, UnfoldPosition::Input { input: 0 });
+        assert!(matches!(
+            cause.current_context(),
+            CodecError::ProtobufDecode { .. }
+        ));
+        assert!(cause.contains::<RuntimeSchemaError>(), "{cause:?}");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "failed to parse protobuf payload for codec 'protobuf_decode': failed to decode \
+                 protobuf message 'nervix.test.Notification': {decode_error} (input value 0)"
+            )
+        );
+    }
+
+    #[test]
+    fn protobuf_codec_keeps_the_message_encode_failure_beneath_the_codec_once() {
+        let codec = compiled_protobuf_codec("protobuf_encode", None, Some("{unknown: 1}"))
+            .expect("an ON EMITTING program compiles");
+        let mut deserializer = serde_json::Deserializer::from_slice(br#"{"unknown":1}"#);
+        let deserialize_error = DynamicMessage::deserialize_with_options(
+            protobuf_descriptor(),
+            &mut deserializer,
+            &ProtobufDeserializeOptions::new().deny_unknown_fields(true),
+        )
+        .expect_err("the message declares no field named unknown")
+        .to_string();
+
+        let error = encode_arrow_record(&codec, &protobuf_row())
+            .expect_err("the message declares no field named unknown");
+
+        assert!(matches!(
+            error.current_context(),
+            CodecError::ProtobufEncode { codec } if codec == "protobuf_encode"
+        ));
+        assert!(
+            matches!(
+                error.downcast_ref::<RuntimeSchemaError>(),
+                Some(RuntimeSchemaError::ProtobufJson {
+                    operation: ProtobufJsonOperation::DeserializeMessage,
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "failed to encode protobuf payload for codec 'protobuf_encode': failed to \
+                 deserialize the protobuf message from JSON for protobuf message \
+                 'nervix.test.Notification': {deserialize_error}"
+            )
+        );
+    }
+
+    #[test]
+    fn syslog_codec_names_a_schema_field_its_encoding_requires() {
+        let schema = CreateSchema {
+            name: named("syslog_message_only"),
+            fields: vec![SchemaField {
+                name: named("message"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let codec = CreateCodec {
+            name: named("syslog_message_only_codec"),
+            wire_format: CodecWireFormat::Syslog,
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let codec = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema)),
+            self_describing(&codec.wire_format),
+        )
+        .expect("a SYSLOG schema may leave fields of the fixed contract out");
+
+        let error = encode_test_fields(
+            &codec,
+            [(
+                "message".to_string(),
+                RuntimeValue::String("order accepted".to_string()),
+            )],
+        )
+        .expect_err("SYSLOG encoding needs the facility");
+
+        assert!(matches!(
+            error.current_context(),
+            CodecError::SyslogEncode { .. }
+        ));
+        assert!(matches!(
+            error.downcast_ref::<syslog::SyslogEncodeError>(),
+            Some(syslog::SyslogEncodeError::MissingSchemaField { field }) if field == "facility"
+        ));
+        assert_eq!(
+            format!("{error:#}"),
+            "failed to encode syslog payload for codec 'syslog_message_only_codec': SYSLOG \
+             encoding requires schema field 'facility'"
+        );
+    }
+
+    #[rstest]
+    #[case::encoding_rules(
+        vec![("facility", ParseAsType::U8, false)],
+        true,
+        "SYSLOG codecs do not support ENCODE field rules"
+    )]
+    #[case::outside_contract(
+        vec![("priority", ParseAsType::U8, false)],
+        false,
+        "SYSLOG schema field 'priority' is outside the fixed field contract"
+    )]
+    #[case::field_type(
+        vec![("facility", ParseAsType::String, false)],
+        false,
+        "SYSLOG field 'facility' must be U8, found STRING"
+    )]
+    #[case::field_optionality(
+        vec![("hostname", ParseAsType::String, false)],
+        false,
+        "SYSLOG field 'hostname' must be STRING OPTIONAL, found STRING"
+    )]
+    fn syslog_codec_refuses_a_schema_outside_its_fixed_contract(
+        #[case] fields: Vec<(&str, ParseAsType, bool)>,
+        #[case] encoding_rules: bool,
+        #[case] reason: &str,
+    ) {
+        let schema = CreateSchema {
+            name: named("syslog_contract"),
+            fields: fields
+                .into_iter()
+                .map(|(name, ty, optional)| SchemaField {
+                    name: named(name),
+                    ty,
+                    optional,
+                    sensitive: false,
+                })
+                .collect(),
+        };
+        let encoding_rules = if encoding_rules {
+            vec![CodecEncodingRule {
+                field: named("facility"),
+                encoding: nervix_models::CodecEncoding::Rfc3339,
+            }]
+        } else {
+            Vec::new()
+        };
+        let codec = CreateCodec {
+            name: named("syslog_contract_codec"),
+            wire_format: CodecWireFormat::Syslog,
+            schema: schema.name.clone(),
+            encoding_rules,
+        };
+
+        let error = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema)),
+            self_describing(&codec.wire_format),
+        )
+        .expect_err("the schema breaks the SYSLOG field contract");
+
+        assert!(matches!(
+            error.current_context(),
+            CodecError::InvalidCodec { .. }
+        ));
+        assert!(error.contains::<CodecContractError>(), "{error:?}");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("codec 'syslog_contract_codec' is incompatible: {reason}")
+        );
+    }
+
     #[test]
     fn syslog_codec_accepts_rfc5424_control_values_while_preserving_structured_data() {
         let codec = compiled_syslog_codec();
@@ -6326,6 +7334,16 @@ mod tests {
         assert!(
             matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "hostname")
         );
+        assert!(
+            matches!(
+                error.downcast_ref::<RuntimeSchemaError>(),
+                Some(RuntimeSchemaError::InvalidSyslogHeader {
+                    position: 3,
+                    issue: SyslogHeaderIssue::NonPrintableAscii,
+                })
+            ),
+            "the header's offending byte must stay beneath the field failure: {error:?}"
+        );
 
         let mut invalid_sd = common();
         invalid_sd.push((
@@ -6367,6 +7385,32 @@ mod tests {
         assert!(
             matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "facility")
         );
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'syslog_codec' failed to encode field 'facility': value must be at most 23"
+        );
+
+        let mut invalid_severity = common();
+        invalid_severity[1] = ("severity".to_string(), RuntimeValue::U8(8));
+        let error = encode_test_fields(&codec, invalid_severity)
+            .expect_err("severity above 7 must be rejected");
+        assert!(matches!(
+            error.downcast_ref::<FieldEncodeError>(),
+            Some(FieldEncodeError::AboveMaximum { maximum: 7 })
+        ));
+
+        let mut trailing_sd = common();
+        trailing_sd.push((
+            "structured_data".to_string(),
+            RuntimeValue::String("[example value=\"one\"] tail".to_string()),
+        ));
+        let error = encode_test_fields(&codec, trailing_sd)
+            .expect_err("text after the SD elements must be rejected");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'syslog_codec' failed to encode field 'structured_data': text contains \
+             trailing content after the SD elements"
+        );
     }
 
     #[test]
@@ -6394,7 +7438,11 @@ mod tests {
         }
 
         assert_eq!(payloads.len(), records.len());
-        for (payload, expected_user_id) in payloads.iter().zip([42, 7]) {
+        for (row_index, (payload, expected_user_id)) in payloads.iter().zip([42, 7]).enumerate() {
+            let reference =
+                serde_json::to_vec(&ArrowCodecRow::new(&compiled_codec, &batch, row_index))
+                    .assured("the reference Arrow row has valid JSON fields");
+            assert_eq!(*payload, reference);
             let decoded =
                 decode_one(&compiled_codec, payload).expect("columnar JSON payload should decode");
             assert_eq!(
@@ -6982,8 +8030,16 @@ mod tests {
             br#"{"matrix":[[1.0,2.0,3.0],[4.0,"five",6.0]],"samples":[[1.0,2.0]]}"#.as_slice(),
             br#"{"matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]],"samples":[[7.0,"eight"]]}"#.as_slice(),
         ] {
-            decode_with_codec(&codec, payload, &mut decoder, &mut builder)
+            let rejected = decode_with_codec(&codec, payload, &mut decoder, &mut builder)
                 .expect_err("an element of the wrong type should be rejected");
+            assert!(
+                matches!(rejected.current_context(), CodecError::ParseField { .. }),
+                "the rejection must name the field that did not decode: {rejected:?}"
+            );
+            assert!(
+                rejected.contains::<RuntimeSchemaError>(),
+                "the element's refusal must stay beneath the field failure: {rejected:?}"
+            );
         }
         let expected = multidimensional_array_record();
         let payload = encode_arrow_record(&codec, &expected).expect("must encode nested arrays");
@@ -7139,6 +8195,16 @@ mod tests {
         }
 
         let batch = decoded;
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .assured("the decoded primitive arrays match the JSON codec");
+        let mut encoded = Vec::new();
+        encoder
+            .encode_row_into(0, &mut encoded)
+            .assured("the primitive arrays encode from their Arrow columns");
+        let reference = serde_json::to_vec(&ArrowCodecRow::new(&compiled_codec, &batch, 0))
+            .assured("the primitive arrays serialize through the reference row view");
+        assert_eq!(encoded, reference);
         for field in compiled_schema.fields() {
             assert_eq!(
                 single_batch_value(&batch, &field.name),
@@ -7185,11 +8251,34 @@ mod tests {
 
         let missing = br#"{"user_id":42,"tenant":"acme","created_at":"2025-01-02T03:04:05+00:00","active":true}"#;
         let err = decode_one(&compiled_codec, missing).expect_err("must reject missing field");
-        assert!(matches!(err, CodecError::MissingField { field, .. } if field == "latency"));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::MissingField { field, .. } if field == "latency"
+        ));
 
         let bad_type = br#"{"user_id":"forty-two","tenant":"acme","created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"active":true}"#;
         let err = decode_one(&compiled_codec, bad_type).expect_err("must reject bad type");
-        assert!(matches!(err, CodecError::ParseField { field, .. } if field == "user_id"));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::ParseField { field, .. } if field == "user_id"
+        ));
+        assert!(
+            matches!(
+                err.downcast_ref::<FieldDecodeError>(),
+                Some(FieldDecodeError::WireType {
+                    found: JsonValueKind::String,
+                    ..
+                })
+            ),
+            "the wire type mismatch must be the typed cause: {err:?}"
+        );
+        let message = format!("{err:#}");
+        assert!(
+            message.starts_with("codec 'json_codec' failed to parse field 'user_id': expected "),
+            "{message}"
+        );
+        assert!(message.ends_with(", found a JSON string"), "{message}");
+        assert!(!message.contains("forty-two"), "{message}");
     }
 
     #[test]
@@ -7237,11 +8326,18 @@ mod tests {
             br#"{"value":-1}"#.as_slice(),
             br#"{"value":1.0}"#.as_slice(),
         ] {
+            let error = decode_one(&codec, payload).expect_err("an out-of-shape U8 is rejected");
             assert!(matches!(
-                decode_one(&codec, payload),
-                Err(CodecError::ParseField { field, .. }) if field == "value"
+                error.current_context(),
+                CodecError::ParseField { field, .. } if field == "value"
             ));
         }
+        let out_of_range = decode_one(&codec, br#"{"value":256}"#)
+            .expect_err("a value above the U8 range is rejected");
+        assert!(
+            out_of_range.contains::<RuntimeSchemaError>(),
+            "the Arrow builder's refusal must stay beneath the field failure: {out_of_range:?}"
+        );
     }
 
     #[test]
@@ -7351,7 +8447,10 @@ mod tests {
 
         let err = decode_one(&compiled_codec, notification_json_payload_with_extra())
             .expect_err("strict wire schema should reject unknown fields");
-        assert!(matches!(err, CodecError::UnexpectedField { field, .. } if field == "ignored"));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::UnexpectedField { field, .. } if field == "ignored"
+        ));
     }
 
     #[test]
@@ -7449,13 +8548,115 @@ mod tests {
                 &mut builder,
             )
             .expect_err("malformed JSON text must be rejected");
-            assert!(matches!(error, CodecError::JsonDecode { .. }));
+            assert!(matches!(
+                error.current_context(),
+                CodecError::JsonDecode { .. }
+            ));
             assert_eq!(builder.rows(), 0);
         }
 
         decode_with_codec(&compiled_codec, valid, &mut decoder, &mut builder)
             .expect("the decoder should recover on the next payload");
         assert_eq!(builder.rows(), 1);
+    }
+
+    fn strict_cbor_codec() -> Arc<CompiledCodec> {
+        compile_codec(
+            &schemaful_cbor_codec("schemaful_cbor_codec"),
+            Arc::new(compile_schema(&schema())),
+            ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Strict)),
+        )
+        .expect("codec should compile")
+    }
+
+    fn cbor_payload(value: &JsonValue) -> Vec<u8> {
+        let mut payload = Vec::new();
+        ciborium::into_writer(value, &mut payload).expect("a JSON value writes as CBOR");
+        payload
+    }
+
+    #[rstest]
+    #[case::not_an_object(
+        serde_json::json!([1]),
+        "codec 'schemaful_cbor_codec' expected an object"
+    )]
+    #[case::unexpected_field(
+        serde_json::json!({
+            "user_id": 42, "tenant": "acme", "created_at": "2025-01-02T03:04:05+00:00",
+            "latency": 12.5, "active": true, "extra": 1
+        }),
+        "codec 'schemaful_cbor_codec' has unexpected field 'extra'"
+    )]
+    #[case::missing_field(
+        serde_json::json!({
+            "user_id": 42, "tenant": "acme", "created_at": "2025-01-02T03:04:05+00:00",
+            "latency": 12.5
+        }),
+        "codec 'schemaful_cbor_codec' missing field 'active'"
+    )]
+    #[case::required_null(
+        serde_json::json!({
+            "user_id": 42, "tenant": "acme", "created_at": "2025-01-02T03:04:05+00:00",
+            "latency": 12.5, "active": null
+        }),
+        "codec 'schemaful_cbor_codec' failed to parse field 'active': null is incompatible with \
+         required field"
+    )]
+    #[case::wire_type(
+        serde_json::json!({
+            "user_id": 42, "tenant": "acme", "created_at": "2025-01-02T03:04:05+00:00",
+            "latency": 12.5, "active": "yes"
+        }),
+        "codec 'schemaful_cbor_codec' failed to parse field 'active': expected Boolean, found a \
+         JSON string"
+    )]
+    #[case::value(
+        serde_json::json!({
+            "user_id": 42, "tenant": "acme", "created_at": "yesterday",
+            "latency": 12.5, "active": true
+        }),
+        "codec 'schemaful_cbor_codec' failed to parse field 'created_at': field 'created_at' \
+         holds a JSON string, which is incompatible with Datetime"
+    )]
+    fn strict_cbor_wire_schema_rejects_a_value_outside_it(
+        #[case] value: JsonValue,
+        #[case] message: &str,
+    ) {
+        let codec = strict_cbor_codec();
+        let mut builder = codec.schema.batch_builder(1);
+
+        let error = decode_with_codec(
+            &codec,
+            &cbor_payload(&value),
+            &mut JsonDecoder::default(),
+            &mut builder,
+        )
+        .expect_err("the payload breaks the wire schema");
+
+        assert_eq!(format!("{error:#}"), message);
+        assert_eq!(builder.rows(), 0);
+    }
+
+    #[test]
+    fn a_malformed_cbor_payload_names_its_parser_error_once() {
+        let malformed = [0xff_u8];
+        let parser_error = ciborium::from_reader::<JsonValue, _>(Cursor::new(&malformed[..]))
+            .expect_err("a lone break byte is not a CBOR item")
+            .to_string();
+
+        let error =
+            decode_one(&strict_cbor_codec(), &malformed).expect_err("the payload is not CBOR");
+
+        assert!(matches!(
+            error.current_context(),
+            CodecError::CborDecode { .. }
+        ));
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "failed to parse cbor payload for codec 'schemaful_cbor_codec': {parser_error}"
+            )
+        );
     }
 
     #[test]
@@ -7622,7 +8823,10 @@ mod tests {
         .expect("codec should compile");
 
         let err = decode_one(&compiled_codec, br#"[1,2,3]"#).expect_err("arrays must be rejected");
-        assert!(matches!(err, CodecError::ExpectedObject { .. }));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::ExpectedObject { .. }
+        ));
 
         let missing_wire_schema = CreateWireSchema {
             name: named("notification_wire_partial"),
@@ -7659,8 +8863,20 @@ mod tests {
             br#"{"user_id":42,"tenant":"acme","created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"active":true}"#,
         )
         .expect_err("missing wire field must fail");
+        assert!(matches!(
+            err.current_context(),
+            CodecError::InvalidCodec { .. }
+        ));
         assert!(
-            matches!(err, CodecError::InvalidCodec { reason, .. } if reason.contains("created_at"))
+            matches!(
+                err.downcast_ref::<CodecContractError>(),
+                Some(CodecContractError::MissingWireField { field }) if field == "created_at"
+            ),
+            "the missing wire field must be the typed cause: {err:?}"
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            "codec 'json_partial' is incompatible: missing wire field 'created_at'"
         );
     }
 
@@ -7757,7 +8973,10 @@ mod tests {
         let err =
             compile_codec(&codec, compiled_schema, wire_format).expect_err("invalid jaq must fail");
 
-        assert!(matches!(err, CodecError::InvalidJaqTransformation { .. }));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::InvalidJaqTransformation { .. }
+        ));
     }
 
     #[test]
@@ -7774,7 +8993,10 @@ mod tests {
         let err =
             compile_codec(&codec, compiled_schema, wire_format).expect_err("invalid jaq must fail");
 
-        assert!(matches!(err, CodecError::InvalidJaqTransformation { .. }));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::InvalidJaqTransformation { .. }
+        ));
     }
 
     #[test]
@@ -7792,8 +9014,8 @@ mod tests {
             }),
         )
         .expect("codec should compile");
-        assert!(compiled_codec.requires_blocking_decode());
-        assert!(!compiled_codec.requires_blocking_encode());
+        assert!(compiled_codec.transforms_on_ingestion());
+        assert!(!compiled_codec.transforms_on_emitting());
 
         let payload = [
             0x08, 42, 0x12, 4, b'a', b'c', b'm', b'e', 0x1a, 5, b'h', b'e', b'l', b'l', b'o',
@@ -7869,8 +9091,8 @@ mod tests {
             }),
         )
         .expect("codec should compile");
-        assert!(!compiled_codec.requires_blocking_decode());
-        assert!(compiled_codec.requires_blocking_encode());
+        assert!(!compiled_codec.transforms_on_ingestion());
+        assert!(compiled_codec.transforms_on_emitting());
 
         let record = test_runtime_row([
             ("user_id".to_string(), RuntimeValue::U32(42)),
@@ -8025,7 +9247,10 @@ mod tests {
         let err = compile_codec(&codec, Arc::new(compile_schema(&schema())), wire_format)
             .expect_err("invalid jaq must fail");
 
-        assert!(matches!(err, CodecError::InvalidJaqTransformation { .. }));
+        assert!(matches!(
+            err.current_context(),
+            CodecError::InvalidJaqTransformation { .. }
+        ));
     }
 
     #[test]
@@ -8041,8 +9266,18 @@ mod tests {
         )
         .expect_err("descriptor is mandatory");
 
+        assert!(matches!(
+            err.current_context(),
+            CodecError::InvalidCodec { .. }
+        ));
+        assert!(matches!(
+            err.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::ProtobufDescriptorMissing)
+        ));
         assert!(
-            matches!(err, CodecError::InvalidCodec { reason, .. } if reason.contains("compiled descriptor"))
+            format!("{err:#}")
+                .ends_with("is incompatible: protobuf codec is missing compiled descriptor"),
+            "{err:#}"
         );
     }
 

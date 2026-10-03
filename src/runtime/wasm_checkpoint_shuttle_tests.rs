@@ -5,20 +5,19 @@
 //!   confirm it, while an inspection reads its progress, and while the acknowledgements it holds
 //!   race the deliveries of the same inputs.
 //! - **Depends on.** The production checkpoint state, checkpoint holds, acknowledgement sets and
-//!   the server Shuttle runner.
+//!   the model harness's Shuttle runner.
 //! - **Must not know.** Guest execution, stable storage, or how a replica reaches the owner.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records.
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
-
-use meticulous::{OptionExt as _, ResultExt as _};
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records.
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     ClusterNodeName, DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint,
     WasmCheckpointStage, WasmStateGeneration,
+};
+use nervix_primitives::{
+    sync::StdArc,
+    unmodeled::sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use super::*;
@@ -26,7 +25,6 @@ use crate::{
     runtime::{BranchKey, RuntimeState, wasm_state::WasmCheckpointReplicas},
     runtime_ack::AckOutcome,
     runtime_schema::RuntimeValue,
-    shuttle_test::check_interleavings,
 };
 
 const MODEL_TASK_JOINS: &str =
@@ -77,7 +75,7 @@ struct ConfirmationRecord {
     reported: [AtomicBool; REPLICAS.len()],
     /// Offers a locally durable checkpoint to the replicas, as the owner notifies them once the
     /// checkpoint is on its storage.
-    offered: tokio::sync::Notify,
+    offered: nervix_primitives::sync::Notify,
 }
 
 impl ConfirmationRecord {
@@ -104,7 +102,7 @@ async fn checkpoint_and_confirm(
         panic!("the checkpoint was captured for replicas");
     };
     loop {
-        let progressed = state.replica_progress_signal().notified();
+        let progressed = state.replication().progress_signal().notified();
         tokio::pin!(progressed);
         progressed.as_mut().enable();
         if state.replicas_awaiting(&replicas, revision).is_empty() {
@@ -149,7 +147,7 @@ async fn replicate(
         .get(replica)
         .assured("the record holds a flag for every named replica")
         .store(true, Ordering::SeqCst);
-    state.mark_replica_progress(&name, held);
+    state.replication().record(&name, held);
 }
 
 /// Read the branch's checkpoint progress while it is being captured, written and confirmed.
@@ -182,7 +180,7 @@ async fn inspect(state: StdArc<ReplicatedWasmProcessorState>, record: StdArc<Con
                 "a replica-confirmed checkpoint must count every required replica as confirmed"
             );
         }
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
 }
 
@@ -193,18 +191,25 @@ async fn inspect(state: StdArc<ReplicatedWasmProcessorState>, record: StdArc<Con
 /// reports confirmation before every replica reported or moves the committed revision back.
 fn a_checkpoint_waiting_for_its_replicas_misses_no_confirmation() {
     shuttle::future::block_on(async {
-        let state = StdArc::new(ReplicatedWasmProcessorState::new(placement(), None));
+        let state = StdArc::new(ReplicatedWasmProcessorState::new(
+            placement(),
+            None,
+            nervix_primitives::sync::Arc::new(
+                nervix_primitives::publication::ArcSwapOption::empty(),
+            ),
+        ));
         let record = StdArc::new(ConfirmationRecord::default());
         let mut replicating = Vec::with_capacity(REPLICAS.len());
         for replica in 0..REPLICAS.len() {
-            replicating.push(tokio::spawn(replicate(
+            replicating.push(nervix_primitives::task::spawn(replicate(
                 state.clone(),
                 record.clone(),
                 replica,
             )));
         }
-        let inspecting = tokio::spawn(inspect(state.clone(), record.clone()));
-        let owner = tokio::spawn(checkpoint_and_confirm(state.clone(), record.clone()));
+        let inspecting = nervix_primitives::task::spawn(inspect(state.clone(), record.clone()));
+        let owner =
+            nervix_primitives::task::spawn(checkpoint_and_confirm(state.clone(), record.clone()));
         owner.await.assured(MODEL_TASK_JOINS);
         for replica in replicating {
             replica.await.assured(MODEL_TASK_JOINS);
@@ -253,7 +258,7 @@ fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, deli
         let released = StdArc::new(AtomicBool::new(false));
 
         let observed_release = released.clone();
-        let observer = tokio::spawn(async move {
+        let observer = nervix_primitives::task::spawn(async move {
             let outcome = completion.wait().await;
             if outcome == AckOutcome::Ack {
                 assert!(
@@ -264,15 +269,15 @@ fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, deli
             }
             outcome
         });
-        let delivering = tokio::spawn(async move {
+        let delivering = nervix_primitives::task::spawn(async move {
             match delivery {
                 DeliveryEnd::Succeeded => delivered.ack_success(),
                 DeliveryEnd::Failed => delivered.no_ack("delivery failed"),
             }
         });
-        let branch = tokio::spawn(async move {
+        let branch = nervix_primitives::task::spawn(async move {
             processing.ack_success();
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             match checkpoint {
                 CheckpointEnd::Completed => {
                     released.store(true, Ordering::SeqCst);

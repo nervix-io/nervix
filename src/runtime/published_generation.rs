@@ -7,12 +7,13 @@
 //! - **Depends on.** `arc-swap` and the runtime state sequence.
 //! - **Must not know.** What a generation holds, how it is encoded, or where it is persisted.
 
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use nervix_primitives::{
+    publication::ArcSwap,
+    sync::{
+        StdArc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
-
-use nervix_execution::sync::ArcSwap;
 
 use super::lsm_sequence::LsmSequence;
 
@@ -60,15 +61,17 @@ impl<T> PublishedGenerations<T> {
         self.live_dirty.load(Ordering::SeqCst)
     }
 
-    /// Publish `value`, everything the owning task's live state holds, as the next generation.
+    /// Publish `value`, everything the owning task's live state holds, as the next generation, and
+    /// return the revision it is stamped with.
     ///
     /// Only the owning task publishes and marks its live state dirty, so no change can land between
     /// stamping this generation and clearing the mark.
-    pub(super) fn publish(&self, value: T) {
+    pub(super) fn publish(&self, value: T) -> u64 {
         let revision = self.revisions.advance();
         self.published
             .store(StdArc::new(Generation { revision, value }));
         self.live_dirty.store(false, Ordering::SeqCst);
+        revision
     }
 
     /// The generation published last.

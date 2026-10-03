@@ -16,9 +16,12 @@ ignore = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }

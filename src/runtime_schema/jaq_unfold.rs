@@ -12,12 +12,13 @@
 use std::fmt;
 
 use bytes::Bytes;
+use error_stack::{Report, ResultExt as _};
 use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqInput, JaqProgramError};
 use serde_json::Value as JsonValue;
 use tracing::trace;
 
 use super::{
-    CodecError, CompiledCodec, CompiledJaqNativeCodec, CompiledWireSchema,
+    CodecContractError, CodecError, CompiledCodec, CompiledJaqNativeCodec, CompiledWireSchema,
     RuntimeRecordBatchBuilder, decode_json_value, decode_protobuf_payload, finish_decoded_row,
 };
 
@@ -68,41 +69,54 @@ impl UnfoldedPayload {
     ///
     /// Reading stops at the first failure, and a program that produces more than
     /// [`PAYLOAD_UNFOLD_LIMIT`] messages is stopped as soon as it exceeds the limit.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the admitted external JAQ extension owns its transformation effects"
+        )
+    )]
     fn unfold(
         codec: &CompiledCodec,
         program: &CompiledJaqProgram,
-        inputs: impl Iterator<Item = Result<JaqInput, CodecError>>,
-    ) -> Result<Self, CodecError> {
+        inputs: impl Iterator<Item = error_stack::Result<JaqInput, CodecError>>,
+    ) -> error_stack::Result<Self, CodecError> {
         let mut messages = Vec::new();
         for (input_index, input) in inputs.enumerate() {
             let input = match input {
                 Ok(input) => input,
                 Err(cause) => {
-                    return Err(cause.at(UnfoldPosition::Input { input: input_index }));
+                    return Err(CodecError::at(
+                        cause,
+                        UnfoldPosition::Input { input: input_index },
+                    ));
                 }
             };
             for (output_index, output) in program.outputs(input).enumerate() {
                 let output = match output {
                     Ok(output) => output,
-                    Err(error) => return Err(codec.evaluation_failure(input_index, &error)),
+                    Err(error) => return Err(codec.evaluation_failure(input_index, error)),
                 };
                 if messages.len() == PAYLOAD_UNFOLD_LIMIT {
-                    return Err(CodecError::UnfoldLimit {
+                    return Err(Report::new(CodecError::UnfoldLimit {
                         codec: codec.name.as_str().to_string(),
                         limit: PAYLOAD_UNFOLD_LIMIT,
-                    });
+                    }));
                 }
                 let value = match JsonValue::try_from(output) {
                     Ok(value) => value,
                     Err(error) => {
-                        let cause = CodecError::JaqTransform {
+                        let cause = Report::new(CodecError::JaqTransform {
                             codec: codec.name.as_str().to_string(),
                             reason: error.to_string(),
-                        };
-                        return Err(cause.at(UnfoldPosition::Output {
-                            input: input_index,
-                            output: output_index,
-                        }));
+                            report: error,
+                        });
+                        return Err(CodecError::at(
+                            cause,
+                            UnfoldPosition::Output {
+                                input: input_index,
+                                output: output_index,
+                            },
+                        ));
                     }
                 };
                 messages.push(UnfoldedMessage {
@@ -123,7 +137,7 @@ impl UnfoldedPayload {
         self,
         codec: &CompiledCodec,
         builder: &mut RuntimeRecordBatchBuilder,
-    ) -> Result<usize, CodecError> {
+    ) -> error_stack::Result<usize, CodecError> {
         let rows_before = builder.rows();
         let appended = self.messages.len();
         for UnfoldedMessage {
@@ -135,7 +149,10 @@ impl UnfoldedPayload {
             let decoded = decode_json_value(codec, &value, None, builder);
             if let Err(cause) = finish_decoded_row(codec, builder, decoded) {
                 builder.abandon_rows_after(rows_before);
-                return Err(cause.at(UnfoldPosition::Output { input, output }));
+                return Err(CodecError::at(
+                    cause,
+                    UnfoldPosition::Output { input, output },
+                ));
             }
         }
         Ok(appended)
@@ -143,18 +160,15 @@ impl UnfoldedPayload {
 }
 
 impl CodecError {
-    /// This failure, placed at `position` in the payload that was unfolding.
-    fn at(self, position: UnfoldPosition) -> Self {
-        Self::Unfold {
-            position,
-            cause: Box::new(self),
-        }
+    /// The failure `cause` reports, placed at `position` in the payload that was unfolding.
+    fn at(cause: Report<Self>, position: UnfoldPosition) -> Report<Self> {
+        Report::new(Self::Unfold { position, cause })
     }
 }
 
 impl CompiledCodec {
     /// Unfolds a payload through the ON INGESTION program that
-    /// [`CompiledCodec::requires_blocking_decode`] selects, without touching a single Arrow column.
+    /// [`CompiledCodec::transforms_on_ingestion`] selects, without touching a single Arrow column.
     ///
     /// jaq and protobuf decoding is the CPU-bound half of those codecs, and it produces the JSON
     /// object of every message before any column is written. Naming that half separately is what
@@ -163,16 +177,13 @@ impl CompiledCodec {
     pub(crate) fn unfold_on_ingestion(
         &self,
         payload: Bytes,
-    ) -> Result<UnfoldedPayload, CodecError> {
+    ) -> error_stack::Result<UnfoldedPayload, CodecError> {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => {
                 let Some(program) = native.transformations.on_ingestion.as_deref() else {
-                    return Err(CodecError::InvalidCodec {
-                        codec: self.name.as_str().to_string(),
-                        reason: "JAQ-native codec used for decoding must declare ON INGESTION \
-                                 transformation"
-                            .to_string(),
-                    });
+                    return Err(
+                        self.contract_violation(CodecContractError::JaqNativeOnIngestionRequired)
+                    );
                 };
                 let values = native.format.read_values(&payload);
                 let inputs =
@@ -181,36 +192,41 @@ impl CompiledCodec {
             }
             CompiledWireSchema::Protobuf(protobuf) => {
                 let Some(program) = protobuf.transformations.on_ingestion.as_deref() else {
-                    return Err(CodecError::InvalidCodec {
-                        codec: self.name.as_str().to_string(),
-                        reason: "protobuf codec used for decoding must declare ON INGESTION \
-                                 transformation"
-                            .to_string(),
-                    });
+                    return Err(
+                        self.contract_violation(CodecContractError::ProtobufOnIngestionRequired)
+                    );
                 };
                 // A protobuf payload holds exactly one message, which is its one input value.
-                let input = match decode_protobuf_payload(&protobuf.message, &payload) {
-                    Ok(value) => {
-                        JaqInput::try_from(value).map_err(|error| CodecError::ProtobufDecode {
-                            codec: self.name.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
-                    }
-                    Err(error) => Err(CodecError::ProtobufDecode {
-                        codec: self.name.as_str().to_string(),
-                        reason: error.to_string(),
-                    }),
-                };
+                let input = self.protobuf_input(&protobuf.message, &payload);
                 UnfoldedPayload::unfold(self, program, std::iter::once(input))
             }
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => Err(CodecError::InvalidCodec {
-                codec: self.name.as_str().to_string(),
-                reason: "codec declares no ON INGESTION transformation to run".to_string(),
-            }),
+            | CompiledWireSchema::Syslog => {
+                Err(self.contract_violation(CodecContractError::OnIngestionMissing))
+            }
         }
+    }
+
+    /// The one input value a protobuf payload holds, decoded as `message`.
+    fn protobuf_input(
+        &self,
+        message: &prost_reflect::MessageDescriptor,
+        payload: &[u8],
+    ) -> error_stack::Result<JaqInput, CodecError> {
+        let value = decode_protobuf_payload(message, payload).change_context_lazy(|| {
+            CodecError::ProtobufDecode {
+                codec: self.name.as_str().to_string(),
+            }
+        })?;
+        JaqInput::try_from(value).map_err(|error| {
+            Report::new(CodecError::ProtobufJaqInput {
+                codec: self.name.as_str().to_string(),
+                reason: error.to_string(),
+                report: error,
+            })
+        })
     }
 
     /// The failure of the ON INGESTION program on one input value.
@@ -218,27 +234,37 @@ impl CompiledCodec {
     /// The evaluator's own message quotes the values it failed on, so the diagnostic names only the
     /// codec and the position, and the message is recorded at trace level with the rest of the
     /// payload-bearing detail.
-    fn evaluation_failure(&self, input: usize, error: &JaqProgramError) -> CodecError {
+    fn evaluation_failure(
+        &self,
+        input: usize,
+        error: error_stack::Report<JaqProgramError>,
+    ) -> Report<CodecError> {
         trace!(
             codec = self.name.as_str(),
             input,
             error = %error,
             "ON INGESTION program evaluation failed"
         );
-        let cause = CodecError::JaqIngestionEvaluation {
+        let cause = Report::new(CodecError::JaqIngestionEvaluation {
             codec: self.name.as_str().to_string(),
-        };
-        cause.at(UnfoldPosition::Input { input })
+            report: error,
+        });
+        CodecError::at(cause, UnfoldPosition::Input { input })
     }
 }
 
 impl CompiledJaqNativeCodec {
-    fn read_failure(&self, codec: &CompiledCodec, error: JaqFormatError) -> CodecError {
-        CodecError::JaqNativeDecode {
+    fn read_failure(
+        &self,
+        codec: &CompiledCodec,
+        error: error_stack::Report<JaqFormatError>,
+    ) -> Report<CodecError> {
+        Report::new(CodecError::JaqNativeDecode {
             codec: codec.name.as_str().to_string(),
             format: self.format.name(),
             reason: error.to_string(),
-        }
+            report: error,
+        })
     }
 }
 
@@ -248,12 +274,12 @@ mod tests {
         CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
         ParseAsType, ResolvedCodecWireFormat, SchemaField,
     };
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::runtime_schema::{
-        JsonDecoder, RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema,
-        decode_with_codec,
+        JsonDecoder, RuntimeRecordBatch, RuntimeSchemaError, RuntimeValue, compile_codec,
+        compile_schema, decode_with_codec,
     };
 
     fn named<N>(raw: &str) -> N
@@ -303,7 +329,7 @@ mod tests {
         codec: &CompiledCodec,
         builder: &mut RuntimeRecordBatchBuilder,
         payload: &[u8],
-    ) -> Result<usize, CodecError> {
+    ) -> error_stack::Result<usize, CodecError> {
         decode_with_codec(codec, payload, &mut JsonDecoder::default(), builder)
     }
 
@@ -388,7 +414,7 @@ mod tests {
 
         assert!(
             matches!(
-                error,
+                error.current_context(),
                 CodecError::Unfold {
                     position: UnfoldPosition::Output {
                         input: 0,
@@ -397,9 +423,26 @@ mod tests {
                     ..
                 }
             ),
-            "{error}"
+            "{error:#}"
         );
-        let message = error.to_string();
+        let CodecError::Unfold { cause, .. } = error.current_context() else {
+            panic!("the rejection must place its cause in the payload: {error:?}");
+        };
+        assert!(
+            matches!(
+                cause.current_context(),
+                CodecError::ParseField { field, .. } if field == "user_id"
+            ),
+            "{cause:?}"
+        );
+        assert!(
+            matches!(
+                cause.downcast_ref::<RuntimeSchemaError>(),
+                Some(RuntimeSchemaError::JsonValueTypeMismatch { .. })
+            ),
+            "the Arrow builder's refusal must stay beneath the field failure: {cause:?}"
+        );
+        let message = format!("{error:#}");
         assert!(
             message.contains("codec 'unfolding_codec' failed to parse field 'user_id'"),
             "{message}"
@@ -422,8 +465,37 @@ mod tests {
             .expect_err("an output that is not an object must be rejected");
 
         assert_eq!(
-            error.to_string(),
+            format!("{error:#}"),
             "codec 'unfolding_codec' expected an object (input value 0, output 1)"
+        );
+        assert_eq!(builder.rows(), 0);
+    }
+
+    #[test]
+    fn names_the_position_of_an_output_that_has_no_json_form() {
+        let codec = unfolding_codec(CodecJaqFormat::Json, "{user_id: nan}");
+        let mut builder = codec.schema().batch_builder(1);
+
+        let error =
+            decode(&codec, &mut builder, br#"{"user_id":1}"#).expect_err("NaN is outside JSON");
+
+        let CodecError::Unfold { position, cause } = error.current_context() else {
+            panic!("the rejection must place its cause in the payload: {error:?}");
+        };
+        assert_eq!(
+            *position,
+            UnfoldPosition::Output {
+                input: 0,
+                output: 0
+            }
+        );
+        assert!(
+            matches!(cause.current_context(), CodecError::JaqTransform { .. }),
+            "{cause:?}"
+        );
+        assert!(
+            format!("{error:#}").starts_with("codec 'unfolding_codec' jaq transformation failed: "),
+            "{error:#}"
         );
         assert_eq!(builder.rows(), 0);
     }
@@ -438,13 +510,13 @@ mod tests {
 
         assert!(
             matches!(
-                error,
+                error.current_context(),
                 CodecError::Unfold {
                     position: UnfoldPosition::Input { input: 1 },
                     ..
                 }
             ),
-            "{error}"
+            "{error:#}"
         );
         assert_eq!(builder.rows(), 0);
     }
@@ -462,7 +534,7 @@ mod tests {
         .expect_err("adding a number to a string must fail");
 
         assert_eq!(
-            error.to_string(),
+            format!("{error:#}"),
             "codec 'unfolding_codec' ON INGESTION program evaluation failed (input value 1)"
         );
         assert_eq!(builder.rows(), 0);
@@ -488,7 +560,7 @@ mod tests {
             .expect_err("a payload beyond the limit must be rejected");
 
         assert_eq!(
-            error.to_string(),
+            format!("{error:#}"),
             "codec 'unfolding_codec' payload exceeds the unfold limit of 65536 messages"
         );
         assert_eq!(builder.rows(), 0);
@@ -502,7 +574,10 @@ mod tests {
         let error = decode(&codec, &mut builder, br#"{"user_id":1}"#)
             .expect_err("an unbounded program must be stopped at the limit");
 
-        assert!(matches!(error, CodecError::UnfoldLimit { .. }), "{error}");
+        assert!(
+            matches!(error.current_context(), CodecError::UnfoldLimit { .. }),
+            "{error:#}"
+        );
         assert_eq!(builder.rows(), 0);
     }
 

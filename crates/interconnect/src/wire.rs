@@ -9,6 +9,7 @@
 use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;
+use error_stack::Report;
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
@@ -31,8 +32,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
 
 /// Changes whenever the one supported interconnect contract changes.
 pub(crate) const WIRE_CONTRACT_FINGERPRINT: [u8; 32] = [
-    0x60, 0xa2, 0x14, 0xe5, 0xa1, 0x98, 0x2d, 0xc7, 0x15, 0x25, 0x79, 0xab, 0xd3, 0x0a, 0x58, 0xbf,
-    0x53, 0x1e, 0x5b, 0xc6, 0x13, 0x3e, 0xcc, 0xdf, 0xe8, 0x9b, 0x43, 0x0f, 0xe8, 0xd4, 0x2e, 0x37,
+    0x2f, 0x11, 0xde, 0xf8, 0xe8, 0x9d, 0xda, 0xba, 0xd3, 0x6e, 0xa2, 0x8d, 0x48, 0x06, 0x50, 0x25,
+    0x7a, 0xda, 0xbe, 0xc3, 0x3b, 0xdd, 0x8b, 0x92, 0xc5, 0xae, 0x40, 0x9f, 0x13, 0xe8, 0x66, 0x36,
 ];
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,7 +167,7 @@ async fn encode_rkyv_buffer<T>(
     cpu: CpuClass,
     limit: u64,
     value: T,
-) -> Result<BudgetedBuffer, TransportError>
+) -> Result<BudgetedBuffer, Report<TransportError>>
 where
     T: Send
         + 'static
@@ -175,19 +176,21 @@ where
     let reservation = executor
         .reserve(class, INITIAL_MESSAGE_CHARGE.min(limit))
         .await
-        .map_err(|error| TransportError::Encode(error.to_string()))?;
+        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
     executor
         .run_cpu(cpu, reservation, move |charge, cancellation| {
-            cancellation
-                .check()
-                .map_err(|error| TransportError::Encode(error.to_string()))?;
+            cancellation.check().map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Encode)
+            })?;
             let writer = IoWriter::new(BudgetedBuffer::with_limit(charge, limit));
-            let writer = rkyv::api::high::to_bytes_in::<_, RkyvError>(&value, writer)
-                .map_err(|error| TransportError::Encode(error.to_string()))?;
+            let writer =
+                rkyv::api::high::to_bytes_in::<_, RkyvError>(&value, writer).map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Encode)
+                })?;
             Ok(writer.into_inner())
         })
         .await
-        .map_err(|error| TransportError::Encode(error.to_string()))?
+        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?
 }
 
 /// Serialize one typed value directly into a budgeted writer on the owning CPU class.
@@ -197,7 +200,7 @@ pub(crate) async fn encode_rkyv<T>(
     cpu: CpuClass,
     limit: u64,
     value: T,
-) -> Result<ChargedBytes, TransportError>
+) -> Result<ChargedBytes, Report<TransportError>>
 where
     T: Send
         + 'static
@@ -214,7 +217,7 @@ pub(crate) async fn encode_rkyv_payload<T>(
     cpu: CpuClass,
     limit: u64,
     value: T,
-) -> Result<EncodedPayload, TransportError>
+) -> Result<EncodedPayload, Report<TransportError>>
 where
     T: Send
         + 'static
@@ -231,7 +234,7 @@ pub(crate) async fn decode_rkyv<T>(
     class: MemoryClass,
     cpu: CpuClass,
     bytes: ChargedBytes,
-) -> Result<Decoded<T>, TransportError>
+) -> Result<Decoded<T>, Report<TransportError>>
 where
     T: Archive + Send + 'static,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
@@ -241,12 +244,12 @@ where
     let decoded_charge = executor
         .reserve(class, bytes.len().arch_into())
         .await
-        .map_err(|error| TransportError::Decode(error.to_string()))?;
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     executor
         .run_cpu(cpu, decoded_charge, move |charge, cancellation| {
-            cancellation
-                .check()
-                .map_err(|error| TransportError::Decode(error.to_string()))?;
+            cancellation.check().map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Decode)
+            })?;
             let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
             aligned.extend_from_slice(bytes.as_ref());
             let value = decode_aligned::<T>(&aligned, max_depth)?;
@@ -256,7 +259,7 @@ where
             })
         })
         .await
-        .map_err(|error| TransportError::Decode(error.to_string()))?
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?
 }
 
 /// Validate and deserialize a nested typed-request payload while its outer envelope remains
@@ -266,7 +269,7 @@ pub(crate) async fn decode_rkyv_payload<T>(
     class: MemoryClass,
     cpu: CpuClass,
     bytes: Vec<u8>,
-) -> Result<Decoded<T>, TransportError>
+) -> Result<Decoded<T>, Report<TransportError>>
 where
     T: Archive + Send + 'static,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
@@ -276,12 +279,12 @@ where
     let decoded_charge = executor
         .reserve(class, bytes.len().arch_into())
         .await
-        .map_err(|error| TransportError::Decode(error.to_string()))?;
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     executor
         .run_cpu(cpu, decoded_charge, move |charge, cancellation| {
-            cancellation
-                .check()
-                .map_err(|error| TransportError::Decode(error.to_string()))?;
+            cancellation.check().map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Decode)
+            })?;
             let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
             aligned.extend_from_slice(&bytes);
             let value = decode_aligned::<T>(&aligned, max_depth)?;
@@ -291,17 +294,18 @@ where
             })
         })
         .await
-        .map_err(|error| TransportError::Decode(error.to_string()))?
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?
 }
 
-fn validation_depth(executor: &Executor) -> Result<NonZeroUsize, TransportError> {
+fn validation_depth(executor: &Executor) -> Result<NonZeroUsize, Report<TransportError>> {
     let depth = usize::try_from(executor.limits().decoder_depth.get())
-        .map_err(|error| TransportError::Decode(error.to_string()))?;
-    NonZeroUsize::new(depth)
-        .ok_or_else(|| TransportError::Decode("decoder depth must be nonzero".to_string()))
+        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?;
+    let depth = NonZeroUsize::new(depth)
+        .ok_or_else(|| TransportError::Decode("decoder depth must be nonzero".to_string()))?;
+    Ok(depth)
 }
 
-fn decode_aligned<T>(bytes: &[u8], max_depth: NonZeroUsize) -> Result<T, TransportError>
+fn decode_aligned<T>(bytes: &[u8], max_depth: NonZeroUsize) -> Result<T, Report<TransportError>>
 where
     T: Archive,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
@@ -312,15 +316,17 @@ where
         SharedValidator::new(),
     );
     let archived = access_with_context::<T::Archived, _, RkyvError>(bytes, &mut validator)
-        .map_err(|error| TransportError::Decode(error.to_string()))?;
+        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?;
     let mut deserializer = Pool::default();
-    deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
-        .map_err(|error| TransportError::Decode(error.to_string()))
+    let value = deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
+        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?;
+    Ok(value)
 }
 
 #[cfg(all(test, feature = "turmoil"))]
 mod simulation_checks {
     use std::{
+        io,
         num::NonZeroUsize,
         time::{Duration, SystemTime},
     };
@@ -368,14 +374,16 @@ mod simulation_checks {
                             4096,
                             response.clone(),
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| io::Error::other(format!("{error:?}")))?;
                         let decoded = decode_rkyv::<RelayGrantResponse>(
                             &executor,
                             MemoryClass::Management,
                             CpuClass::Control,
                             bytes,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| io::Error::other(format!("{error:?}")))?;
                         assert_eq!(decoded.into_value(), response);
 
                         let snapshot = executor.snapshot();
@@ -383,7 +391,7 @@ mod simulation_checks {
                         assert_eq!(snapshot.control_cpu.completed, 2);
                         assert_eq!(snapshot.control_cpu.running, 0);
                         assert_eq!(snapshot.management_memory.reserved_bytes, 0);
-                        Ok::<(), super::TransportError>(())
+                        Ok::<(), io::Error>(())
                     })
                     .await
                 });

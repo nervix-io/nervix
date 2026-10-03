@@ -10,14 +10,13 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How the runtime narrows operands or scatters results.
 
-use std::sync::{Arc as StdArc, Mutex};
-
 use arrow_array::{
     Array, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
     builder::{Int64Builder, ListBuilder, StringBuilder},
 };
 use arrow_schema::{DataType, Field, Schema};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::{StdArc, blocking::Mutex};
 
 use super::{
     ExecutionContext, FunctionInjector, InjectedResult, RowSelection,
@@ -51,10 +50,7 @@ struct ProbeInjector {
 
 impl ProbeInjector {
     fn calls(&self) -> Vec<ProbeCall> {
-        self.calls
-            .lock()
-            .expect("the probe call log is only locked by the test thread")
-            .clone()
+        self.calls.lock().clone()
     }
 }
 
@@ -67,7 +63,7 @@ impl FunctionInjector for ProbeInjector {
         span: Span,
         _now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         assert_eq!(*function, FunctionName::Udf("probe".to_string()));
         let [TypedArray::Int64(values)] = arguments else {
             panic!("probe must receive one Int64 argument");
@@ -82,13 +78,10 @@ impl FunctionInjector for ProbeInjector {
             rows.len(),
             "the prior error rows cover every row of the call"
         );
-        self.calls
-            .lock()
-            .expect("the probe call log is only locked by the test thread")
-            .push(ProbeCall {
-                rows: rows.clone(),
-                values: values.iter().collect(),
-            });
+        self.calls.lock().push(ProbeCall {
+            rows: rows.clone(),
+            values: values.iter().collect(),
+        });
         let mut output = Int64Builder::with_capacity(rows.len());
         let mut side_errors = Vec::new();
         for (row, value) in values.iter().enumerate() {
@@ -133,16 +126,13 @@ impl FunctionInjector for ListingHeaderInjector {
         _span: Span,
         _now: Timestamp,
         _prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         assert_eq!(*function, FunctionName::ReadHeaders);
         let [TypedArray::Utf8(names)] = arguments else {
             panic!("read_headers must receive one Utf8 argument");
         };
         assert_eq!(names.len(), rows.len());
-        self.calls
-            .lock()
-            .expect("the header call log is only locked by the test thread")
-            .push(rows.clone());
+        self.calls.lock().push(rows.clone());
         let field = StdArc::new(Field::new("item", DataType::Utf8, false));
         let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
         for (row, name) in rows.iter().zip(names.iter()) {
@@ -214,7 +204,7 @@ fn compile_with_probe(
         outputs,
         CompileOptions {
             udf_signatures: probe_signatures(),
-            injector: Some(triomphe::Arc::new(injector)),
+            injector: Some(nervix_primitives::sync::Arc::new(injector)),
             ..CompileOptions::default()
         },
     )
@@ -229,7 +219,7 @@ impl FunctionInjector for StdArc<ProbeInjector> {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         self.as_ref()
             .inject_with_context(function, arguments, rows, span, now, prior_error_rows)
     }
@@ -244,7 +234,7 @@ impl FunctionInjector for StdArc<ListingHeaderInjector> {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         self.as_ref()
             .inject_with_context(function, arguments, rows, span, now, prior_error_rows)
     }
@@ -722,7 +712,7 @@ fn an_arm_scatters_list_results_and_yields_nulls_where_no_row_selects_it() {
         vec![Field::new("route", DataType::Utf8, true)],
         CompileOptions {
             allow_header_reads: true,
-            injector: Some(triomphe::Arc::new(injector)),
+            injector: Some(nervix_primitives::sync::Arc::new(injector)),
             ..CompileOptions::default()
         },
     );
@@ -761,10 +751,7 @@ fn an_arm_scatters_list_results_and_yields_nulls_where_no_row_selects_it() {
         &TypedArray::Utf8(StringArray::new_null(2))
     );
     assert_eq!(
-        *headers
-            .calls
-            .lock()
-            .expect("the header call log is only locked by the test thread"),
+        *headers.calls.lock(),
         [RowSelection::Selected(vec![1, 2])],
         "the header read ran once, for the two selected rows of the first batch"
     );
@@ -880,7 +867,7 @@ fn a_header_read_repeated_outside_its_arm_is_made_for_every_row() {
         vec![Field::new("route", DataType::Utf8, true)],
         CompileOptions {
             allow_header_reads: true,
-            injector: Some(triomphe::Arc::new(injector)),
+            injector: Some(nervix_primitives::sync::Arc::new(injector)),
             ..CompileOptions::default()
         },
     );
@@ -902,10 +889,7 @@ fn a_header_read_repeated_outside_its_arm_is_made_for_every_row() {
         "the read outside the arm answers the row the arm did not select"
     );
     assert_eq!(
-        *headers
-            .calls
-            .lock()
-            .expect("the header call log is only locked by the test thread"),
+        *headers.calls.lock(),
         [RowSelection::Selected(vec![0, 2]), RowSelection::All(3)]
     );
 }

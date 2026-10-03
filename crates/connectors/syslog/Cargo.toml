@@ -10,11 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -22,17 +18,12 @@ async-trait = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nonzero_ext = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "io-util",
-  "macros",
-  "net",
-  "rt",
-  "sync",
-], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
@@ -40,10 +31,12 @@ tokio = { workspace = true, features = [
   "net",
   "rt",
   "sync",
+  "time",
 ] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+nervix-test-environment = { workspace = true }
 tempfile = { workspace = true }

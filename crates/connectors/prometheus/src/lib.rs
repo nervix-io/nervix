@@ -118,7 +118,7 @@ impl PacedSourceConnector for PrometheusSource {
         let mut messages = Vec::with_capacity(samples.len());
         let mut failures = Vec::new();
         for sample in samples {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match Self::sample_payload(&sample) {
                 Ok(payload) => messages.push(SourcePollMessage {
                     payload,
@@ -268,7 +268,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn prometheus_source_reads_address_and_validates_client_configuration()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
@@ -354,7 +354,7 @@ mod tests {
         status: &str,
         body: &str,
     ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusSourceError>> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test Prometheus listener should bind");
         let address = listener
@@ -362,7 +362,7 @@ mod tests {
             .expect("test Prometheus listener should have an address");
         let status = status.to_string();
         let body = body.to_string();
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener
                 .accept()
                 .await
@@ -394,7 +394,7 @@ mod tests {
         result
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn prometheus_query_failures_have_distinct_typed_contexts() {
         let unavailable = PrometheusSource {
             client: HttpClient::new(),

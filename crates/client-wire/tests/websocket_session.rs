@@ -17,7 +17,7 @@ use nervix_client_wire::{
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
     websocket::{ClientWebSocketCodec, ServerWebSocketCodec, WebSocketData, WebSocketError},
 };
-use tokio::net::{TcpListener, TcpStream};
+use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
     WebSocketStream, accept_async_with_config, client_async_with_config,
     tungstenite::{
@@ -75,7 +75,7 @@ async fn serve_one(listener: TcpListener, limits: SessionLimits) {
         .assured("the client reads the notice");
 
     while let Some(message) = websocket.next().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let data = match message.assured("the client sends well-formed WebSocket messages") {
             Message::Binary(payload) => WebSocketData::Binary(Bytes::from(payload)),
             Message::Text(_) => WebSocketData::Text,
@@ -137,7 +137,7 @@ async fn connect(limits: SessionLimits) -> (WebSocketStream<TcpStream>, ClientWe
     let address = listener
         .local_addr()
         .assured("a bound listener has an address");
-    tokio::spawn(serve_one(listener, limits));
+    nervix_primitives::task::spawn(serve_one(listener, limits));
     let codec = ClientWebSocketCodec::new(limits);
     let stream = TcpStream::connect(address)
         .await
@@ -156,7 +156,7 @@ async fn next_message(
     websocket: &mut WebSocketStream<TcpStream>,
     codec: &ClientWebSocketCodec,
 ) -> ServerMessage {
-    let message = tokio::time::timeout(DEADLINE, websocket.next())
+    let message = nervix_primitives::time::timeout(DEADLINE, websocket.next())
         .await
         .assured("the server answers within the deadline")
         .assured("the connection stays open")
@@ -170,7 +170,7 @@ async fn next_message(
     ServerMessage::decode(&frame).assured("the frame decodes")
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_browser_session_exchanges_one_frame_per_binary_message() {
     let limits = limits();
     let (mut websocket, codec) = connect(limits).await;
@@ -188,7 +188,7 @@ async fn a_browser_session_exchanges_one_frame_per_binary_message() {
         },
     ];
     for request in &requests {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let frame = request.encode(&limits).assured("a request fits");
         websocket
             .send(Message::Binary(Vec::from(codec.encode(frame))))
@@ -243,8 +243,8 @@ async fn close_code_after(message: Message) -> CloseCode {
         .await
         .assured("the server reads the message");
     loop {
-        tokio::task::consume_budget().await;
-        let received = tokio::time::timeout(DEADLINE, websocket.next())
+        nervix_primitives::task::consume_budget().await;
+        let received = nervix_primitives::time::timeout(DEADLINE, websocket.next())
             .await
             .assured("the server answers within the deadline")
             .assured("the connection closes with a close message")
@@ -255,13 +255,13 @@ async fn close_code_after(message: Message) -> CloseCode {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_text_message_closes_the_session_as_unsupported_data() {
     let code = close_code_after(Message::Text("SHOW DOMAINS;".to_string())).await;
     assert_eq!(code, CloseCode::Unsupported);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_binary_message_that_is_not_a_frame_closes_the_session_as_invalid() {
     let code = close_code_after(Message::Binary(b"not a frame".to_vec())).await;
     assert_eq!(code, CloseCode::Invalid);

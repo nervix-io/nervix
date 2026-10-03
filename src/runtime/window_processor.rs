@@ -235,6 +235,7 @@ pub(super) async fn flush_ready_window_processor(
                 }
             };
             let output_batch = match evaluate_window_aggregate(
+                branch.runtime.executor(),
                 compiled_aggregate,
                 state,
                 &output_schema,
@@ -789,7 +790,7 @@ impl EvaluatedWindowArguments {
 // Counted per thread so a test observes only the argument programs it ran itself, while the rest
 // of the suite evaluates windows in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(super) static WINDOW_ARGUMENT_VM_EXECUTIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
@@ -797,6 +798,7 @@ thread_local! {
 /// Evaluate every aggregate argument of the window's routes over `carrier` once, and find the rows
 /// whose arguments cannot be admitted.
 pub(super) async fn evaluate_window_arguments(
+    executor: &Executor,
     plan: &WindowAccumulatorPlan,
     programs: &[CompiledWindowAggregateProgram],
     carrier: &RuntimeRecordBatch,
@@ -806,8 +808,8 @@ pub(super) async fn evaluate_window_arguments(
     let mut arrays = Vec::with_capacity(plan.demands().len());
     let mut row_failures: Vec<Option<Report<WindowProcessorError>>> = Vec::new();
     for program in programs {
-        tokio::task::consume_budget().await;
-        let result = evaluate_route_arguments(program, carrier, execution_now).await?;
+        nervix_primitives::task::consume_budget().await;
+        let result = evaluate_route_arguments(executor, program, carrier, execution_now).await?;
         for demand in &program.route.demands {
             let columns = demand
                 .arguments
@@ -841,8 +843,13 @@ pub(super) async fn evaluate_window_arguments(
             evaluated.refuse(row_count, row, failure);
         }
     }
-    for row in 0..row_count {
-        if let Some(function) = evaluated.columns.refused_function(plan, row) {
+    for (row, function) in evaluated
+        .columns
+        .refused_functions(plan, row_count)
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(function) = function {
             evaluated.refuse(
                 row_count,
                 row,
@@ -875,7 +882,12 @@ fn is_argument_output_field(field: &str) -> bool {
 }
 
 /// Run one route's argument program over every row of `carrier`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the admitted expression executor owns its generic effects")
+)]
 async fn evaluate_route_arguments(
+    executor: &Executor,
     program: &CompiledWindowAggregateProgram,
     carrier: &RuntimeRecordBatch,
     execution_now: Timestamp,
@@ -912,6 +924,7 @@ async fn evaluate_route_arguments(
     #[cfg(test)]
     WINDOW_ARGUMENT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
+        executor,
         argument_program,
         &input,
         &VmExecutionContext {
@@ -1035,29 +1048,29 @@ impl VmFunctionInjector for WindowAggregateResults {
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
-    ) -> Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
+    ) -> error_stack::Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
         let FunctionName::WindowAggregate(invocation) = function else {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!("function '{}' is not a window aggregate", function.as_str()),
-            });
+            }));
         };
         let Some(result) = self.results.get(invocation) else {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} of structure {} was not evaluated for this emission",
                     invocation.function.nspl_name(),
                     invocation.demand_id
                 ),
-            });
+            }));
         };
         if !rows.fits(result.len()) {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} evaluated {} rows for output rows selected as {rows:?}",
                     invocation.function.nspl_name(),
                     result.len()
                 ),
-            });
+            }));
         }
         let output = match rows {
             nervix_vm::RowSelection::All(_) => result.clone(),
@@ -1078,6 +1091,7 @@ impl VmFunctionInjector for WindowAggregateResults {
 
 /// Build the one-row output batch of one route from the window's accumulators.
 pub(super) async fn evaluate_window_aggregate(
+    executor: &Executor,
     program: &CompiledWindowAggregateProgram,
     state: &WindowProcessorState,
     output_schema: &CompiledSchema,
@@ -1114,6 +1128,7 @@ pub(super) async fn evaluate_window_aggregate(
                     .get(*index)
                     .verified("field assignments index the route's own assignments");
                 let column = evaluate_window_value(
+                    executor,
                     &assignment.value,
                     &assignment.field,
                     field.data_type(),
@@ -1147,6 +1162,7 @@ pub(super) async fn evaluate_window_aggregate(
 
 /// Evaluate one assigned value as a one-row array of `data_type`.
 fn evaluate_window_value<'a>(
+    executor: &'a Executor,
     value: &'a CompiledWindowExpr,
     target_field: &'a str,
     data_type: &'a ArrowDataType,
@@ -1167,6 +1183,7 @@ fn evaluate_window_value<'a>(
                 )
                 .change_context(WindowProcessorError::AggregateExprInput)?;
                 let result = execute_program_with_selection_in_context(
+                    executor,
                     program,
                     &input,
                     &VmExecutionContext {
@@ -1197,6 +1214,7 @@ fn evaluate_window_value<'a>(
                 for item in items {
                     values.push(
                         evaluate_window_value(
+                            executor,
                             item,
                             target_field,
                             element.data_type(),
@@ -1328,7 +1346,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(1),
         );
         assert!(
-            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(beyond, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a row past the evaluated output rows is refused"
         );
         let short = injector.inject_with_context(
@@ -1340,7 +1358,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(2),
         );
         assert!(
-            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(short, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a batch of another size than the evaluated output rows is refused"
         );
     }
@@ -1408,6 +1426,7 @@ mod tests {
                     .expect("the test batch should be a valid relay batch"),
             );
             let mut evaluated = evaluate_window_arguments(
+                &Executor::default(),
                 &self.plan,
                 std::slice::from_ref(&self.compiled),
                 &carrier,
@@ -1452,8 +1471,14 @@ mod tests {
         }
 
         async fn emit(&self) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
-            evaluate_window_aggregate(&self.compiled, &self.state, &self.output_schema, at(42))
-                .await
+            evaluate_window_aggregate(
+                &Executor::default(),
+                &self.compiled,
+                &self.state,
+                &self.output_schema,
+                at(42),
+            )
+            .await
         }
 
         async fn emitted(&self) -> RuntimeRecordBatch {
@@ -1483,7 +1508,7 @@ mod tests {
         Some(RuntimeValue::F64(OrderedFloat(value)))
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sketches_merge_panes_expire_rows_and_restore_from_snapshot() {
         let mut window = TestWindow::new(
             "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10), median_value = \
@@ -1567,7 +1592,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sketch_window_rejects_pane_and_byte_budget_overruns_before_admission() {
         let mut window = TestWindow::new(
             "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10)",
@@ -1604,7 +1629,7 @@ mod tests {
         assert!(window.state.entries.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn each_top_k_demand_charges_its_own_large_string_keys() {
         let input = &[field("value", ParseAsType::String)];
         let output = &[field(
@@ -1654,7 +1679,7 @@ mod tests {
         assert!(two.state.entries.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sketch_snapshot_restores_at_the_admitted_state_limit() {
         let mut window = TestWindow::new(
             "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10)",
@@ -1703,7 +1728,7 @@ mod tests {
         assert_eq!(restored.entries.len(), window.state.entries.len());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn quantile_sketch_refuses_non_finite_rows_without_exposing_values() {
         let mut window = TestWindow::new(
             "SET median_value = APPROX_QUANTILE(input.value, 50, 128)",
@@ -1730,7 +1755,7 @@ mod tests {
         assert!(window.state.entries.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn statistics_follow_sliding_admission_and_retraction() {
         let mut window = TestWindow::new(
             "SET healthy_samples = COUNT_IF(input.healthy), all_healthy = \
@@ -1895,7 +1920,7 @@ mod tests {
         assert_eq!(emitted, windows.len());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn null_arguments_contribute_nothing_and_undefined_results_are_typed_nulls() {
         let set = "SET samples = COUNT(input.value), total = SUM(input.value), mean_value = \
                    AVG(input.value), lowest = MIN(input.value), first_value = FIRST(input.value), \
@@ -1986,7 +2011,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rows_with_non_finite_statistic_arguments_are_refused_before_admission() {
         let mut window = TestWindow::new(
             "SET mean_reading = AVG(input.reading), highest = MAX(input.reading), samples = \
@@ -2022,7 +2047,7 @@ mod tests {
         assert_eq!(batch_value(&record, "samples"), Some(RuntimeValue::I64(2)));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn argument_evaluation_failures_refuse_only_their_rows_in_one_vm_execution() {
         let mut window = TestWindow::new(
             "SET adjusted_total = SUM(120 / input.latency)",
@@ -2051,7 +2076,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn integer_sums_are_exact_through_retraction_and_report_overflow_of_their_type() {
         let mut window = TestWindow::new(
             "SET total = SUM(input.value)",
@@ -2079,7 +2104,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn float_sums_forget_an_evicted_outlier_exactly() {
         let mut window = TestWindow::new(
             "SET total = SUM(input.reading), mean_reading = AVG(input.reading), spread = \
@@ -2102,7 +2127,7 @@ mod tests {
         assert_eq!(batch_value(&record, "spread"), f64_value(1.0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn extremes_prefer_the_earliest_row_and_order_arrival_by_watermark() {
         let mut window = TestWindow::new(
             "SET lowest_label = ARG_MIN(input.label, input.value), highest_label = \
@@ -2144,7 +2169,7 @@ mod tests {
         assert_eq!(batch_value(&record, "first_label"), string("c"));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn admission_runs_end_at_the_row_that_fills_the_window() {
         let mut window = TestWindow::new(
             "SET samples = COUNT(input.value)",
@@ -2210,7 +2235,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn restored_windows_answer_every_aggregate_as_before_they_were_published() {
         let set = "SET count = COUNT(input.latency), total = SUM(input.latency), first_latency = \
                    FIRST(input.latency), highest = MAX(input.latency), mean_latency = \
@@ -2282,7 +2307,7 @@ mod tests {
         assert_eq!(batch_value(&after, "p0"), f64_value(15.0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array() {
         let mut window = TestWindow::new(
             "SET count = COUNT(input.latency), adjusted_count = COUNT(input.latency) + 2, p50 = \
@@ -2332,7 +2357,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
         let mut window = TestWindow::new(
             "SET p50 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), p90 = \
@@ -2359,7 +2384,7 @@ mod tests {
         assert_eq!(batch_value(&record, "p50_other_range"), f64_value(30.0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_advance_removes_step_messages() {
         let mut window = TestWindow::new(
             "SET count = COUNT(input.latency)",
@@ -2381,7 +2406,7 @@ mod tests {
         assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(3)));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_advance_steps_by_duration_after_messages() {
         let mut window = TestWindow::new(
             "SET count = COUNT(input.latency)",
@@ -2412,7 +2437,7 @@ mod tests {
         assert_eq!(batch_value(&record, "count"), Some(RuntimeValue::I64(2)));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn linear_histogram_zero_delay_removes_step_values_immediately() {
         let mut window = TestWindow::new(
             "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '0ms')",
@@ -2427,7 +2452,7 @@ mod tests {
         assert_eq!(batch_value(&record, "p0"), f64_value(95.0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
         let mut window = TestWindow::new(
             "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')",
@@ -2482,7 +2507,7 @@ mod tests {
         assert_eq!(batch_value(&expired, "p0"), f64_value(95.0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() {
         let mut window = TestWindow::new(
             "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')",
@@ -2506,7 +2531,7 @@ mod tests {
         assert_eq!(batch_value(&record, "p0"), f64_value(95.0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
         let mut window = TestWindow::new(
             "SET first_latency = FIRST(input.latency), last_latency = LAST(input.latency), \
@@ -2588,7 +2613,7 @@ mod tests {
         assert_eq!(message_timestamp(&message), at(10));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
         let mut window = TestWindow::new(
             "SET count = COUNT(input.latency)",
@@ -2614,7 +2639,7 @@ mod tests {
         error.current_context().to_string()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn restoring_a_window_rejects_snapshots_that_disagree_with_its_plan() {
         let mut window = TestWindow::new(
             "SET count = COUNT(input.latency)",
@@ -2667,7 +2692,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_aggregate_reports_uninitialized_outputs_and_null_required_results() {
         let window = TestWindow::new(
             "SET count = COUNT(input.latency)",
@@ -2753,7 +2778,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn datetime_extremes_keep_their_timezone() {
         let mut window = TestWindow::new(
             "SET latest = MAX(input.observed_at)",

@@ -17,10 +17,16 @@
 //! standing state behind — a connection that failed, a stream that reset, a request that finished
 //! — are counted as they happen.
 
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "interconnect metric registration and exposition observe retained transport \
+                  counters"
+    )
+)]
+
+use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
@@ -30,16 +36,20 @@ use nervix_interconnect::{
     ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome, RequestOutcome,
     RequestSubquota, StreamResetReason, TransferDirection, Transport, TransportSnapshot,
 };
-use parking_lot::RwLock;
+use nervix_primitives::{
+    sync::{
+        Arc, CancellationToken,
+        atomic::{AtomicU64, Ordering},
+        blocking::RwLock,
+    },
+    time::{Instant, MissedTickBehavior, interval},
+};
 use prometheus::{
     CounterVec, GaugeVec, Opts,
     core::{Collector, Desc},
     proto::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use strum::IntoEnumIterator as _;
-use tokio::time::{Instant, MissedTickBehavior, interval};
-use tokio_util::sync::CancellationToken;
-use triomphe::Arc;
 
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is
 /// visible in a scrape interval, long enough that the probe itself is not the load.
@@ -85,8 +95,8 @@ impl NodeObservations {
         ticks.tick().await;
         let mut expected_at = Instant::now();
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = shutdown.cancelled() => break,
                 _ = ticks.tick() => {}
             }
@@ -731,6 +741,10 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             class: "bulk",
             budget: executor.bulk_memory,
         },
+        MemoryClassSample {
+            class: "credentials",
+            budget: executor.credentials_memory,
+        },
     ];
     let workers = [
         WorkerClassSample {
@@ -738,8 +752,16 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             workers: executor.control_cpu,
         },
         WorkerClassSample {
+            class: "credentials_cpu",
+            workers: executor.credentials_cpu,
+        },
+        WorkerClassSample {
             class: "data_cpu",
             workers: executor.data_cpu,
+        },
+        WorkerClassSample {
+            class: "extension_cpu",
+            workers: executor.extension_cpu,
         },
         WorkerClassSample {
             class: "bulk_cpu",

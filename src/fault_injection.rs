@@ -9,25 +9,39 @@
 //! - **Must not know.** Product configuration, NSPL syntax, connector implementations, or runtime
 //!   ownership beyond the typed values needed to select a seam.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "the testing harness owns failure seams and observations; these are not product \
+                  graph state"
+    )
+)]
+
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
+    RestoreStep,
+};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{
+        Arc, CancellationToken,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        blocking::{Mutex, RwLock},
+        broadcast, mpsc, oneshot, watch,
+    },
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
-use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
 
@@ -73,6 +87,8 @@ struct FaultInjectionState {
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
+    /// A stale drain observation on one node omits already buffered relay-owner batches.
+    stale_owner_buffer_drain_reports: DashMap<(DomainName, ClusterNodeName), (), RandomState>,
     /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
     forced_domain_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// One-shot entity-swap failures consumed by the selected runtime node and domain.
@@ -86,8 +102,11 @@ struct FaultInjectionState {
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
     startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
-    bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
+    executions: DashMap<ClusterNodeName, NodeExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
+    failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
+    /// A blocked peer drops gossip requests until the scenario restores its links.
+    blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -99,6 +118,19 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     remote_relay_admission_pauses:
         DashMap<RemoteRelayAdmissionPauseKey, Arc<TestPause>, RandomState>,
+    /// A receiver pauses after it admitted a remote relay batch and returned the admission to the
+    /// batch's owner, before it hands the batch to its local runtime consumers.
+    remote_relay_dispatch_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// One-shot losses of the terminal record acknowledgement a node returns to the node that
+    /// registered it. Each keeps whether it fired, so a scenario waits for the loss instead of
+    /// assuming it.
+    lost_remote_acknowledgements:
+        DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
+    owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// A local schedule swap pauses after removing one attached emitter from its relay.
+    emitter_swap_after_detach_pauses:
+        DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
     /// A source pauses once inside dispatch so a test can engage quiesce while its loop awaits.
     ingestor_dispatch_pauses: DashMap<DomainNodeRef, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -115,6 +147,9 @@ struct FaultInjectionState {
     /// Wall time already elapsed when the next newly supplied mapping for a domain starts.
     domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
+    /// While set, every node drops every runtime-state checkpoint announcement it receives, as if
+    /// each was lost on the way.
+    state_checkpoint_announcements_lost: AtomicBool,
     /// While set, every node's WASM guest-state checkpoint fails to reach its stable storage.
     wasm_checkpoint_storage_failing: AtomicBool,
     /// While set, every coordinated WASM reset fails while building its fresh guest instance.
@@ -175,10 +210,10 @@ impl std::fmt::Debug for ConsensusProbe {
 }
 
 #[derive(Debug)]
-struct NodeBulkExecution {
+struct NodeExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
+    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -220,14 +255,35 @@ struct EntityScheduleSwapFailureKey {
     domain: DomainName,
 }
 
+/// The direction a record acknowledgement travels: from the node that resolved it back to the
+/// node that registered it.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RemoteAcknowledgementLink {
+    resolver: ClusterNodeName,
+    registrar: ClusterNodeName,
+}
+
+/// Whether the one terminal record acknowledgement a scenario armed a link to lose was lost yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteAcknowledgementLoss {
+    Armed,
+    Lost,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    RuntimePreparation(ClusterNodeName),
+    ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
+    RestoreStep {
+        node_id: ClusterNodeName,
+        step: RestoreStep,
+    },
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -286,6 +342,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
+                stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
@@ -293,13 +350,19 @@ impl Default for FaultInjection {
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
-                bulk_executions: DashMap::default(),
+                executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
+                failed_health_links: DashMap::default(),
+                blocked_gossip_nodes: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
+                remote_relay_dispatch_pauses: DashMap::default(),
+                lost_remote_acknowledgements: DashMap::default(),
+                owner_relay_fanout_pauses: DashMap::default(),
+                emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
@@ -307,6 +370,7 @@ impl Default for FaultInjection {
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
+                state_checkpoint_announcements_lost: AtomicBool::new(false),
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
@@ -654,6 +718,18 @@ impl FaultInjection {
         self.inner.forced_entity_drain_timeouts.insert(domain, ());
     }
 
+    /// Simulates an incomplete drain observation so a scenario can exercise the local schedule
+    /// fence independently of the coordinator's normal quiescence check.
+    pub fn report_no_owner_buffered_batches_for_entity_drain(
+        &self,
+        domain: DomainName,
+        node: ClusterNodeName,
+    ) {
+        self.inner
+            .stale_owner_buffer_drain_reports
+            .insert((domain, node), ());
+    }
+
     /// Forces the next domain drain to time out after the durable pause has engaged.
     pub fn force_next_domain_drain_timeout(&self, domain: DomainName) {
         self.inner.forced_domain_drain_timeouts.insert(domain, ());
@@ -685,17 +761,17 @@ impl FaultInjection {
             .insert(node_id, ());
     }
 
-    /// Fill every bulk worker on `node_id` and return once every occupying job is running.
-    pub async fn occupy_bulk_execution(&self, node_id: &ClusterNodeName) {
+    /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
+    pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
         let node = self
             .inner
-            .bulk_executions
+            .executions
             .get(node_id)
             .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"));
         let executor = node.executor.clone();
         let holders = node.holders.clone();
         drop(node);
-        let workers = executor.snapshot().bulk_cpu.workers;
+        let workers = executor.snapshot().cpu_class(class).workers;
         let started = Arc::new(AtomicUsize::new(0));
         for _ in 0..workers {
             let reservation = executor
@@ -703,25 +779,21 @@ impl FaultInjection {
                 .unwrap_or_else(|error| {
                     panic!("bulk admission must accept a zero charge: {error}")
                 });
-            let (holder, held) = std::sync::mpsc::channel();
+            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
             holders.lock().push(holder);
             let executor = executor.clone();
             let started = started.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 executor
-                    .run_cpu(
-                        CpuClass::Bulk,
-                        reservation,
-                        move |_charge, _cancellation| {
-                            started.fetch_add(1, Ordering::AcqRel);
-                            // Park until the scenario drops the holder so occupancy consumes no
-                            // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
-                            // than a failure.
-                            held.recv().discarded(
-                                "dropping the holder is how the scenario releases this worker",
-                            );
-                        },
-                    )
+                    .run_cpu(class, reservation, move |_charge, _cancellation| {
+                        started.fetch_add(1, Ordering::AcqRel);
+                        // Park until the scenario drops the holder so occupancy consumes no
+                        // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
+                        // than a failure.
+                        held.recv().discarded(
+                            "dropping the holder is how the scenario releases this worker",
+                        );
+                    })
                     .await
                     .discarded(
                         "this job exists to hold a worker until the scenario releases it; its \
@@ -730,14 +802,51 @@ impl FaultInjection {
             });
         }
         while started.load(Ordering::Acquire) < workers {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     }
 
-    pub fn release_bulk_execution(&self, node_id: &ClusterNodeName) {
+    /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
+    /// once the class refuses the next job it is handed.
+    pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
+        self.occupy_execution(node_id, class).await;
+        let executor = self
+            .inner
+            .executions
+            .get(node_id)
+            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
+            .executor
+            .clone();
+        let capacity = executor.snapshot().cpu_class(class).queue_capacity;
+        for _ in 0..capacity {
+            let reservation = executor
+                .try_reserve(MemoryClass::Bulk, 0)
+                .unwrap_or_else(|error| {
+                    panic!("bulk admission must accept a zero charge: {error}")
+                });
+            let waiter = executor.clone();
+            nervix_primitives::task::spawn(async move {
+                waiter
+                    .run_cpu(class, reservation, |_charge, _cancellation| ())
+                    .await
+                    .discarded(
+                        "this job exists to hold a place in the wait queue; once the scenario \
+                         releases the workers it runs empty",
+                    );
+            });
+        }
+        while executor.snapshot().cpu_class(class).pending < capacity {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+    }
+
+    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
+    /// behind them then run empty.
+    pub fn release_execution(&self, node_id: &ClusterNodeName) {
         self.inner
-            .bulk_executions
+            .executions
             .get(node_id)
             .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
             .holders
@@ -763,6 +872,57 @@ impl FaultInjection {
         self.inner
             .failed_health_responders
             .insert(responding_node, ());
+    }
+
+    pub fn fail_health_responses_between(
+        &self,
+        probing_node: ClusterNodeName,
+        responding_node: ClusterNodeName,
+    ) {
+        self.inner.failed_health_links.insert(
+            HealthResponsePauseKey {
+                probing_node,
+                responding_node,
+            },
+            (),
+        );
+    }
+
+    pub fn restore_health_responses_between(
+        &self,
+        probing_node: &ClusterNodeName,
+        responding_node: &ClusterNodeName,
+    ) {
+        self.inner
+            .failed_health_links
+            .remove(&HealthResponsePauseKey {
+                probing_node: probing_node.clone(),
+                responding_node: responding_node.clone(),
+            });
+    }
+
+    pub fn block_gossip_for_node(&self, node: ClusterNodeName, send_delay: Duration) {
+        self.inner.blocked_gossip_nodes.insert(node, send_delay);
+    }
+
+    pub fn restore_gossip_for_node(&self, node: &ClusterNodeName) {
+        self.inner.blocked_gossip_nodes.remove(node);
+    }
+
+    pub(crate) fn gossip_exchange_is_blocked(
+        &self,
+        sending_node: &ClusterNodeName,
+        receiving_node: &ClusterNodeName,
+    ) -> bool {
+        self.inner.blocked_gossip_nodes.contains_key(sending_node)
+            || self.inner.blocked_gossip_nodes.contains_key(receiving_node)
+    }
+
+    pub(crate) fn gossip_send_delay(&self, destination: &ClusterNodeName) -> Option<Duration> {
+        self.inner
+            .blocked_gossip_nodes
+            .get(destination)
+            .map(|delay| *delay.value())
     }
 
     pub async fn wait_for_health_response_pause(
@@ -795,6 +955,19 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
+    }
+
+    pub async fn wait_for_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()));
+    }
+
     pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.wait_for_command_pause(&CommandPausePoint::Admission(node_id.clone()))
             .await;
@@ -802,6 +975,20 @@ impl FaultInjection {
 
     pub fn release_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::Admission(node_id.clone()));
+    }
+
+    /// Holds a command after its leader-local reference lookup and before its replicated proposal.
+    pub fn pause_command_reference_lookup_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ReferenceLookup(node_id));
+    }
+
+    pub async fn wait_for_command_reference_lookup_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ReferenceLookup(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_reference_lookup_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ReferenceLookup(node_id.clone()));
     }
 
     /// Holds the next persistent command after its applying record is committed and before its
@@ -867,6 +1054,26 @@ impl FaultInjection {
 
     pub fn release_resource_installation_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::ResourceInstallation(node_id.clone()));
+    }
+
+    /// Holds the next restore on `node_id` just before it applies `step`, once.
+    pub fn pause_restore_step_on(&self, node_id: ClusterNodeName, step: RestoreStep) {
+        self.arm_command_pause(CommandPausePoint::RestoreStep { node_id, step });
+    }
+
+    pub async fn wait_for_restore_step_pause(&self, node_id: &ClusterNodeName, step: &RestoreStep) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreStep {
+            node_id: node_id.clone(),
+            step: step.clone(),
+        })
+        .await;
+    }
+
+    pub fn release_restore_step_pause(&self, node_id: &ClusterNodeName, step: &RestoreStep) {
+        self.release_command_pause(&CommandPausePoint::RestoreStep {
+            node_id: node_id.clone(),
+            step: step.clone(),
+        });
     }
 
     pub fn pause_transaction_commit_after(
@@ -1006,6 +1213,110 @@ impl FaultInjection {
             branch: branch.map(str::to_string),
         };
         let pause = self.remote_relay_admission_pause(&key);
+        pause.release();
+    }
+
+    pub fn pause_remote_relay_dispatch(&self, domain: impl Into<String>) {
+        self.inner.remote_relay_dispatch_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_remote_relay_dispatch_pause(&self, domain: &str) {
+        let pause = self.remote_relay_dispatch_pause(&domain.to_ascii_lowercase());
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_remote_relay_dispatch_pause(&self, domain: &str) {
+        let pause = self.remote_relay_dispatch_pause(&domain.to_ascii_lowercase());
+        pause.release();
+    }
+
+    /// Loses the next terminal record acknowledgement `resolver` returns to `registrar`. The
+    /// resolving node drops it instead of sending it, as a link that loses every attempt of the
+    /// send does, and reports nothing more about that record.
+    pub fn lose_next_remote_acknowledgement(
+        &self,
+        resolver: ClusterNodeName,
+        registrar: ClusterNodeName,
+    ) {
+        let link = RemoteAcknowledgementLink {
+            resolver,
+            registrar,
+        };
+        let (loss, _) = watch::channel(RemoteAcknowledgementLoss::Armed);
+        self.inner.lost_remote_acknowledgements.insert(link, loss);
+    }
+
+    /// Waits until the loss armed from `resolver` to `registrar` has taken an acknowledgement.
+    pub async fn wait_for_lost_remote_acknowledgement(
+        &self,
+        resolver: &ClusterNodeName,
+        registrar: &ClusterNodeName,
+    ) {
+        let link = RemoteAcknowledgementLink {
+            resolver: resolver.clone(),
+            registrar: registrar.clone(),
+        };
+        let mut loss = {
+            let armed = self
+                .inner
+                .lost_remote_acknowledgements
+                .get(&link)
+                .assured("a scenario waits only for a loss it armed");
+            armed.subscribe()
+        };
+        loss.wait_for(|loss| *loss == RemoteAcknowledgementLoss::Lost)
+            .await
+            .assured("the armed loss keeps its sender for the rest of the scenario");
+    }
+
+    pub fn pause_owner_relay_fanout(&self, domain: impl Into<String>) {
+        self.inner.owner_relay_fanout_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_owner_relay_fanout_pause(&self, domain: &str) {
+        let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_owner_relay_fanout_pause(&self, domain: &str) {
+        let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
+        pause.release();
+    }
+
+    pub async fn wait_for_owner_relay_fanout_completion(&self, domain: &str) {
+        let key = domain.to_ascii_lowercase();
+        let pause = self.owner_relay_fanout_pause(&key);
+        pause.wait_until_delivered().await;
+        self.inner.owner_relay_fanout_pauses.remove(&key);
+    }
+
+    pub fn pause_emitter_swap_after_detach(&self, domain: DomainName, emitter: EmitterName) {
+        self.inner
+            .emitter_swap_after_detach_pauses
+            .insert((domain, emitter), Arc::new(TestPause::default()));
+    }
+
+    pub async fn wait_for_emitter_swap_after_detach_pause(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) {
+        let pause = self.emitter_swap_after_detach_pause(domain, emitter);
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_emitter_swap_after_detach_pause(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) {
+        let pause = self.emitter_swap_after_detach_pause(domain, emitter);
         pause.release();
     }
 
@@ -1155,6 +1466,14 @@ impl FaultInjection {
             .store(true, Ordering::Release);
     }
 
+    /// Make every node drop every runtime-state checkpoint announcement it receives, so replicas
+    /// learn of new checkpoints only through their own catch-up rounds.
+    pub fn lose_state_checkpoint_announcements(&self) {
+        self.inner
+            .state_checkpoint_announcements_lost
+            .store(true, Ordering::Release);
+    }
+
     /// Make every node's WASM guest-state checkpoint fail to reach its stable storage, as a failing
     /// disk would, until [`Self::restore_wasm_checkpoint_storage`].
     pub fn fail_wasm_checkpoint_storage(&self) {
@@ -1281,6 +1600,15 @@ impl FaultInjection {
             .means_shutdown("leadership transfer watcher");
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained emitter fault mode",
+            key = "one test emitter",
+            bound = "one keyed read; the guard ends with the synchronous predicate"
+        )
+    )]
     pub(crate) fn emitter_should_fail(&self, emitter: &EmitterName) -> bool {
         self.inner
             .emitter_faults
@@ -1288,6 +1616,15 @@ impl FaultInjection {
             .is_some_and(|mode| *mode == EmitterFaultMode::Fail)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained emitter stall mode",
+            key = "one test emitter",
+            bound = "one keyed read; the guard ends with the synchronous predicate"
+        )
+    )]
     pub(crate) fn emitter_should_stall(&self, emitter: &EmitterName) -> bool {
         self.inner
             .emitter_faults
@@ -1295,12 +1632,30 @@ impl FaultInjection {
             .is_some_and(|mode| *mode == EmitterFaultMode::Stall)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained ingestor failure seam",
+            key = "one test ingestor",
+            bound = "one keyed presence read with no retained guard"
+        )
+    )]
     pub(crate) fn ingestor_is_failed(&self, ingestor: &IngestorName) -> bool {
         self.inner
             .failed_ingestors
             .contains_key(&ingestor.as_str().to_ascii_lowercase())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained sink unavailability seam",
+            key = "one test emitter",
+            bound = "one keyed presence read with no retained guard"
+        )
+    )]
     pub(crate) fn sink_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.inner
             .unavailable_sink_clients
@@ -1309,6 +1664,15 @@ impl FaultInjection {
 
     /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
     /// sink resolves before it stalls.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario consumes its single armed sink-write stall",
+            key = "one test emitter",
+            bound = "one keyed removal; no guard survives the operation"
+        )
+    )]
     pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
         self.inner
             .stalled_emitter_sinks
@@ -1337,6 +1701,16 @@ impl FaultInjection {
             .forced_entity_drain_timeouts
             .remove(domain)
             .is_some()
+    }
+
+    pub(crate) fn report_no_owner_buffered_batches(
+        &self,
+        domain: &DomainName,
+        node: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .stale_owner_buffer_drain_reports
+            .contains_key(&(domain.clone(), node.clone()))
     }
 
     pub(crate) fn take_forced_domain_drain_timeout(&self, domain: &DomainName) -> bool {
@@ -1390,11 +1764,11 @@ impl FaultInjection {
             .is_some()
     }
 
-    /// Record the executor whose bulk workers a scenario may fill.
-    pub(crate) fn register_bulk_executor(&self, node_id: ClusterNodeName, executor: Executor) {
-        self.inner.bulk_executions.insert(
+    /// Record the executor whose workers a scenario may fill.
+    pub(crate) fn register_executor(&self, node_id: ClusterNodeName, executor: Executor) {
+        self.inner.executions.insert(
             node_id,
-            NodeBulkExecution {
+            NodeExecution {
                 executor,
                 holders: Arc::default(),
             },
@@ -1417,6 +1791,16 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_runtime_preparation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::RuntimePreparation(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
             .await;
     }
 
@@ -1443,6 +1827,18 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_restore_step_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        step: &RestoreStep,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::RestoreStep {
+            node_id: node_id.clone(),
+            step: step.clone(),
+        })
+        .await;
+    }
+
     pub(crate) async fn pause_health_response_if_armed(
         &self,
         probing_node: &ClusterNodeName,
@@ -1467,12 +1863,18 @@ impl FaultInjection {
 
     pub(crate) fn health_response_identity(
         &self,
+        probing_node: &ClusterNodeName,
         responding_node: ClusterNodeIdentity,
     ) -> ClusterNodeIdentity {
-        if !self
-            .inner
-            .failed_health_responders
-            .contains_key(responding_node.node_id())
+        let link = HealthResponsePauseKey {
+            probing_node: probing_node.clone(),
+            responding_node: responding_node.node_id().clone(),
+        };
+        if !self.inner.failed_health_links.contains_key(&link)
+            && !self
+                .inner
+                .failed_health_responders
+                .contains_key(responding_node.node_id())
         {
             return responding_node;
         }
@@ -1500,6 +1902,15 @@ impl FaultInjection {
         self.inner.entity_gate_pauses.remove(&key);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned ingestor dispatch pause is claimed once",
+            key = "one test domain and ingestor",
+            bound = "one keyed read and removal; guards end before the test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_ingestor_dispatch_if_armed(
         &self,
         domain: &DomainName,
@@ -1544,6 +1955,16 @@ impl FaultInjection {
         self.inner.entity_gate_response_pauses.remove(&key);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned admission pause chooses an exact or domain selector",
+            key = "one test domain and optional branch",
+            bound = "at most two keyed reads and one removal; guards end before the \
+                     test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_remote_relay_admission_if_armed(
         &self,
         domain: &DomainName,
@@ -1584,6 +2005,15 @@ impl FaultInjection {
 
     /// Hold a guest-state checkpoint of `processor` at `window` when a scenario armed that window
     /// and no other checkpoint has claimed it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned guest checkpoint window is claimed once",
+            key = "one test domain, processor and checkpoint window",
+            bound = "one keyed read; its guard ends before the test-controlled wait"
+        )
+    )]
     pub(crate) async fn pause_wasm_checkpoint_if_armed(
         &self,
         domain: &DomainName,
@@ -1608,6 +2038,118 @@ impl FaultInjection {
         }
         pause.reach();
         pause.wait_until_released().await;
+    }
+
+    /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
+    /// lost on the way. Only the first acknowledgement on an armed link is lost.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario drops only the first acknowledgement on an armed link",
+            key = "one test resolver and registrar link",
+            bound = "one keyed read and a terminal retained watch transition; no guard across \
+                     await"
+        )
+    )]
+    pub(crate) fn loses_remote_acknowledgement(
+        &self,
+        resolver: &ClusterNodeName,
+        registrar: &ClusterNodeName,
+    ) -> bool {
+        let link = RemoteAcknowledgementLink {
+            resolver: resolver.clone(),
+            registrar: registrar.clone(),
+        };
+        let Some(loss) = self.inner.lost_remote_acknowledgements.get(&link) else {
+            return false;
+        };
+        loss.send_if_modified(|loss| {
+            if *loss == RemoteAcknowledgementLoss::Lost {
+                return false;
+            }
+            *loss = RemoteAcknowledgementLoss::Lost;
+            true
+        })
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned remote dispatch pause is consumed at its selected seam",
+            key = "one test domain",
+            bound = "one keyed read and removal; guards end before the test-controlled wait"
+        )
+    )]
+    pub(crate) async fn pause_remote_relay_dispatch_if_armed(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .remote_relay_dispatch_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.remote_relay_dispatch_pauses.remove(&key);
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one scenario-owned relay fanout pause is claimed once",
+            key = "one test domain",
+            bound = "one keyed read; its guard ends before the test-controlled wait"
+        )
+    )]
+    pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .owner_relay_fanout_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+    }
+
+    pub(crate) fn mark_owner_relay_fanout_complete(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        if let Some(pause) = self.inner.owner_relay_fanout_pauses.get(&key) {
+            pause.mark_delivered();
+        }
+    }
+
+    pub(crate) async fn pause_emitter_swap_after_detach_if_armed(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) {
+        let key = (domain.clone(), emitter.clone());
+        let Some(pause) = self
+            .inner
+            .emitter_swap_after_detach_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.emitter_swap_after_detach_pauses.remove(&key);
     }
 
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
@@ -1670,7 +2212,7 @@ impl FaultInjection {
             return false;
         };
         pause.reach();
-        tokio::select! {
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => false,
             _ = pause.wait_until_released() => true,
         }
@@ -1731,6 +2273,12 @@ impl FaultInjection {
     pub(crate) fn state_replica_polling_is_paused(&self) -> bool {
         self.inner
             .state_replica_polling_paused
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn state_checkpoint_announcements_are_lost(&self) -> bool {
+        self.inner
+            .state_checkpoint_announcements_lost
             .load(Ordering::Acquire)
     }
 
@@ -1846,6 +2394,39 @@ impl FaultInjection {
             panic!(
                 "remote relay admission pause for domain '{}' and branch {:?} is not armed",
                 key.domain, key.branch
+            );
+        };
+        pause.value().clone()
+    }
+
+    fn remote_relay_dispatch_pause(&self, key: &str) -> Arc<TestPause> {
+        let Some(pause) = self.inner.remote_relay_dispatch_pauses.get(key) else {
+            panic!("remote relay dispatch pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn owner_relay_fanout_pause(&self, key: &str) -> Arc<TestPause> {
+        let Some(pause) = self.inner.owner_relay_fanout_pauses.get(key) else {
+            panic!("relay owner fan-out pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn emitter_swap_after_detach_pause(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) -> Arc<TestPause> {
+        let Some(pause) = self
+            .inner
+            .emitter_swap_after_detach_pauses
+            .get(&(domain.clone(), emitter.clone()))
+        else {
+            panic!(
+                "emitter swap pause for '{}' in domain '{}' is not armed",
+                emitter.as_str(),
+                domain.as_str()
             );
         };
         pause.value().clone()

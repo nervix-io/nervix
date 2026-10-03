@@ -1,5 +1,7 @@
 //! One exchange with a server, and the dispatcher that routes every frame it receives.
 //!
+//! Layer: edges.
+//!
 //! Every request of an exchange takes an identity that is non-zero and never reused on that
 //! exchange, and its waiter is registered under that identity before its frame is sent. Every
 //! reply names the identity it answers, so the reader completes exactly the waiter it belongs to,
@@ -8,7 +10,7 @@
 //!
 //! - **Owns.** Request identities, the waiters of an exchange, the reassembly of replies too large
 //!   for one frame, the subscriptions an exchange holds, and the delivery of unsolicited messages
-//!   to the client's event sinks.
+//!   and domain clock replies to the client's event sinks.
 //! - **Depends on.** The wire contract's frames and tonic's gRPC client.
 //! - **Must not know.** What a request means, how its outcome is routed, or how a lost exchange is
 //!   recovered.
@@ -16,28 +18,29 @@
 use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
 use ahash::{HashMap, HashSet};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, Reply, ReplyBody, RequestId,
-    RowSchema, ServerFrame, ServerMessage, SessionLimits, SubscribeDisposition, SubscriptionHandle,
-    SubscriptionOpened, TransferAssembly, TransferPart, UnsubscribeDisposition, VerifiedFrame,
+    self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition,
+    ProducerId, Reply, ReplyBody, RequestId, RowSchema, ServerFrame, ServerMessage, SessionLimits,
+    SubscribeDisposition, SubscriptionHandle, SubscriptionOpened, TransferAssembly, TransferPart,
+    UnsubscribeDisposition, VerifiedFrame,
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
 use nervix_models::RelayName;
-use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
-use parking_lot::Mutex as SyncMutex;
-use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
+use nervix_primitives::{
+    stream::{Stream, StreamExt as _, wrappers::ReceiverStream},
+    sync::{Arc, Mutex, blocking::Mutex as SyncMutex, mpsc, oneshot, watch},
     task::JoinHandle,
 };
-use tokio_stream::{Stream, StreamExt as _, wrappers::ReceiverStream};
+use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use tonic::{Request, Status, codegen::http::uri::PathAndQuery, transport::Channel};
-use triomphe::Arc;
 
 use crate::{
     connection::GrpcConnector,
+    domain_clock::DomainClockAttachments,
     error::ClientError,
     events::{ServerEvent, SubscriptionEvent, SubscriptionRowsEvent},
+    producer::ProducerRegistry,
     subscriptions::DesiredSubscriptions,
 };
 
@@ -47,11 +50,50 @@ pub(crate) const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 /// Request frames queued for an exchange before a sender waits for the transport.
 const REQUEST_FRAME_CAPACITY: usize = 32;
 
-/// Subscription events retained for one exchange, bounded both by records and retained bytes.
-const SUBSCRIPTION_EVENT_CAPACITY: usize = 128;
-pub(crate) const SUBSCRIPTION_EVENT_BYTES: usize = 8 * 1024 * 1024;
+// Subscription events retained for one exchange, bounded both by records and retained bytes, for
+// each subscription and for all of them together.
+
+/// The events one subscription retains.
 const SUBSCRIPTION_RECORD_CAPACITY: usize = 32;
-const SUBSCRIPTION_RETAINED_BYTES: usize = 2 * 1024 * 1024;
+
+/// The most bytes one event is charged. Rows keep the whole frame they were read from alive, and
+/// the exchange verifies every frame against the session's frame limit.
+const SUBSCRIPTION_LARGEST_EVENT_BYTES: usize =
+    SESSION_LIMITS.frame_bytes() + SubscriptionEvent::HEADER_BYTES;
+
+/// How many of the largest events one subscription retains. An event stops counting once its
+/// consumer reads it, so a subscription whose consumer reads each event before the next one
+/// arrives stays within its own allowance, however wide the server's frames are.
+const SUBSCRIPTION_RETAINED_FRAMES: usize = 1;
+
+/// The bytes one subscription retains.
+pub(crate) const SUBSCRIPTION_RETAINED_BYTES: usize =
+    SUBSCRIPTION_LARGEST_EVENT_BYTES * SUBSCRIPTION_RETAINED_FRAMES;
+
+/// How many subscriptions retain everything they are allowed to at the same time.
+pub(crate) const SUBSCRIPTIONS_RETAINED_IN_FULL: usize = 4;
+
+/// The events all subscriptions of an exchange retain together.
+const SUBSCRIPTION_EVENT_CAPACITY: usize =
+    SUBSCRIPTION_RECORD_CAPACITY * SUBSCRIPTIONS_RETAINED_IN_FULL;
+
+/// The bytes all subscriptions of an exchange retain together.
+pub(crate) const SUBSCRIPTION_EVENT_BYTES: usize =
+    SUBSCRIPTION_RETAINED_BYTES * SUBSCRIPTIONS_RETAINED_IN_FULL;
+
+const _: () = assert!(
+    SUBSCRIPTION_RECORD_CAPACITY > 0,
+    "a subscription must retain an event",
+);
+const _: () = assert!(
+    SUBSCRIPTION_RETAINED_BYTES >= SUBSCRIPTION_LARGEST_EVENT_BYTES,
+    "a subscription must retain a frame of the frame limit, which the server may send",
+);
+const _: () = assert!(
+    SUBSCRIPTION_EVENT_CAPACITY >= SUBSCRIPTION_RECORD_CAPACITY
+        && SUBSCRIPTION_EVENT_BYTES >= SUBSCRIPTION_RETAINED_BYTES,
+    "all subscriptions together must retain what one subscription may",
+);
 
 /// Server notices retained for one exchange, bounded both by records and retained bytes.
 const SERVER_NOTICE_CAPACITY: usize = 128;
@@ -59,9 +101,24 @@ pub(crate) const SERVER_NOTICE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum EventQueueError {
-    #[error("the event stream exceeded its queue")]
+    /// Events arrived faster than they were read, and the queue dropped the ones it held. The
+    /// events that arrive after the gap follow it.
+    #[error("the event queue dropped events that were not read in time")]
     Overflow,
-    #[error("the event stream closed")]
+    /// The generation the read began on ended.
+    #[error("the session of the event queue ended")]
+    Closed,
+}
+
+/// Whether a generation's queue delivers events, owes its reader a gap, or has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueCondition {
+    /// Events are retained in the order they arrived.
+    Delivering,
+    /// An event did not fit, so the queue dropped it and every event it held. Events that arrive
+    /// later are retained behind the gap, which the next read reports first.
+    Overflowed,
+    /// The generation ended, and the queue retains nothing more for it.
     Closed,
 }
 
@@ -74,7 +131,7 @@ struct EventQueueState<T> {
     generation: Arc<()>,
     events: VecDeque<QueuedEvent<T>>,
     bytes: usize,
-    terminal: Option<EventQueueError>,
+    condition: QueueCondition,
     subscription_usage: HashMap<SubscriptionHandle, QueueUsage>,
     overflowed_subscriptions: HashSet<SubscriptionHandle>,
     overflow_events: VecDeque<T>,
@@ -189,8 +246,9 @@ struct EventQueueInner<T> {
     subscription: Option<SubscriptionQueuePolicy<T>>,
 }
 
-/// A generation-scoped event queue. An unread consumer cannot hold the exchange reader; if its
-/// bounded queue fills, that generation fails visibly and the reader still routes replies.
+/// A generation-scoped event queue. An unread consumer cannot hold the exchange reader: when the
+/// bounded queue fills, it drops what it held and reports the gap to its reader, and the exchange
+/// reader keeps routing replies.
 pub(crate) struct EventQueue<T> {
     inner: Arc<EventQueueInner<T>>,
 }
@@ -220,7 +278,7 @@ impl<T> EventQueue<T> {
                     generation: Arc::new(()),
                     events: VecDeque::new(),
                     bytes: 0,
-                    terminal: None,
+                    condition: QueueCondition::Delivering,
                     subscription_usage: HashMap::default(),
                     overflowed_subscriptions: HashSet::default(),
                     overflow_events: VecDeque::new(),
@@ -238,7 +296,7 @@ impl<T> EventQueue<T> {
         state.generation = generation.clone();
         state.events.clear();
         state.bytes = 0;
-        state.terminal = None;
+        state.condition = QueueCondition::Delivering;
         state.subscription_usage.clear();
         state.overflowed_subscriptions.clear();
         state.overflow_events.clear();
@@ -253,7 +311,7 @@ impl<T> EventQueue<T> {
         }
         state.events.clear();
         state.bytes = 0;
-        state.terminal = Some(EventQueueError::Closed);
+        state.condition = QueueCondition::Closed;
         state.subscription_usage.clear();
         state.overflowed_subscriptions.clear();
         state.overflow_events.clear();
@@ -262,10 +320,12 @@ impl<T> EventQueue<T> {
     }
 
     /// Retains one event without waiting on its consumer. Subscription overflow ends only the
-    /// affected subscription's delivery; notice overflow closes the notice stream.
+    /// affected subscription's delivery; any other overflow drops every event the queue holds and
+    /// leaves a gap that its next read reports.
     pub(crate) fn push(&self, generation: &Arc<()>, value: T, bytes: usize) -> bool {
         let mut state = self.inner.state.lock();
-        if !Arc::ptr_eq(&state.generation, generation) || state.terminal.is_some() {
+        if !Arc::ptr_eq(&state.generation, generation) || state.condition == QueueCondition::Closed
+        {
             return false;
         }
         if let Some(policy) = &self.inner.subscription {
@@ -288,7 +348,7 @@ impl<T> EventQueue<T> {
         if state.events.len() >= self.inner.max_records || exceeds_bytes {
             state.events.clear();
             state.bytes = 0;
-            state.terminal = Some(EventQueueError::Overflow);
+            state.condition = QueueCondition::Overflowed;
         } else if let Some(next_bytes) = next_bytes {
             state.bytes = next_bytes;
             state.events.push_back(QueuedEvent { value, bytes });
@@ -298,18 +358,27 @@ impl<T> EventQueue<T> {
         false
     }
 
+    /// Waits for the next event of the current generation. A gap is reported once, before the
+    /// events that follow it; `Closed` reports that the generation the read began on ended.
     pub(crate) async fn next(&self) -> error_stack::Result<T, EventQueueError> {
         let mut changed = self.inner.changed.subscribe();
         let generation = self.inner.state.lock().generation.clone();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             {
                 let mut state = self.inner.state.lock();
                 if !Arc::ptr_eq(&state.generation, &generation) {
                     return Err(error_stack::Report::new(EventQueueError::Closed));
                 }
-                if let Some(terminal) = state.terminal {
-                    return Err(error_stack::Report::new(terminal));
+                match state.condition {
+                    QueueCondition::Delivering => {}
+                    QueueCondition::Overflowed => {
+                        state.condition = QueueCondition::Delivering;
+                        return Err(error_stack::Report::new(EventQueueError::Overflow));
+                    }
+                    QueueCondition::Closed => {
+                        return Err(error_stack::Report::new(EventQueueError::Closed));
+                    }
                 }
                 if let Some(event) = state.pop_event(self.inner.subscription.as_ref()) {
                     return Ok(event);
@@ -318,6 +387,22 @@ impl<T> EventQueue<T> {
             if changed.changed().await.is_err() {
                 return Err(error_stack::Report::new(EventQueueError::Closed));
             }
+        }
+    }
+
+    /// Waits until the queue belongs to a generation that has not ended: at once while the current
+    /// one delivers, and otherwise until the next exchange begins one.
+    pub(crate) async fn resumed(&self) {
+        let mut changed = self.inner.changed.subscribe();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if self.inner.state.lock().condition != QueueCondition::Closed {
+                return;
+            }
+            changed
+                .changed()
+                .await
+                .assured("the queue holds the sender of its own notifications");
         }
     }
 
@@ -331,6 +416,12 @@ impl<T> EventQueue<T> {
     pub(crate) fn close_current(&self) {
         let generation = self.inner.state.lock().generation.clone();
         self.close(&generation);
+    }
+
+    /// Whether the generation the queue belongs to has ended.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.state.lock().condition == QueueCondition::Closed
     }
 }
 
@@ -360,6 +451,12 @@ pub(crate) struct EventSinks {
     pub(crate) leadership: watch::Sender<Option<Leadership>>,
     /// The latest complete domain list, replaced the same way.
     pub(crate) domains: watch::Sender<Option<Vec<DomainInfo>>>,
+    /// The domain clocks the client follows, and the events about them.
+    pub(crate) clocks: DomainClockAttachments,
+    /// The producers opened on each exchange, and the events about them.
+    pub(crate) producers: ProducerRegistry,
+    /// Desired native emitter consumers and their current attachments.
+    pub(crate) consumers: crate::consumer::DesiredConsumers,
 }
 
 impl EventSinks {
@@ -372,6 +469,9 @@ impl EventSinks {
 
     pub(crate) fn close_generation(&self, generation: &Arc<()>) {
         self.desired.ended(generation);
+        self.clocks.exchange_ended(generation);
+        self.producers.exchange_ended(generation);
+        self.consumers.exchange_ended(generation);
         self.subscriptions.close(generation);
         self.notices.close(generation);
     }
@@ -398,6 +498,9 @@ impl SessionEvents {
                 notices: notices.clone(),
                 leadership,
                 domains,
+                clocks: DomainClockAttachments::new(),
+                producers: ProducerRegistry::default(),
+                consumers: crate::consumer::DesiredConsumers::default(),
             },
             leadership: observed_leadership,
             domains: Mutex::new(observed_domains),
@@ -470,7 +573,7 @@ impl Exchange {
         let (frames, outbound) = mpsc::channel(REQUEST_FRAME_CAPACITY);
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
-        let response = tokio::time::timeout(connector.connect_timeout(), async {
+        let response = nervix_primitives::time::timeout(connector.connect_timeout(), async {
             client.ready().await.map_err(ClientError::ConnectServer)?;
             client
                 .streaming(
@@ -486,7 +589,7 @@ impl Exchange {
         let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
         let generation = sinks.begin_generation();
         let reader = ExchangeReader::new(pending.clone(), sinks.clone(), generation.clone());
-        let reader = tokio::spawn(reader.run(response.into_inner()));
+        let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
         Ok(Self {
             requests: Arc::new(ExchangeRequests {
                 frames,
@@ -505,8 +608,17 @@ impl Exchange {
     }
 
     /// Ends the exchange. Every request still waiting on it observes the closed session.
-    pub(crate) async fn close(self) {
+    ///
+    /// The reader stops before the generation ends, so nothing it routes can follow that end: an
+    /// attach reply or an acknowledgement it applied is interrupted with the rest of the exchange
+    /// rather than left looking held by an exchange that is gone.
+    pub(crate) async fn close(mut self) {
         self.requests.pending.lock().close();
+        self.reader.abort();
+        (&mut self.reader).await.discarded(
+            "an aborted reader ends cancelled, and one that ended first already closed its \
+             requests",
+        );
         self.sinks.close_generation(&self.generation);
     }
 }
@@ -514,8 +626,10 @@ impl Exchange {
 impl Drop for Exchange {
     fn drop(&mut self) {
         // Nothing reads an exchange's replies once it is gone, and stopping its reader releases
-        // the server's session.
+        // the server's session. Its waiters observe the closed session instead of waiting out
+        // their deadlines.
         self.reader.abort();
+        self.requests.pending.lock().close();
     }
 }
 
@@ -639,7 +753,7 @@ impl ExchangeReader {
     {
         let mut failure = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let received = frames.next().await;
             let frame = match received {
                 Some(Ok(frame)) => frame,
@@ -693,6 +807,22 @@ impl ExchangeReader {
                 .acknowledge(&opened.subscription, &self.generation);
         }
         self.subscriptions.track(&reply.body);
+        match &reply.body {
+            ReplyBody::DomainClockAttach(outcome) => {
+                self.sinks.clocks.apply_attach(outcome, &self.generation);
+            }
+            ReplyBody::DomainClockDetach(outcome) => self.sinks.clocks.apply_detach(outcome),
+            ReplyBody::OpenIngestor(outcome) => {
+                if let OpenIngestorDisposition::Opened(opened) = &outcome.disposition {
+                    self.sinks.producers.opened(
+                        &self.generation,
+                        ProducerId::opened_by(reply.request_id),
+                        opened.description.admission,
+                    );
+                }
+            }
+            _ => {}
+        }
         let waiter = self.pending.lock().take(reply.request_id);
         let Some(waiter) = waiter else {
             // No request of this exchange waits under the identity, so no one is owed the reply.
@@ -774,7 +904,31 @@ impl ExchangeReader {
                 if !self.subscriptions.close(&ended.subscription) {
                     return ReaderFlow::Continue;
                 }
+                // The end is applied before its event is queued, so no caller reads an end the
+                // client does not hold, and a session lost before the end is read cannot restore
+                // the generation it ended.
+                self.sinks.desired.end(&ended, &self.generation);
                 self.forward(SubscriptionEvent::Ended(ended))
+            }
+            wire::ServerEvent::DomainClockObserved(observed) => {
+                self.sinks.clocks.apply_observed(observed, &self.generation);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::DomainClockTicked(ticked) => {
+                self.sinks.clocks.apply_ticked(ticked, &self.generation);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::DomainClockAttachmentEnded(ended) => {
+                self.sinks.clocks.apply_ended(ended, &self.generation);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::ProducerAdmissionChanged(changed) => {
+                self.sinks.producers.admission(&self.generation, changed);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::ProducerEnded(ended) => {
+                self.sinks.producers.ended(&self.generation, ended);
+                ReaderFlow::Continue
             }
             // No reply follows for any request still in flight; the waiters observe the closed
             // session when the exchange ends.

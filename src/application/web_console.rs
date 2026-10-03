@@ -13,7 +13,6 @@ use std::{
     io,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::Arc as StdArc,
 };
 
 use error_stack::{Report, ResultExt};
@@ -38,19 +37,25 @@ use nervix_models::{
     DomainName, NodeEndpoint, NodeServiceUrl, NodeServiceUrlParseError, ResourceName,
     ResourceUploadIdentity, ResourceUploadKey, UserName,
 };
+use nervix_primitives::{
+    net::TcpListener,
+    sync::{CancellationToken, StdArc},
+    task::JoinSet,
+};
 use rustls::ServerConfig;
-use tokio::{net::TcpListener, task::JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{handshake::derive_accept_key, protocol::Role},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{
     AppError,
-    authentication::{credentials_from_web_console_request, unauthorized_basic_response},
+    authentication::{
+        CredentialRejection, busy_authentication_response, credentials_from_web_console_request,
+        unauthorized_basic_response,
+    },
     http_endpoint::{is_websocket_upgrade_request, response_with_bytes, text_response},
     session::websocket::console_websocket_config,
     session_service::SessionServiceImpl,
@@ -114,22 +119,25 @@ async fn handle_web_console_request(
                 "authentication failed",
             ));
         };
-        let Some(_) = service.authenticate_basic_credentials(&credentials).await else {
-            return Ok(text_response(
-                StatusCode::UNAUTHORIZED,
-                "authentication failed",
-            ));
-        };
-        return Ok(text_response(StatusCode::NO_CONTENT, ""));
+        return Ok(
+            match service.authenticate_basic_credentials(&credentials).await {
+                Ok(_) => text_response(StatusCode::NO_CONTENT, ""),
+                Err(CredentialRejection::Failed) => {
+                    text_response(StatusCode::UNAUTHORIZED, "authentication failed")
+                }
+                Err(CredentialRejection::Busy) => busy_authentication_response(),
+            },
+        );
     }
 
     if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_WS_PATH {
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        let Some(authenticated_user) = service.authenticate_basic_credentials(&credentials).await
-        else {
-            return Ok(unauthorized_basic_response());
+        let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+            Ok(user) => user,
+            Err(CredentialRejection::Failed) => return Ok(unauthorized_basic_response()),
+            Err(CredentialRejection::Busy) => return Ok(busy_authentication_response()),
         };
 
         if !is_websocket_upgrade_request(&request) {
@@ -171,7 +179,7 @@ async fn handle_web_console_request(
         let on_upgrade = upgrade::on(&mut request);
         let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
-            let upgraded = tokio::select! {
+            let upgraded = nervix_primitives::select! {
                 _ = service.inner.admission_shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
@@ -209,9 +217,10 @@ async fn handle_web_console_request(
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        let Some(authenticated_user) = service.authenticate_basic_credentials(&credentials).await
-        else {
-            return Ok(unauthorized_basic_response());
+        let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+            Ok(user) => user,
+            Err(CredentialRejection::Failed) => return Ok(unauthorized_basic_response()),
+            Err(CredentialRejection::Busy) => return Ok(busy_authentication_response()),
         };
 
         return Ok(service
@@ -298,7 +307,7 @@ pub(in crate::application) async fn serve_web_console_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
@@ -341,7 +350,7 @@ pub(in crate::application) async fn serve_web_console_https(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
@@ -538,7 +547,7 @@ impl SessionServiceImpl {
                     format!("failed to read multipart field: {error}"),
                 )
             })? {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if field.name() != Some("file") {
                     continue;
                 }
@@ -559,7 +568,7 @@ impl SessionServiceImpl {
                         format!("failed to read uploaded file chunk: {error}"),
                     )
                 })? {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let chunk = self
                         .inner
                         .resource_store

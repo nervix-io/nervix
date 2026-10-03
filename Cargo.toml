@@ -16,18 +16,20 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
-# Replaces synchronization primitives with scheduler-visible Shuttle implementations. The edge
-# I/O modules remain Tokio's real implementations through the wrapper crates.
+# Selects Loom's primitives for the whole graph, so a Loom model of a server owner runs on them.
+loom = [
+  "nervix-consensus/loom",
+  "nervix-execution/loom",
+  "nervix-primitives/loom",
+]
+# Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
+# I/O modules remain Tokio's real implementations, outside every model.
 shuttle = [
   "dep:shuttle",
-  "dep:shuttle-dashmap",
-  "dep:shuttle-parking-lot",
-  "dep:shuttle-tokio",
-  "dep:shuttle-tokio-stream",
-  "dep:shuttle-tokio-util",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
   "nervix-connector-clickhouse/shuttle",
+  "nervix-connector-http/shuttle",
   "nervix-connector-iceberg/shuttle",
   "nervix-connector-kafka/shuttle",
   "nervix-connector-mongodb/shuttle",
@@ -46,12 +48,9 @@ shuttle = [
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
   "nervix-wasm/shuttle",
-  "shuttle-dashmap/shuttle",
-  "shuttle-parking-lot/shuttle",
-  "shuttle-tokio/shuttle",
-  "shuttle-tokio-stream/shuttle",
-  "shuttle-tokio-util/shuttle",
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
@@ -82,14 +81,13 @@ chrono = { workspace = true }
 ciborium = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
-concurrent-queue = { workspace = true }
-dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
+http = { workspace = true }
 http-body-util = { workspace = true }
 humantime = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
@@ -99,13 +97,18 @@ hyper-util = { workspace = true, features = [
   "tokio",
   "http1",
 ] }
+imbl = { workspace = true }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
+nervix-branch-instances = { workspace = true }
+nervix-checkpoint-replication = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
+nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }
 nervix-connector-http = { workspace = true }
@@ -133,10 +136,12 @@ nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
-nervix-models = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
 nervix-nspl = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
+nervix-simd-kernels = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 nonzero_ext = { workspace = true }
@@ -157,7 +162,7 @@ ort = { workspace = true, features = [
   "tracing",
   "webgpu",
 ] }
-parking_lot = { workspace = true }
+otel-tonic = { workspace = true }
 petgraph = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -170,11 +175,6 @@ rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
-shuttle-dashmap = { workspace = true, optional = true }
-shuttle-parking-lot = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = ["full"], optional = true }
-shuttle-tokio-stream = { workspace = true, optional = true }
-shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 signal-hook = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
@@ -187,14 +187,12 @@ tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
-tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true }
+tower-service = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
-triomphe = { workspace = true }
 typed-builder = { workspace = true }
 ubyte = { workspace = true }
 upon = { workspace = true }
@@ -208,12 +206,14 @@ async-nats = { workspace = true }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
+bolero = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
+flatbuffers = { workspace = true }
+flate2 = { workspace = true }
 h2 = { workspace = true }
-http = { workspace = true }
 httparse = { workspace = true }
 iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
@@ -222,10 +222,23 @@ lapin = { workspace = true }
 mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
-nervix-client-core = { workspace = true }
+nervix-arbitrary = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
+# The runtime's timer tests advance a paused clock.
+nervix-model-harness = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
-nix = { workspace = true, features = ["signal"] }
+nix = { workspace = true, features = ["fs", "signal", "term"] }
+# The features the OTEL connector builds the crate with, so the scenarios decode the Export
+# requests it sends without compiling the crate a second time.
+opentelemetry-proto = { workspace = true, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+  "trace",
+] }
+otel-prost = { workspace = true }
 playwright-rs = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }
@@ -242,13 +255,17 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
-trybuild = { workspace = true }
 zeromq = { workspace = true }
 
 [[test]]
 harness = false
 name = "scenarios"
 required-features = ["testing"]
+
+[[bench]]
+harness = false
+name = "admitted_work"
+required-features = ["benchmarks"]
 
 [[bench]]
 harness = false
@@ -262,18 +279,38 @@ required-features = ["benchmarks"]
 
 [[bench]]
 harness = false
+name = "client_wire_cost"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
 name = "wasm_checkpoint"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
+name = "task_handles"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
+name = "state_replication"
 required-features = ["benchmarks"]
 
 [workspace]
 members = [
   ".",
   "crates/approx-into",
+  "crates/arbitrary",
+  "crates/backup",
   "crates/benchmark",
   "crates/bounded-write",
+  "crates/branch-instances",
+  "crates/checkpoint-replication",
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-wire",
+  "crates/columnar-json",
   "crates/connector",
   "crates/connectors/clickhouse",
   "crates/connectors/http",
@@ -309,8 +346,12 @@ members = [
   "crates/nervix-vm",
   "crates/nspl",
   "crates/nspl-format",
+  "crates/model-harness",
   "crates/models",
+  "crates/primitives",
+  "crates/primitives/macros",
   "crates/recovery",
+  "crates/simd-kernels",
   "crates/test-environment",
   "crates/nervix-cli",
 ]
@@ -323,11 +364,18 @@ version = "0.1.0-dev"
 # Tokio's unstable runtime knobs are enabled only by the Turmoil test recipes, which pass
 # `--cfg tokio_unstable`; the simulation runner refuses to run without them.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(tokio_unstable)",
+  "cfg(nervix_lint)",
+] }
 
 [workspace.lints.clippy]
-as-conversions = "deny"
-disallowed-types = "deny"
+as_conversions = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
+[workspace.metadata.tooling]
+workspaces = ["tools/nervix-lint"]
 
 [workspace.dependencies]
 ahash = "0.8"
@@ -362,6 +410,11 @@ async-nats = { version = "0.49.1", default-features = false, features = [
   "server_2_10",
   "server_2_11",
 ] }
+# Lapin's async runtime abstraction, named by the RabbitMQ connector for the transport it hands
+# Lapin. Its `hickory-dns` feature stays off; see `lapin` below.
+async-rs = { version = "0.8.12", default-features = false, features = [
+  "tokio",
+] }
 async-tar = { version = "0.6", default-features = false }
 async-trait = "0.1"
 aws-config = "1.8"
@@ -372,11 +425,13 @@ aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "rt-tokio",
 ] }
 aws-smithy-http-client = "1.1.12"
+# The DNS hook trait a Smithy HTTP client resolves hosts through, implemented by nervix-dns.
+aws-smithy-runtime-api = { version = "1.18", features = ["client"] }
 base64 = "0.22"
 base64-simd = "0.8"
 bb8 = "0.9.1"
 blake3 = "1"
-bolero = "0.13"
+bolero = "=0.13.4"
 byte-unit = "5.2"
 bytes = "1.11"
 chitchat = "0.10.1"
@@ -394,6 +449,7 @@ dashmap = "6"
 error-stack = "0.5"
 faster-hex = "0.10"
 fastrand = "2.4.1"
+fearless_simd = { version = "1.0", features = ["force_support_fallback"] }
 fjall = "3.0.4"
 flatbuffers = "25.12.19"
 flatc-rust = "0.2.0"
@@ -416,6 +472,7 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = [
 http = "1"
 http-body-util = "0.1"
 httparse = "1"
+httpdate = "1"
 humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
@@ -431,6 +488,7 @@ ignore = "0.4.33"
 imbl = { version = "7.0.2", features = ["serde", "triomphe"] }
 indexmap = "2"
 intrusive-collections = "0.10.3"
+itoa = "1"
 jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
@@ -440,9 +498,18 @@ jaq-std = "3"
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 jiff-tzdb = "0.1.8"
 js-sys = "0.3"
-lapin = "4.4.0"
+# The RabbitMQ connector resolves its broker through the node resolver and hands Lapin the
+# established transport through `Connection::connector`. The `hickory-dns` feature stays off: it
+# resolves through a process-wide resolver read from the host's `/etc/resolv.conf`, which ignores
+# the node's DNS configuration and bounds and keeps name-server connections of the first Tokio
+# runtime that used it.
+lapin = "4.12.0"
 leptos = { version = "0.8.19", features = ["csr"] }
 libc = "0.2"
+# The model checker for memory-ordering claims. Only `nervix-primitives` selects its atomics and
+# threads, and only `nervix-model-harness` runs its models; both take it as an optional dependency,
+# so no ordinary dependency graph contains it.
+loom = "0.7.2"
 md5 = "0.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
 # trait implementations but not on the trait declarations, so the feature fails every release build
@@ -457,10 +524,15 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
+nervix-arbitrary = { package = "nervix-arbitrary", path = "crates/arbitrary" }
+nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
+nervix-branch-instances = { package = "nervix-branch-instances", path = "crates/branch-instances" }
+nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", path = "crates/checkpoint-replication" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
+nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
 nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
@@ -488,12 +560,16 @@ nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
+nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
+nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
+nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
+nervix-simd-kernels = { package = "nervix-simd-kernels", path = "crates/simd-kernels" }
 nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
@@ -534,7 +610,9 @@ prost = "0.13"
 prost-reflect = "0.15.3"
 prost-types = "0.13"
 protox = "0.8.0"
-pulsar = { version = "6.7.2", default-features = false, features = [
+# 6.9.0 with the broker's announced maxMessageSize kept per connection, a larger message refused
+# before it is written, and a broker SendError resolved with its server error.
+pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-max-message-size", default-features = false, features = [
   "compression",
   "tokio-rustls-runtime",
 ] }
@@ -576,6 +654,9 @@ rstest = "0.26.1"
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
   "use-rustls-aws-lc",
 ] }
+# The per-address TCP dialer the rumqttc-next line builds on, which applies the driver's network
+# options; its TLS selection stays the facade's.
+rumqttc-core = { package = "rumqttc-core-next", version = "0.34.0", default-features = false }
 # Workspace-wide Rustls policy: AWS-LC only, apart from the dev-only Playwright exception.
 rustls = { version = "0.23", default-features = false, features = [
   "aws_lc_rs",
@@ -586,6 +667,7 @@ rustls = { version = "0.23", default-features = false, features = [
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 rustyline = "17"
+ryu = "1"
 sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
@@ -627,6 +709,8 @@ tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
+# The resolver service `hyper-util`'s connector resolves hosts through, implemented by nervix-dns.
+tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
@@ -634,7 +718,6 @@ tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"
 triomphe = "0.1"
-trybuild = "1.0"
 typed-builder = "0.20"
 typetag = "0.2"
 ubyte = "0.10.4"
@@ -664,6 +747,20 @@ proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", 
 
 [profile.release]
 panic = "unwind"
+
+[profile.fuzz]
+codegen-units = 1
+debug = 1
+debug-assertions = true
+inherits = "dev"
+opt-level = 2
+overflow-checks = true
+
+# The full server's single codegen unit must fit the bounded sanitizer build. Keep its checks
+# and coverage instrumentation with lighter optimization and no debug output.
+[profile.fuzz.package.nervix-server]
+debug = 0
+opt-level = 1
 
 [profile.dev.package."wasmtime"]
 opt-level = 3
@@ -711,6 +808,8 @@ opt-level = 3
 [profile.dev.package."arrow-string"]
 opt-level = 3
 [profile.dev.package."roto"]
+opt-level = 3
+[profile.dev.package."blake3"]
 opt-level = 3
 [profile.dev.package."cranelift-codegen"]
 opt-level = 3

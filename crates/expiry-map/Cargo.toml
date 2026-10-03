@@ -12,4 +12,4 @@ workspace = true
 ahash = { workspace = true }
 intrusive-collections = { workspace = true }
 meticulous = { workspace = true }
-triomphe = { workspace = true }
+nervix-primitives = { workspace = true }

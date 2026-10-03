@@ -5,11 +5,7 @@
 //! - **Depends on.** Consensus command records and the authoritative visibility barrier.
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
 
-use std::{
-    collections::BTreeSet,
-    sync::{Arc as StdArc, Weak as StdWeak},
-    time::Duration,
-};
+use std::{collections::BTreeSet, time::Duration};
 
 use ahash::RandomState;
 use blake3::Hasher;
@@ -21,16 +17,19 @@ use nervix_consensus::{
     CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
     CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
-    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusError,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
+    ConsensusError, RestoreExecution,
 };
-use nervix_execution::sync::DashMap;
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Statement,
-    Timestamp, TransactionPosition, TransactionStatus, UserName,
+    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
+    RestoreArchive, Statement, Timestamp, TransactionPosition, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc, StdWeak},
+};
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::warn;
 
 use super::{
@@ -38,7 +37,7 @@ use super::{
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     model_mutation::{command_error, is_persistent_statement},
-    session_service::{SessionServiceImpl, conflicting_reference},
+    session_service::{SessionServiceImpl, conflicting_reference, expired_reference},
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
     transaction::is_queueable_transaction_statement,
 };
@@ -196,6 +195,12 @@ enum PersistentCommandRequestBody {
         statement: Statement,
     },
     Transaction(CommandExecutionTransactionRequest),
+    /// A restore of `archive`, which takes the mutation lease of every domain in `targets`.
+    Restore {
+        restore: Restore,
+        archive: RestoreArchive,
+        targets: BTreeSet<DomainName>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -337,6 +342,41 @@ impl PersistentCommandRequest {
         })
     }
 
+    /// The request of a restore of `archive`, which owns the domains in `targets` while it
+    /// applies. The request's identity covers the statement and the archive's size and digest, so
+    /// the same reference sent with another archive is another request.
+    pub(in crate::application) fn restore(
+        restore: Restore,
+        archive: RestoreArchive,
+        targets: BTreeSet<DomainName>,
+    ) -> Result<Self, Report<PersistentCommandRequestError>> {
+        let statement = Statement::Restore(restore.clone());
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&statement).map_err(|error| {
+            Report::new(PersistentCommandRequestError::Encoding {
+                message: error.to_string(),
+            })
+        })?;
+        let encoded_bytes = encoded.as_slice();
+        let encoded_length = u64::try_from(encoded_bytes.len())
+            .map_err(|_| Report::new(PersistentCommandRequestError::SemanticsTooLarge))?;
+        let mut hasher = Hasher::new();
+        hasher.update(&[]);
+        hasher.update(&encoded_length.to_le_bytes());
+        hasher.update(encoded_bytes);
+        hasher.update(&archive.total_bytes.get().to_le_bytes());
+        hasher.update(archive.digest.as_bytes());
+        Ok(Self {
+            domain: None,
+            expected_transaction_position: None,
+            digest: *hasher.finalize().as_bytes(),
+            body: PersistentCommandRequestBody::Restore {
+                restore,
+                archive,
+                targets,
+            },
+        })
+    }
+
     pub(in crate::application) fn transaction_digest(
         query: &str,
     ) -> Result<[u8; 32], Report<PersistentCommandRequestError>> {
@@ -349,8 +389,10 @@ impl PersistentCommandRequest {
     }
 
     fn mutation_domains(&self) -> BTreeSet<DomainName> {
-        let PersistentCommandRequestBody::Statement { statement, .. } = &self.body else {
-            return BTreeSet::new();
+        let statement = match &self.body {
+            PersistentCommandRequestBody::Statement { statement, .. } => statement,
+            PersistentCommandRequestBody::Restore { targets, .. } => return targets.clone(),
+            PersistentCommandRequestBody::Transaction(_) => return BTreeSet::new(),
         };
         match statement {
             Statement::CreateDomain(create) => BTreeSet::from([create.id.clone()]),
@@ -369,7 +411,8 @@ fn transaction_targets_match(
 ) -> bool {
     let requested = match &requested.body {
         PersistentCommandRequestBody::Transaction(request) => Some(request),
-        PersistentCommandRequestBody::Statement { .. } => None,
+        PersistentCommandRequestBody::Statement { .. }
+        | PersistentCommandRequestBody::Restore { .. } => None,
     };
     match (existing.transaction_target(), requested) {
         (Some(existing), Some(requested)) => existing.identifies_same_request(&requested.target),
@@ -391,7 +434,7 @@ impl SessionServiceImpl {
             .await;
         let maintenance_due = reconciliation.maintenance_due;
         for reference in reconciliation.applying {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(execution_guard) = self.inner.command_executions.try_lock(reference.clone())
             else {
                 continue;
@@ -405,6 +448,17 @@ impl SessionServiceImpl {
                 continue;
             };
             if !execution.is_applying() {
+                continue;
+            }
+            if execution.restore_execution().is_some()
+                && !self.inner.restore_archives.retains(&reference)
+            {
+                // Only the node its client streamed the archive to can apply a restore. Its
+                // client sends the archive again to this leader to resume it; until then it waits,
+                // and once no retry can send it any more, it ends where it stopped.
+                if self.restore_archive_retry_ended(&reference) {
+                    self.finish_restore_without_archive(execution, execution_guard);
+                }
                 continue;
             }
             let owner = execution
@@ -464,11 +518,7 @@ impl SessionServiceImpl {
             .await
         {
             if existing.is_expired() {
-                let message = format!("command execution reference '{reference}' has expired");
-                return Err(Box::new(CommandResult {
-                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
-                    ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
-                }));
+                return Err(Box::new(expired_reference(&reference)));
             }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
@@ -491,18 +541,38 @@ impl SessionServiceImpl {
                     ..
                 },
             ) = (existing.password_hash(), &request.body)
-                && !verify_password_hash(password_hash.to_string(), create.body.password.clone())
-                    .await
             {
-                // The password is left out of the request digest, so a retry that changed it is
-                // a different command under the same reference.
-                return Err(Box::new(conflicting_reference(
-                    &reference,
-                    CommandExecutionRequestConflict::Content,
-                )));
+                let verified = verify_password_hash(
+                    self.inner.runtime.executor(),
+                    password_hash.to_string(),
+                    create.body.password.clone(),
+                )
+                .await;
+                let matched = match verified {
+                    Ok(matched) => matched,
+                    Err(error) => {
+                        return Err(Box::new(command_error(format!(
+                            "could not compare the retried password with the admitted one: {error}"
+                        ))));
+                    }
+                };
+                if !matched {
+                    // The password is left out of the request digest, so a retry that changed it
+                    // is a different command under the same reference.
+                    return Err(Box::new(conflicting_reference(
+                        &reference,
+                        CommandExecutionRequestConflict::Content,
+                    )));
+                }
             }
             return Ok(CommandAdmission::Existing(existing));
         }
+
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_command_reference_lookup_if_armed(self.inner.consensus.local_node_id())
+            .await;
 
         let effect = match &request.body {
             PersistentCommandRequestBody::Transaction(transaction) => {
@@ -535,9 +605,13 @@ impl SessionServiceImpl {
                 source: _,
                 statement: Statement::CreateUser(create),
             } => {
-                let user = user_credentials(create.body.name.clone(), create.body.password.clone())
-                    .await
-                    .map_err(|error| Box::new(command_error(error.to_string())))?;
+                let user = user_credentials(
+                    self.inner.runtime.executor(),
+                    create.body.name.clone(),
+                    create.body.password.clone(),
+                )
+                .await
+                .map_err(|error| Box::new(command_error(error.to_string())))?;
                 CommandExecutionEffect::CreateUser {
                     if_not_exists: create.if_not_exists,
                     name: user.name,
@@ -549,8 +623,7 @@ impl SessionServiceImpl {
                 statement: Statement::DropNode(drop),
             } => {
                 let availability = self.inner.cluster.availability_state().await;
-                let mut latest_nodes = availability.latest_nodes_by_id();
-                let Some(node) = latest_nodes.remove(&drop.node_id) else {
+                let Some(identity) = availability.latest_observed_identity(&drop.node_id) else {
                     return Err(Box::new(command_error(format!(
                         "cannot identify the current incarnation of raft member '{}'",
                         drop.node_id
@@ -558,7 +631,7 @@ impl SessionServiceImpl {
                 };
                 let membership = self.inner.consensus.membership_nodes().await;
                 CommandExecutionEffect::DropNode {
-                    identity: node.identity(),
+                    identity,
                     member_at_admission: membership.contains_key(&drop.node_id),
                 }
             }
@@ -580,6 +653,12 @@ impl SessionServiceImpl {
                     statement: Box::new(statement.clone()),
                 }
             }
+            PersistentCommandRequestBody::Restore {
+                restore, archive, ..
+            } => CommandExecutionEffect::Restore(Box::new(RestoreExecution::new(
+                restore.clone(),
+                *archive,
+            ))),
         };
         let admitted_at = current_timestamp();
         let policy = self
@@ -614,7 +693,12 @@ impl SessionServiceImpl {
                         ),
                     )));
                 }
-                let message = error.to_string();
+                if let Some(result) =
+                    replicated_admission_refusal(&reference, error.current_context())
+                {
+                    return Err(Box::new(result));
+                }
+                let message = ConsensusError::report_message(&error);
                 let result = self
                     .consensus_error_response(error.current_context(), message)
                     .await;
@@ -700,6 +784,9 @@ impl SessionServiceImpl {
                 .await
             }
             CommandExecutionEffect::Statement { source, statement } => match *statement {
+                Statement::Backup(backup) => {
+                    return Box::pin(self.execute_backup(execution, backup)).await;
+                }
                 Statement::Relocate(relocation) => {
                     let Some(domain) = execution.domain() else {
                         return command_error("durable relocation lost its domain".to_string());
@@ -748,6 +835,9 @@ impl SessionServiceImpl {
                 identity,
                 member_at_admission,
             } => Box::pin(self.drop_admitted_node(identity, member_at_admission)).await,
+            CommandExecutionEffect::Restore(restore) => {
+                Box::pin(self.execute_restore(execution, *restore)).await
+            }
         }
     }
 
@@ -785,13 +875,16 @@ impl SessionServiceImpl {
                         ),
                     )));
                 }
-                let message = error.to_string();
+                let message = ConsensusError::report_message(&error);
                 let result = self
                     .consensus_error_response(error.current_context(), message)
                     .await;
                 return Err(Box::new(result));
             }
         };
+        // A restore's archive is read only while its restore applies, so it is released once the
+        // restore's outcome is durable. Every other command retains no archive under its reference.
+        self.inner.restore_archives.release(&reference);
         self.result_from_finished_execution(&reference, execution)
             .await
     }
@@ -806,13 +899,7 @@ impl SessionServiceImpl {
                 OutcomeUnknownCause::StillApplying,
                 format!("command execution reference '{reference}' is still applying"),
             ))),
-            CommandExecutionState::Expired => {
-                let message = format!("command execution reference '{reference}' has expired");
-                Err(Box::new(CommandResult {
-                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
-                    ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
-                }))
-            }
+            CommandExecutionState::Expired => Err(Box::new(expired_reference(reference))),
             CommandExecutionState::Finished {
                 outcome_revision,
                 result,
@@ -937,6 +1024,21 @@ pub(in crate::application) enum CommandAdmission {
 }
 
 /// An admitted command whose outcome is not known yet, for `cause`.
+fn replicated_admission_refusal(
+    reference: &CommandExecutionReference,
+    error: &ConsensusError,
+) -> Option<CommandResult> {
+    match error {
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired { .. }) => {
+            Some(expired_reference(reference))
+        }
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+            kind, ..
+        }) => Some(conflicting_reference(reference, *kind)),
+        _ => None,
+    }
+}
+
 fn outcome_unknown(cause: OutcomeUnknownCause, message: String) -> CommandResult {
     CommandResult {
         diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
@@ -985,6 +1087,8 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
             .collect(),
         transaction: result.transaction.as_ref().map(durable_transaction_status),
         transaction_admission: result.transaction_admission.clone(),
+        backup: result.backup.as_deref().cloned(),
+        restore: result.restore.as_deref().cloned(),
     }
 }
 
@@ -1041,6 +1145,8 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
             .collect(),
         transaction,
         transaction_admission: result.transaction_admission,
+        backup: result.backup.map(Box::new),
+        restore: result.restore.map(Box::new),
         ..CommandResult::new(disposition, result.message)
     }
 }
@@ -1121,7 +1227,36 @@ mod tests {
         })
     }
 
-    #[tokio::test]
+    #[test]
+    fn replicated_admission_refusals_keep_their_typed_dispositions() {
+        let reference = CommandExecutionReference::parse("reference.admission")
+            .assured("the test reference is an identifier-shaped literal");
+        let expired = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            reference: reference.clone(),
+        });
+        assert_eq!(
+            replicated_admission_refusal(&reference, &expired).map(|result| result.disposition),
+            Some(CommandDisposition::ExecutionReferenceExpired)
+        );
+
+        let conflict = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+            reference: reference.clone(),
+            kind: CommandExecutionRequestConflict::Content,
+        });
+        assert_eq!(
+            replicated_admission_refusal(&reference, &conflict).map(|result| result.disposition),
+            Some(CommandDisposition::ExecutionReferenceConflict(
+                CommandExecutionRequestConflict::Content,
+            ))
+        );
+
+        let unrelated = ConsensusError::Conflict(ConsensusConflict::Reason(format!(
+            "command execution reference '{reference}' has expired"
+        )));
+        assert!(replicated_admission_refusal(&reference, &unrelated).is_none());
+    }
+
+    #[nervix_primitives::test]
     async fn command_execution_owner_entry_survives_a_waiter_and_leaves_with_its_last_guard() {
         let owners = CommandExecutionOwners::default();
         let reference = CommandExecutionReference::parse("request.owners")
@@ -1129,7 +1264,7 @@ mod tests {
         let first = owners.lock(reference.clone()).await;
         let late_lock = owners.lock_for(&reference);
         let waiter_lock = late_lock.clone();
-        let waiter = tokio::spawn(async move {
+        let waiter = nervix_primitives::task::spawn(async move {
             let guard = waiter_lock.mutex.clone().lock_owned().await;
             (waiter_lock, guard)
         });

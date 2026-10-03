@@ -1,5 +1,7 @@
 //! Why a client call failed.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The failures a caller of the client can act on, and which request each concerns.
 //! - **Depends on.** The wire contract's rejection, cancellation and codec errors, and tonic's
 //!   transport errors.
@@ -7,11 +9,18 @@
 //!   returned.
 
 use nervix_client_wire::{
-    CancellationStage, ClientRequest, ReplyBody, RequestRejection, WireDecodeError, WireEncodeError,
+    CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
+    WireDecodeError, WireEncodeError,
 };
-use nervix_models::{CommandExecutionReference, NameError, ResourceUploadIdentity};
+use nervix_dns::DnsConfigurationError;
+use nervix_models::{
+    ClientProducerRefusal, CommandExecutionReference, NameError, ResourceUploadIdentity,
+};
 use thiserror::Error;
 use tonic::metadata::errors::InvalidMetadataValue;
+use uuid::Uuid;
+
+use crate::consumer::ConsumerReopenReason;
 
 /// The requests of the session protocol, as errors about their replies name them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
@@ -38,6 +47,26 @@ pub enum RequestKind {
     Cancel,
     #[strum(serialize = "upload resource")]
     UploadResource,
+    #[strum(serialize = "restore")]
+    Restore,
+    #[strum(serialize = "attach domain clock")]
+    AttachDomainClock,
+    #[strum(serialize = "detach domain clock")]
+    DetachDomainClock,
+    #[strum(serialize = "open ingestor")]
+    OpenIngestor,
+    #[strum(serialize = "submit batch")]
+    SubmitBatch,
+    #[strum(serialize = "close ingestor")]
+    CloseIngestor,
+    #[strum(serialize = "open emitter")]
+    OpenEmitter,
+    #[strum(serialize = "read emitter batch")]
+    ReadEmitterBatch,
+    #[strum(serialize = "settle emitter batch")]
+    SettleEmitterBatch,
+    #[strum(serialize = "close emitter")]
+    CloseEmitter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -61,12 +90,23 @@ impl From<&ClientRequest> for RequestKind {
             ClientRequest::Subscribe(_) => Self::Subscribe,
             ClientRequest::Unsubscribe(_) => Self::Unsubscribe,
             ClientRequest::Cancel(_) => Self::Cancel,
+            ClientRequest::AttachDomainClock(_) => Self::AttachDomainClock,
+            ClientRequest::DetachDomainClock(_) => Self::DetachDomainClock,
+            ClientRequest::OpenIngestor(_) => Self::OpenIngestor,
+            ClientRequest::SubmitBatch(_) => Self::SubmitBatch,
+            ClientRequest::CloseIngestor(_) => Self::CloseIngestor,
+            ClientRequest::OpenEmitter(_) => Self::OpenEmitter,
+            ClientRequest::ReadEmitterBatch(_) => Self::ReadEmitterBatch,
+            ClientRequest::SettleEmitterBatch(_) => Self::SettleEmitterBatch,
+            ClientRequest::CloseEmitter(_) => Self::CloseEmitter,
         }
     }
 }
 
 #[derive(Debug, Error)]
 pub enum ClientError {
+    #[error("failed to load native DNS configuration: {0}")]
+    LoadDnsConfiguration(error_stack::Report<DnsConfigurationError>),
     #[error("invalid server URI")]
     InvalidServerUri(#[source] tonic::codegen::http::uri::InvalidUri),
     #[error("invalid server URL")]
@@ -92,7 +132,7 @@ pub enum ClientError {
     #[error("session exchange closed")]
     SessionClosed,
     #[error("a subscription operation task stopped before completing")]
-    SubscriptionTask(#[source] tokio::task::JoinError),
+    SubscriptionTask(#[source] nervix_primitives::task::JoinError),
     #[error("subscription operation failed")]
     SubscriptionOperation(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("session exchange failed: {0}")]
@@ -175,6 +215,49 @@ pub enum ClientError {
     },
     #[error("failed to load TLS CA certificate")]
     LoadTlsCaCertificate(#[source] std::io::Error),
+    /// The server refused to open a producer. Nothing was attached.
+    #[error("the server refused to open the producer ({refusal:?}): {message}")]
+    ProducerRefused {
+        refusal: ClientProducerRefusal,
+        message: String,
+    },
+    #[error("the server refused to open the emitter consumer ({refusal:?}): {message}")]
+    ConsumerRefused {
+        refusal: EmitterOpenRefusal,
+        message: String,
+    },
+    #[error("the emitter consumer was interrupted by a session gap")]
+    ConsumerInterrupted,
+    #[error("the emitter consumer needs a new open: {0:?}")]
+    ConsumerReopenRequired(ConsumerReopenReason),
+    #[error("the emitter consumer's session could not be restored before the retry deadline")]
+    ConsumerSessionUnavailable,
+    #[error("the delivery reference {reference} belongs to an expired attachment")]
+    DeliveryReferenceExpired { reference: Uuid },
+    #[error("the settlement outcome for delivery reference {reference} is unknown")]
+    SettlementUnknown { reference: Uuid },
+    /// The archive a restore names could not be read on this machine.
+    #[error("failed to read the restore archive '{}' ({kind})", .path.display())]
+    ReadRestoreArchive {
+        path: std::path::PathBuf,
+        kind: std::io::ErrorKind,
+    },
+    /// The archive a restore names is empty, so it holds no backup.
+    #[error("the restore archive '{}' is empty", .path.display())]
+    EmptyRestoreArchive { path: std::path::PathBuf },
+    #[error("restore request failed: {0}")]
+    Restore(#[source] Box<tonic::Status>),
+    #[error("the restore reply does not decode")]
+    InvalidRestoreReply(#[source] WireDecodeError),
+    /// The backup completed, and its archive could not be downloaded. Running the same execution
+    /// handle again recovers the backup's outcome and downloads the archive again while the server
+    /// retains it.
+    #[error("failed to download the archive of backup '{reference}'")]
+    BackupDownload {
+        reference: CommandExecutionReference,
+        #[source]
+        source: crate::backup::BackupDownloadError,
+    },
 }
 
 impl ClientError {
@@ -199,7 +282,7 @@ impl ClientError {
             | Self::SessionOpenDeadline
             | Self::RetryDeadline => true,
             Self::Transport(_) => self.retryable_session_failure(),
-            Self::StartSession(status) => matches!(
+            Self::StartSession(status) | Self::Restore(status) => matches!(
                 status.code(),
                 tonic::Code::Cancelled
                     | tonic::Code::Unknown
@@ -211,21 +294,39 @@ impl ClientError {
     }
 
     pub(crate) fn retryable_session_failure(&self) -> bool {
+        self.session_failure().is_some()
+    }
+
+    /// The same failure again, when it is the loss of a session that a caller recovers from by
+    /// opening a new one.
+    ///
+    /// A subscription request fails on a task of its own, whose report its caller keeps; the
+    /// caller rebuilds the failure from that report so it can recover the session the way every
+    /// other request does.
+    pub(crate) fn session_failure(&self) -> Option<Self> {
         match self {
-            Self::SessionClosed
-            | Self::RequestDeadline { .. }
-            | Self::RequestInterrupted { .. } => true,
-            Self::Transport(status) => {
-                if let tonic::Code::Cancelled
+            Self::SessionClosed => Some(Self::SessionClosed),
+            Self::RequestDeadline { request } => Some(Self::RequestDeadline { request: *request }),
+            Self::RequestInterrupted { request } => {
+                Some(Self::RequestInterrupted { request: *request })
+            }
+            Self::Transport(status) => match status.code() {
+                tonic::Code::Cancelled
                 | tonic::Code::Unknown
                 | tonic::Code::DeadlineExceeded
-                | tonic::Code::Unavailable = status.code()
-                {
-                    return true;
-                }
-                false
-            }
-            _ => false,
+                | tonic::Code::Unavailable => Some(Self::Transport(status.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The error the report of a subscription request stands for: the session failure it
+    /// reports, which its caller recovers from, or the operation's failure with its report.
+    pub(crate) fn subscription_operation(report: error_stack::Report<Self>) -> Self {
+        match report.current_context().session_failure() {
+            Some(failure) => failure,
+            None => Self::SubscriptionOperation(Box::new(report.into_error())),
         }
     }
 
@@ -251,7 +352,16 @@ impl ClientError {
             | ReplyBody::Inspection(_)
             | ReplyBody::Subscribe(_)
             | ReplyBody::Unsubscribe(_)
-            | ReplyBody::Cancel(_) => Self::UnexpectedReply { request },
+            | ReplyBody::Cancel(_)
+            | ReplyBody::DomainClockAttach(_)
+            | ReplyBody::DomainClockDetach(_)
+            | ReplyBody::OpenIngestor(_)
+            | ReplyBody::Submission(_)
+            | ReplyBody::CloseIngestor(_)
+            | ReplyBody::OpenEmitter(_)
+            | ReplyBody::ReadEmitterBatch(_)
+            | ReplyBody::SettleEmitterBatch(_)
+            | ReplyBody::CloseEmitter(_) => Self::UnexpectedReply { request },
         }
     }
 }

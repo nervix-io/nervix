@@ -13,36 +13,51 @@
 //! This module breaks its own contract: recording is infrastructure the data plane calls inward,
 //! but the Prometheus exposition beside it is an edge. The two separate when the crate does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "metrics registration, snapshot and inspection observe membership; recurring \
+                  series recorders carry their own contract"
+    )
+)]
+
 use std::{
     cmp::Ordering,
     collections::VecDeque,
-    sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    num::NonZeroU64,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
-use dashmap::mapref::entry::Entry;
 use hdrhistogram::Histogram as HdrHistogram;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
-use nervix_execution::sync::DashMap;
 use nervix_models::{
-    BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
-    Timestamp,
+    BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName, ModelKind, ModelName,
+    RelayName, Timestamp,
+};
+use nervix_primitives::{
+    collections::{DashMap, dash_map::Entry},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
+        blocking::Mutex,
+    },
+    time::Instant,
 };
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
+use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};
 use prometheus::{
-    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
-    Opts, Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
     core::{Collector, Desc},
     proto::{MetricFamily, MetricType},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
-use triomphe::Arc;
 
 mod interconnection;
 
@@ -66,6 +81,23 @@ const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
 const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
 const INGESTOR_QUIESCE_REJECTED_TOTAL: &str = "ingestor_quiesce_rejected_total";
 const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
+const CLIENT_INGESTOR_PRODUCERS: &str = "client_ingestor_producers";
+const CLIENT_INGESTOR_FORWARDED_PRODUCERS: &str = "client_ingestor_forwarded_producers";
+const CLIENT_INGESTOR_OUTSTANDING_BATCHES: &str = "client_ingestor_outstanding_batches";
+const CLIENT_INGESTOR_OUTSTANDING_BYTES: &str = "client_ingestor_outstanding_bytes";
+const CLIENT_INGESTOR_ADMITTED_BATCHES: &str = "client_ingestor_admitted_batches";
+const CLIENT_INGESTOR_SUBMISSIONS_TOTAL: &str = "client_ingestor_submissions_total";
+const CLIENT_EMITTER_CONSUMERS: &str = "client_emitter_consumers";
+const CLIENT_EMITTER_FORWARDED_CONSUMERS: &str = "client_emitter_forwarded_consumers";
+const CLIENT_EMITTER_FORWARDED_CREDIT_BYTES: &str = "client_emitter_forwarded_credit_bytes";
+const CLIENT_EMITTER_FORWARDED_RETAINED_BATCHES: &str = "client_emitter_forwarded_retained_batches";
+const CLIENT_EMITTER_FORWARDED_RETAINED_BYTES: &str = "client_emitter_forwarded_retained_bytes";
+const CLIENT_EMITTER_RETAINED_BATCHES: &str = "client_emitter_retained_batches";
+const CLIENT_EMITTER_RETAINED_BYTES: &str = "client_emitter_retained_bytes";
+const CLIENT_EMITTER_INCOMPLETE_BATCHES: &str = "client_emitter_incomplete_batches";
+const CLIENT_EMITTER_RETRIES_TOTAL: &str = "client_emitter_retries_total";
+const CLIENT_EMITTER_ACKS_TOTAL: &str = "client_emitter_acks_total";
+const CLIENT_EMITTER_REJECTIONS_TOTAL: &str = "client_emitter_rejections_total";
 const SESSION_SUBSCRIPTION_DROPPED_ROWS_TOTAL: &str = "session_subscription_dropped_rows_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
@@ -102,6 +134,10 @@ const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "branch", "physical_node_id", "reason"];
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const SESSION_SUBSCRIPTION_PROMETHEUS_LABELS: &[&str] = &["domain", "relay"];
+const CLIENT_INGESTOR_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor"];
+const CLIENT_EMITTER_PROMETHEUS_LABELS: &[&str] = &["domain", "emitter"];
+const CLIENT_INGESTOR_SUBMISSION_PROMETHEUS_LABELS: &[&str] =
+    &["domain", "ingestor", "outcome", "cause"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
 const NO_WALL_ELAPSED_NANOS: u64 = u64::MAX;
@@ -114,6 +150,7 @@ const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
 const DOMAIN_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
 const DOMAIN_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
 const HISTOGRAM_VALUE_SCALE: f64 = 1_000.0;
+const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
 const HISTOGRAM_DISPLAY_DECIMAL_SCALE: f64 = 10.0;
 const HDR_HISTOGRAM_SIGFIG: u8 = 2;
 
@@ -241,6 +278,14 @@ struct WallEma {
 }
 
 impl WallEma {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(series_started_at: Instant, tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
@@ -250,6 +295,13 @@ impl WallEma {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &WallEmaSnapshot,
         series_started_at: Instant,
@@ -348,6 +400,14 @@ struct DomainEma {
 }
 
 impl DomainEma {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
@@ -356,6 +416,13 @@ impl DomainEma {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: &DomainEmaSnapshot, tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
@@ -483,6 +550,14 @@ struct RollingRates {
 }
 
 impl RollingRates {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(series_started_at: Instant) -> Self {
         Self {
             wall_1m: WallEma::new(series_started_at, rate_decay_tau_seconds(ONE_MINUTE)),
@@ -492,6 +567,13 @@ impl RollingRates {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: Option<&RollingRatesSnapshot>, series_started_at: Instant) -> Self {
         let Some(snapshot) = snapshot else {
             return Self::new(series_started_at);
@@ -615,6 +697,77 @@ impl HistogramConfig {
                  the 0..=5 hdrhistogram accepts",
             )
     }
+
+    /// How a batch of delivery latencies folds into these histograms' buckets: elapsed nanoseconds
+    /// rounded to the recorded unit, clamped at the same maximum, at the same precision.
+    fn delivery_latency_layout(self) -> ElapsedLayout {
+        let unit_nanos: u64 = (NANOS_PER_SECOND / HISTOGRAM_VALUE_SCALE)
+            .checked_approx_into()
+            .assured("a second divides into the recorded units as a whole number of nanoseconds");
+        let unit_nanos = NonZeroU64::new(unit_nanos)
+            .assured("a recorded unit is a thousandth of a second, which is not zero nanoseconds");
+        ElapsedLayout::new(
+            unit_nanos,
+            self.highest_trackable_value,
+            self.significant_figures,
+        )
+        .assured(
+            "the latency ladder tops out at 30 s, far inside the range the kernel rounds exactly, \
+             for_buckets raises the maximum to at least 2, and HDR_HISTOGRAM_SIGFIG is within \
+             0..=5",
+        )
+    }
+}
+
+/// What one recording adds to a histogram series.
+#[derive(Debug, Clone, Copy)]
+enum HistogramSamples<'a> {
+    /// One observation, in recorded units.
+    One(u64),
+    /// Every delivery latency of one batch, already folded into recorded-unit buckets.
+    Elapsed(&'a ElapsedHistogram),
+}
+
+impl HistogramSamples<'_> {
+    /// One observation in recorded units, or `None` for one that has none: a negative sample, or
+    /// one whose recorded magnitude leaves the `u64` range. Neither belongs in a histogram.
+    fn one(value: f64) -> Option<Self> {
+        if value < 0.0 {
+            return None;
+        }
+        let units = scaled_histogram_value(value)?;
+        Some(Self::One(units))
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "histogram recording iterates the retained external histogram bucket \
+                      interface"
+        )
+    )]
+    fn record_into(self, histogram: &mut HdrHistogram<u64>) {
+        // The configured maximum is the top of this metric's bucket ladder, so a sample above it
+        // belongs in the top bucket exactly as one past the last explicit boundary does. Clamping
+        // here is what puts it there; letting `record` reject it instead would drop the sample and
+        // pull every percentile below the truth, which is the one outcome a latency histogram must
+        // not produce. The kernel already clamps a batch at the same maximum.
+        let highest = histogram.high();
+        match self {
+            Self::One(units) => {
+                histogram
+                    .record(units.min(highest))
+                    .assured("the value was just clamped to the histogram's own maximum");
+            }
+            Self::Elapsed(latencies) => {
+                for bucket in latencies.buckets() {
+                    histogram
+                        .record_n(bucket.lowest_units.min(highest), bucket.count)
+                        .assured("the value was just clamped to the histogram's own maximum");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -626,6 +779,14 @@ struct TimeRollingHistogram {
 }
 
 impl TimeRollingHistogram {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(window: Duration, step: Duration, buckets: &'static [f64]) -> Self {
         Self {
             window,
@@ -635,6 +796,13 @@ impl TimeRollingHistogram {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &[RollingHistogramBucketSnapshot],
         window: Duration,
@@ -659,27 +827,21 @@ impl TimeRollingHistogram {
         }
     }
 
-    fn observe_at(&mut self, value: f64, now_nanos: i64) {
-        if !value.is_finite() || value < 0.0 {
-            return;
-        }
+    /// Records `samples` in the bucket of the window step that holds `now_nanos`.
+    ///
+    /// A step the window has already moved past keeps samples only while its bucket still exists;
+    /// an older step is never reopened, so its samples are not recorded.
+    fn record_at(&mut self, samples: HistogramSamples<'_>, now_nanos: i64) {
         let current_start = bucket_start(now_nanos, self.step);
         self.ensure_current_bucket(current_start);
-        if let Some(bucket) = self
+        // Buckets are ordered by start, and the current step is normally the newest.
+        let current = self
             .buckets
             .iter_mut()
-            .find(|bucket| bucket.start_at_nanos == current_start)
-            && let Some(scaled) = scaled_histogram_value(value)
-        {
-            // The configured maximum is the top of this metric's bucket ladder, so an
-            // observation above it belongs in the top bucket exactly as one past the last
-            // explicit boundary does. Clamping here is what puts it there; letting `record`
-            // reject it instead would drop the sample and pull every percentile below the truth,
-            // which is the one outcome a latency histogram must not produce.
-            bucket
-                .histogram
-                .record(scaled.min(bucket.histogram.high()))
-                .assured("the value was just clamped to the histogram's own maximum");
+            .rev()
+            .find(|bucket| bucket.start_at_nanos == current_start);
+        if let Some(bucket) = current {
+            samples.record_into(&mut bucket.histogram);
         }
     }
 
@@ -770,12 +932,27 @@ struct WallRollingHistogram {
 }
 
 impl WallRollingHistogram {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(window: Duration, step: Duration, buckets: &'static [f64]) -> Self {
         Self {
             inner: TimeRollingHistogram::new(window, step, buckets),
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &WallRollingHistogramSnapshot,
         window: Duration,
@@ -787,10 +964,8 @@ impl WallRollingHistogram {
         }
     }
 
-    fn observe(&mut self, value: f64) {
-        if let Some(now_nanos) = current_wall_unix_nanos() {
-            self.inner.observe_at(value, now_nanos);
-        }
+    fn record(&mut self, samples: HistogramSamples<'_>, now_nanos: i64) {
+        self.inner.record_at(samples, now_nanos);
     }
 
     fn summary(&self) -> HistogramPercentileSummary {
@@ -813,12 +988,27 @@ struct DomainRollingHistogram {
 }
 
 impl DomainRollingHistogram {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(window: Duration, step: Duration, buckets: &'static [f64]) -> Self {
         Self {
             inner: TimeRollingHistogram::new(window, step, buckets),
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &DomainRollingHistogramSnapshot,
         window: Duration,
@@ -830,8 +1020,8 @@ impl DomainRollingHistogram {
         }
     }
 
-    fn observe(&mut self, value: f64, now: Timestamp) {
-        self.inner.observe_at(value, now.unix_nanos());
+    fn record(&mut self, samples: HistogramSamples<'_>, domain_now_nanos: i64) {
+        self.inner.record_at(samples, domain_now_nanos);
     }
 
     fn summary(&self, now: Option<Timestamp>) -> Option<HistogramPercentileSummary> {
@@ -855,7 +1045,6 @@ struct RollingHistogramsSnapshot {
 
 #[derive(Debug)]
 struct RollingHistograms {
-    observed: bool,
     wall_1m: WallRollingHistogram,
     wall_15m: WallRollingHistogram,
     domain_1m: DomainRollingHistogram,
@@ -863,9 +1052,16 @@ struct RollingHistograms {
 }
 
 impl RollingHistograms {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(buckets: &'static [f64]) -> Self {
         Self {
-            observed: false,
             wall_1m: WallRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
             wall_15m: WallRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
             domain_1m: DomainRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
@@ -877,6 +1073,13 @@ impl RollingHistograms {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: Option<&RollingHistogramsSnapshot>,
         _series_started_at: Instant,
@@ -886,7 +1089,6 @@ impl RollingHistograms {
             return Self::new(buckets);
         };
         Self {
-            observed: true,
             wall_1m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_1m,
                 ONE_MINUTE,
@@ -914,13 +1116,22 @@ impl RollingHistograms {
         }
     }
 
-    fn observe(&mut self, value: f64, domain_timestamp: Option<Timestamp>) {
-        self.observed = true;
-        self.wall_1m.observe(value);
-        self.wall_15m.observe(value);
-        if let Some(domain_timestamp) = domain_timestamp {
-            self.domain_1m.observe(value, domain_timestamp);
-            self.domain_15m.observe(value, domain_timestamp);
+    /// Records `samples` in every window: the wall windows at `wall_now_nanos` when the wall clock
+    /// has a nanosecond reading, the domain windows at `domain_now_nanos` when the samples carry
+    /// domain time.
+    fn record(
+        &mut self,
+        samples: HistogramSamples<'_>,
+        wall_now_nanos: Option<i64>,
+        domain_now_nanos: Option<i64>,
+    ) {
+        if let Some(wall_now_nanos) = wall_now_nanos {
+            self.wall_1m.record(samples, wall_now_nanos);
+            self.wall_15m.record(samples, wall_now_nanos);
+        }
+        if let Some(domain_now_nanos) = domain_now_nanos {
+            self.domain_1m.record(samples, domain_now_nanos);
+            self.domain_15m.record(samples, domain_now_nanos);
         }
     }
 
@@ -941,10 +1152,6 @@ impl RollingHistograms {
             domain_15m: self.domain_15m.to_snapshot(),
         }
     }
-
-    fn was_observed(&self) -> bool {
-        self.observed
-    }
 }
 
 #[derive(Debug)]
@@ -957,6 +1164,14 @@ struct AggregatedRollingHistograms {
 }
 
 impl AggregatedRollingHistograms {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(buckets: &'static [f64]) -> Self {
         Self {
             wall_1m: TimeRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
@@ -1065,6 +1280,13 @@ impl Default for CounterSeries {
 }
 
 impl CounterSeries {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: &MetricCounterSnapshot) -> Self {
         let started_at = match snapshot
             .started_at_wall_nanos
@@ -1135,49 +1357,82 @@ impl CounterSeries {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one retained metric series",
+        bound = "fixed rolling histogram buckets and one admitted observation or batch; no guard \
+                 crosses await",
+        reason = "the recorder retains this series instead of discovering it per observation"
+    )
+)]
 struct HistogramSeries {
     started_at: Instant,
     domain_started_at_nanos: AtomicI64,
     domain_last_at_nanos: AtomicI64,
     capacity: AtomicU64,
+    /// Whether anything was ever recorded. It is set while the rolling histograms are locked for
+    /// the recording, so a reader that sees it and then locks them also sees that recording.
+    observed: AtomicBool,
     rolling_histograms: Mutex<RollingHistograms>,
 }
 
 impl HistogramSeries {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(buckets: &'static [f64]) -> Self {
         Self {
             started_at: Instant::now(),
             domain_started_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
             domain_last_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
             capacity: AtomicU64::new(NO_HISTOGRAM_CAPACITY),
+            observed: AtomicBool::new(false),
             rolling_histograms: Mutex::new(RollingHistograms::new(buckets)),
         }
     }
 
-    fn observe_with_capacity(
+    /// Records one observation or one batch: it reads the wall clock once and locks the rolling
+    /// histograms once, however many samples a batch holds.
+    fn record(
         &self,
-        value: f64,
+        samples: HistogramSamples<'_>,
         capacity: Option<u64>,
         domain_timestamp: Option<Timestamp>,
     ) {
-        if !value.is_finite() {
-            return;
-        }
         if let Some(capacity) = capacity {
             self.capacity.store(capacity, AtomicOrdering::Relaxed);
         }
-        if let Some(domain_timestamp) = domain_timestamp {
-            observe_domain_timestamp(
-                &self.domain_started_at_nanos,
-                &self.domain_last_at_nanos,
-                domain_timestamp,
-            );
-        }
-        self.rolling_histograms
-            .lock()
-            .observe(value, domain_timestamp);
+        let domain_now_nanos = match domain_timestamp {
+            Some(domain_timestamp) => {
+                observe_domain_timestamp(
+                    &self.domain_started_at_nanos,
+                    &self.domain_last_at_nanos,
+                    domain_timestamp,
+                );
+                Some(domain_timestamp.unix_nanos())
+            }
+            None => None,
+        };
+        let wall_now_nanos = current_wall_unix_nanos();
+        let mut rolling_histograms = self.rolling_histograms.lock();
+        rolling_histograms.record(samples, wall_now_nanos, domain_now_nanos);
+        self.observed.store(true, AtomicOrdering::Relaxed);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: &MetricHistogramSnapshot) -> Self {
         let started_at = match snapshot
             .started_at_wall_nanos
@@ -1198,6 +1453,7 @@ impl HistogramSeries {
                 snapshot.domain_last_at_nanos.unwrap_or(NO_DOMAIN_TIMESTAMP),
             ),
             capacity: AtomicU64::new(NO_HISTOGRAM_CAPACITY),
+            observed: AtomicBool::new(snapshot.rolling_histograms.is_some()),
             rolling_histograms: Mutex::new(RollingHistograms::from_snapshot(
                 snapshot.rolling_histograms.as_ref(),
                 started_at,
@@ -1231,7 +1487,7 @@ impl HistogramSeries {
     }
 
     fn was_observed(&self) -> bool {
-        self.rolling_histograms.lock().was_observed()
+        self.observed.load(AtomicOrdering::Relaxed)
     }
 }
 
@@ -1353,23 +1609,36 @@ struct PrometheusMetrics {
     ingestor_quiesce_rejected_total: IntCounterVec,
     session_subscriptions: IntGaugeVec,
     session_subscription_dropped_rows_total: IntCounterVec,
+    client_ingestor_producers: IntGaugeVec,
+    client_ingestor_forwarded_producers: IntGaugeVec,
+    client_ingestor_outstanding_batches: IntGaugeVec,
+    client_ingestor_outstanding_bytes: IntGaugeVec,
+    client_ingestor_admitted_batches: IntGaugeVec,
+    client_ingestor_submissions_total: IntCounterVec,
+    client_emitter_consumers: IntGaugeVec,
+    client_emitter_forwarded_consumers: IntGaugeVec,
+    client_emitter_forwarded_credit_bytes: IntGaugeVec,
+    client_emitter_forwarded_retained_batches: IntGaugeVec,
+    client_emitter_forwarded_retained_bytes: IntGaugeVec,
+    client_emitter_retained_batches: IntGaugeVec,
+    client_emitter_retained_bytes: IntGaugeVec,
+    client_emitter_incomplete_batches: IntGaugeVec,
+    client_emitter_retries_total: IntCounterVec,
+    client_emitter_acks_total: IntCounterVec,
+    client_emitter_rejections_total: IntCounterVec,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct IngestorQuiesceMetricLabels {
-    domain: String,
-    ingestor: String,
-    physical_node_id: Option<ClusterNodeName>,
+pub(crate) struct IngestorQuiesceMetrics {
+    series: Arc<IngestorQuiesceSeries>,
 }
 
-impl IngestorQuiesceMetricLabels {
-    fn values(&self) -> [&str; 3] {
-        [
-            self.domain.as_str(),
-            self.ingestor.as_str(),
-            physical_node_label(self.physical_node_id.as_ref()),
-        ]
-    }
+#[derive(Debug)]
+struct IngestorQuiesceSeries {
+    buffered_records: IntGauge,
+    buffered_bytes: IntGauge,
+    dropped: IntCounter,
+    rejected: IntCounter,
 }
 
 struct JemallocMetricsCollector {
@@ -1405,6 +1674,14 @@ impl Default for RuntimeMetrics {
 }
 
 impl PrometheusMetrics {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new() -> Self {
         let registry = Registry::new();
         let messages_total = IntCounterVec::new(
@@ -1656,6 +1933,171 @@ impl PrometheusMetrics {
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
             );
+        let client_ingestor_producers = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_PRODUCERS,
+                "Producers attached to a client ingestor this node executes.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_forwarded_producers = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_FORWARDED_PRODUCERS,
+                "Producers of a client ingestor this node executes whose sessions another node \
+                 serves.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_outstanding_batches = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_OUTSTANDING_BATCHES,
+                "Batches the producers of a client ingestor submitted and have no outcome for yet.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_outstanding_bytes = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_OUTSTANDING_BYTES,
+                "Arrow IPC bytes of the batches a client ingestor's producers have outstanding.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_admitted_batches = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_ADMITTED_BATCHES,
+                "Batches of a client ingestor holding a slot of its acknowledgement window: being \
+                 admitted, or admitted and awaiting their acknowledgement.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_submissions_total = IntCounterVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_SUBMISSIONS_TOTAL,
+                "Batches a client ingestor answered, by outcome and cause.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_SUBMISSION_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_collectors: [Box<dyn prometheus::core::Collector>; 6] = [
+            Box::new(client_ingestor_producers.clone()),
+            Box::new(client_ingestor_forwarded_producers.clone()),
+            Box::new(client_ingestor_outstanding_batches.clone()),
+            Box::new(client_ingestor_outstanding_bytes.clone()),
+            Box::new(client_ingestor_admitted_batches.clone()),
+            Box::new(client_ingestor_submissions_total.clone()),
+        ];
+        for collector in client_ingestor_collectors {
+            registry.register(collector).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
+        let emitter_gauge = |name, help| {
+            IntGaugeVec::new(
+                Opts::new(name, help).namespace("nervix"),
+                CLIENT_EMITTER_PROMETHEUS_LABELS,
+            )
+            .assured("client emitter metric names and labels are fixed valid Prometheus names")
+        };
+        let emitter_counter = |name, help| {
+            IntCounterVec::new(
+                Opts::new(name, help).namespace("nervix"),
+                CLIENT_EMITTER_PROMETHEUS_LABELS,
+            )
+            .assured("client emitter metric names and labels are fixed valid Prometheus names")
+        };
+        let client_emitter_consumers = emitter_gauge(
+            CLIENT_EMITTER_CONSUMERS,
+            "Application consumers attached to this client emitter.",
+        );
+        let client_emitter_forwarded_consumers = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_CONSUMERS,
+            "Client emitter consumers served on another node.",
+        );
+        let client_emitter_forwarded_credit_bytes = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_CREDIT_BYTES,
+            "Reserved byte credit of client emitter consumers served on another node.",
+        );
+        let client_emitter_forwarded_retained_batches = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_RETAINED_BATCHES,
+            "Retained output batches assigned to consumers served on another node.",
+        );
+        let client_emitter_forwarded_retained_bytes = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_RETAINED_BYTES,
+            "Arrow IPC bytes retained for consumers served on another node.",
+        );
+        let client_emitter_retained_batches = emitter_gauge(
+            CLIENT_EMITTER_RETAINED_BATCHES,
+            "Client emitter output batches still awaiting application settlement.",
+        );
+        let client_emitter_retained_bytes = emitter_gauge(
+            CLIENT_EMITTER_RETAINED_BYTES,
+            "Arrow IPC bytes retained while client emitter output awaits application settlement.",
+        );
+        let client_emitter_incomplete_batches = emitter_gauge(
+            CLIENT_EMITTER_INCOMPLETE_BATCHES,
+            "Assigned output batches awaiting application processing.",
+        );
+        let client_emitter_retries_total = emitter_counter(
+            CLIENT_EMITTER_RETRIES_TOTAL,
+            "Client emitter output attempts revoked for retry, timeout or consumer loss.",
+        );
+        let client_emitter_acks_total = emitter_counter(
+            CLIENT_EMITTER_ACKS_TOTAL,
+            "Client emitter output batches acknowledged by applications.",
+        );
+        let client_emitter_rejections_total = emitter_counter(
+            CLIENT_EMITTER_REJECTIONS_TOTAL,
+            "Client emitter output batches rejected by applications.",
+        );
+        let client_emitter_collectors: [Box<dyn prometheus::core::Collector>; 11] = [
+            Box::new(client_emitter_consumers.clone()),
+            Box::new(client_emitter_forwarded_consumers.clone()),
+            Box::new(client_emitter_forwarded_credit_bytes.clone()),
+            Box::new(client_emitter_forwarded_retained_batches.clone()),
+            Box::new(client_emitter_forwarded_retained_bytes.clone()),
+            Box::new(client_emitter_retained_batches.clone()),
+            Box::new(client_emitter_retained_bytes.clone()),
+            Box::new(client_emitter_incomplete_batches.clone()),
+            Box::new(client_emitter_retries_total.clone()),
+            Box::new(client_emitter_acks_total.clone()),
+            Box::new(client_emitter_rejections_total.clone()),
+        ];
+        for collector in client_emitter_collectors {
+            registry.register(collector).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
         registry
             .register(Box::new(JemallocMetricsCollector::new()))
             .assured(
@@ -1689,6 +2131,23 @@ impl PrometheusMetrics {
             ingestor_quiesce_rejected_total,
             session_subscriptions,
             session_subscription_dropped_rows_total,
+            client_ingestor_producers,
+            client_ingestor_forwarded_producers,
+            client_ingestor_outstanding_batches,
+            client_ingestor_outstanding_bytes,
+            client_ingestor_admitted_batches,
+            client_ingestor_submissions_total,
+            client_emitter_consumers,
+            client_emitter_forwarded_consumers,
+            client_emitter_forwarded_credit_bytes,
+            client_emitter_forwarded_retained_batches,
+            client_emitter_forwarded_retained_bytes,
+            client_emitter_retained_batches,
+            client_emitter_retained_bytes,
+            client_emitter_incomplete_batches,
+            client_emitter_retries_total,
+            client_emitter_acks_total,
+            client_emitter_rejections_total,
         }
     }
 
@@ -1792,6 +2251,14 @@ impl PrometheusMetrics {
 }
 
 impl JemallocMetricsCollector {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new() -> Self {
         let mut descs = Vec::new();
         let active_gauge = jemalloc_gauge(
@@ -2011,11 +2478,37 @@ impl HistogramRecorder {
         if !value.is_finite() {
             return;
         }
-        self.series
-            .observe_with_capacity(value, capacity, domain_timestamp);
+        if let Some(samples) = HistogramSamples::one(value) {
+            self.series.record(samples, capacity, domain_timestamp);
+        }
         if let Some(prometheus) = &self.prometheus {
             prometheus.observe(value);
         }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "latency recording iterates the selected timestamp projection without \
+                      changing its retained histogram owner"
+        )
+    )]
+    fn observe_delivery_latencies(&self, latencies: &DeliveryLatencies<'_>) {
+        self.series.record(
+            HistogramSamples::Elapsed(&latencies.buckets),
+            None,
+            latencies.domain_timestamp,
+        );
+        let Some(prometheus) = &self.prometheus else {
+            return;
+        };
+        // The Prometheus client takes one sample per call. Its local histogram folds the batch
+        // without touching the shared child, which then takes the whole batch in one flush.
+        let local = prometheus.local();
+        for elapsed in elapsed_nanos(latencies.delivered_at_nanos, latencies.ingested_at) {
+            local.observe(Duration::from_nanos(elapsed).as_secs_f64());
+        }
+        local.flush();
     }
 }
 
@@ -2032,6 +2525,42 @@ impl HistogramRecorders {
             secondary.observe(value, capacity, domain_timestamp);
         }
     }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "latency recording iterates the selected timestamp projection without \
+                      changing its retained histogram owner"
+        )
+    )]
+    fn observe_delivery_latencies(&self, latencies: &DeliveryLatencies<'_>) {
+        self.primary.observe_delivery_latencies(latencies);
+        if let Some(secondary) = &self.secondary {
+            secondary.observe_delivery_latencies(latencies);
+        }
+    }
+}
+
+/// One batch as a node input accepts it.
+pub(crate) struct DeliveryObservation<'a> {
+    pub(crate) messages: u64,
+    pub(crate) bytes: u64,
+    /// The instant the input accepted the batch, which every row's delivery latency is measured
+    /// to.
+    pub(crate) delivered_at: Timestamp,
+    /// Every row's ingestion high watermark in Unix nanoseconds, the instant its delivery latency
+    /// is measured from.
+    pub(crate) ingested_at: &'a [i64],
+}
+
+/// The delivery latencies of one batch, as every latency series of a node input records them.
+struct DeliveryLatencies<'a> {
+    /// The kernel's fold of every latency, which the rolling histograms merge bucket by bucket.
+    buckets: ElapsedHistogram,
+    delivered_at_nanos: i64,
+    ingested_at: &'a [i64],
+    /// The batch's latest ingestion watermark, which places it in the domain-time windows.
+    domain_timestamp: Option<Timestamp>,
 }
 
 #[derive(Debug)]
@@ -2085,6 +2614,8 @@ impl MessageMetricsHandle {
 struct NodeInputMetricRecorders {
     batch: BatchMetricRecorders,
     delivery_latency: HistogramRecorders,
+    /// How one batch's delivery latencies fold into the latency histograms' buckets.
+    delivery_latency_layout: ElapsedLayout,
 }
 
 /// A task-local handle for one node input edge, including delivery latency.
@@ -2094,12 +2625,34 @@ pub(crate) struct NodeInputMetricsHandle {
 }
 
 impl NodeInputMetricsHandle {
-    pub(crate) fn observe_batch(
-        &self,
-        messages: u64,
-        bytes: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
+    /// Records one delivered batch.
+    ///
+    /// The batch's traffic is stamped with its latest ingestion watermark. Every row ingested at or
+    /// before the delivery instant adds its delivery latency: one kernel pass folds them all into
+    /// buckets, and each latency series merges those buckets in one recording.
+    pub(crate) fn observe_delivery(&self, delivery: &DeliveryObservation<'_>) {
+        let delivered_at_nanos = delivery.delivered_at.unix_nanos();
+        let buckets = ElapsedHistogram::new(
+            &self.inner.delivery_latency_layout,
+            delivered_at_nanos,
+            delivery.ingested_at,
+        );
+        let domain_timestamp = buckets.latest().map(Timestamp::from_unix_nanos);
+        self.observe_batch(delivery.messages, delivery.bytes, domain_timestamp);
+        if buckets.total() == 0 {
+            return;
+        }
+        self.inner
+            .delivery_latency
+            .observe_delivery_latencies(&DeliveryLatencies {
+                buckets,
+                delivered_at_nanos,
+                ingested_at: delivery.ingested_at,
+                domain_timestamp,
+            });
+    }
+
+    fn observe_batch(&self, messages: u64, bytes: u64, domain_timestamp: Option<Timestamp>) {
         self.inner
             .batch
             .messages
@@ -2110,16 +2663,6 @@ impl NodeInputMetricsHandle {
             .batch
             .messages_per_batch
             .observe(messages.approx_into(), None, domain_timestamp);
-    }
-
-    pub(crate) fn observe_delivery_latency(
-        &self,
-        seconds: f64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.inner
-            .delivery_latency
-            .observe(seconds, None, domain_timestamp);
     }
 }
 
@@ -2279,6 +2822,9 @@ impl RuntimeMetrics {
             "received",
             MESSAGES_TOTAL,
         );
+        let delivery_latency_layout =
+            HistogramConfig::for_buckets(internal_buckets_for_metric(DELIVERY_LATENCY_SECONDS))
+                .delivery_latency_layout();
         NodeInputMetricsHandle {
             inner: Arc::new(NodeInputMetricRecorders {
                 batch: self.resolve_batch_metric_recorders(messages_key.clone(), scope),
@@ -2286,6 +2832,7 @@ impl RuntimeMetrics {
                     with_metric(&messages_key, DELIVERY_LATENCY_SECONDS),
                     scope,
                 ),
+                delivery_latency_layout,
             }),
         }
     }
@@ -2414,6 +2961,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_global_counter(&self, key: MetricKey) -> CounterRecorder {
         let prometheus = self
             .series
@@ -2434,6 +2989,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_branch_counter(&self, branch_key: &str, key: MetricKey) -> CounterRecorder {
         let key = BranchMetricKey {
             branch_key: branch_key.to_string(),
@@ -2453,6 +3016,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_global_histogram(&self, key: MetricKey) -> HistogramRecorder {
         let prometheus =
             self.series.prometheus.histogram(&key).assured(
@@ -2473,6 +3044,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_branch_histogram(&self, branch_key: &str, key: MetricKey) -> HistogramRecorder {
         let buckets = internal_buckets_for_metric(key.metric);
         let key = BranchMetricKey {
@@ -2498,32 +3077,32 @@ impl RuntimeMetrics {
         domain: &DomainName,
         ingestor: &IngestorName,
         physical_node_id: Option<&ClusterNodeName>,
-    ) -> IngestorQuiesceMetricLabels {
-        let labels = IngestorQuiesceMetricLabels {
-            domain: domain.as_str().to_string(),
-            ingestor: ingestor.as_str().to_string(),
-            physical_node_id: physical_node_id.cloned(),
+    ) -> IngestorQuiesceMetrics {
+        let values = [
+            domain.as_str(),
+            ingestor.as_str(),
+            physical_node_label(physical_node_id),
+        ];
+        let prometheus = &self.series.prometheus;
+        let series = IngestorQuiesceSeries {
+            buffered_records: prometheus
+                .ingestor_quiesce_buffered_records
+                .with_label_values(&values),
+            buffered_bytes: prometheus
+                .ingestor_quiesce_buffered_bytes
+                .with_label_values(&values),
+            dropped: prometheus
+                .ingestor_quiesce_dropped_total
+                .with_label_values(&values),
+            rejected: prometheus
+                .ingestor_quiesce_rejected_total
+                .with_label_values(&values),
         };
-        let values = labels.values();
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_records
-            .with_label_values(&values)
-            .set(0);
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_bytes
-            .with_label_values(&values)
-            .set(0);
-        self.series
-            .prometheus
-            .ingestor_quiesce_dropped_total
-            .with_label_values(&values);
-        self.series
-            .prometheus
-            .ingestor_quiesce_rejected_total
-            .with_label_values(&values);
-        labels
+        series.buffered_records.set(0);
+        series.buffered_bytes.set(0);
+        IngestorQuiesceMetrics {
+            series: Arc::new(series),
+        }
     }
 
     /// Records how many open session subscriptions this node delivers from `relay`. A relay the
@@ -2545,65 +3124,126 @@ impl RuntimeMetrics {
             );
     }
 
+    /// The series of one client ingestor this node executes. Its gauges are resolved once, so its
+    /// endpoint sets them without looking their labels up again.
+    pub(crate) fn client_ingestor_series(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> ClientIngestorSeries {
+        let labels = [domain.as_str(), ingestor.as_str()];
+        let prometheus = &self.series.prometheus;
+        ClientIngestorSeries {
+            producers: prometheus
+                .client_ingestor_producers
+                .with_label_values(&labels),
+            forwarded_producers: prometheus
+                .client_ingestor_forwarded_producers
+                .with_label_values(&labels),
+            outstanding_batches: prometheus
+                .client_ingestor_outstanding_batches
+                .with_label_values(&labels),
+            outstanding_bytes: prometheus
+                .client_ingestor_outstanding_bytes
+                .with_label_values(&labels),
+            admitted_batches: prometheus
+                .client_ingestor_admitted_batches
+                .with_label_values(&labels),
+            submissions: ClientSubmissionCounters::new(
+                &prometheus.client_ingestor_submissions_total,
+                domain,
+                ingestor,
+            ),
+        }
+    }
+
+    /// The per-emitter metrics that the volatile client delivery owner updates at each boundary.
+    pub(crate) fn client_emitter_series(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) -> ClientEmitterSeries {
+        let labels = [domain.as_str(), emitter.as_str()];
+        let prometheus = &self.series.prometheus;
+        ClientEmitterSeries {
+            consumers: prometheus
+                .client_emitter_consumers
+                .with_label_values(&labels),
+            forwarded_consumers: prometheus
+                .client_emitter_forwarded_consumers
+                .with_label_values(&labels),
+            forwarded_credit_bytes: prometheus
+                .client_emitter_forwarded_credit_bytes
+                .with_label_values(&labels),
+            forwarded_retained_batches: prometheus
+                .client_emitter_forwarded_retained_batches
+                .with_label_values(&labels),
+            forwarded_retained_bytes: prometheus
+                .client_emitter_forwarded_retained_bytes
+                .with_label_values(&labels),
+            retained_batches: prometheus
+                .client_emitter_retained_batches
+                .with_label_values(&labels),
+            retained_bytes: prometheus
+                .client_emitter_retained_bytes
+                .with_label_values(&labels),
+            incomplete_batches: prometheus
+                .client_emitter_incomplete_batches
+                .with_label_values(&labels),
+            retries: prometheus
+                .client_emitter_retries_total
+                .with_label_values(&labels),
+            acks: prometheus
+                .client_emitter_acks_total
+                .with_label_values(&labels),
+            rejections: prometheus
+                .client_emitter_rejections_total
+                .with_label_values(&labels),
+        }
+    }
+
     /// Records rows a dropping session subscription to `relay` discarded.
-    pub(crate) fn increment_session_subscription_dropped_rows(
+    pub(crate) fn session_subscription_dropped_rows(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        rows: u64,
-    ) {
+    ) -> IntCounter {
         self.series
             .prometheus
             .session_subscription_dropped_rows_total
             .with_label_values(&[domain.as_str(), relay.as_str()])
-            .inc_by(rows);
     }
 
     pub(crate) fn set_ingestor_quiesce_buffered(
         &self,
-        labels: &IngestorQuiesceMetricLabels,
+        metrics: &IngestorQuiesceMetrics,
         records: usize,
         bytes: usize,
     ) {
-        let values = labels.values();
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_records
-            .with_label_values(&values)
-            .set(i64::try_from(records).assured(
-                "buffered records occupy memory and cannot exceed the allocator's isize limit",
-            ));
-        self.series
-            .prometheus
-            .ingestor_quiesce_buffered_bytes
-            .with_label_values(&values)
-            .set(i64::try_from(bytes).assured(
-                "buffered bytes occupy memory and cannot exceed the allocator's isize limit",
-            ));
+        metrics
+            .series
+            .buffered_records
+            .set(i64::try_from(records).assured("buffered records occupy memory and fit in i64"));
+        metrics
+            .series
+            .buffered_bytes
+            .set(i64::try_from(bytes).assured("buffered bytes occupy memory and fit in i64"));
     }
 
     pub(crate) fn increment_ingestor_quiesce_dropped(
         &self,
-        labels: &IngestorQuiesceMetricLabels,
+        metrics: &IngestorQuiesceMetrics,
         count: u64,
     ) {
-        self.series
-            .prometheus
-            .ingestor_quiesce_dropped_total
-            .with_label_values(&labels.values())
-            .inc_by(count);
+        metrics.series.dropped.inc_by(count);
     }
 
     pub(crate) fn increment_ingestor_quiesce_rejected(
         &self,
-        labels: &IngestorQuiesceMetricLabels,
+        metrics: &IngestorQuiesceMetrics,
         count: u64,
     ) {
-        self.series
-            .prometheus
-            .ingestor_quiesce_rejected_total
-            .with_label_values(&labels.values())
-            .inc_by(count);
+        metrics.series.rejected.inc_by(count);
     }
 
     pub(crate) fn register_branch(
@@ -2631,6 +3271,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(crate) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
@@ -2668,6 +3316,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(crate) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
@@ -2721,6 +3377,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(crate) fn observe_branch_instance_detached(
         &self,
         domain: &DomainName,
@@ -2836,6 +3500,14 @@ impl RuntimeMetrics {
         self.series.prometheus.interconnection.install(observations);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub fn snapshot_global_target(
         &self,
         domain: &DomainName,
@@ -2921,6 +3593,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub fn apply_global_target_snapshot(
         &self,
         domain: &DomainName,
@@ -2973,6 +3653,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub fn has_global_target_measurements(
         &self,
         domain: &DomainName,
@@ -4193,9 +4881,326 @@ fn format_number(value: f64) -> String {
         .to_string()
 }
 
+/// The series of one client ingestor on this node: its attached producers, the batches and bytes
+/// they have outstanding, the batches holding a slot of its acknowledgement window, and the
+/// batches it answered.
+pub(crate) struct ClientIngestorSeries {
+    producers: IntGauge,
+    forwarded_producers: IntGauge,
+    outstanding_batches: IntGauge,
+    outstanding_bytes: IntGauge,
+    admitted_batches: IntGauge,
+    /// Every bounded outcome child is resolved before the endpoint accepts its first batch.
+    submissions: ClientSubmissionCounters,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct ClientSubmissionMetricKey {
+    class: &'static str,
+    cause: &'static str,
+}
+
+impl From<&nervix_models::ClientSubmissionOutcome> for ClientSubmissionMetricKey {
+    fn from(outcome: &nervix_models::ClientSubmissionOutcome) -> Self {
+        Self {
+            class: outcome.class_label(),
+            cause: outcome.cause_label(),
+        }
+    }
+}
+
+struct ClientSubmissionCounters {
+    children: ahash::HashMap<ClientSubmissionMetricKey, IntCounter>,
+}
+
+impl ClientSubmissionCounters {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
+    fn new(vector: &IntCounterVec, domain: &DomainName, ingestor: &IngestorName) -> Self {
+        use nervix_models::{
+            ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure,
+            ClientSubmissionOutcome, ClientSubmissionRefusal,
+        };
+        let mut outcomes = vec![ClientSubmissionOutcome::Completed];
+        for refusal in [
+            ClientSubmissionRefusal::InvalidBatch(ClientBatchDefect::Malformed),
+            ClientSubmissionRefusal::Suspended,
+            ClientSubmissionRefusal::Busy,
+            ClientSubmissionRefusal::Draining,
+            ClientSubmissionRefusal::ProducerEnded,
+            ClientSubmissionRefusal::CreditExceeded,
+        ] {
+            outcomes.push(ClientSubmissionOutcome::NotAdmitted(refusal));
+        }
+        for failure in ClientProcessingFailure::iter() {
+            outcomes.push(ClientSubmissionOutcome::ProcessingFailed(failure));
+        }
+        for uncertainty in ClientOutcomeUncertainty::iter() {
+            outcomes.push(ClientSubmissionOutcome::OutcomeUnknown(uncertainty));
+        }
+        let mut children = ahash::HashMap::default();
+        for outcome in outcomes {
+            let child = vector.with_label_values(&[
+                domain.as_str(),
+                ingestor.as_str(),
+                outcome.class_label(),
+                outcome.cause_label(),
+            ]);
+            children.insert(ClientSubmissionMetricKey::from(&outcome), child);
+        }
+        Self { children }
+    }
+}
+
+impl ClientIngestorSeries {
+    /// Counts one batch the ingestor answered with `outcome`.
+    pub(crate) fn count(&self, outcome: &nervix_models::ClientSubmissionOutcome) {
+        let key = ClientSubmissionMetricKey::from(outcome);
+        self.submissions
+            .children
+            .get(&key)
+            .assured("every public outcome's metric child is bound at endpoint startup")
+            .inc();
+    }
+
+    pub(crate) fn set(&self, gauges: crate::runtime::ClientIngestorGauges) {
+        self.producers.set(
+            i64::try_from(gauges.producers)
+                .assured("every attached producer occupies memory, so the count fits in i64"),
+        );
+        self.forwarded_producers.set(
+            i64::try_from(gauges.forwarded_producers)
+                .assured("every attached producer occupies memory, so the count fits in i64"),
+        );
+        self.outstanding_batches.set(
+            i64::try_from(gauges.outstanding_batches)
+                .assured("every outstanding batch occupies memory, so the count fits in i64"),
+        );
+        self.outstanding_bytes
+            .set(i64::try_from(gauges.outstanding_bytes).assured(
+                "outstanding bytes are held in memory within the node's producer budget, so they \
+                 fit in i64",
+            ));
+        self.admitted_batches
+            .set(i64::try_from(gauges.admitted_batches).assured(
+                "every admitted batch holds its ACK root in memory, so the count fits in i64",
+            ));
+    }
+}
+
+/// Public metrics for one volatile client emitter delivery owner. Gauges describe only current
+/// in-memory work; counters retain outcomes across endpoint restarts on the same node.
+#[derive(Clone)]
+pub(crate) struct ClientEmitterSeries {
+    consumers: IntGauge,
+    forwarded_consumers: IntGauge,
+    forwarded_credit_bytes: IntGauge,
+    forwarded_retained_batches: IntGauge,
+    forwarded_retained_bytes: IntGauge,
+    retained_batches: IntGauge,
+    retained_bytes: IntGauge,
+    incomplete_batches: IntGauge,
+    retries: IntCounter,
+    acks: IntCounter,
+    rejections: IntCounter,
+}
+
+impl ClientEmitterSeries {
+    pub(crate) fn reset_gauges(&self) {
+        self.consumers.set(0);
+        self.forwarded_consumers.set(0);
+        self.forwarded_credit_bytes.set(0);
+        self.forwarded_retained_batches.set(0);
+        self.forwarded_retained_bytes.set(0);
+        self.retained_batches.set(0);
+        self.retained_bytes.set(0);
+        self.incomplete_batches.set(0);
+    }
+
+    pub(crate) fn attach(&self, forwarded: bool, credit: u64) {
+        self.consumers.inc();
+        if forwarded {
+            self.forwarded_consumers.inc();
+            self.forwarded_credit_bytes.add(
+                i64::try_from(credit)
+                    .assured("consumer credit is bounded by the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn detach(&self, forwarded: bool, credit: u64) {
+        self.consumers.dec();
+        if forwarded {
+            self.forwarded_consumers.dec();
+            self.forwarded_credit_bytes.sub(
+                i64::try_from(credit)
+                    .assured("consumer credit is bounded by the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn retain(&self, bytes: usize) {
+        self.retained_batches.inc();
+        self.retained_bytes.add(
+            i64::try_from(bytes).assured("a retained IPC payload fits in the 128 MiB node budget"),
+        );
+    }
+
+    pub(crate) fn release(&self, bytes: usize) {
+        self.retained_batches.dec();
+        self.retained_bytes.sub(
+            i64::try_from(bytes).assured("a retained IPC payload fits in the 128 MiB node budget"),
+        );
+    }
+
+    pub(crate) fn assign(&self, bytes: usize, forwarded: bool) {
+        self.incomplete_batches.inc();
+        if forwarded {
+            self.forwarded_retained_batches.inc();
+            self.forwarded_retained_bytes.add(
+                i64::try_from(bytes)
+                    .assured("a forwarded IPC payload fits in the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn unassign(&self, bytes: usize, forwarded: bool) {
+        self.incomplete_batches.dec();
+        if forwarded {
+            self.forwarded_retained_batches.dec();
+            self.forwarded_retained_bytes.sub(
+                i64::try_from(bytes)
+                    .assured("a forwarded IPC payload fits in the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn retry(&self) {
+        self.retries.inc();
+    }
+    pub(crate) fn ack(&self) {
+        self.acks.inc();
+    }
+    pub(crate) fn reject(&self) {
+        self.rejections.inc();
+    }
+
+    pub(crate) fn describe_lines(&self) -> Vec<String> {
+        vec![
+            format!("consumers: {}", self.consumers.get()),
+            format!("forwarded consumers: {}", self.forwarded_consumers.get()),
+            format!(
+                "forwarded credit: {} bytes",
+                self.forwarded_credit_bytes.get()
+            ),
+            format!(
+                "forwarded retained batches: {}",
+                self.forwarded_retained_batches.get()
+            ),
+            format!(
+                "forwarded retained bytes: {}",
+                self.forwarded_retained_bytes.get()
+            ),
+            format!("retained batches: {}", self.retained_batches.get()),
+            format!("retained bytes: {}", self.retained_bytes.get()),
+            format!(
+                "incomplete application batches: {}",
+                self.incomplete_batches.get()
+            ),
+            format!("retries: {}", self.retries.get()),
+            format!("application ACKs: {}", self.acks.get()),
+            format!("application rejections: {}", self.rejections.get()),
+        ]
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_client_outcome_children_cover_every_public_cause_and_batch_defect() {
+        use nervix_models::{
+            ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure,
+            ClientSubmissionOutcome, ClientSubmissionRefusal,
+        };
+
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("retained").assured("the domain is valid");
+        let ingestor = IngestorName::parse("source").assured("the ingestor is valid");
+        let series = metrics.client_ingestor_series(&domain, &ingestor);
+        let mut outcomes = vec![ClientSubmissionOutcome::Completed];
+        for defect in ClientBatchDefect::iter() {
+            outcomes.push(ClientSubmissionOutcome::NotAdmitted(
+                ClientSubmissionRefusal::InvalidBatch(defect),
+            ));
+        }
+        for refusal in [
+            ClientSubmissionRefusal::Suspended,
+            ClientSubmissionRefusal::Busy,
+            ClientSubmissionRefusal::Draining,
+            ClientSubmissionRefusal::ProducerEnded,
+            ClientSubmissionRefusal::CreditExceeded,
+        ] {
+            outcomes.push(ClientSubmissionOutcome::NotAdmitted(refusal));
+        }
+        for failure in ClientProcessingFailure::iter() {
+            outcomes.push(ClientSubmissionOutcome::ProcessingFailed(failure));
+        }
+        for uncertainty in ClientOutcomeUncertainty::iter() {
+            outcomes.push(ClientSubmissionOutcome::OutcomeUnknown(uncertainty));
+        }
+        let mut expected = ahash::HashMap::<ClientSubmissionMetricKey, u64>::default();
+        for outcome in outcomes {
+            series.count(&outcome);
+            *expected
+                .entry(ClientSubmissionMetricKey::from(&outcome))
+                .or_default() += 1;
+        }
+        assert_eq!(series.submissions.children.len(), expected.len());
+        for (key, count) in expected {
+            assert_eq!(
+                series
+                    .submissions
+                    .children
+                    .get(&key)
+                    .assured("every public cause has a retained metric")
+                    .get(),
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn retained_quiesce_children_keep_gauges_and_outcomes_in_the_registered_series() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("retained").assured("the domain is valid");
+        let ingestor = IngestorName::parse("source").assured("the ingestor is valid");
+        let children = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+        metrics.set_ingestor_quiesce_buffered(&children, 2, 13);
+        metrics.increment_ingestor_quiesce_dropped(&children, 3);
+        metrics.increment_ingestor_quiesce_rejected(&children, 5);
+        assert_eq!(children.series.buffered_records.get(), 2);
+        assert_eq!(children.series.buffered_bytes.get(), 13);
+        assert_eq!(children.series.dropped.get(), 3);
+        assert_eq!(children.series.rejected.get(), 5);
+        metrics.set_ingestor_quiesce_buffered(&children, 0, 0);
+        assert_eq!(children.series.buffered_records.get(), 0);
+        assert_eq!(children.series.buffered_bytes.get(), 0);
+        assert_eq!(children.series.dropped.get(), 3);
+        assert_eq!(children.series.rejected.get(), 5);
+    }
+
+    fn record_value_at(histogram: &mut TimeRollingHistogram, value: f64, now_nanos: i64) {
+        let samples = HistogramSamples::one(value)
+            .expect("a finite, non-negative test value has recorded units");
+        histogram.record_at(samples, now_nanos);
+    }
 
     fn assert_histogram_percentile_near(actual: Option<f64>, expected: f64) {
         let Some(actual) = actual else {
@@ -4254,8 +5259,12 @@ mod tests {
             Some(&physical_node),
             None,
         );
-        input_metrics.observe_batch(3, 128, Some(Timestamp::from_unix_nanos(1_000_000_000)));
-        input_metrics.observe_delivery_latency(0.25, None);
+        input_metrics.observe_delivery(&DeliveryObservation {
+            messages: 3,
+            bytes: 128,
+            delivered_at: Timestamp::from_unix_nanos(1_250_000_000),
+            ingested_at: &[1_000_000_000; 3],
+        });
 
         let rendered = metrics.describe_global_target(&domain, "DEDUPLICATOR", &node);
         assert!(rendered.iter().any(|line| line.contains("metrics:")));
@@ -4446,7 +5455,7 @@ mod tests {
             Duration::from_secs(10),
             INTERNAL_MESSAGE_BATCH_BUCKETS,
         );
-        histogram.observe_at(65_536.0, 0);
+        record_value_at(&mut histogram, 65_536.0, 0);
 
         let summary = histogram.summary_at(1_000_000_000);
         assert_histogram_percentile_near(summary.p50, 65_536.0);
@@ -4501,8 +5510,8 @@ mod tests {
             Duration::from_secs(10),
             MESSAGE_BATCH_BUCKETS,
         );
-        histogram.observe_at(10.0, 0);
-        histogram.observe_at(20.0, 0);
+        record_value_at(&mut histogram, 10.0, 0);
+        record_value_at(&mut histogram, 20.0, 0);
 
         let present = histogram.summary_at(59 * 1_000_000_000);
         assert_histogram_percentile_near(present.p50, 10.0);
@@ -4522,9 +5531,9 @@ mod tests {
             MESSAGE_BATCH_BUCKETS,
         );
         for _ in 0..100 {
-            histogram.observe_at(2.0, 0);
+            record_value_at(&mut histogram, 2.0, 0);
         }
-        histogram.observe_at(500.0, 0);
+        record_value_at(&mut histogram, 500.0, 0);
 
         let summary = histogram.summary_at(1_000_000_000);
         assert_histogram_percentile_near(summary.p50, 2.0);
@@ -4543,10 +5552,10 @@ mod tests {
             LATENCY_BUCKETS,
         );
         for _ in 0..90 {
-            histogram.observe_at(0.001, 0);
+            record_value_at(&mut histogram, 0.001, 0);
         }
         for _ in 0..10 {
-            histogram.observe_at(3_600.0, 0);
+            record_value_at(&mut histogram, 3_600.0, 0);
         }
 
         let summary = histogram.summary_at(1_000_000_000);
@@ -4578,9 +5587,9 @@ mod tests {
         let old = now_wall - 2 * 60 * 1_000_000_000;
         {
             let mut rolling = histogram.rolling_histograms.lock();
-            rolling.observed = true;
-            rolling.wall_1m.inner.observe_at(10.0, old);
-            rolling.wall_15m.inner.observe_at(10.0, old);
+            record_value_at(&mut rolling.wall_1m.inner, 10.0, old);
+            record_value_at(&mut rolling.wall_15m.inner, 10.0, old);
+            histogram.observed.store(true, AtomicOrdering::Relaxed);
         }
         metrics.series.histograms.insert(key, Arc::new(histogram));
 
@@ -4720,6 +5729,60 @@ mod tests {
         assert!(rendered.contains("relay=\"events\""));
         assert!(rendered.contains("physical_node_id=\"node-1\""));
         assert!(rendered.contains(" 2"));
+    }
+
+    #[test]
+    fn client_emitter_metrics_track_live_work_and_monotonic_application_results() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("main").expect("valid domain");
+        let emitter = EmitterName::parse("output").expect("valid emitter");
+        let series = metrics.client_emitter_series(&domain, &emitter);
+        series.reset_gauges();
+        series.attach(false, 1024);
+        series.attach(true, 2048);
+        series.retain(512);
+        series.assign(512, true);
+        series.retry();
+        series.ack();
+        series.reject();
+        let rendered = metrics.prometheus_text();
+        for (name, expected) in [
+            ("consumers", 2.0),
+            ("forwarded_consumers", 1.0),
+            ("forwarded_credit_bytes", 2048.0),
+            ("forwarded_retained_batches", 1.0),
+            ("forwarded_retained_bytes", 512.0),
+            ("retained_batches", 1.0),
+            ("retained_bytes", 512.0),
+            ("incomplete_batches", 1.0),
+            ("retries_total", 1.0),
+            ("acks_total", 1.0),
+            ("rejections_total", 1.0),
+        ] {
+            let metric = format!("nervix_client_emitter_{name}");
+            assert_eq!(
+                prometheus_sample(&rendered, &metric, "domain=\"main\",emitter=\"output\""),
+                Some(expected),
+                "{metric}"
+            );
+        }
+        series.unassign(512, true);
+        series.release(512);
+        series.detach(true, 2048);
+        series.detach(false, 1024);
+        series.reset_gauges();
+        assert!(
+            series
+                .describe_lines()
+                .iter()
+                .any(|line| line == "retained batches: 0")
+        );
+        assert!(
+            series
+                .describe_lines()
+                .iter()
+                .any(|line| line == "application ACKs: 1")
+        );
     }
 
     #[test]
@@ -5090,5 +6153,204 @@ mod tests {
                 .iter()
                 .any(|counter| { counter.key.metric == MESSAGES_TOTAL && counter.value == 9 })
         );
+    }
+
+    fn recorded_values(histogram: &HdrHistogram<u64>) -> Vec<(u64, u64)> {
+        histogram
+            .iter_recorded()
+            .map(|value| (value.value_iterated_to(), value.count_at_value()))
+            .collect()
+    }
+
+    fn deduplicator_input(
+        metrics: &RuntimeMetrics,
+        branch_key: Option<&str>,
+    ) -> NodeInputMetricsHandle {
+        metrics.resolve_node_input_metrics(
+            &DomainName::parse("main").expect("valid domain"),
+            ModelKind::Deduplicator,
+            &ModelName::parse("dedupe").expect("valid identifier"),
+            &RelayName::parse("events").expect("valid identifier"),
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            branch_key,
+        )
+    }
+
+    fn delivery_latency_line(metrics: &RuntimeMetrics) -> Option<String> {
+        metrics
+            .describe_global_target(
+                &DomainName::parse("main").expect("valid domain"),
+                "DEDUPLICATOR",
+                ModelName::parse("dedupe").expect("valid identifier"),
+            )
+            .into_iter()
+            .find(|line| line.contains("delivery_latency_seconds received relay=events"))
+    }
+
+    fn prometheus_sample(rendered: &str, series: &str, fragment: &str) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(series) && line.contains(fragment))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse().ok())
+    }
+
+    #[test]
+    fn a_batch_of_latencies_fills_the_buckets_recording_each_latency_would() {
+        let config =
+            HistogramConfig::for_buckets(internal_buckets_for_metric(DELIVERY_LATENCY_SECONDS));
+        let layout = config.delivery_latency_layout();
+        let now = 0_i64;
+        let mut instants = vec![i64::MIN, -i64::MAX, 1];
+        for millis in 0..=31_000_i64 {
+            for remainder in [0, 1, 499_999, 500_001, 999_999] {
+                instants.push(now - (millis * 1_000_000 + remainder));
+            }
+        }
+
+        let mut one_at_a_time = config.new_histogram();
+        for elapsed in elapsed_nanos(now, &instants) {
+            let seconds = Duration::from_nanos(elapsed).as_secs_f64();
+            HistogramSamples::one(seconds)
+                .expect("an elapsed time has recorded units")
+                .record_into(&mut one_at_a_time);
+        }
+        let mut per_batch = config.new_histogram();
+        let batch = ElapsedHistogram::new(&layout, now, &instants);
+        HistogramSamples::Elapsed(&batch).record_into(&mut per_batch);
+
+        assert_eq!(batch.total(), one_at_a_time.len());
+        assert_eq!(recorded_values(&per_batch), recorded_values(&one_at_a_time));
+    }
+
+    #[test]
+    fn a_delivered_batch_records_each_series_once_with_its_latest_watermark() {
+        let metrics = RuntimeMetrics::default();
+        let input = deduplicator_input(&metrics, Some(r#"{"tenant":"acme"}"#));
+
+        input.observe_delivery(&DeliveryObservation {
+            messages: 4,
+            bytes: 64,
+            delivered_at: Timestamp::from_unix_nanos(10_000_000_000),
+            ingested_at: &[9_900_000_000, 7_500_000_000, 10_500_000_000, 10_000_000_000],
+        });
+
+        let line = delivery_latency_line(&metrics).expect("delivery latency should be rendered");
+        assert!(line.contains(" p50_1m=0.1 "), "{line}");
+        assert!(line.contains(" p90_1m=2.5 "), "{line}");
+        assert!(line.contains(" domain_p50_1m=0.1 "), "{line}");
+        assert!(line.contains(" domain_p99_15m=2.5"), "{line}");
+
+        let rendered = metrics.prometheus_text();
+        let count = prometheus_sample(&rendered, "nervix_delivery_latency_seconds_count", "dedupe");
+        assert_eq!(count, Some(3.0), "{rendered}");
+        let zero = prometheus_sample(
+            &rendered,
+            "nervix_delivery_latency_seconds_bucket",
+            "le=\"0.001\"",
+        );
+        assert_eq!(zero, Some(1.0), "{rendered}");
+        let tenth = prometheus_sample(
+            &rendered,
+            "nervix_delivery_latency_seconds_bucket",
+            "le=\"0.1\"",
+        );
+        assert_eq!(tenth, Some(2.0), "{rendered}");
+        let five = prometheus_sample(
+            &rendered,
+            "nervix_delivery_latency_seconds_bucket",
+            "le=\"5\"",
+        );
+        assert_eq!(five, Some(3.0), "{rendered}");
+        let sum = prometheus_sample(&rendered, "nervix_delivery_latency_seconds_sum", "dedupe")
+            .expect("the latency sum is exported");
+        assert!((sum - 2.6).abs() < 1e-9, "{rendered}");
+
+        let node_id = ClusterNodeName::parse("node-1").expect("valid name");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let branch = metrics.snapshot_branch_target(
+            r#"{"tenant":"acme"}"#,
+            &domain,
+            ModelKind::Deduplicator,
+            &node,
+            &node_id,
+        );
+        let global =
+            metrics.snapshot_global_target(&domain, ModelKind::Deduplicator, &node, &node_id);
+        for snapshot in [branch, global] {
+            let latency = snapshot
+                .histograms
+                .iter()
+                .find(|histogram| histogram.key.metric == DELIVERY_LATENCY_SECONDS)
+                .expect("each latency series records the batch");
+            assert_eq!(latency.domain_started_at_nanos, Some(10_500_000_000));
+            assert_eq!(latency.domain_last_at_nanos, Some(10_500_000_000));
+            let messages = snapshot
+                .counters
+                .iter()
+                .find(|counter| counter.key.metric == MESSAGES_TOTAL)
+                .expect("each traffic series records the batch");
+            assert_eq!(messages.value, 4);
+            assert_eq!(messages.domain_last_at_nanos, Some(10_500_000_000));
+        }
+    }
+
+    #[test]
+    fn a_batch_ingested_after_its_delivery_records_traffic_but_no_latency() {
+        let metrics = RuntimeMetrics::default();
+        let input = deduplicator_input(&metrics, None);
+
+        input.observe_delivery(&DeliveryObservation {
+            messages: 2,
+            bytes: 32,
+            delivered_at: Timestamp::from_unix_nanos(1_000),
+            ingested_at: &[1_001, 2_000],
+        });
+
+        assert_eq!(delivery_latency_line(&metrics), None);
+        let rendered = metrics.prometheus_text();
+        assert!(
+            !rendered.contains("nervix_delivery_latency_seconds_count"),
+            "{rendered}"
+        );
+        let messages = prometheus_sample(&rendered, "nervix_messages_total", "dedupe");
+        assert_eq!(messages, Some(2.0), "{rendered}");
+    }
+
+    #[test]
+    fn an_older_batch_leaves_the_latency_domain_time_at_the_latest_watermark() {
+        let metrics = RuntimeMetrics::default();
+        let input = deduplicator_input(&metrics, None);
+
+        input.observe_delivery(&DeliveryObservation {
+            messages: 1,
+            bytes: 16,
+            delivered_at: Timestamp::from_unix_nanos(60_000_000_000),
+            ingested_at: &[59_900_000_000],
+        });
+        input.observe_delivery(&DeliveryObservation {
+            messages: 1,
+            bytes: 16,
+            delivered_at: Timestamp::from_unix_nanos(60_000_000_000),
+            ingested_at: &[15_000_000_000],
+        });
+
+        let snapshot = metrics.snapshot_global_target(
+            &DomainName::parse("main").expect("valid domain"),
+            ModelKind::Deduplicator,
+            &ModelName::parse("dedupe").expect("valid identifier"),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        );
+        let latency = snapshot
+            .histograms
+            .iter()
+            .find(|histogram| histogram.key.metric == DELIVERY_LATENCY_SECONDS)
+            .expect("the latency series records both batches");
+        assert_eq!(latency.domain_started_at_nanos, Some(15_000_000_000));
+        assert_eq!(latency.domain_last_at_nanos, Some(59_900_000_000));
+        let line = delivery_latency_line(&metrics).expect("delivery latency should be rendered");
+        assert!(line.contains(" p99_1m=30.1 "), "{line}");
+        assert!(line.contains(" domain_p99_1m=0.1 "), "{line}");
     }
 }

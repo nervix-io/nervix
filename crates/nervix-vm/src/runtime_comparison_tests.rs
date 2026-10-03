@@ -8,11 +8,10 @@
 //! - **Depends on.** The NSPL parser, the VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How the kernels traverse their Arrow buffers.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::StdArc;
 
 use super::{execute_predicate_in_context, execute_program_sync};
 use crate::{
@@ -452,7 +451,7 @@ fn extrema_skip_nulls_and_clamp_fails_only_the_rows_it_evaluates() {
     assert_eq!(nan_bound[0].reason.to_string(), "clamp bound is NaN");
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[nervix_primitives::test(flavor = "current_thread")]
 async fn read_only_predicates_select_rows_with_the_new_tests() {
     let input = StdArc::new(Schema::new(vec![
         Field::new("status", DataType::Utf8, false),
@@ -499,6 +498,7 @@ async fn read_only_predicates_select_rows_with_the_new_tests() {
     .expect("the batch must build");
 
     let result = execute_predicate_in_context(
+        &nervix_execution::Executor::default(),
         &compiled,
         &batch,
         &ExecutionContext::new(Timestamp::from_unix_nanos(0)),

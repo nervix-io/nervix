@@ -93,6 +93,8 @@ fn requires_request_domain(statement: &Statement) -> bool {
         statement,
         Statement::CreateDomain(_)
             | Statement::CreateUser(_)
+            | Statement::Backup(_)
+            | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
@@ -109,6 +111,8 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
         statement,
         Statement::CreateDomain(_)
             | Statement::CreateUser(_)
+            | Statement::Backup(_)
+            | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
@@ -145,6 +149,7 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::LookupQuery(_)
             | Statement::ShowCreate(_)
             | Statement::ShowUdfs(_)
+            | Statement::ShowIngestors(_)
             | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
     )
@@ -166,6 +171,7 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
                 | Statement::DrainNode(_)
                 | Statement::Relocate(_)
                 | Statement::ResetWasmState(_)
+                | Statement::Backup(_)
         )
 }
 
@@ -825,24 +831,49 @@ impl SessionServiceImpl {
             query,
             request_domain,
             None,
+            None,
         ))
         .await
     }
 
+    /// Applies a restore's models to `domain` as one batch, publishing under `lease`, the mutation
+    /// lease the restore holds on the domain.
+    pub(in crate::application) async fn process_restored_model_batch(
+        &self,
+        statements: Vec<Statement>,
+        query: &str,
+        domain: &DomainName,
+        lease: &DomainMutationLease,
+    ) -> CommandResult {
+        Box::pin(self.process_model_mutation_batch_with_transaction(
+            statements,
+            query,
+            Some(domain),
+            None,
+            Some(lease),
+        ))
+        .await
+    }
+
+    /// Applies one batch of model mutations. A transaction step publishes under its transaction's
+    /// lease, and a batch a command owns under `command_lease`, the lease that command holds on the
+    /// domain; a batch with neither presents none.
     pub(in crate::application) async fn process_model_mutation_batch_with_transaction(
         &self,
         statements: Vec<Statement>,
         query: &str,
         request_domain: Option<&DomainName>,
         transaction_step: Option<TransactionModelStepContext<'_>>,
+        command_lease: Option<&DomainMutationLease>,
     ) -> CommandResult {
         let Some(domain) = request_domain.cloned() else {
             return command_error("no active domain selected".to_string());
         };
-        let domain_mutation = transaction_step
-            .as_ref()
-            .and_then(|step| step.transaction.domain_mutation())
-            .cloned();
+        let domain_mutation = match (&transaction_step, command_lease) {
+            (Some(step), _) => step.transaction.domain_mutation().cloned(),
+            (None, Some(lease)) => Some(lease.clone()),
+            (None, None) => None,
+        };
 
         let leader = Box::pin(self.inner.consensus.current_leader()).await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
@@ -1325,8 +1356,8 @@ impl SessionServiceImpl {
             if !is_noop && !model_gate.affected_entities().is_empty() {
                 let relays = model_gate.relays();
                 let affected_entities = model_gate.affected_entities();
-                let deadline =
-                    tokio::time::Instant::now() + self.inner.runtime.entity_gate_deadline();
+                let deadline = nervix_primitives::time::Instant::now()
+                    + self.inner.runtime.entity_gate_deadline();
                 let gate = match Box::pin(self.engage_cluster_entity_gates(
                     &domain,
                     relays,
@@ -1654,7 +1685,7 @@ impl SessionServiceImpl {
                     ))
                     .await
                     {
-                        let err = error.to_string();
+                        let err = ConsensusError::report_message(&error);
                         if let Some(handoff) = ownership_handoff.take() {
                             Box::pin(self.abort_planned_ownership_handoff(
                                 &domain,
@@ -1680,7 +1711,7 @@ impl SessionServiceImpl {
                             .await
                         {
                             return Box::pin(self.consensus_error_response(
-                                &error,
+                                error.current_context(),
                                 format!(
                                     "failed to publish model alteration schedule for domain '{}': \
                                      {err}; {rollback_error}",
@@ -1699,7 +1730,9 @@ impl SessionServiceImpl {
                             error = %err,
                             "failed to publish schedule for model mutation batch"
                         );
-                        if let ConsensusError::LeadershipLost { leader_id } = &error {
+                        if let ConsensusError::LeadershipLost { leader_id } =
+                            error.current_context()
+                        {
                             return Box::pin(self.not_leader_response(query, leader_id.clone()))
                                 .await;
                         }
@@ -2051,8 +2084,29 @@ impl SessionServiceImpl {
                         .to_string(),
                 );
             }
+            ClientStatement::AttachDomainClock => {
+                return command_error(
+                    "ATTACH DOMAIN CLOCK is a session-local command; send an attach domain clock \
+                     request"
+                        .to_string(),
+                );
+            }
+            ClientStatement::DetachDomainClock => {
+                return command_error(
+                    "DETACH DOMAIN CLOCK is a session-local command; send a detach domain clock \
+                     request"
+                        .to_string(),
+                );
+            }
             ClientStatement::UploadResource(upload) => {
                 return self.upload_resource_command(upload).await;
+            }
+            ClientStatement::DescribeBackup(_) => {
+                return command_error(
+                    "DESCRIBE BACKUP reads an archive on the client's machine and runs in the \
+                     client"
+                        .to_string(),
+                );
             }
             ClientStatement::CreateSubscription(_) => {
                 return command_error(
@@ -2125,6 +2179,14 @@ impl SessionServiceImpl {
                 .await
             }
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
+            Statement::Backup(_) => command_error(
+                "BACKUP runs only as an admitted command under its execution reference".to_string(),
+            ),
+            Statement::Restore(_) => command_error(
+                "RESTORE reads an archive on the client's machine; a client sends it on the \
+                 restore stream beside the session"
+                    .to_string(),
+            ),
             Statement::StartDomain(start) => {
                 let domain = domain
                     .as_ref()
@@ -2355,6 +2417,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_placements(domain).await
             }
+            Statement::ShowIngestors(_) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_ingestors(domain).await
+            }
             Statement::ShowClusterStatus(_) => {
                 command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
             }
@@ -2382,7 +2450,7 @@ mod tests {
         },
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
         let TestService {
             service,
@@ -2430,7 +2498,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn persistent_model_command_replays_one_terminal_result_for_its_reference() {
         let TestService {
             service,
@@ -2474,7 +2542,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_rejects_implicit_semicolon_batch() {
         let TestService {
             service,
@@ -2511,7 +2579,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
         let TestService {
             service,
@@ -2565,7 +2633,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
         let TestService {
             service,
@@ -2609,7 +2677,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
         let TestService {
             service,
@@ -2673,7 +2741,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_creates_junction_model() {
         let TestService {
             service,
@@ -2735,7 +2803,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_creates_deduplicator_model() {
         let TestService {
             service,

@@ -9,15 +9,14 @@
 //! - **Depends on.** The VM compiler and its constant folding.
 //! - **Must not know.** How execution evaluates a call.
 
-use std::sync::Arc;
-
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::*;
 use crate::test_support::parse_program;
 
-fn operand_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+fn operand_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
         Field::new("u8", DataType::UInt8, true),
         Field::new("i8", DataType::Int8, true),
         Field::new("u16", DataType::UInt16, true),
@@ -34,7 +33,7 @@ fn operand_schema() -> Arc<Schema> {
 fn compile_assignment(
     expression: &str,
     output_type: DataType,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let program = parse_program(&format!("SET out = {expression}")).expect("must parse");
     let input = operand_schema();
     let mut fields = input
@@ -45,7 +44,7 @@ fn compile_assignment(
     fields.push(Field::new("out", output_type, true));
     compile_program_for_bindings(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
     )
 }
@@ -159,11 +158,15 @@ fn calls_outside_a_signature_are_rejected_when_the_statement_is_applied() {
     for (expression, code, message) in rejected {
         let error = compile_assignment(expression, DataType::Int64)
             .expect_err("a call outside its signature must be rejected");
-        assert_eq!(error.code, code, "`{expression}`: {error}");
+        assert_eq!(
+            error.current_context().code(),
+            code,
+            "`{expression}`: {error}"
+        );
         assert!(
-            error.message.contains(message),
+            error.current_context().message.contains(message),
             "`{expression}` reported `{}`",
-            error.message
+            error.current_context().message
         );
     }
 }
@@ -172,11 +175,11 @@ fn calls_outside_a_signature_are_rejected_when_the_statement_is_applied() {
 fn a_result_must_match_the_exact_type_of_its_destination() {
     let error = compile_assignment("bit_count(input.u8)", DataType::UInt8)
         .expect_err("bit_count returns I64");
-    assert_eq!(error.code, "type_mismatch");
+    assert_eq!(error.current_context().code(), "type_mismatch");
 
     let error = compile_assignment("sign(input.i16)", DataType::Int64)
         .expect_err("sign returns its operand's type");
-    assert_eq!(error.code, "type_mismatch");
+    assert_eq!(error.current_context().code(), "type_mismatch");
 }
 
 #[test]
@@ -187,8 +190,8 @@ fn calls_that_cannot_fail_fold_over_literals_and_calls_that_can_fail_do_not() {
          trunc(2.5), rounded = round(2.675, 2)",
     )
     .expect("must parse");
-    let input = Arc::new(Schema::new(Vec::<Field>::new()));
-    let output = Arc::new(Schema::new(vec![
+    let input = StdArc::new(Schema::new(Vec::<Field>::new()));
+    let output = StdArc::new(Schema::new(vec![
         Field::new("masked", DataType::Int64, true),
         Field::new("inverted", DataType::Int64, true),
         Field::new("ones", DataType::Int64, true),

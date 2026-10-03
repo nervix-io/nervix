@@ -52,6 +52,15 @@ For a single-input emitter, sent metrics retain that input relay as `stream`. A 
 emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
 shared sink pipeline with `stream="-"` because one flush may contain work from several sources.
 
+An emitter's sent metrics count the records its destination delivered, each once, however many
+attempts it took: a flush that completes after retries counts its delivered records once, and a
+record the destination refused follows `ON MESSAGE ERROR` and is not sent. When a flush fails for
+good, the records its sink delivered before the failure are counted as its other records are routed
+to their error policy. A sink that publishes on its own commit, such as Iceberg, counts what each
+commit publishes. Sent bytes measure a delivered record's payload as the emitter's buffer measures
+it; an HTTP request's method, target and headers are not payload, and a request without a body
+carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-and-metrics).
+
 `DESCRIBE` output uses the same concepts but renders `physical_node_id` as `physical_node` for readability.
 
 Example Prometheus series:
@@ -86,7 +95,8 @@ Nervix records these raw metric families:
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
 - `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
-  per-instance quiesce buffers
+  per-instance quiesce buffers, including a payload that is draining until its messages enter
+  their ingest group
 - `nervix_ingestor_quiesce_buffered_bytes`: raw payload bytes currently retained in those buffers
 - `nervix_ingestor_quiesce_dropped_total`: payloads deliberately discarded by `DROP`, buffer
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination
@@ -97,6 +107,15 @@ Nervix records these raw metric families:
   series stays at `0` once the relay's last subscription on the node closes
 - `nervix_session_subscription_dropped_rows_total`: rows `DROPPING` session subscriptions on the
   node discarded because their session could not take them in time
+- `nervix_client_ingestor_producers`: producers attached to a client ingestor the node executes
+- `nervix_client_ingestor_forwarded_producers`: those of them whose sessions another node serves
+- `nervix_client_ingestor_outstanding_batches`: batches those producers submitted that have no
+  outcome yet
+- `nervix_client_ingestor_outstanding_bytes`: the Arrow IPC bytes of those batches
+- `nervix_client_ingestor_admitted_batches`: batches holding a slot of the ingestor's
+  acknowledgement window
+- `nervix_client_ingestor_submissions_total`: batches the ingestor answered, by `outcome` and
+  `cause`
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -116,9 +135,85 @@ The four ingestor-quiesce families use `domain`, `ingestor`, and `physical_node_
 families are gauges; dropped and rejected families are monotonic counters. They are process-local:
 quiesce buffers do not migrate during termination or failover.
 
+Quiesce children are registered when the ingestor starts. Client-ingestor outcome children are
+registered when its endpoint starts, and subscription loss counters when delivery starts. These
+bounded series may therefore appear at zero before their first observation. Their labels and
+counting contracts are unchanged.
+
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
-of its own losses directly, as described in [Sessions](sessions.md).
+of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
+session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
+what clients and operators observe instead.
+
+## Client Ingestors
+
+The six client-ingestor families describe the node that executes the ingestor and use `domain` and
+`ingestor` labels. The first five are gauges, rewritten whenever the ingestor's endpoint changes
+them, and they are `0` once the endpoint ends. `admitted_batches` never exceeds the window the
+ingestor declares, however many producers are attached.
+
+`nervix_client_ingestor_submissions_total` is a counter with two more labels drawn from fixed sets.
+`outcome` is `not_admitted`, `completed`, `processing_failed`, or `outcome_unknown`. `cause` is the
+refusal of a batch that was not admitted (`invalid_batch`, `suspended`, `busy`, `draining`,
+`producer_ended`, `credit_exceeded`), the failure of one that failed (`ack_timeout`, `rejected`),
+the uncertainty of one whose outcome is unknown (`interrupted`, `owner_lost`), or `none` for a
+completed batch. No label carries a payload value, a producer, or an attachment identity. A batch
+the serving session refused before it reached the node that executes the ingestor, such as one
+beyond its producer's credit, is answered by the session and not counted here. So is every batch the
+node that forwards a producer answers itself once it lost the node that executes the ingestor: a
+batch it never cleared for admission as `not_admitted` with `producer_ended`, and a cleared one as
+`outcome_unknown` with `owner_lost`.
+[Ingestors](ingestors.md#observing-client-ingestors) describes the same counts in `SHOW INGESTORS`
+and `DESCRIBE INGESTOR`.
+
+## Client Emitters
+
+Client emitter metrics use `domain` and `emitter` labels on the executing node. The gauges
+`nervix_client_emitter_consumers`, `nervix_client_emitter_forwarded_consumers`,
+`nervix_client_emitter_forwarded_credit_bytes`, `nervix_client_emitter_retained_batches`, and
+`nervix_client_emitter_retained_bytes` describe current in-memory attachments and prepared Arrow
+IPC awaiting an application decision. `nervix_client_emitter_forwarded_retained_batches` and
+`nervix_client_emitter_forwarded_retained_bytes` count the subset assigned to consumers served on
+another node. `nervix_client_emitter_incomplete_batches` counts assigned batches whose application
+decision is still pending. These gauges return to zero when that endpoint ends. The counters
+`nervix_client_emitter_retries_total`, `nervix_client_emitter_acks_total`, and
+`nervix_client_emitter_rejections_total` retain results across endpoint restarts on the same node.
+Retries include explicit application retry, ACK timeout, and consumer loss; a repeated confirmed
+ACK does not increment the ACK counter. `DESCRIBE EMITTER` reports the same values for the
+scheduled owner.
+
+Restoring a client producer or consumer creates a new server attachment. The attachment gauges
+fall when the prior session detaches and rise only after the replacement open succeeds; retained
+batch and incomplete-attempt gauges remain bounded by the existing endpoint budgets. None uses a
+session, producer, consumer, delivery or attempt identity as a metric label. Applications can sample
+the Rust handles' `connection()` states to distinguish an active, interrupted, restoring or
+reopen-required handle. An uncertain producer result and an uncertain consumer settlement remain
+typed call outcomes; these gauges do not imply replay or a confirmed ACK.
+
+## Delivery Latency
+
+Every processor, reingestor, and emitter input records the delivery latency of each batch it
+accepts. A row's latency runs from its ingestion high watermark to the instant the input accepts the
+batch. Processors and reingestors read that instant from the domain clock, so in a paced domain
+their latency is measured in domain time; emitters read the wall clock. A row whose high watermark
+is later than that instant has no latency and adds nothing to the histograms, although it still
+counts as a received message.
+
+A batch is recorded as a whole. Each row's ingestion watermarks travel with the batch in Arrow
+buffers of Unix-nanosecond timestamps, and one pass over the high watermarks finds the batch's
+latest watermark and folds every row's latency into buckets. Each latency series then takes the whole batch
+in one update: the rolling histograms behind `DESCRIBE` merge the buckets under one lock with one
+wall-clock reading, and the Prometheus histogram takes the batch in one flush.
+
+- The batch's latest high watermark is its domain timestamp. It stamps the batch's traffic counters
+  and places its latencies in the domain-clock windows. A batch older than a window's current step
+  lands in its own step only while that step is still retained; an older step is never reopened.
+- The rolling histograms record each latency to the nearest millisecond, halves rounding up, and
+  record anything above 30 seconds as 30 seconds, so a slow tail is never dropped from the
+  percentiles.
+- The Prometheus histogram receives every latency in seconds and counts it in the boundaries
+  listed under [Raw Metrics](#raw-metrics); a latency above 30 seconds counts only in `+Inf`.
 
 ## Interconnection Metrics
 
@@ -130,9 +225,9 @@ carry no node label, and they are aggregated by dimensions whose value sets are 
 identity, a domain, or an operation identifier.
 
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
-or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`
-for memory, and `control_cpu`, `data_cpu`, `bulk_cpu`, `consensus_storage`, `filesystem_storage` for
-workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
+or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
+`credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
+`bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
 Transport pools:
@@ -171,7 +266,7 @@ Relay admission:
 Execution admission:
 
 - `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
-  transient interconnection memory reserved for one class, and what it is currently holding
+  transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
   charges granted and charges refused outright
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
@@ -301,7 +396,10 @@ Nervix reports two time bases because they answer different questions:
 
 For unpaced domains or records without usable timestamps, domain-clock values may be unavailable. For paced domains, domain-clock values follow the event timestamps and domain pace rather than the speed of test execution or wall-clock ingestion.
 
-The moving rates and percentile windows are online exponential summaries rather than stored real-time windows. This keeps memory bounded and allows metric state to be snapshotted and replicated without retaining all observations.
+The moving rates are online exponential summaries. The percentile windows keep one bounded HDR
+histogram per step, 10 seconds for the one-minute windows and one minute for the fifteen-minute
+windows, rather than every observation. Both keep memory bounded and let metric state be
+snapshotted and replicated without retaining the observations themselves.
 
 ## Replication And Drain Behavior
 

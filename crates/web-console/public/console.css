@@ -370,6 +370,24 @@ button {
   font-size: 12px;
 }
 
+.topbar-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-d);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.topbar-clock strong {
+  color: var(--cyan);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -605,6 +623,80 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.domain-clock {
+  display: grid;
+  gap: 7px;
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-c);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+.domain-clock-heading,
+.domain-clock-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.domain-clock-heading {
+  color: var(--text-d);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.domain-clock-heading strong {
+  overflow: hidden;
+  color: var(--text-b);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.domain-clock-state {
+  color: var(--cyan);
+  font-size: 11px;
+}
+
+.domain-clock-generation {
+  color: var(--text-d);
+}
+
+.domain-clock-details {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 6px;
+}
+
+.domain-clock-details > span:nth-child(odd) {
+  color: var(--text-d);
+}
+
+.domain-clock-details > :nth-child(even) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.domain-clock-logical {
+  color: var(--text);
+}
+
+.domain-clock-tick-id {
+  color: var(--purple);
+}
+
+.domain-clock-error {
+  margin: 0;
+  color: #ef4444;
+  line-height: 1.4;
 }
 
 .domain-select:hover,
@@ -2036,7 +2128,6 @@ button {
   backdrop-filter: blur(4px);
 }
 
-.subscribe-dialog,
 .branch-dialog,
 .resource-dialog {
   width: 460px;
@@ -2281,23 +2372,6 @@ button {
   font-size: 11px;
 }
 
-.schema-field-button {
-  width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 0;
-  text-align: left;
-  text-transform: none;
-}
-
-.schema-field-button:hover span {
-  color: var(--cyan);
-}
-
 .schema-row span {
   color: #c8d8f0;
 }
@@ -2307,44 +2381,10 @@ button {
   font-style: normal;
 }
 
-.subscribe-block input {
-  width: 100%;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid rgba(30, 58, 186, 0.3);
-  border-radius: 6px;
-  outline: 0;
-  background: rgba(6, 10, 23, 0.7);
-  color: #e0e8ff;
-  caret-color: var(--cyan);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-}
-
-.sample-options {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-}
-
-.sample-options button,
 .subscribe-actions button {
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-}
-
-.sample-options button {
-  height: 30px;
-  border: 1px solid rgba(30, 58, 186, 0.2);
-  background: rgba(30, 58, 186, 0.08);
-  color: #4a5a8a;
-}
-
-.sample-options button.active {
-  border-color: rgba(6, 182, 212, 0.4);
-  background: rgba(6, 182, 212, 0.15);
-  color: var(--cyan);
 }
 
 .subscribe-actions {
@@ -2571,15 +2611,22 @@ button {
   height: 6px;
 }
 
-.repl-toolbar .tab-close {
+.repl-toolbar .tab-close,
+.repl-toolbar .tab-resubscribe {
   width: 28px;
   height: 100%;
   padding: 0;
   color: var(--text-d);
 }
 
-.repl-toolbar .tab-close:hover {
+.repl-toolbar .tab-close:hover,
+.repl-toolbar .tab-resubscribe:hover {
   color: var(--text-a);
+}
+
+.repl-toolbar .subscription-tab[data-subscription-state="ended"] .tab-main {
+  color: var(--text-d);
+  text-decoration: line-through;
 }
 
 .repl-toolbar .tab.active {
@@ -2758,6 +2805,8 @@ button {
   top: 34px;
   right: 0;
   min-width: 240px;
+  max-height: min(70vh, 550px);
+  overflow-y: auto;
 }
 
 .create-menu button {
@@ -2883,6 +2932,7 @@ button {
 }
 
 .create-field input,
+.create-field textarea,
 .create-choice-search {
   min-width: 0;
   height: 35px;
@@ -2896,10 +2946,74 @@ button {
   font-size: 12px;
 }
 
+.create-field textarea {
+  height: auto;
+  min-height: 78px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
 .create-field input:focus,
+.create-field textarea:focus,
 .create-choice-search:focus {
   border-color: var(--cyan);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--cyan) 18%, transparent);
+}
+
+.create-config-list,
+.create-codec-encoding,
+.create-signaling-steps,
+.create-signaling-step,
+.create-signaling-program-list {
+  display: grid;
+  gap: 10px;
+}
+
+.create-config-list,
+.create-codec-encoding,
+.create-signaling-step {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.create-config-list p,
+.create-codec-encoding p,
+.create-signaling-program-list p {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-signaling-program-row,
+.create-signaling-step-head {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+}
+
+.create-signaling-step-head {
+  flex-wrap: wrap;
+}
+
+.create-signaling-program-row .create-field {
+  flex: 1;
+}
+
+.create-config-list button,
+.create-codec-encoding button,
+.create-signaling-steps button,
+.create-signaling-program-list button {
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
 }
 
 .create-choice-group {
@@ -2920,6 +3034,130 @@ button {
   text-transform: uppercase;
 }
 
+.create-fields,
+.create-field-entry,
+.create-type-layers {
+  display: grid;
+  gap: 10px;
+}
+
+.create-field-entry {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.create-field-entry-head,
+.create-type-layer,
+.create-type-layer-add,
+.create-field-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.create-field-entry-head {
+  justify-content: space-between;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-field-type {
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-field-type legend,
+.create-type-layers > span,
+.create-mode-options legend {
+  color: var(--text-d);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-type-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.create-field-actions button,
+.create-type-options button,
+.create-type-layer button,
+.create-type-layer-add button,
+.create-add-field {
+  min-height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
+}
+
+.create-type-options button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-type-layer .create-field {
+  flex: 1 1 100px;
+}
+
+.create-type-layer .create-array-length {
+  width: 100%;
+}
+
+.create-mode-options {
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-selected-schema,
+.create-selected-branch,
+.create-selected-relay,
+.create-filter-reading,
+.create-reference-invalid {
+  margin: 0;
+  font-size: 10px;
+}
+
+.create-filter-reading {
+  color: var(--text-d);
+  overflow-wrap: anywhere;
+}
+
+.create-reference-invalid,
+.create-filter-reading.invalid {
+  color: #fb7185;
+}
+
+.create-choice-buttons button em {
+  margin-left: 6px;
+  color: var(--purple);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.create-field-actions button:disabled,
+.create-type-options button:disabled,
+.create-type-layer button:disabled,
+.create-type-layer-add button:disabled,
+.create-add-field:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
 .create-choice-buttons {
   display: flex;
   flex-wrap: wrap;
@@ -2928,6 +3166,7 @@ button {
 
 .create-choice-buttons button,
 .create-choice-more,
+.create-choice-retry,
 .create-actions button {
   min-height: 31px;
   padding: 6px 10px;
@@ -2946,6 +3185,260 @@ button {
   color: var(--cyan);
 }
 
+.create-ingestor-source,
+.create-ingestor-offset,
+.create-ingestor-mode,
+.create-ingestor-mqtt-session,
+.create-ingestor-mqtt-qos,
+.create-ingestor-quiesce,
+.create-ingestor-overflow,
+.create-ingestor-timestamp,
+.create-ingestor-general-error,
+.create-ingestor-branching,
+.create-ingestor-inherit,
+.create-ingestor-flush,
+.create-ingestor-message-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-ingestor-source legend,
+.create-ingestor-offset legend,
+.create-ingestor-mode legend,
+.create-ingestor-mqtt-session legend,
+.create-ingestor-mqtt-qos legend,
+.create-ingestor-quiesce legend,
+.create-ingestor-overflow legend,
+.create-ingestor-timestamp legend,
+.create-ingestor-general-error legend,
+.create-ingestor-branching legend,
+.create-ingestor-inherit legend,
+.create-ingestor-flush legend,
+.create-ingestor-message-error legend {
+  color: var(--text-d);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-ingestor-source button,
+.create-ingestor-offset button,
+.create-ingestor-mode button,
+.create-ingestor-mqtt-session button,
+.create-ingestor-mqtt-qos button,
+.create-ingestor-quiesce button,
+.create-ingestor-overflow button,
+.create-ingestor-timestamp button,
+.create-ingestor-general-error button,
+.create-ingestor-route-list button,
+.create-ingestor-route-actions button,
+.create-ingestor-branching button,
+.create-ingestor-inherit button,
+.create-ingestor-flush button,
+.create-ingestor-message-error button,
+.create-ingestor-assignment button,
+.create-ingestor-inherited-field button,
+.create-ingestor-invocations button {
+  min-height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
+}
+
+.create-ingestor-source button.active,
+.create-ingestor-offset button.active,
+.create-ingestor-mode button.active,
+.create-ingestor-mqtt-session button.active,
+.create-ingestor-mqtt-qos button.active,
+.create-ingestor-quiesce button.active,
+.create-ingestor-overflow button.active,
+.create-ingestor-timestamp button.active,
+.create-ingestor-general-error button.active,
+.create-ingestor-route-list button.active,
+.create-ingestor-branching button.active,
+.create-ingestor-inherit button.active,
+.create-ingestor-flush button.active,
+.create-ingestor-message-error button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-ingestor-routes,
+.create-ingestor-route,
+.create-ingestor-invocations,
+.create-ingestor-branch-assignments,
+.create-ingestor-output-assignments,
+.create-ingestor-error-assignments {
+  display: grid;
+  gap: 10px;
+}
+
+.create-ingestor-routes,
+.create-ingestor-route {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.create-ingestor-routes h3,
+.create-ingestor-invocations h4 {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-ingestor-route-list,
+.create-ingestor-route-actions,
+.create-ingestor-assignment,
+.create-ingestor-inherited-field,
+.create-ingestor-invocation,
+.create-ingestor-invocation-argument-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.create-ingestor-assignment-expression,
+.create-ingestor-invocation-function,
+.create-ingestor-invocation-argument {
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 35px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.create-processor-mode,
+.create-processor-branching,
+.create-processor-route-branching,
+.create-processor-state-policy,
+.create-processor-inherit,
+.create-processor-flush,
+.create-processor-message-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-processor-mode legend,
+.create-processor-branching legend,
+.create-processor-route-branching legend,
+.create-processor-state-policy legend,
+.create-processor-inherit legend,
+.create-processor-flush legend,
+.create-processor-message-error legend {
+  color: var(--text-d);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-processor-inputs,
+.create-processor-state,
+.create-processor-routes,
+.create-processor-route,
+.create-processor-invocations,
+.create-processor-state-default,
+.create-processor-output-assignments,
+.create-processor-branch-assignments,
+.create-processor-error-assignments {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.create-processor-inputs,
+.create-processor-state,
+.create-processor-routes,
+.create-processor-route {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.create-processor-inputs h3,
+.create-processor-state h3,
+.create-processor-routes h3,
+.create-processor-invocations h4 {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-processor-input-list,
+.create-processor-input-actions,
+.create-processor-state-list,
+.create-processor-state-actions,
+.create-processor-route-list,
+.create-processor-route-actions,
+.create-processor-assignment-row,
+.create-processor-inherited-field,
+.create-processor-invocation,
+.create-processor-invocation-argument-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.create-processor-inputs button,
+.create-processor-state button,
+.create-processor-routes button,
+.create-processor-mode button {
+  min-height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
+}
+
+.create-processor-inputs button.active,
+.create-processor-state button.active,
+.create-processor-routes button.active,
+.create-processor-mode button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-processor-assignment-row input,
+.create-processor-invocation input {
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 35px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .create-choice-state,
 .create-validation,
 .create-error,
@@ -2956,6 +3449,12 @@ button {
 
 .create-choice-state {
   color: var(--text-d);
+}
+
+.create-choice-recovery {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .choice-failed,

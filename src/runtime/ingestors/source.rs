@@ -27,11 +27,14 @@ use nervix_connector::{
     SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::CancellationToken;
 
-use super::super::{
-    domain_clock::{DomainCadence, DomainClockWaitResult},
-    *,
+use super::{
+    super::{
+        domain_clock::{DomainCadence, DomainClockWaitResult},
+        *,
+    },
+    IngestorStartError, SourceStartError,
 };
 use crate::runtime::ingestor_quiesce::IngestorQuiesceObservation;
 
@@ -46,17 +49,30 @@ pub(super) const SOURCE_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolicy 
 
 impl IngestorSpec {
     /// The identity this ingestor's running source is registered under.
-    pub(super) fn runtime_key(&self) -> DomainNodeRef {
+    pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeRef {
         DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone())
     }
 
-    /// The start failure this ingestor reports, naming why it could not start.
-    pub(super) fn start_failure(&self, reason: impl Into<String>) -> RuntimeError {
-        RuntimeError::StartIngestor {
-            domain: self.domain.as_str().to_string(),
-            ingestor: self.name.as_str().to_string(),
-            reason: reason.into(),
+    /// The context every failure to initialize this ingestor's source is reported under.
+    pub(super) fn initialize_failure(&self) -> IngestorStartError {
+        IngestorStartError::Initialize {
+            domain: self.domain.clone(),
+            ingestor: self.name.clone(),
         }
+    }
+
+    /// This ingestor's source failing to start because of `cause`.
+    pub(super) fn source_start_failure(
+        &self,
+        cause: SourceStartError,
+    ) -> Report<IngestorStartError> {
+        Report::new(cause).change_context(self.initialize_failure())
+    }
+
+    /// The metadata namespace this ingestor's messages expose to its programs, which its source's
+    /// transport class decides.
+    pub(in crate::runtime) fn metadata_kind(&self) -> IngestMetadataKind {
+        IngestMetadataKind::from(self.declared_input.source_kind())
     }
 
     /// The capabilities this ingestor's source runs with, derived from the source vocabulary.
@@ -66,9 +82,10 @@ impl IngestorSpec {
         acknowledgement: SourceAcknowledgementSupport,
     ) -> SourceCapabilities {
         SourceCapabilities::new(
-            self.allow_header_reads,
-            self.metadata_kind.source_scope(),
-            self.quiesce.supports(self.quiesce.mode()),
+            self.reads_headers(),
+            self.metadata_kind().source_scope(),
+            self.declared_input
+                .supports_quiesce(self.declared_input.quiesce_mode()),
             instances,
             acknowledgement,
         )
@@ -130,7 +147,10 @@ impl<P> BrokerSourceStart<'_, P> {
     ///
     /// Nothing is registered here, so a mode that fails to parse or an instance that fails to open
     /// leaves no running ingestor behind.
-    pub(super) async fn open<C>(self, ingestor: &IngestorSpec) -> Result<SourceStart, RuntimeError>
+    pub(super) async fn open<C>(
+        self,
+        ingestor: &IngestorSpec,
+    ) -> error_stack::Result<SourceStart, IngestorStartError>
     where
         C: BrokerSourceConnector<Plan = P>,
     {
@@ -164,10 +184,10 @@ impl<P> BrokerSourceStart<'_, P> {
         let mut opened: Vec<Box<dyn SourceInstance>> =
             Vec::with_capacity(plan.capabilities.instances().get().arch_into());
         for instance_index in 0..plan.capabilities.instances().get() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source = C::open(&plan.connector, instance_index)
                 .await
-                .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+                .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
                 acknowledgement: plan.acknowledgement,
@@ -232,7 +252,7 @@ impl<P> PacedSourceStart<P> {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError>
+    ) -> error_stack::Result<SourceStart, IngestorStartError>
     where
         C: PacedSourceConnector<Plan = P>,
     {
@@ -251,10 +271,10 @@ impl<P> PacedSourceStart<P> {
         };
         let source = C::open(&plan.connector, 0)
             .await
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let cadence = runtime
             .bind_domain_cadence(&ingestor.domain, every, cadence_start)
-            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance: Box<dyn SourceInstance> = Box::new(PacedSourceInstance { source, cadence });
         Ok(SourceStart {
             instances: vec![instance],
@@ -299,6 +319,7 @@ impl Runtime {
         ingestor: &IngestorSpec,
         quiesce: Arc<IngestorQuiesceControl>,
         dependencies: IngestorDependencies,
+        codec: Arc<CompiledCodec>,
         source: SourceStart,
     ) {
         let SourceStart {
@@ -310,15 +331,18 @@ impl Runtime {
             connector_label,
         } = source;
         let IngestorDependencies {
+            handles,
             output_routes,
             filter_where,
-            codec,
             branched_templates,
             metrics,
         } = dependencies;
         let domain = &ingestor.domain;
-        let branched_runtime =
-            self.start_branched_ingestor_runtime(domain, &ingestor.name, branched_templates);
+        let branched_runtime = self.start_branched_entrypoint_runtimes(
+            domain,
+            &ModelName::from(&ingestor.name),
+            branched_templates,
+        );
         let instance_count: u64 = instances.len().arch_into();
         let expected_instances = NonZeroU64::new(instance_count).assured(
             "every source composition opens the non-zero instance count its source declares",
@@ -328,10 +352,13 @@ impl Runtime {
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances.len());
         for companion in companions {
-            tasks.push(tokio::spawn(companion.start(shutdown_tx.subscribe())));
+            tasks.push(nervix_primitives::task::spawn(
+                companion.start(shutdown_tx.subscribe()),
+            ));
         }
         for (instance_index, instance) in (0_u64..).zip(instances) {
             let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
+                handles: handles.clone(),
                 runtime: self.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.name.clone(),
@@ -344,7 +371,7 @@ impl Runtime {
                 quiesce: quiesce.clone(),
                 shutdown: shutdown_tx.subscribe(),
                 instance_index,
-                metadata_kind: ingestor.metadata_kind,
+                metadata_kind: ingestor.metadata_kind(),
                 buffered_intake,
                 flush_each_intake,
             });
@@ -352,7 +379,7 @@ impl Runtime {
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
             let task_client_mounts = client_mounts.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(nervix_primitives::task::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 info!(
                     domain = task_domain.as_str(),
@@ -402,11 +429,12 @@ fn source_failure_reason(error: &Report<SourceError>) -> String {
 }
 
 pub(super) struct RuntimeSourceHostSpec {
+    pub(super) handles: IngestTaskHandles,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) timestamp_source: Option<IngestTimestampSource>,
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) metrics: MessageMetricsHandle,
@@ -420,11 +448,13 @@ pub(super) struct RuntimeSourceHostSpec {
 }
 
 pub(super) struct RuntimeSourceHost {
+    handles: IngestTaskHandles,
+    status: Arc<super::super::task_status::TaskStatus<RuntimeReconnectStatus>>,
     runtime: Runtime,
     domain: DomainName,
     ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
-    output_routes: RelayProcessorOutputsNode,
+    output_routes: Arc<BoundIngestorRoutes>,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     metrics: MessageMetricsHandle,
@@ -441,6 +471,12 @@ pub(super) struct RuntimeSourceHost {
 
 impl RuntimeSourceHost {
     pub(super) fn new(spec: RuntimeSourceHostSpec) -> Self {
+        let status_key = DomainNodeRef::node_in(
+            spec.domain.clone(),
+            ModelKind::Ingestor,
+            spec.ingestor.clone(),
+        );
+        let status = spec.runtime.ingestor_status(&status_key);
         let ack_root_trackers = spec
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
@@ -451,6 +487,8 @@ impl RuntimeSourceHost {
         );
         let quiesce_observation = spec.quiesce.observation();
         Self {
+            handles: spec.handles,
+            status,
             runtime: spec.runtime,
             domain: spec.domain,
             ingestor: spec.ingestor,
@@ -473,7 +511,7 @@ impl RuntimeSourceHost {
 
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
         for failure in poll.failures {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.report_error(format!(
                 "source poll could not materialize one message: {failure:?}"
             ));
@@ -502,20 +540,13 @@ impl RuntimeSourceHost {
         Ok(true)
     }
 
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
-            return Ok(false);
-        };
-        self.dispatch_polled_payload(&payload).await?;
-        Ok(true)
-    }
-
     async fn dispatch_polled_payload(
         &mut self,
         payload: &BufferedIngestPayload,
     ) -> SourceIntakeResult<()> {
         self.runtime
             .dispatch_raw_ingest_payload(RawIngestDispatch {
+                handles: &self.handles,
                 domain: &self.domain,
                 ingestor: &self.ingestor,
                 timestamp_source: self.timestamp_source.as_ref(),
@@ -538,11 +569,7 @@ impl RuntimeSourceHost {
     /// the host holds, on the request path rather than in the source loop.
     pub(super) fn request_intake(&self) -> EndpointIngestBinding {
         EndpointIngestBinding {
-            runtime_key: DomainNodeRef::node_in(
-                self.domain.clone(),
-                ModelKind::Ingestor,
-                self.ingestor.clone(),
-            ),
+            handles: self.handles.clone(),
             quiesce: self.quiesce.clone(),
             domain: self.domain.clone(),
             ingestor: self.ingestor.clone(),
@@ -556,8 +583,7 @@ impl RuntimeSourceHost {
     }
 
     fn record_poll_error(&self, reason: String) {
-        self.runtime
-            .record_ingestor_transient_error(&self.domain, &self.ingestor, reason.clone());
+        self.status.record_error(reason.clone());
         self.report_error(reason);
     }
 }
@@ -620,13 +646,20 @@ impl RuntimeSourceHost {
 
     /// Unacknowledged input read while the ingestor is quiesced enters the quiesce control as one
     /// payload, which buffers it, drops it, or admits it for dispatch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn retain_unacknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         let mut entries = Vec::with_capacity(messages.len());
         for message in messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let metadata = Self::retained_metadata(&message.metadata)?;
             entries.push((message.payload.to_vec(), metadata));
         }
@@ -647,6 +680,13 @@ impl RuntimeSourceHost {
     /// with its acknowledgement root as it would be unquiesced; one it buffers or drops is
     /// acknowledged at once, because the buffer or the drop policy has taken it over from the
     /// source. The acknowledgements keep the batch's order.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn retain_acknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
@@ -654,7 +694,7 @@ impl RuntimeSourceHost {
         let mut admitted = Vec::with_capacity(messages.len());
         let mut decisions = Vec::with_capacity(messages.len());
         for message in messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let metadata = Self::retained_metadata(&message.metadata)?;
             let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
             match self.quiesce.intake(self.instance_index, retained, false) {
@@ -682,7 +722,7 @@ impl RuntimeSourceHost {
         let mut dispatched = dispatched.into_iter();
         let mut acknowledgements = Vec::with_capacity(decisions.len());
         for decision in decisions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let acknowledgement = match decision {
                 QuiescedIntake::Admitted => dispatched.next().verified(
                     "an acknowledged dispatch returns one acknowledgement per admitted message",
@@ -698,6 +738,13 @@ impl RuntimeSourceHost {
 
     /// Decodes a batch into its ingest group and dispatches it, returning one acknowledgement per
     /// message for an acknowledged batch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn dispatch_batch(
         &mut self,
         batch: SourceIntakeBatch<'_>,
@@ -718,10 +765,28 @@ impl RuntimeSourceHost {
 
         let mut metadata = Vec::with_capacity(batch.messages.len());
         for message in batch.messages {
-            tokio::task::consume_budget().await;
-            if let Err(error) = collector.decode_payload(&self.codec, message.payload).await {
+            nervix_primitives::task::consume_budget().await;
+            if let Err(failure) = collector
+                .decode_payload(
+                    self.runtime.executor(),
+                    QueueAdmission::RefuseWhenFull,
+                    &self.codec,
+                    message.payload,
+                )
+                .await
+            {
                 collector.discard_undispatched_payloads();
-                return Err(Report::new(error).change_context(SourceIntakeError::Decode));
+                // A payload the node could not take now was never judged, so it is not a decode
+                // failure: the batch failed to dispatch.
+                let error = match failure {
+                    PayloadDecodeFailure::Codec(report) => {
+                        report.change_context(SourceIntakeError::Decode)
+                    }
+                    PayloadDecodeFailure::NotAdmitted(report) => {
+                        report.change_context(SourceIntakeError::Dispatch)
+                    }
+                };
+                return Err(error);
             }
             metadata.push(message.metadata);
         }
@@ -733,7 +798,7 @@ impl RuntimeSourceHost {
             completions.reserve(metadata.len());
             let mut acks = Vec::with_capacity(metadata.len());
             for _ in &metadata {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let (root, completion) = self.ack_root_trackers.tracked_root();
                 if self.branched_senders.is_empty() {
                     acks.push(root.clone());
@@ -750,6 +815,7 @@ impl RuntimeSourceHost {
 
         self.runtime
             .dispatch_ingested_records(IngestGroupDispatch {
+                handles: &self.handles,
                 collector,
                 domain: &self.domain,
                 ingestor: &self.ingestor,
@@ -821,11 +887,7 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
-        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
-            return Ok(false);
-        };
-        self.dispatch_buffered_payload(&payload).await?;
-        Ok(true)
+        self.deliver_retained().await
     }
 
     fn next_flush(&self) -> Option<Instant> {
@@ -848,7 +910,7 @@ impl SourceHostServices for RuntimeSourceHost {
 
     async fn wait_until_active(&mut self) -> bool {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !self
                 .runtime
                 .inner
@@ -859,7 +921,7 @@ impl SourceHostServices for RuntimeSourceHost {
             }
             if self
                 .runtime
-                .wait_if_ingestor_faulted(&self.domain, &self.ingestor, &mut self.shutdown)
+                .wait_if_ingestor_faulted(&self.status, &self.ingestor, &mut self.shutdown)
                 .await
             {
                 return false;
@@ -884,17 +946,17 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
-        self.runtime.record_ingestor_transient_error_with_backoff(
-            &self.domain,
-            &self.ingestor,
+        self.status.fail(
             reason,
-            retry_after,
+            Some(RuntimeReconnectStatus {
+                backoff: retry_after,
+                retry_at: Instant::now() + retry_after,
+            }),
         );
     }
 
     fn clear_transient_error(&self) {
-        self.runtime
-            .clear_ingestor_transient_error(&self.domain, &self.ingestor);
+        self.status.clear();
     }
 
     fn report_error(&self, message: String) {
@@ -915,6 +977,13 @@ impl SourceHostServices for RuntimeSourceHost {
 }
 
 impl RuntimeSourceHost {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
     async fn dispatch_buffered_payload(
         &mut self,
         payload: &BufferedIngestPayload,
@@ -925,12 +994,96 @@ impl RuntimeSourceHost {
         }
         Ok(())
     }
+
+    /// Delivers the oldest payload this instance's quiesce buffer retained, and answers whether it
+    /// delivered one.
+    ///
+    /// Nothing can present a retained payload again: an endpoint already answered it and a source
+    /// already moved past it. Its unfolding therefore waits for a place on the node's extension
+    /// workers rather than being refused, and the payload stays retained, counted with its bytes,
+    /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
+    /// that wait and leaves the payload at the front of the buffer, so it is delivered first when
+    /// the buffer drains again. A payload its codec rejects leaves the buffer and is reported, as
+    /// any retained payload that fails is.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host delivers one retained payload on each loop turn while its \
+                      buffer drains"
+        )
+    )]
+    async fn deliver_retained(&mut self) -> SourceIntakeResult<bool> {
+        let Some(retained) = self.quiesce.take_buffered(self.instance_index) else {
+            return Ok(false);
+        };
+        let decode = self.runtime.decode_raw_ingest_payload(
+            &mut self.collector,
+            QueueAdmission::WaitForPlace,
+            &self.codec,
+            retained.payload(),
+        );
+        let decoded = retained.run_until_interrupted(&self.shutdown, decode).await;
+        let Some(decoded) = decoded else {
+            // The group keeps none of the payload's messages, and dropping the delivery puts the
+            // payload back at the front of the buffer.
+            self.collector.discard_undispatched_payloads();
+            return Ok(false);
+        };
+        match decoded {
+            Ok(()) => {}
+            Err(PayloadDecodeFailure::NotAdmitted(refusal)) => {
+                // A job that waits for a place is refused only by an executor that no longer
+                // admits work. The refusal judged nothing, so the payload stays retained.
+                debug!(
+                    domain = self.domain.as_str(),
+                    ingestor = self.ingestor.as_str(),
+                    error = ?refusal,
+                    "the node could not take a retained payload's unfolding"
+                );
+                return Ok(false);
+            }
+            Err(failure @ PayloadDecodeFailure::Codec(_)) => {
+                // Its codec rejected it, so it leaves the buffer and its failure is reported.
+                drop(retained.finish());
+                return Err(failure
+                    .into_group_error(&self.ingestor)
+                    .change_context(SourceIntakeError::Dispatch));
+            }
+        }
+        // The payload's messages are in the group, so it leaves the buffer before the group
+        // accepts them.
+        let payload = retained.finish();
+        self.runtime
+            .accept_raw_ingest_payload(RawIngestAcceptance {
+                handles: &self.handles,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                payload: &payload,
+                collector: &mut self.collector,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)?;
+        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+            self.flush().await?;
+        }
+        Ok(true)
+    }
 }
 
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained paced source host handles every poll and acknowledgement"
+    )
+)]
 trait PacedSourceHostServices: SourceHostServices {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool>;
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool>;
     fn should_skip_poll(&self) -> bool;
     fn record_poll_error(&self, reason: String);
 }
@@ -939,10 +1092,6 @@ trait PacedSourceHostServices: SourceHostServices {
 impl PacedSourceHostServices for RuntimeSourceHost {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
         RuntimeSourceHost::intake_poll(self, poll).await
-    }
-
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        RuntimeSourceHost::replay_buffered_poll(self).await
     }
 
     fn should_skip_poll(&self) -> bool {
@@ -955,6 +1104,13 @@ impl PacedSourceHostServices for RuntimeSourceHost {
 }
 
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained cadence selects each paced source poll"
+    )
+)]
 trait PacedSourceCadence: Send + 'static {
     async fn next(&mut self, cancellation: &CancellationToken) -> DomainClockWaitResult<Timestamp>;
 }
@@ -996,7 +1152,7 @@ where
             *ready = false;
             host.mark_unready();
         }
-        let keep_running = tokio::select! {
+        let keep_running = nervix_primitives::select! {
             changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
             _ = host.wait_until_not_suspended() => true,
         };
@@ -1040,6 +1196,13 @@ where
     PacedSourceAction::Poll
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained paced source handles every poll, retry and acknowledgement"
+    )
+)]
 async fn run_paced_source<C, H, D>(
     mut source: C,
     mut host: H,
@@ -1054,23 +1217,23 @@ async fn run_paced_source<C, H, D>(
     let mut ready = false;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await {
             PacedSourceAction::Poll => {}
             PacedSourceAction::Restart => continue,
             PacedSourceAction::Stop => break,
         }
 
-        match host.replay_buffered_poll().await {
+        match host.replay_buffered().await {
             Ok(true) => {
                 flush_paced_source(&mut host).await;
                 continue;
             }
             Ok(false) => {}
-            Err(error) => host.report_error(error.to_string()),
+            Err(error) => host.report_error(format!("{error:#}")),
         }
 
-        let due_at = tokio::select! {
+        let due_at = nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1093,7 +1256,7 @@ async fn run_paced_source<C, H, D>(
             continue;
         }
 
-        let poll = tokio::select! {
+        let poll = nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1116,12 +1279,18 @@ async fn run_paced_source<C, H, D>(
         match host.intake_poll(poll).await {
             Ok(true) => flush_paced_source(&mut host).await,
             Ok(false) => {}
-            Err(error) => host.report_error(error.to_string()),
+            Err(error) => host.report_error(format!("{error:#}")),
         }
     }
 
     flush_paced_source(&mut host).await;
-    if let Err(error) = source.close().await {
+    if let Err(error) = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "terminal source teardown closes its exact connector instance after the polling loop ends",
+        source.close()
+    )
+    .await
+    {
         host.report_error(error.to_string());
     }
     host.mark_unready();
@@ -1132,7 +1301,7 @@ where
     H: SourceHostServices,
 {
     if let Err(error) = host.flush().await {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
     }
 }
 
@@ -1144,7 +1313,7 @@ async fn wait_for_paced_retry<H>(
 where
     H: SourceHostServices,
 {
-    tokio::select! {
+    nervix_primitives::select! {
         changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
         _ = host.wait_for_quiesce_change() => true,
         _ = sleep(delay) => true,
@@ -1157,6 +1326,13 @@ where
 /// bound, so the loop reads nothing from the source. It replays what a quiesce buffer retained for
 /// those requests once the buffer is released, and closes the source at shutdown so its routes stop
 /// receiving requests.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained request source handles every admitted request and acknowledgement"
+    )
+)]
 pub(super) async fn run_request_source<C>(
     mut source: C,
     mut host: SourceHost,
@@ -1165,7 +1341,7 @@ pub(super) async fn run_request_source<C>(
     C: SourceConnector,
 {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match host.replay_buffered().await {
             Ok(true) => continue,
             Ok(false) => {}
@@ -1174,7 +1350,7 @@ pub(super) async fn run_request_source<C>(
                 continue;
             }
         }
-        tokio::select! {
+        nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1184,18 +1360,32 @@ pub(super) async fn run_request_source<C>(
         }
     }
 
-    if let Err(error) = source.close().await {
+    if let Err(error) = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "terminal source teardown closes its exact connector instance after the polling loop ends",
+        source.close()
+    )
+    .await
+    {
         host.report_error(format!("{error:#}"));
     }
     host.mark_unready();
 }
 
-enum BatchDisposition {
+enum BatchDisposition<P> {
     Accepted,
     Retry,
+    RetryRejection(Vec<P>),
     Shutdown,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained source handles every poll, retry and acknowledgement"
+    )
+)]
 pub(super) async fn run_source_instance_with_retry<C>(
     mut source: C,
     mut host: SourceHost,
@@ -1207,9 +1397,10 @@ pub(super) async fn run_source_instance_with_retry<C>(
 {
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
+    let mut pending_rejection: Option<Vec<C::Position>> = None;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if !host.wait_until_active().await {
             break;
         }
@@ -1227,7 +1418,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
                 ready = false;
                 host.mark_unready();
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
@@ -1240,12 +1431,25 @@ pub(super) async fn run_source_instance_with_retry<C>(
 
         if !ready || source.needs_resume() {
             flush_for_lifecycle(&mut host).await;
-            match source.resume().await {
+            let resumed = nervix_primitives::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                _ = host.wait_for_quiesce_change() => continue,
+                resumed = source.resume() => resumed,
+            };
+            match resumed {
                 Ok(SourceResume::Ready) => {
                     ready = true;
-                    retry_delay = retry_policy.backoff;
-                    host.mark_ready();
-                    host.clear_transient_error();
+                    if pending_rejection.is_none() {
+                        retry_delay = retry_policy.backoff;
+                        host.mark_ready();
+                        host.clear_transient_error();
+                    }
                     // A quiesce released while the source was resuming was not waited on by
                     // anything, so the iteration starts over and replays what it buffered
                     // before the loop blocks on the next batch.
@@ -1274,9 +1478,33 @@ pub(super) async fn run_source_instance_with_retry<C>(
             }
         }
 
+        // A failed rewind leaves the connector's cursor beyond an unacknowledged message.
+        // Reestablish its assignment and retry that same rewind before reading another batch:
+        // acknowledging a later Kafka offset would otherwise commit past the missing record.
+        if let Some(positions) = pending_rejection.take() {
+            if let Err(error) = source.reject(&positions).await {
+                host.report_error(format!("{error:#}"));
+                pending_rejection = Some(positions);
+                if let Err(error) = source.suspend().await {
+                    host.report_error(format!("{error:#}"));
+                }
+                ready = false;
+                host.mark_unready();
+                let delay = source_retry_delay(retry_delay);
+                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                    break;
+                }
+                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                continue;
+            }
+            retry_delay = retry_policy.backoff;
+            host.mark_ready();
+            host.clear_transient_error();
+        }
+
         let request = batch_request(acknowledgement);
         let next_flush = host.next_flush();
-        let batch = tokio::select! {
+        let batch = nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1327,12 +1555,31 @@ pub(super) async fn run_source_instance_with_retry<C>(
                 }
                 retry_delay = next_retry_delay(retry_delay, retry_policy);
             }
+            BatchDisposition::RetryRejection(positions) => {
+                pending_rejection = Some(positions);
+                if let Err(error) = source.suspend().await {
+                    host.report_error(format!("{error:#}"));
+                }
+                ready = false;
+                host.mark_unready();
+                let delay = source_retry_delay(retry_delay);
+                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                    break;
+                }
+                retry_delay = next_retry_delay(retry_delay, retry_policy);
+            }
             BatchDisposition::Shutdown => break,
         }
     }
 
     flush_for_lifecycle(&mut host).await;
-    if let Err(error) = source.close().await {
+    if let Err(error) = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "terminal source teardown closes its exact connector instance after the polling loop ends",
+        source.close()
+    )
+    .await
+    {
         host.report_error(format!("{error:#}"));
     }
     host.mark_unready();
@@ -1355,12 +1602,19 @@ fn batch_request(acknowledgement: SourceAckPolicy) -> SourceBatchRequest {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the source driver owns position cloning while this admitted batch retains its \
+                  acknowledgement list"
+    )
+)]
 async fn handle_batch<C>(
     source: &mut C,
     host: &mut SourceHost,
     acknowledgement: SourceAckPolicy,
     messages: Vec<C::Message>,
-) -> BatchDisposition
+) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
@@ -1392,8 +1646,7 @@ where
         Err(error) => {
             host.report_error(format!("{error:#}"));
             if mode == SourceIntakeMode::Acknowledged {
-                reject_batch(source, host, &positions).await;
-                return BatchDisposition::Retry;
+                return reject_batch(source, host, positions).await;
             }
             return BatchDisposition::Accepted;
         }
@@ -1412,17 +1665,15 @@ where
                 outcome.acknowledgements.len(),
                 positions.len(),
             ));
-            reject_batch(source, host, &positions).await;
-            return BatchDisposition::Retry;
+            return reject_batch(source, host, positions).await;
         }
         for acknowledgement in outcome.acknowledgements {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match acknowledgement.wait(timeout).await {
                 SourceAcknowledgementOutcome::Ack => {}
                 SourceAcknowledgementOutcome::NoAck(reason) => {
                     host.handle_ack_failure(reason);
-                    reject_batch(source, host, &positions).await;
-                    return BatchDisposition::Retry;
+                    return reject_batch(source, host, positions).await;
                 }
                 SourceAcknowledgementOutcome::Shutdown => return BatchDisposition::Shutdown,
             }
@@ -1433,18 +1684,25 @@ where
 
     if let Err(error) = source.acknowledge(&positions).await {
         host.report_error(format!("{error:#}"));
-        reject_batch(source, host, &positions).await;
-        return BatchDisposition::Retry;
+        return reject_batch(source, host, positions).await;
     }
     BatchDisposition::Accepted
 }
 
-async fn reject_batch<C>(source: &mut C, host: &mut SourceHost, positions: &[C::Position])
+async fn reject_batch<C>(
+    source: &mut C,
+    host: &mut SourceHost,
+    positions: Vec<C::Position>,
+) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
-    if let Err(error) = source.reject(positions).await {
-        host.report_error(format!("{error:#}"));
+    match source.reject(&positions).await {
+        Ok(()) => BatchDisposition::Retry,
+        Err(error) => {
+            host.report_error(format!("{error:#}"));
+            BatchDisposition::RetryRejection(positions)
+        }
     }
 }
 
@@ -1463,7 +1721,7 @@ async fn wait_for_retry(
     shutdown: &mut watch::Receiver<bool>,
     delay: Duration,
 ) -> bool {
-    tokio::select! {
+    nervix_primitives::select! {
         changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
         _ = host.wait_for_quiesce_change() => true,
         _ = sleep(delay) => true,
@@ -1484,7 +1742,7 @@ mod tests {
     use nervix_connector::{
         IngestMessageHeaders, IngestMetadataRow, SourceConnector, SourceError, SourceResult,
     };
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::{Notify, blocking::Mutex};
 
     use super::*;
 
@@ -1501,6 +1759,7 @@ mod tests {
         poll_errors: Vec<String>,
         reported_errors: Vec<String>,
         ack_waits: usize,
+        ack_outcomes: VecDeque<SourceAcknowledgementOutcome>,
         resumes: usize,
         suspends: usize,
         closes: usize,
@@ -1545,8 +1804,12 @@ mod tests {
         messages: VecDeque<FakeMessage>,
         resume_required: bool,
         resume_results: VecDeque<SourceResult<SourceResume>>,
+        reject_failures_left: usize,
+        replay_rejected: bool,
         /// Replays each resume leaves pending, as a quiesce released during it would.
         replays_pending_after_resume: usize,
+        resume_started: Option<Arc<Notify>>,
+        block_resume: bool,
         observations: Arc<Mutex<SourceLoopObservations>>,
     }
 
@@ -1559,14 +1822,21 @@ mod tests {
         }
 
         async fn resume(&mut self) -> SourceResult<SourceResume> {
-            let mut observations = self.observations.lock();
-            observations.resumes += 1;
-            observations.sequence.push("resume");
-            observations.pending_replays = observations
-                .pending_replays
-                .checked_add(self.replays_pending_after_resume)
-                .verified("the test leaves at most a few replays pending");
-            drop(observations);
+            {
+                let mut observations = self.observations.lock();
+                observations.resumes += 1;
+                observations.sequence.push("resume");
+                observations.pending_replays = observations
+                    .pending_replays
+                    .checked_add(self.replays_pending_after_resume)
+                    .verified("the test leaves at most a few replays pending");
+            }
+            if let Some(started) = self.resume_started.as_ref() {
+                started.notify_one();
+            }
+            if self.block_resume {
+                future::pending::<()>().await;
+            }
             match self.resume_results.pop_front() {
                 Some(result) => result,
                 None => Ok(SourceResume::Ready),
@@ -1626,6 +1896,21 @@ mod tests {
 
         async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
             self.observations.lock().rejected.push(positions.to_vec());
+            if self.reject_failures_left > 0 {
+                self.reject_failures_left -= 1;
+                return Err(Report::new(SourceError::Reject { connector: "fake" }));
+            }
+            if self.replay_rejected {
+                for position in positions.iter().rev() {
+                    self.messages.push_front(FakeMessage {
+                        position: *position,
+                        payload: vec![
+                            u8::try_from(*position)
+                                .verified("the test positions are all below 256"),
+                        ],
+                    });
+                }
+            }
             Ok(())
         }
     }
@@ -1637,8 +1922,12 @@ mod tests {
     #[async_trait]
     impl SourceAcknowledgementServices for ImmediateAcknowledgement {
         async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
-            self.observations.lock().ack_waits += 1;
-            SourceAcknowledgementOutcome::Ack
+            let mut observations = self.observations.lock();
+            observations.ack_waits += 1;
+            observations
+                .ack_outcomes
+                .pop_front()
+                .unwrap_or(SourceAcknowledgementOutcome::Ack)
         }
     }
 
@@ -1646,6 +1935,7 @@ mod tests {
         observations: Arc<Mutex<SourceLoopObservations>>,
         suspend_intake: bool,
         wake_quiesce: bool,
+        quiesce_change: Option<Arc<Notify>>,
         wake_suspension: bool,
         active: bool,
     }
@@ -1656,6 +1946,7 @@ mod tests {
                 observations,
                 suspend_intake: false,
                 wake_quiesce: false,
+                quiesce_change: None,
                 wake_suspension: false,
                 active: true,
             }
@@ -1707,6 +1998,11 @@ mod tests {
         }
 
         async fn wait_for_quiesce_change(&mut self) {
+            if let Some(change) = self.quiesce_change.as_ref() {
+                change.notified().await;
+                self.observations.lock().quiesce_waits += 1;
+                return;
+            }
             if self.wake_quiesce {
                 self.observations.lock().quiesce_waits += 1;
                 return;
@@ -1752,10 +2048,6 @@ mod tests {
             Ok(!poll.messages.is_empty())
         }
 
-        async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-            Ok(false)
-        }
-
         fn should_skip_poll(&self) -> bool {
             self.suspend_intake
         }
@@ -1786,7 +2078,11 @@ mod tests {
             messages: three_messages(),
             resume_required,
             resume_results: VecDeque::new(),
+            reject_failures_left: 0,
+            replay_rejected: false,
             replays_pending_after_resume: 0,
+            resume_started: None,
+            block_resume: false,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
@@ -1812,19 +2108,27 @@ mod tests {
             messages: VecDeque::new(),
             resume_required: false,
             resume_results: VecDeque::new(),
+            reject_failures_left: 0,
+            replay_rejected: false,
             replays_pending_after_resume: 0,
+            resume_started: None,
+            block_resume: false,
             observations,
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let source = FakeSource {
             messages: three_messages(),
             resume_required: false,
             resume_results: VecDeque::new(),
+            reject_failures_left: 0,
+            replay_rejected: false,
             replays_pending_after_resume: 2,
+            resume_started: None,
+            block_resume: false,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
@@ -1855,7 +2159,67 @@ mod tests {
         assert_eq!(observations.pending_replays, 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let started = Arc::new(Notify::new());
+        let mut source = empty_source(observations.clone());
+        source.resume_started = Some(started.clone());
+        source.block_resume = true;
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
+            source,
+            host,
+            SourceAckPolicy::None,
+            SourceAckPolicy::None.retry(),
+            shutdown_rx,
+        ));
+        started.notified().await;
+        shutdown_tx.send_replace(true);
+        nervix_primitives::time::timeout(Duration::from_secs(10), running)
+            .await
+            .assured("shutdown cancels the pending resume through the source-loop select")
+            .assured("the source loop exits without a task panic");
+        assert_eq!(observations.lock().closes, 1);
+    }
+
+    #[nervix_primitives::test]
+    async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let started = Arc::new(Notify::new());
+        let changed = Arc::new(Notify::new());
+        let mut source = empty_source(observations.clone());
+        source.resume_started = Some(started.clone());
+        source.block_resume = true;
+        let mut fake_host = FakeHost::running(observations.clone());
+        fake_host.quiesce_change = Some(changed.clone());
+        let host = SourceHost::new(fake_host);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
+            source,
+            host,
+            SourceAckPolicy::None,
+            SourceAckPolicy::None.retry(),
+            shutdown_rx,
+        ));
+        started.notified().await;
+        changed.notify_one();
+        nervix_primitives::time::timeout(Duration::from_secs(10), started.notified())
+            .await
+            .assured("the quiesce notification interrupts resume so the loop retries it");
+        shutdown_tx.send_replace(true);
+        nervix_primitives::time::timeout(Duration::from_secs(10), running)
+            .await
+            .assured("shutdown cancels the retried resume through the source-loop select")
+            .assured("the source loop exits without a task panic");
+        let observations = observations.lock();
+        assert_eq!(observations.resumes, 2);
+        assert_eq!(observations.quiesce_waits, 1);
+        assert_eq!(observations.closes, 1);
+    }
+
+    #[nervix_primitives::test]
     async fn request_source_loop_replays_retained_requests_and_closes_the_source_at_shutdown() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         observations.lock().pending_replays = 2;
@@ -1877,7 +2241,7 @@ mod tests {
         assert_eq!(observations.unready, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_suspends_a_ready_source_until_quiesce_releases() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -1898,7 +2262,7 @@ mod tests {
         assert_eq!(observations.unready, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_retries_resume_until_the_source_is_ready() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -1939,7 +2303,7 @@ mod tests {
         assert_eq!(observations.reported_errors.len(), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_stops_when_the_host_is_inactive() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -1955,7 +2319,7 @@ mod tests {
         assert_eq!(observations.lock().resumes, 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_stops_suspended_intake_after_shutdown_closes() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -1972,7 +2336,7 @@ mod tests {
         assert_eq!(observations.lock().flushes, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_accepts_no_ack_messages_one_at_a_time() {
         let observations = run_policy(SourceAckPolicy::None).await;
         let observations = observations.lock();
@@ -1985,7 +2349,7 @@ mod tests {
         assert!(observations.rejected.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_waits_and_commits_each_sequential_ack() {
         let observations = run_policy(SourceAckPolicy::Sequential {
             timeout: Duration::from_secs(1),
@@ -2002,7 +2366,42 @@ mod tests {
         assert!(observations.rejected.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
+    async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        observations.lock().ack_outcomes = VecDeque::from([
+            SourceAcknowledgementOutcome::NoAck("relay owner crashed".to_string()),
+            SourceAcknowledgementOutcome::Ack,
+            SourceAcknowledgementOutcome::Ack,
+        ]);
+        let source = FakeSource {
+            messages: three_messages().into_iter().take(2).collect(),
+            resume_required: false,
+            resume_results: VecDeque::new(),
+            reject_failures_left: 2,
+            replay_rejected: true,
+            replays_pending_after_resume: 0,
+            resume_started: None,
+            block_resume: false,
+            observations: observations.clone(),
+        };
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let policy = SourceAckPolicy::Sequential {
+            timeout: Duration::from_secs(1),
+            retry: retry_policy(),
+        };
+        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
+        drop(shutdown_tx);
+
+        let observations = observations.lock();
+        assert_eq!(observations.rejected, vec![vec![0], vec![0], vec![0]]);
+        assert_eq!(observations.acknowledged, vec![vec![0], vec![1]]);
+        assert_eq!(observations.suspends, 2);
+        assert_eq!(observations.resumes, 3);
+    }
+
+    #[nervix_primitives::test]
     async fn source_loop_commits_one_parallel_ack_batch() {
         let observations = run_policy(SourceAckPolicy::Parallel {
             max_in_flight: NonZeroUsize::new(3).verified("three is a nonzero source batch bound"),
@@ -2026,7 +2425,7 @@ mod tests {
         assert!(observations.rejected.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_resumes_after_connector_configuration_changes() {
         let observations = run_policy_with_refresh(SourceAckPolicy::None, true).await;
         let observations = observations.lock();

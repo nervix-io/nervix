@@ -5,6 +5,15 @@
 //! - **Depends on.** Typed schedules, runtime lifecycle handles and installed domain capabilities.
 //! - **Must not know.** NSPL parsing, registry validation or placement-policy computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "schedule publication installs one typed execution revision and its ownership \
+                  bindings"
+    )
+)]
+
 use super::*;
 
 /// What one node has applied of the cluster schedule its leader publishes.
@@ -70,19 +79,6 @@ impl ScheduleApplication {
 }
 
 impl Runtime {
-    pub(super) fn branched_specs_by_identifier(
-        specs: &[BranchedIngestorSpec],
-    ) -> HashMap<ModelName, Vec<BranchedIngestorSpec>> {
-        let mut specs_by_identifier = HashMap::default();
-        for spec in specs {
-            specs_by_identifier
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(spec.clone());
-        }
-        specs_by_identifier
-    }
-
     #[cfg(test)]
     pub(in crate::runtime) async fn apply_cluster_schedule(
         &self,
@@ -90,18 +86,60 @@ impl Runtime {
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
         let _application = self.inner.schedule_application.lock().await;
-        Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, true))
-            .await
-            .map(|_| ())
+        let applied = self.inner.test_applied_schedule.load_full();
+        let revision_plan =
+            PlannedClusterRevision::between(applied.as_deref(), schedule).map_err(|error| {
+                RuntimeError::BuildDomainExecution {
+                    domain: "cluster".to_string(),
+                    reason: format!("{error:#}"),
+                }
+            })?;
+        Box::pin(self.apply_cluster_schedule_locked(local_node_id, revision_plan, true)).await?;
+        self.inner
+            .test_applied_schedule
+            .store(Some(StdArc::new(schedule.clone())));
+        Ok(())
     }
 
-    pub(crate) async fn apply_cluster_state(
+    #[cfg(test)]
+    pub(in crate::runtime) async fn apply_cluster_state(
         &self,
         local_node_id: &ClusterNodeName,
         revision: u64,
         domains: &BTreeMap<DomainName, DomainState>,
         domain_clock_authorities: &BTreeMap<DomainName, DomainClockAuthority>,
         schedule: &ClusterSchedule,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let applied = self.inner.test_applied_schedule.load_full();
+        let revision_plan =
+            PlannedClusterRevision::between(applied.as_deref(), schedule).map_err(|error| {
+                Report::new(RuntimeError::BuildDomainExecution {
+                    domain: "cluster".to_string(),
+                    reason: format!("{error:#}"),
+                })
+            })?;
+        self.apply_planned_cluster_state(
+            local_node_id,
+            revision,
+            domains,
+            domain_clock_authorities,
+            revision_plan,
+        )
+        .await
+        .map_err(Report::new)?;
+        self.inner
+            .test_applied_schedule
+            .store(Some(StdArc::new(schedule.clone())));
+        Ok(())
+    }
+
+    pub(crate) async fn apply_planned_cluster_state(
+        &self,
+        local_node_id: &ClusterNodeName,
+        revision: u64,
+        domains: &BTreeMap<DomainName, DomainState>,
+        domain_clock_authorities: &BTreeMap<DomainName, DomainClockAuthority>,
+        revision_plan: PlannedClusterRevision,
     ) -> Result<(), RuntimeError> {
         let mut application = self.inner.schedule_application.lock().await;
         if !application.advances_beyond_applied(revision) {
@@ -112,7 +150,8 @@ impl Runtime {
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
         let recovery_expansions =
-            Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, false)).await?;
+            Box::pin(self.apply_cluster_schedule_locked(local_node_id, revision_plan, false))
+                .await?;
         application.record_applied(revision);
         self.inner
             .applied_recovery_expansions
@@ -136,12 +175,12 @@ impl Runtime {
     pub(super) async fn apply_cluster_schedule_locked(
         &self,
         local_node_id: &ClusterNodeName,
-        schedule: &ClusterSchedule,
+        revision_plan: PlannedClusterRevision,
         start_ingestors: bool,
     ) -> Result<Vec<RuntimeRecoveryExpansion>, RuntimeError> {
         // Delta application and full rebuild each own substantial state. Poll them indirectly so
         // applying a cluster revision does not embed both state machines in this coordinator.
-        let scheduled_domains = schedule
+        let scheduled_domains = revision_plan
             .domains
             .keys()
             .cloned()
@@ -152,13 +191,6 @@ impl Runtime {
                 .iter()
                 .map(|entry| entry.key().clone())
                 .collect::<std::collections::BTreeSet<_>>()
-        };
-        let existing_schedules = {
-            self.inner
-                .executions
-                .iter()
-                .map(|entry| (entry.key().clone(), entry.value().schedule.clone()))
-                .collect::<HashMap<_, _>>()
         };
         let existing_passive_only = {
             self.inner
@@ -177,7 +209,7 @@ impl Runtime {
         let mut recovery_expansions = Vec::new();
 
         for domain in existing_domains.difference(&scheduled_domains) {
-            match Box::pin(self.rebuild_domain_from_schedule(
+            match Box::pin(self.rebuild_domain_from_revision(
                 local_node_id,
                 domain,
                 None,
@@ -197,7 +229,15 @@ impl Runtime {
             }
         }
 
-        for (domain_id, domain) in &schedule.domains {
+        for (domain_id, change) in &revision_plan.domains {
+            let domain = &change.revision;
+            let predecessor_matches =
+                self.inner
+                    .executions
+                    .get(domain_id)
+                    .is_some_and(|execution| {
+                        Some(execution.revision.source_digest) == change.predecessor_digest
+                    });
             let Some(domain_state) = self.inner.domains.get(domain_id) else {
                 continue;
             };
@@ -210,19 +250,21 @@ impl Runtime {
             }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
-            if existing_schedules.get(&domain.domain) != Some(domain)
+            if !matches!(change.delta, ExecutionDelta::Unchanged)
+                || !existing_domains.contains(&domain.domain)
+                || !predecessor_matches
                 || existing_passive_only.get(&domain.domain) != Some(&desired_passive_only)
                 || existing_start_versions.get(&domain.domain) != Some(&desired_start_version)
             {
                 let delta_application = if !desired_passive_only
+                    && predecessor_matches
                     && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
                     && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
-                    && let Some(existing_schedule) = existing_schedules.get(&domain.domain)
                 {
                     Box::pin(self.apply_schedule_delta(
                         local_node_id,
-                        existing_schedule,
                         domain,
+                        &change.delta,
                         start_ingestors,
                     ))
                     .await?
@@ -233,7 +275,7 @@ impl Runtime {
                     recovery_expansions.push(expansion);
                 }
                 if !delta_application.applied_incrementally {
-                    match Box::pin(self.rebuild_domain_from_schedule(
+                    match Box::pin(self.rebuild_domain_from_revision(
                         local_node_id,
                         &domain.domain,
                         Some(domain.clone()),
@@ -263,12 +305,14 @@ impl Runtime {
                         reason: error.to_string(),
                     })?;
                 if start_ingestors {
-                    Box::pin(self.start_missing_domain_ingestors(&domain.domain)).await?;
+                    Box::pin(self.start_missing_domain_ingestors(&domain.domain))
+                        .await
+                        .map_err(|report| RuntimeError::IngestorStart { report })?;
                 }
                 self.release_domain_ingestor_quiesce(&domain.domain);
             }
         }
-        self.retain_assigned_wasm_modules(local_node_id, schedule);
+        self.retain_assigned_wasm_modules(local_node_id, &revision_plan);
 
         Ok(recovery_expansions)
     }
@@ -278,26 +322,22 @@ impl Runtime {
     pub(super) async fn apply_schedule_delta(
         &self,
         local_node_id: &ClusterNodeName,
-        existing_schedule: &DomainSchedule,
-        desired: &DomainSchedule,
+        desired: &Arc<ExecutionRevision>,
+        delta: &ExecutionDelta,
         start_ingestors: bool,
     ) -> Result<ScheduleDeltaApplication, RuntimeError> {
-        match ScheduleDelta::classify(existing_schedule, desired) {
-            ScheduleDelta::Unchanged => Ok(ScheduleDeltaApplication::incremental()),
-            ScheduleDelta::Dynamic(updates) => {
+        match delta {
+            ExecutionDelta::Unchanged => Ok(ScheduleDeltaApplication::incremental()),
+            ExecutionDelta::Dynamic(updates) => {
                 Box::pin(self.apply_dynamic_schedule_update(
                     &desired.domain,
                     desired.clone(),
-                    &updates,
+                    updates,
                 ))
                 .await?;
                 Ok(ScheduleDeltaApplication::incremental())
             }
-            ScheduleDelta::EntitySwap {
-                entities,
-                reassignments,
-                dynamic_updates,
-            } => {
+            ExecutionDelta::EntitySwap(change) => {
                 #[cfg(feature = "testing")]
                 let swap_result = if self
                     .inner
@@ -309,24 +349,13 @@ impl Runtime {
                         reason: "injected entity-level schedule apply failure".to_string(),
                     })
                 } else {
-                    Box::pin(self.swap_scheduled_nodes(
-                        &desired.domain,
-                        desired.clone(),
-                        &entities,
-                        &reassignments,
-                        &dynamic_updates,
-                    ))
-                    .await
+                    Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
+                        .await
                 };
                 #[cfg(not(feature = "testing"))]
-                let swap_result = Box::pin(self.swap_scheduled_nodes(
-                    &desired.domain,
-                    desired.clone(),
-                    &entities,
-                    &reassignments,
-                    &dynamic_updates,
-                ))
-                .await;
+                let swap_result =
+                    Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
+                        .await;
                 if let Err(error) = swap_result {
                     let reason = error.to_string();
                     warn!(
@@ -334,7 +363,7 @@ impl Runtime {
                         error = %error,
                         "entity-level schedule apply failed; rebuilding domain"
                     );
-                    Box::pin(self.rebuild_domain_from_schedule(
+                    Box::pin(self.rebuild_domain_from_revision(
                         local_node_id,
                         &desired.domain,
                         Some(desired.clone()),
@@ -352,7 +381,7 @@ impl Runtime {
                 }
                 Ok(ScheduleDeltaApplication::incremental())
             }
-            ScheduleDelta::Rebuild => Ok(ScheduleDeltaApplication::rebuild_required()),
+            ExecutionDelta::Rebuild => Ok(ScheduleDeltaApplication::rebuild_required()),
         }
     }
 
@@ -364,7 +393,7 @@ impl Runtime {
     pub(super) fn locally_relocated_nodes(
         &self,
         domain: &DomainName,
-        desired: &DomainSchedule,
+        desired: &ExecutionRevision,
         reassignments: &[NodeRef],
     ) -> Vec<NodeRef> {
         let dispatcher = self.inner.remote_dispatcher.load();
@@ -380,7 +409,7 @@ impl Runtime {
             .filter(|entity| {
                 entity.kind != ModelKind::Relay
                     && entity.kind != ModelKind::Lookup
-                    && Self::scheduled_node(&execution.schedule, entity).is_some_and(|existing| {
+                    && Self::scheduled_node(&execution.revision, entity).is_some_and(|existing| {
                         Self::scheduled_node(desired, entity).is_some_and(|desired_node| {
                             existing.executes_on(local_node_id)
                                 != desired_node.executes_on(local_node_id)
@@ -392,13 +421,10 @@ impl Runtime {
     }
 
     pub(super) fn scheduled_node<'a>(
-        schedule: &'a DomainSchedule,
+        revision: &'a ExecutionRevision,
         entity: &NodeRef,
-    ) -> Option<&'a ScheduledNode> {
-        schedule
-            .nodes
-            .values()
-            .find(|node| node.kind() == entity.kind && node.identifier == entity.identifier)
+    ) -> Option<&'a ExecutionNode> {
+        revision.nodes.get(entity)
     }
 
     /// Rebuilds the placement-derived runtime of every reassigned node: the replicated states this
@@ -407,7 +433,7 @@ impl Runtime {
     pub(super) async fn rebind_reassigned_nodes(
         &self,
         domain: &DomainName,
-        schedule: &DomainSchedule,
+        revision: &ExecutionRevision,
         reassignments: &[NodeRef],
         local_node_id: Option<&ClusterNodeName>,
     ) -> Result<bool, RuntimeError> {
@@ -417,8 +443,7 @@ impl Runtime {
         if reassignments.is_empty() {
             return Ok(false);
         }
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let activation_plan = &revision.activation;
         let shutdown = match self.inner.executions.get(domain) {
             Some(execution) => execution.shutdown.clone(),
             None => {
@@ -429,16 +454,10 @@ impl Runtime {
             }
         };
         let mut relay_states_moved = false;
-        let schedule_fingerprint =
-            Self::ownership_handoff_schedule_fingerprint(schedule).map_err(|reason| {
-                RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: reason.to_string(),
-                }
-            })?;
+        let schedule_fingerprint = revision.ownership_handoff_fingerprint;
         for entity in reassignments {
-            tokio::task::consume_budget().await;
-            let desired_node = Self::scheduled_node(schedule, entity).ok_or_else(|| {
+            nervix_primitives::task::consume_budget().await;
+            let desired_node = Self::scheduled_node(revision, entity).ok_or_else(|| {
                 RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!(
@@ -449,11 +468,11 @@ impl Runtime {
                 }
             })?;
             let was_local = self.inner.executions.get(domain).is_some_and(|execution| {
-                Self::scheduled_node(&execution.schedule, entity)
+                Self::scheduled_node(&execution.revision, entity)
                     .is_some_and(|existing| existing.executes_on(local_node_id))
             });
             let previous_owner = if let Some(execution) = self.inner.executions.get(domain)
-                && let Some(existing) = Self::scheduled_node(&execution.schedule, entity)
+                && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
                 existing.execution_node().cloned()
             } else {
@@ -490,16 +509,13 @@ impl Runtime {
                     desired_node.identifier.as_str()
                 ),
             })?;
-            let relay_runtime = if entity.kind == ModelKind::Relay
+            let relay_services = if entity.kind == ModelKind::Relay
                 && let Some(execution) = self.inner.executions.get(domain)
-                && let Some(registry) = execution
-                    .relay_registries
-                    .get(&RelayName::from(&entity.identifier))
-                && let Some(service) = execution
+                && let Some(services) = execution
                     .relay_services
                     .get(&RelayName::from(&entity.identifier))
             {
-                Some((registry.clone(), service.clone()))
+                Some(services.clone())
             } else {
                 None
             };
@@ -531,27 +547,19 @@ impl Runtime {
                 None
             };
             for task in previous_tasks.unwrap_or_default() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 task.abort();
                 task.join_after_shutdown("placement").await;
             }
 
-            let materialized_relay = match desired_node.config.as_ref() {
-                Model::Relay(relay) if relay.materialized_state.is_some() => {
-                    Some(relay.name.clone())
-                }
-                _ => None,
-            };
-            let materialized_schema = if let Some(relay) = materialized_relay.as_ref()
-                && let Some(execution) = self.inner.executions.get(domain)
-                && let Some(schema) = execution.relay_schemas.get(relay)
-            {
-                Some(schema.arrow_schema())
+            let state = PlacedNodeState::of(desired_node, revision);
+            let materialized_relay = if let Some(PlacedNodeState::MaterializedRelay(_)) = &state {
+                Some(RelayName::from(&entity.identifier))
             } else {
                 None
             };
             if let Some(relay) = materialized_relay.as_ref()
-                && let Some(schema) = materialized_schema.as_ref()
+                && let Some(PlacedNodeState::MaterializedRelay(schema)) = &state
             {
                 let state_placement = self
                     .state_placement(
@@ -630,7 +638,7 @@ impl Runtime {
                 &shutdown,
                 desired_node,
                 local_node_id,
-                materialized_schema,
+                state,
             )?;
             let tasks = placement.tasks;
 
@@ -701,8 +709,8 @@ impl Runtime {
             }
 
             if entity.kind == ModelKind::Relay && executes_locally && !was_local {
-                let (registry, services) =
-                    relay_runtime.ok_or_else(|| RuntimeError::BuildDomainExecution {
+                let services =
+                    relay_services.ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
                             "missing runtime boundary for relocated relay '{}'",
@@ -712,7 +720,6 @@ impl Runtime {
                 let task = self.spawn_relay_owner_task(
                     domain,
                     &RelayName::from(&entity.identifier),
-                    registry,
                     services,
                     activation_plan
                         .relays
@@ -739,19 +746,26 @@ impl Runtime {
     pub(super) async fn swap_scheduled_nodes(
         &self,
         domain: &DomainName,
-        schedule: DomainSchedule,
-        entities: &[NodeRef],
-        reassignments: &[NodeRef],
-        dynamic_updates: &[nervix_models::DynamicModelUpdate],
+        revision: Arc<ExecutionRevision>,
+        change: &EntitySwapExecution,
     ) -> Result<(), RuntimeError> {
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let EntitySwapExecution {
+            entities,
+            reassignments,
+            dynamic_updates,
+            state_purges,
+            gate_relays,
+        } = change;
+        let activation_plan = &revision.activation;
+        let resource_plans = &revision.resources;
+        let entrypoints = &revision.entrypoints;
+        let emitter_plans = &revision.emitters;
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         // A reassignment only replaces this cluster node's runtime when the node stopped or
         // started executing here. A node that keeps executing here, such as a server-side ingestor
         // that merely lost one of its other placements, is left running.
-        let relocated = self.locally_relocated_nodes(domain, &schedule, reassignments);
+        let relocated = self.locally_relocated_nodes(domain, &revision, reassignments);
         let entities = SortedSet::from_unsorted(
             entities
                 .iter()
@@ -761,7 +775,30 @@ impl Runtime {
         )
         .into_vec();
         let entities = entities.as_slice();
-        let desired_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
+        for entity in entities {
+            if entity.kind != ModelKind::WasmProcessor {
+                continue;
+            }
+            let Some(wasm) = resource_plans.wasm.get(&entity.identifier) else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing desired WASM processor '{}'", entity.identifier),
+                });
+            };
+            let assigned_here = match local_node_id {
+                Some(local) => wasm.assignment.is_assigned_to(local),
+                None => wasm.assignment.executes_on(None),
+            };
+            if assigned_here {
+                self.prepare_wasm_module(&wasm.module)
+                    .await
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("failed to prepare WASM processor: {error:#}"),
+                    })?;
+            }
+        }
+        let desired_specs = &revision.processors;
         // Fence the relays feeding every entity this activation replaces, and the relays feeding
         // every reassigned node, so producers pause instead of dispatching into an owner that is
         // about to stop.
@@ -774,9 +811,7 @@ impl Runtime {
         )
         .into_vec();
         let mut relays = self.entity_pause_relays(domain, &gated);
-        relays.extend(crate::registry::entity_pause_relays_for_schedule(
-            &schedule, &gated,
-        ));
+        relays.extend(gate_relays.iter().cloned());
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
         let mut local_gate_hold = self.engage_entity_gates(
@@ -795,39 +830,24 @@ impl Runtime {
         }
         self.force_flush_domain(domain);
 
-        let desired_graph = StdArc::new(ActiveGraph::from_scheduled_models(&schedule).map_err(
-            |error| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("failed to build entity-swap schedule graph: {error}"),
-            },
-        )?);
-        let desired_model_index = schedule
-            .nodes
-            .values()
-            .map(|node| (*node.config).clone())
-            .collect::<ModelIndex>();
-
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
         // desired fingerprints before constructing state so the post-swap stale-state purge does
         // not discard the newly attached state instance.
-        self.install_state_identities(&schedule);
+        self.install_state_identities(&revision);
         let mut materialized_routing_changed = self
-            .rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id)
+            .rebind_reassigned_nodes(domain, &revision, reassignments, local_node_id)
             .await?;
 
         for entity in entities {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if entity.kind == ModelKind::Relay {
-                let ScheduledModel {
-                    config: desired_relay,
-                    node: desired_node,
-                } = schedule
-                    .scheduled::<CreateRelay>(entity.identifier.clone())
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                let desired_node = revision.nodes.get(entity).ok_or_else(|| {
+                    RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!("missing desired relay '{}'", entity.identifier.as_str()),
-                    })?;
-                let desired_materialized = desired_relay.materialized_state.is_some();
+                    }
+                })?;
+                let desired_materialized = desired_node.materialized_relay;
                 let (
                     was_materialized,
                     shutdown,
@@ -916,7 +936,7 @@ impl Runtime {
                     services.remove_local_runtime_consumer(AckMode::Detached);
                 }
                 for task in previous_placement_tasks {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     task.abort();
                     task.join_after_shutdown("placement").await;
                 }
@@ -930,7 +950,7 @@ impl Runtime {
                             domain: domain.as_str().to_string(),
                             reason: "local node id is unavailable for relay transition".to_string(),
                         })?,
-                        Some(schema.arrow_schema()),
+                        Some(PlacedNodeState::MaterializedRelay(schema.arrow_schema())),
                     )?;
                     let state_task = if desired_node.executes_on(local_node_id.verified(
                         "the resolution above returned an error unless the local node id is \
@@ -986,80 +1006,46 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Ingestor {
-                let ScheduledModel {
-                    config: desired_ingestor,
-                    node: desired_node,
-                } = schedule
-                    .scheduled::<CreateIngestor>(entity.identifier.clone())
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                let ingestor = IngestorName::from(&entity.identifier);
+                let Some(desired_plan) = entrypoints.ingestor(&ingestor).cloned() else {
+                    return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing desired ingestor '{}'",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
+                        reason: format!("missing desired ingestor '{}'", ingestor.as_str()),
+                    });
+                };
+                let desired_node = revision
+                    .nodes
+                    .get(entity)
+                    .assured("the entrypoint plans were decided from this same schedule");
 
                 let key = entity.in_domain(domain);
                 if self.inner.ingestors.contains_key(&key) {
-                    self.stop_ingestor(domain, &IngestorName::from(&entity.identifier))
-                        .await?;
+                    self.stop_ingestor(domain, &ingestor).await?;
                 }
-
-                // The ingestor builds its branch entrypoints from the specs the execution holds
-                // for it, so an ingestor arriving on this node needs its desired specs installed
-                // before it starts and one leaving needs them removed.
-                let desired_entrypoint_specs = desired_specs
-                    .entrypoints
-                    .iter()
-                    .filter(|spec| {
-                        spec.kind == ModelKind::Ingestor && spec.identifier == entity.identifier
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                    if desired_entrypoint_specs.is_empty() {
-                        execution.branched_ingestors.remove(&entity.identifier);
-                    } else {
-                        execution.branched_ingestors.insert(
-                            ModelName::from(&BranchName::from(&entity.identifier)),
-                            desired_entrypoint_specs,
-                        );
-                    }
-                }
-
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
-                    let source_model =
-                        Self::source_model_for_scheduled_ingestor(&schedule, desired_ingestor)
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing source model for swapped ingestor '{}'",
-                                    entity.identifier.as_str()
-                                ),
-                            })?;
-                    let plan = IngestorStartPlan::decide(domain, desired_node, &source_model)
-                        .map_err(|error| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "cannot plan swapped ingestor '{}': {error}",
-                                desired_ingestor.name.as_str()
-                            ),
-                        })?;
-                    self.start_ingestor(plan).await?;
+                    self.start_ingestor(&desired_plan)
+                        .await
+                        .map_err(|report| RuntimeError::IngestorStart { report })?;
                 }
                 continue;
             }
             if entity.kind == ModelKind::Emitter {
-                let ScheduledModel {
-                    config: desired_emitter,
-                    node: desired_node,
-                } = schedule
-                    .scheduled::<CreateEmitter>(entity.identifier.clone())
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
-                    })?;
-                let desired_emitter = desired_emitter.clone();
+                let emitter_name = EmitterName::from(&entity.identifier);
+                let desired_emitter =
+                    emitter_plans
+                        .emitter(&emitter_name)
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing desired emitter '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                let desired_node = revision
+                    .nodes
+                    .get(entity)
+                    .assured("the emitter plan was decided from this same schedule");
                 let (old_emitter, old_task) = {
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
@@ -1067,10 +1053,11 @@ impl Runtime {
                             reason: "domain execution is unavailable for emitter swap".to_string(),
                         }
                     })?;
-                    let old_node = execution
-                        .schedule
-                        .nodes
-                        .get(&NodeRef::new(ModelKind::Emitter, entity.identifier.clone()))
+                    let old_emitter = execution
+                        .revision
+                        .emitters
+                        .emitter(&emitter_name)
+                        .cloned()
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
@@ -1078,16 +1065,6 @@ impl Runtime {
                                 entity.identifier.as_str()
                             ),
                         })?;
-                    let Model::Emitter(old_emitter) = old_node.config.as_ref() else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing existing emitter '{}'",
-                                entity.identifier.as_str()
-                            ),
-                        });
-                    };
-                    let old_emitter = old_emitter.clone();
                     let old_task = execution.emitter_tasks.remove(entity);
                     (old_emitter, old_task)
                 };
@@ -1115,7 +1092,6 @@ impl Runtime {
                 struct EmitterSpawnInputs {
                     shutdown: watch::Sender<bool>,
                     codecs: HashMap<CodecName, Arc<CompiledCodec>>,
-                    clients: HashMap<ClientName, Arc<Model>>,
                     deps: EmitterTaskDeps,
                     inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
                 }
@@ -1128,8 +1104,8 @@ impl Runtime {
                         }
                     })?;
                     if had_old_task {
-                        for input_relay in old_emitter.from.relays() {
-                            if let Some(services) = execution.relay_services.get(input_relay) {
+                        for input in &old_emitter.inputs {
+                            if let Some(services) = execution.relay_services.get(&input.relay) {
                                 services.remove_local_runtime_consumer(old_emitter.mode);
                             }
                         }
@@ -1138,40 +1114,32 @@ impl Runtime {
                         None
                     } else {
                         let inputs = desired_emitter
-                            .from
-                            .relays()
+                            .inputs
                             .iter()
-                            .map(|input_relay| {
-                                let Some(services) = execution.relay_services.get(input_relay)
+                            .map(|input| {
+                                let Some(services) = execution.relay_services.get(&input.relay)
                                 else {
                                     return Err(RuntimeError::BuildDomainExecution {
                                         domain: domain.as_str().to_string(),
                                         reason: format!(
                                             "missing relay services for swapped emitter input '{}'",
-                                            input_relay.as_str()
+                                            input.relay.as_str()
                                         ),
                                     });
                                 };
                                 Ok((
-                                    input_relay.clone(),
+                                    input.relay.clone(),
                                     services.add_local_runtime_consumer(desired_emitter.mode),
                                 ))
                             })
                             .collect::<Result<Vec<_>, RuntimeError>>()?;
                         let deps = self.emitter_task_deps(
-                            ExecutionBuildDeps {
-                                domain,
-                                relay_schemas: &execution.relay_schemas,
-                                relay_branchings: &execution.relay_branchings,
-                                materialized_relay_specs: &execution.materialized_stream_specs,
-                                lookups: &execution.lookups,
-                            },
+                            ExecutionBuildDeps::from_routing(domain, &execution),
                             &desired_emitter,
                         )?;
                         Some(EmitterSpawnInputs {
                             shutdown: execution.shutdown.clone(),
                             codecs: execution.codecs.clone(),
-                            clients: execution.clients.clone(),
                             deps,
                             inputs,
                         })
@@ -1185,8 +1153,7 @@ impl Runtime {
                             codecs: &spawn.codecs,
                             deps: spawn.deps,
                         },
-                        &spawn.clients,
-                        desired_emitter,
+                        desired_emitter.as_ref().clone(),
                         spawn.inputs,
                     )?;
                     self.inner
@@ -1199,44 +1166,37 @@ impl Runtime {
                         .emitter_tasks
                         .insert(entity.clone(), task);
                 }
+                #[cfg(feature = "testing")]
+                if had_old_task && !executes_locally {
+                    self.inner
+                        .fault_injection
+                        .pause_emitter_swap_after_detach_if_armed(domain, &emitter_name)
+                        .await;
+                }
                 continue;
             }
             if entity.kind == ModelKind::Reingestor {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(
-                        ModelKind::Reingestor,
-                        entity.identifier.clone(),
-                    ))
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing desired reingestor '{}'",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
-                let Model::Reingestor(desired_reingestor) = desired_node.config.as_ref() else {
+                let reingestor = ReingestorName::from(&entity.identifier);
+                let Some(desired_plan) = entrypoints.reingestor(&reingestor).cloned() else {
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired reingestor '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
+                        reason: format!("missing desired reingestor '{}'", reingestor.as_str()),
                     });
                 };
-                let desired_reingestor = desired_reingestor.clone();
+                let desired_node = revision
+                    .nodes
+                    .get(entity)
+                    .assured("the entrypoint plans were decided from this same schedule");
                 /// What the outgoing reingestor left behind, taken out while the execution is
                 /// borrowed so the tasks below are awaited without holding that borrow.
                 struct RetiredReingestor {
                     tasks: Vec<JoinHandle<()>>,
                     entrypoints: Vec<Arc<IngestorRouteRuntime>>,
-                    shutdown: watch::Sender<bool>,
                 }
 
                 let RetiredReingestor {
                     tasks: old_tasks,
                     entrypoints: old_entrypoints,
-                    shutdown,
                 } = {
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
@@ -1245,38 +1205,28 @@ impl Runtime {
                                 .to_string(),
                         }
                     })?;
-                    let old_node = execution
-                        .schedule
-                        .nodes
-                        .get(&NodeRef::new(
-                            ModelKind::Reingestor,
-                            entity.identifier.clone(),
-                        ))
-                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing existing reingestor '{}'",
-                                entity.identifier.as_str()
-                            ),
-                        })?;
-                    let Model::Reingestor(old_reingestor) = old_node.config.as_ref() else {
+                    let Some(old_plan) = execution
+                        .revision
+                        .entrypoints
+                        .reingestor(&reingestor)
+                        .cloned()
+                    else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "missing existing reingestor '{}'",
-                                entity.identifier.as_str()
+                                reingestor.as_str()
                             ),
                         });
                     };
-                    let old_reingestor = old_reingestor.clone();
                     let old_tasks = execution
                         .reingestor_tasks
                         .remove(entity)
                         .unwrap_or_default();
                     if !old_tasks.is_empty() {
-                        for relay in old_reingestor.from.relays() {
-                            if let Some(services) = execution.relay_services.get(relay) {
-                                services.remove_local_runtime_consumer(old_reingestor.mode);
+                        for input in &old_plan.inputs {
+                            if let Some(services) = execution.relay_services.get(&input.relay) {
+                                services.remove_local_runtime_consumer(old_plan.mode);
                             }
                         }
                     }
@@ -1284,34 +1234,23 @@ impl Runtime {
                         .branched_entrypoints
                         .remove(&entity.identifier)
                         .unwrap_or_default();
-                    execution.branched_ingestors.remove(&entity.identifier);
                     RetiredReingestor {
                         tasks: old_tasks,
                         entrypoints: old_entrypoints,
-                        shutdown: execution.shutdown.clone(),
                     }
                 };
                 for task in old_tasks {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     task.abort();
                     task.join_after_shutdown("scheduled node").await;
                 }
                 for runtime in old_entrypoints {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     runtime.shutdown().await;
                 }
 
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
-                    let desired_entrypoint_specs = desired_specs
-                        .entrypoints
-                        .iter()
-                        .filter(|spec| {
-                            spec.kind == ModelKind::Reingestor
-                                && spec.identifier == entity.identifier
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let templates = {
+                    let (routing, shutdown) = {
                         let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
@@ -1319,81 +1258,35 @@ impl Runtime {
                                     .to_string(),
                             }
                         })?;
-                        desired_entrypoint_specs
-                            .iter()
-                            .map(|spec| {
-                                materialize_ingestor_route_template(
-                                    spec,
-                                    &desired_model_index,
-                                    &execution.relay_registries,
-                                    &execution.relay_services,
-                                )
-                                .map(|template| (spec.clone(), template))
-                                .map_err(|reason| {
-                                    RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: reason.to_string(),
-                                    }
-                                })
-                            })
-                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                        (execution.routing.staged(), execution.shutdown.clone())
                     };
-                    let mut entrypoints = Vec::with_capacity(templates.len());
-                    let mut entrypoint_senders = HashMap::default();
-                    for (spec, template) in templates {
-                        tokio::task::consume_budget().await;
-                        let Some(runtime) = self.start_branched_entrypoint_runtime(
-                            domain,
-                            &entity.identifier,
-                            Some(template),
-                        ) else {
-                            continue;
-                        };
-                        entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-                        entrypoints.push(runtime);
-                    }
-
-                    let receivers = {
-                        let execution = self.inner.executions.get(domain).ok_or_else(|| {
-                            RuntimeError::BuildDomainExecution {
+                    let mut inputs = Vec::with_capacity(desired_plan.inputs.len());
+                    for input in &desired_plan.inputs {
+                        let Some(services) = routing.relay_services.get(&input.relay) else {
+                            return Err(RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
-                                reason: "domain execution disappeared before reingestor spawn"
-                                    .to_string(),
-                            }
-                        })?;
-                        desired_reingestor
-                            .from
-                            .relays()
-                            .iter()
-                            .map(|relay| {
-                                let Some(services) = execution.relay_services.get(relay) else {
-                                    return Err(RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: format!(
-                                            "missing reingestor input relay services '{}'",
-                                            relay.as_str()
-                                        ),
-                                    });
-                                };
-                                Ok((
-                                    relay.clone(),
-                                    services.add_local_runtime_consumer(desired_reingestor.mode),
-                                ))
-                            })
-                            .collect::<Result<Vec<_>, RuntimeError>>()?
-                    };
-                    let mut tasks = Vec::with_capacity(receivers.len());
-                    for (from_relay, receiver) in receivers {
-                        tokio::task::consume_budget().await;
-                        tasks.push(self.spawn_reingestor_task(
-                            domain,
-                            &shutdown,
-                            &entrypoint_senders,
-                            desired_reingestor.clone(),
-                            from_relay,
-                            receiver,
-                        )?);
+                                reason: format!(
+                                    "missing reingestor input relay services '{}'",
+                                    input.relay.as_str()
+                                ),
+                            });
+                        };
+                        inputs.push(PlannedReingestorInput {
+                            plan: desired_plan.clone(),
+                            input: input.clone(),
+                            consumer: ReingestorInputConsumer::Deferred(services.clone()),
+                        });
                     }
+                    let runtimes = self
+                        .start_reingestor_runtimes(
+                            ExecutionBuildDeps::from_routing(domain, &routing),
+                            &shutdown,
+                            RelayRuntimeHandles {
+                                services: &routing.relay_services,
+                            },
+                            inputs,
+                        )
+                        .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -1401,42 +1294,21 @@ impl Runtime {
                                 .to_string(),
                         }
                     })?;
-                    execution.branched_ingestors.insert(
-                        ModelName::from(&BranchName::from(&entity.identifier)),
-                        desired_entrypoint_specs,
-                    );
-                    execution.branched_entrypoints.insert(
-                        ModelName::from(&BranchName::from(&entity.identifier)),
-                        entrypoints,
-                    );
-                    execution.reingestor_tasks.insert(entity.clone(), tasks);
+                    execution
+                        .branched_entrypoints
+                        .extend(runtimes.branched_entrypoints);
+                    execution.reingestor_tasks.extend(runtimes.tasks);
                 }
                 continue;
             }
             if entity.kind == ModelKind::Generator {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(
-                        ModelKind::Generator,
-                        entity.identifier.clone(),
-                    ))
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing desired generator '{}'",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
-                let Model::Generator(desired_generator) = desired_node.config.as_ref() else {
+                let name = GeneratorName::from(&entity.identifier);
+                let Some(generator) = resource_plans.generators.get(&name) else {
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired generator '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
+                        reason: format!("missing desired generator '{}'", entity.identifier),
                     });
                 };
-                let desired_generator = desired_generator.clone();
                 let old_task = self
                     .inner
                     .executions
@@ -1452,7 +1324,7 @@ impl Runtime {
                     task.join_after_shutdown("generator").await;
                 }
 
-                if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
+                if generator.assignment.executes_on(local_node_id) {
                     let (shutdown, spec) = {
                         let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
@@ -1461,94 +1333,19 @@ impl Runtime {
                                     .to_string(),
                             }
                         })?;
-                        let source_schema = execution
-                            .relay_schemas
-                            .get(&desired_generator.materialized_relay)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing generator source relay schema '{}'",
-                                    desired_generator.materialized_relay.as_str()
-                                ),
-                            })?;
-                        let source_branching = execution
-                            .relay_branchings
-                            .get(&desired_generator.materialized_relay)
-                            .cloned()
-                            .assured("the generator's validated source relay has branch routing");
-                        let source_branch_schema =
-                            RuntimeVmSchema::from_branching(&source_branching);
-                        let mut routes =
-                            Vec::with_capacity(desired_generator.output_routes.routes.len());
-                        for output in desired_generator.output_routes.outputs() {
-                            let output_schema = execution
-                                .relay_schemas
-                                .get(&output.relay)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing generator output relay schema '{}'",
-                                        output.relay.as_str()
-                                    ),
-                                })?;
-                            let output_registry = execution
-                                .relay_registries
-                                .get(&output.relay)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing generator output relay '{}'",
-                                        output.relay.as_str()
-                                    ),
-                                })?;
-                            let output_services = execution
-                                .relay_services
-                                .get(&output.relay)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing generator output relay services '{}'",
-                                        output.relay.as_str()
-                                    ),
-                                })?;
-                            let program = compile_generator_set_program(
-                                domain,
-                                &desired_generator,
-                                output,
-                                GeneratorSetProgramSchemas {
-                                    output: RuntimeVmSchema {
-                                        schema: output_schema.arrow_schema(),
-                                        sensitivity: output_schema.vm_sensitivity(),
-                                    },
-                                    source: RuntimeVmSchema {
-                                        schema: source_schema.arrow_schema(),
-                                        sensitivity: source_schema.vm_sensitivity(),
-                                    },
-                                    branch: source_branch_schema.clone(),
-                                },
-                                Some(&execution.udfs),
-                            )?;
-                            routes.push(GeneratorTaskRouteSpec::new(
-                                output.clone(),
-                                program,
-                                output_schema,
-                                output_registry,
-                                output_services,
-                            ));
-                        }
-                        (
-                            execution.shutdown.clone(),
-                            GeneratorTaskSpec::new(
-                                desired_generator.clone(),
-                                source_schema,
-                                source_branching,
-                                routes,
-                            ),
+                        let spec = GeneratorTaskSpec::bind(
+                            domain,
+                            generator,
+                            &execution.relay_services,
+                            &execution.udfs,
                         )
+                        .map_err(|report| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!("generator binding failed: {report:#}"),
+                            }
+                        })?;
+                        (execution.shutdown.clone(), spec)
                     };
                     let task = self.spawn_generator_task(domain, &shutdown, spec)?;
                     self.inner
@@ -1564,7 +1361,7 @@ impl Runtime {
                 }
                 continue;
             }
-            let desired_node = schedule
+            let desired_node = revision
                 .nodes
                 .get(&NodeRef::new(entity.kind, entity.identifier.clone()))
                 .ok_or_else(|| RuntimeError::BuildDomainExecution {
@@ -1593,8 +1390,9 @@ impl Runtime {
                         reason: "domain execution is unavailable for entity swap".to_string(),
                     }
                 })?;
-                let old_specs = branched_node_specs_from_scheduled_nodes(&execution.schedule.nodes);
-                old_specs
+                execution
+                    .revision
+                    .processors
                     .processor(entity.kind, &entity.identifier)
                     .cloned()
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
@@ -1607,21 +1405,7 @@ impl Runtime {
             };
             // The change aspects own which node-local state a swap invalidates, so the runtime
             // applies that contract rather than re-deriving it per processor kind.
-            let state_purges = if let Some(execution) = self.inner.executions.get(domain)
-                && let Some(old_node) = execution
-                    .schedule
-                    .nodes
-                    .get(&NodeRef::new(entity.kind, entity.identifier.clone()))
-                && let Some(desired_model) = desired_model_index.get(entity)
-            {
-                old_node
-                    .config
-                    .change_aspects_against(desired_model)
-                    .state_purges()
-            } else {
-                Vec::new()
-            };
-            for purge in state_purges {
+            for purge in state_purges.get(entity).into_iter().flatten() {
                 match purge {
                     nervix_models::StatePurge::DeduplicatorKeyspace => {
                         self.purge_deduplicator_state(
@@ -1644,7 +1428,7 @@ impl Runtime {
                 Self::scheduled_node_executes_locally(desired_node, local_node_id);
             let published_plan = if executes_locally {
                 Some(
-                    self.bind_installed_processor_plan(domain, &desired_spec, &desired_model_index)
+                    self.bind_installed_processor_plan(domain, &desired_spec)
                         .await
                         .map_err(|error| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -1736,19 +1520,42 @@ impl Runtime {
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
         let processor_plans = self
-            .bind_installed_processor_plans(domain, &schedule)
+            .bind_installed_processor_plans(domain, &revision)
             .await
             .map_err(|error| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!("{error:#}"),
             })?;
+        let message_error_plans = {
+            let execution = self.inner.executions.get(domain).ok_or_else(|| {
+                RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: "domain execution is unavailable for message-error binding".to_string(),
+                }
+            })?;
+            Arc::new(
+                BoundMessageErrorRoutes::bind(
+                    revision.message_errors.clone(),
+                    MessageErrorRouteBindingContext {
+                        relay_services: &execution.relay_services,
+                        materialized_stream_specs: &execution.materialized_stream_specs,
+                        lookups: &execution.lookups,
+                        udfs: &execution.udfs,
+                    },
+                )
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to bind message-error routes: {reason:#}"),
+                })?,
+            )
+        };
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {
                 let remote_consumers =
-                    Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
+                    Self::remote_runtime_consumers_for_revision(&revision, local_node_id);
                 for (relay, services) in &execution.relay_services {
-                    let owner_node = if let Some(node) = schedule
+                    let owner_node = if let Some(node) = revision
                         .nodes
                         .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
                         && let Some(owner) = node.execution_node()
@@ -1763,14 +1570,11 @@ impl Runtime {
                     );
                 }
             }
-            execution.schedule = schedule;
+            execution.revision = revision;
+            execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
-        }
-        if routing_published {
-            let graph_handle = self.domain_graph_handle(domain).await;
-            graph_handle.store(Some(desired_graph));
         }
         if routing_published && materialized_routing_changed {
             // Readers must refresh only after the owner map is published. Waking them while the
@@ -1785,29 +1589,39 @@ impl Runtime {
     pub(super) async fn apply_dynamic_schedule_update(
         &self,
         domain: &DomainName,
-        schedule: DomainSchedule,
-        updates: &[nervix_models::DynamicModelUpdate],
+        revision: Arc<ExecutionRevision>,
+        updates: &[DynamicExecutionUpdate],
     ) -> Result<(), RuntimeError> {
         let processor_plans = self
-            .bind_installed_processor_plans(domain, &schedule)
+            .bind_installed_processor_plans(domain, &revision)
             .await
             .map_err(|error| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!("{error:#}"),
             })?;
-        let graph = ActiveGraph::from_scheduled_models(&schedule).map_err(|error| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("failed to build dynamic schedule graph: {error}"),
-            }
-        })?;
         // A reset's new generation must be visible before its supervisor writes the generation's
         // initial checkpoint. Publishing the identity first is safe because the selected inputs
         // remain fenced until the same schedule reaches Ready.
-        self.install_state_identities(&schedule);
+        self.install_state_identities(&revision);
         self.apply_dynamic_model_updates(domain, updates).await?;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-            execution.schedule = schedule;
+            let message_error_plans = Arc::new(
+                BoundMessageErrorRoutes::bind(
+                    revision.message_errors.clone(),
+                    MessageErrorRouteBindingContext {
+                        relay_services: &execution.relay_services,
+                        materialized_stream_specs: &execution.materialized_stream_specs,
+                        lookups: &execution.lookups,
+                        udfs: &execution.udfs,
+                    },
+                )
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to bind message-error routes: {reason:#}"),
+                })?,
+            );
+            execution.revision = revision;
+            execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
         } else {
@@ -1816,16 +1630,10 @@ impl Runtime {
                 reason: "domain execution disappeared while publishing processor plans".to_string(),
             });
         }
-        // The active graph remains the control-plane observation surface. Processor tasks have
-        // already received the complete typed snapshot and never read this graph.
-        let graph_handle = self.domain_graph_handle(domain).await;
-        graph_handle.store(Some(StdArc::new(graph)));
-        if updates.iter().any(|update| {
-            !matches!(
-                update,
-                nervix_models::DynamicModelUpdate::WasmStateReset { .. }
-            )
-        }) {
+        if updates
+            .iter()
+            .any(|update| !matches!(update, DynamicExecutionUpdate::WasmStateReset { .. }))
+        {
             self.force_flush_domain(domain);
         }
         Ok(())
@@ -1834,16 +1642,16 @@ impl Runtime {
     pub(super) async fn apply_dynamic_model_updates(
         &self,
         domain: &DomainName,
-        updates: &[nervix_models::DynamicModelUpdate],
+        updates: &[DynamicExecutionUpdate],
     ) -> Result<(), RuntimeError> {
         for update in updates {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match update {
-                nervix_models::DynamicModelUpdate::RelayCapacity { relay, capacity } => {
+                DynamicExecutionUpdate::RelayCapacity { relay, capacity } => {
                     self.set_relay_capacity(domain, relay, *capacity);
                 }
-                nervix_models::DynamicModelUpdate::Processor { .. } => {}
-                nervix_models::DynamicModelUpdate::WasmStateReset { processor, reset } => {
+                DynamicExecutionUpdate::Processor => {}
+                DynamicExecutionUpdate::WasmStateReset { processor, reset } => {
                     let commands = if let Some(execution) = self.inner.executions.get(domain)
                         && let Some(task) = execution
                             .node_tasks
@@ -1885,8 +1693,8 @@ impl Runtime {
                 }
                 // Endpoint routing reads only a VHOST's hostnames. The certificate belongs to the
                 // HTTPS listener, which installs it from the same admitted state on every node.
-                nervix_models::DynamicModelUpdate::VhostTlsVersion { .. } => {}
-                nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
+                DynamicExecutionUpdate::VhostTlsVersion => {}
+                DynamicExecutionUpdate::EmitterFlush { emitter, policy } => {
                     let commands = if let Some(execution) = self.inner.executions.get(domain)
                         && let Some(task) = execution.emitter_tasks.get(&NodeRef {
                             kind: ModelKind::Emitter,
@@ -1897,7 +1705,7 @@ impl Runtime {
                         None
                     };
                     if let Some(commands) = commands {
-                        ScheduledEmitterTask::reconfigure_via(&commands, config.clone())
+                        ScheduledEmitterTask::reconfigure_via(&commands, policy.clone())
                             .await
                             .map_err(|error| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
@@ -1918,22 +1726,19 @@ impl Runtime {
         &self,
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
-        materialized_schema: Option<StdArc<arrow_schema::Schema>>,
+        state: Option<PlacedNodeState>,
     ) -> Result<ScheduledNodePlacement, RuntimeError> {
         let mut placement = ScheduledNodePlacement::default();
         let executes_locally = node.executes_on(local_node_id);
         let assigned_locally = node.is_assigned_to(local_node_id);
         let execution_node = node.execution_node().cloned();
-        if let Model::Relay(relay) = node.config.as_ref()
-            && relay.materialized_state.is_some()
+        if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref()
             && (executes_locally || assigned_locally)
         {
-            let schema = materialized_schema.ok_or_else(|| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("missing materialized relay spec '{}'", relay.name.as_str()),
-            })?;
+            let relay = RelayName::from(&node.identifier);
+            let schema = schema.clone();
             let replica_nodes = node
                 .replica_nodes()
                 .into_iter()
@@ -1944,7 +1749,7 @@ impl Runtime {
                     domain,
                     RuntimeStateKind::MaterializedRelay,
                     ModelKind::Relay,
-                    &relay.name,
+                    &relay,
                     None,
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
@@ -1975,7 +1780,7 @@ impl Runtime {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "materialized relay '{}' lacks authoritative state access",
-                                relay.name.as_str()
+                                relay.as_str()
                             ),
                         }
                     })?);
@@ -1985,7 +1790,7 @@ impl Runtime {
                         domain: domain.as_str().to_string(),
                         reason: format!(
                             "materialized relay '{}' lacks replica installation access",
-                            relay.name.as_str()
+                            relay.as_str()
                         ),
                     }
                 })?;
@@ -1997,13 +1802,10 @@ impl Runtime {
             }
         }
 
-        if let Model::Ingestor(ingestor) = node.config.as_ref()
-            && let IngestSource::Kafka {
-                offset_mode: KafkaOffsetMode::Domain,
-                ..
-            } = &ingestor.source
+        if let Some(PlacedNodeState::KafkaDomainOffsets) = state.as_ref()
             && assigned_locally
         {
+            let ingestor = IngestorName::from(&node.identifier);
             let replica_nodes = node
                 .replica_nodes()
                 .into_iter()
@@ -2040,7 +1842,7 @@ impl Runtime {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "Kafka ingestor '{}' lacks authoritative offset access",
-                                ingestor.name.as_str()
+                                ingestor.as_str()
                             ),
                         }
                     })?);
@@ -2050,7 +1852,7 @@ impl Runtime {
                         domain: domain.as_str().to_string(),
                         reason: format!(
                             "Kafka ingestor '{}' lacks replica installation access",
-                            ingestor.name.as_str()
+                            ingestor.as_str()
                         ),
                     }
                 })?;
@@ -2065,19 +1867,9 @@ impl Runtime {
         let aggregate_primary_node = execution_node
             .clone()
             .or_else(|| executes_locally.then(|| local_node_id.clone()));
-        let aggregate_replica_nodes = if execution_node.is_some() && node.kind() != ModelKind::Relay
-        {
-            node.replica_nodes()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
         if node.kind() != ModelKind::Relay
             && (executes_locally || (assigned_locally && aggregate_primary_node.is_some()))
         {
-            let required_replica_acks = aggregate_replica_nodes.len();
             let state = self
                 .replicated_branch_aggregated_state(
                     RuntimeStatePlacement {
@@ -2089,8 +1881,6 @@ impl Runtime {
                     },
                     aggregate_primary_node.clone(),
                     aggregate_primary_node.unwrap_or_else(|| local_node_id.clone()),
-                    aggregate_replica_nodes,
-                    required_replica_acks,
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -2128,47 +1918,18 @@ impl Runtime {
         Ok(placement)
     }
 
-    pub(crate) async fn apply_changes(&self, changes: RuntimeChanges) -> Result<(), RuntimeError> {
-        let domain = changes.domain.clone();
-        let graph = changes.graph;
-        let starts_are_scheduled_by_graph = graph.is_some();
-        let mut stops = Vec::new();
-        let mut starts = Vec::new();
-        for change in changes.changes {
-            match change {
-                RuntimeChange::StopIngestor { ingestor } => stops.push(ingestor),
-                RuntimeChange::StartIngestor {
-                    source_model,
-                    ingestor,
-                } => starts.push((*source_model, *ingestor)),
-            }
-        }
-
-        for ingestor in stops {
-            self.stop_ingestor(&domain, &ingestor).await?;
-        }
-
-        self.rebuild_domain_execution(&domain, graph).await?;
-
-        if starts_are_scheduled_by_graph {
-            return Ok(());
-        }
-
-        for (source_model, ingestor) in starts {
-            let plan = IngestorStartPlan::decide_unscheduled(&domain, &ingestor, &source_model)
-                .map_err(|error| RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
-            self.start_ingestor(plan).await?;
-        }
-
-        Ok(())
+    /// Installs the graph a domain's registry state holds when the node starts, before the cluster
+    /// schedules it.
+    pub(crate) async fn apply_changes(
+        &self,
+        domain: &DomainName,
+        revision: Option<Arc<ExecutionRevision>>,
+    ) -> Result<(), RuntimeError> {
+        self.rebuild_domain_execution(domain, revision).await
     }
 
     pub(super) fn scheduled_node_executes_locally(
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         local_node_id: Option<&ClusterNodeName>,
     ) -> bool {
         if let Some(local_node_id) = local_node_id {
@@ -2180,7 +1941,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc as StdArc};
+    use std::collections::BTreeMap;
 
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateDeduplicator,
@@ -2193,7 +1954,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_relay_placement_does_not_create_metric_replication_state() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2257,7 +2018,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2304,7 +2065,13 @@ mod tests {
             )
             .await
             .expect("running schedule should build");
-        let graph_before_pause = runtime.domain_graph_handle(&domain).await;
+        let revision_before_pause = runtime
+            .inner
+            .executions
+            .get(&domain)
+            .assured("the running domain has an installed revision")
+            .revision
+            .clone();
 
         let mut paused = running;
         paused.status = DomainStatus::Paused;
@@ -2317,18 +2084,17 @@ mod tests {
             .await
             .expect("paused schedule should remain active");
 
-        let graph_after_pause = runtime.domain_graph_handle(&domain).await;
         let execution = runtime
             .inner
             .executions
             .get(&domain)
             .expect("paused execution should remain");
         assert!(!execution.passive_only);
-        assert!(StdArc::ptr_eq(&graph_before_pause, &graph_after_pause));
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(Arc::ptr_eq(&revision_before_pause, &execution.revision));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2404,10 +2170,16 @@ mod tests {
             .get(&domain)
             .expect("current execution should remain");
         assert_eq!(
-            Some(&execution.schedule),
-            current_schedule.domains.get(&domain)
+            execution.revision.ownership_handoff_fingerprint,
+            ExecutionRevision::ownership_fingerprint(
+                current_schedule
+                    .domains
+                    .get(&domain)
+                    .assured("the current schedule has the domain")
+            )
+            .assured("the current schedule has an ownership fingerprint")
         );
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
     #[test]
@@ -2445,7 +2217,7 @@ mod tests {
         assert!(!application.advances_beyond_applied(0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_largest_revision_still_suppresses_a_later_stale_cluster_state() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2508,13 +2280,19 @@ mod tests {
             .get(&domain)
             .expect("current execution should remain");
         assert_eq!(
-            Some(&execution.schedule),
-            current_schedule.domains.get(&domain)
+            execution.revision.ownership_handoff_fingerprint,
+            ExecutionRevision::ownership_fingerprint(
+                current_schedule
+                    .domains
+                    .get(&domain)
+                    .assured("the current schedule has the domain")
+            )
+            .assured("the current schedule has an ownership fingerprint")
         );
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_application_leaves_its_revision_ready_to_apply_again() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2550,7 +2328,7 @@ mod tests {
             Vec::new(),
         )]);
 
-        runtime
+        let failure = runtime
             .apply_cluster_state(
                 &ClusterNodeName::parse("node-1").expect("valid name"),
                 4,
@@ -2560,6 +2338,10 @@ mod tests {
             )
             .await
             .expect_err("a relay without its schema should fail to build");
+        assert!(matches!(
+            failure.current_context(),
+            RuntimeError::BuildDomainExecution { .. }
+        ));
         runtime
             .apply_cluster_state(
                 &ClusterNodeName::parse("node-1").expect("valid name"),
@@ -2576,10 +2358,10 @@ mod tests {
             .executions
             .get(&domain)
             .expect("the reapplied execution should exist");
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2669,7 +2451,7 @@ mod tests {
             .expect("domain teardown must stop processor runtimes");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         let runtime = Runtime::default();
         attach_loopback_cluster(
@@ -2763,8 +2545,20 @@ mod tests {
         };
         config.mode = AckMode::Detached;
 
+        let desired_revision = ExecutionRevision::from_schedule(&desired)
+            .assured("the changed processor has a complete execution revision");
         runtime
-            .swap_scheduled_nodes(&domain, desired.clone(), &[entity], &[], &[])
+            .swap_scheduled_nodes(
+                &domain,
+                desired_revision.clone(),
+                &EntitySwapExecution {
+                    entities: vec![entity],
+                    reassignments: Vec::new(),
+                    dynamic_updates: Vec::new(),
+                    state_purges: BTreeMap::new(),
+                    gate_relays: Vec::new(),
+                },
+            )
             .await
             .expect("non-junction scheduled processors must use the shared swap path");
         let execution = runtime
@@ -2772,7 +2566,10 @@ mod tests {
             .executions
             .get(&domain)
             .expect("domain execution must remain installed");
-        assert_eq!(execution.schedule, desired);
+        assert_eq!(
+            execution.revision.ownership_handoff_fingerprint,
+            desired_revision.ownership_handoff_fingerprint
+        );
         assert!(execution.node_tasks.contains_key(&NodeRef {
             kind: ModelKind::Deduplicator,
             identifier: ModelName::from(&processor),
@@ -2800,8 +2597,11 @@ mod tests {
                 .fault_injection
                 .fail_next_entity_schedule_swap_on(node.clone(), domain.clone());
 
+            let recovered_revision = ExecutionRevision::from_schedule(&recovered)
+                .assured("the recovered processor has a complete execution revision");
+            let delta = ExecutionDelta::between(Some(&desired), Some(&recovered));
             let application = runtime
-                .apply_schedule_delta(&node, &desired, &recovered, true)
+                .apply_schedule_delta(&node, &recovered_revision, &delta, true)
                 .await
                 .assured("the domain rebuild recovers the injected entity swap failure");
             assert!(application.applied_incrementally);
@@ -2824,13 +2624,14 @@ mod tests {
                     .executions
                     .get(&domain)
                     .assured("recovery reinstalls the test domain")
-                    .schedule,
-                recovered
+                    .revision
+                    .ownership_handoff_fingerprint,
+                recovered_revision.ownership_handoff_fingerprint
             );
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
         let runtime = Runtime::default();
         attach_loopback_cluster(
@@ -2918,8 +2719,20 @@ mod tests {
             identifier: ModelName::from(&processor),
         };
 
+        let desired_revision = ExecutionRevision::from_schedule(&desired)
+            .assured("the changed processor has a complete execution revision");
         runtime
-            .swap_scheduled_nodes(&domain, desired, &[entity], &[], &[])
+            .swap_scheduled_nodes(
+                &domain,
+                desired_revision,
+                &EntitySwapExecution {
+                    entities: vec![entity],
+                    reassignments: Vec::new(),
+                    dynamic_updates: Vec::new(),
+                    state_purges: BTreeMap::new(),
+                    gate_relays: Vec::new(),
+                },
+            )
             .await
             .expect("entity swap must apply");
 
@@ -2931,7 +2744,10 @@ mod tests {
                 ModelKind::Deduplicator,
                 ModelName::from(&processor),
             ))
-            .map(|entry| entry.value().schema_fingerprint);
+            .and_then(|slot| {
+                slot.load_full()
+                    .map(|assignment| assignment.identity.schema_fingerprint)
+            });
         assert_eq!(
             installed,
             Some(SchemaFingerprint::from_digest([7; 32])),

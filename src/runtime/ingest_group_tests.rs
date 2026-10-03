@@ -7,25 +7,31 @@
 //! - **Depends on.** The runtime ingest grouping implementation and its test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
-use std::sync::Arc as StdArc;
+use std::time::Duration;
 
 use ahash::HashMap;
+use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
 use nervix_models::{
     AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     CreateWireSchema, ErrorPolicies, JsonType, ModelKind, ParseAsType, ResolvedCodecWireFormat,
     SchemaField, Timestamp, WireSchemaField,
 };
-use tokio::time::{Duration, timeout};
-use triomphe::Arc;
+use nervix_primitives::{
+    sync::{Arc, StdArc},
+    time::timeout,
+};
 
 use super::*;
 use crate::{
-    runtime::branch_runtime::BranchExecutionRuntime,
+    runtime::{
+        branch_runtime::BranchExecutionRuntime,
+        test_fixtures::{FilledCpuClass, single_worker_executor},
+    },
     runtime_ack::{AckOutcome, AckRootTracker, AckSet},
     runtime_schema::{
-        RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT, RuntimeRecordBatch,
-        RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
+        CodecContractError, RECORD_BUILDER_SETS_OPENED, RECORD_COLUMN_SETS_BUILT,
+        RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, compile_codec, test_runtime_row,
     },
 };
 
@@ -117,10 +123,11 @@ fn accept_decoded_payloads(
         .collect::<Vec<_>>();
     collector
         .collect(IngestGroupContribution {
+            handles: &IngestTaskHandles::detached(&domain("default")),
             domain: &domain("default"),
             ingestor: &named("grouped_event_source"),
             timestamp_source: None,
-            output_routes: &RelayProcessorOutputsNode { routes: Vec::new() },
+            output_routes: &Arc::new(BoundIngestorRoutes { routes: Vec::new() }),
             filter_where: None,
             metadata: &metadata,
             acks,
@@ -137,7 +144,10 @@ fn two_ingest_rows() -> IngestGroupRows {
             .expect("test rows should form one ingest group");
     IngestGroupRows {
         batch: Arc::new(batch),
-        record_metadata: vec![RuntimeRecordMetadata::test(); 2],
+        record_metadata: RecordMetadataColumns::from_rows([
+            RuntimeRecordMetadata::test(),
+            RuntimeRecordMetadata::test(),
+        ]),
         ingest_metadata: ingest_metadata_for_test(
             IngestMetadataKind::Headers,
             &[
@@ -179,7 +189,7 @@ fn expect_failure<T, E>(result: Result<T, E>, reason: &str) -> E {
 
 /// A group of `n` messages must cost one set of Arrow columns, not `n` single-row batches and
 /// a concatenation.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
@@ -194,7 +204,12 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     for user_id in 0..3i64 {
         let payload = format!(r#"{{"user_id":{user_id}}}"#);
         collector
-            .decode_payload(&codec, payload.as_bytes())
+            .decode_payload(
+                &Executor::default(),
+                QueueAdmission::RefuseWhenFull,
+                &codec,
+                payload.as_bytes(),
+            )
             .await
             .expect("each payload should decode into the open group");
         accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
@@ -237,7 +252,7 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
 
 /// An acknowledged poll group decodes its whole batch up front and then accepts the payloads
 /// one at a time, so a contribution covers a prefix of what the group has decoded.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
@@ -249,7 +264,12 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     for user_id in 0..3i64 {
         let payload = format!(r#"{{"user_id":{user_id}}}"#);
         collector
-            .decode_payload(&codec, payload.as_bytes())
+            .decode_payload(
+                &Executor::default(),
+                QueueAdmission::RefuseWhenFull,
+                &codec,
+                payload.as_bytes(),
+            )
             .await
             .expect("each payload should decode into the open group");
     }
@@ -278,7 +298,7 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
 
 /// A payload the codec rejects stays attributable to its own message: the group keeps the rows
 /// around it, and its records, metadata and ACKs stay row-aligned.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
@@ -288,19 +308,44 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     );
 
     collector
-        .decode_payload(&codec, br#"{"user_id":1}"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"{"user_id":1}"#,
+        )
         .await
         .expect("the first payload should decode");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first payload should be accepted");
 
-    collector
-        .decode_payload(&codec, br#"{"user_id":"two"}"#)
+    let rejected = collector
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"{"user_id":"two"}"#,
+        )
         .await
         .expect_err("a user id of the wrong type should be rejected");
+    let PayloadDecodeFailure::Codec(rejected) = rejected else {
+        panic!("a payload its codec rejects must fail as a codec failure: {rejected:?}");
+    };
+    assert!(
+        matches!(
+            rejected.current_context(),
+            CodecError::ParseField { field, .. } if field == "user_id"
+        ),
+        "the rejection must name the field that did not decode: {rejected:?}"
+    );
 
     collector
-        .decode_payload(&codec, br#"{"user_id":3}"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"{"user_id":3}"#,
+        )
         .await
         .expect("the payload after the rejected one should decode");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
@@ -326,7 +371,7 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
 
 /// Every message a payload unfolds into takes the payload's metadata and a share of its ACK
 /// set, so the source's acknowledgement waits for all of them.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_ack_share() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
@@ -338,7 +383,12 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
     let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
 
     collector
-        .decode_payload(&codec, br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#,
+        )
         .await
         .expect("the payload should unfold into the open group");
     accept_decoded_payloads(&mut collector, vec![payload_acks])
@@ -385,7 +435,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
 
 /// A payload that unfolds into no message is acknowledged when it is accepted, and it neither
 /// opens the group nor schedules its idle close.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let codec = unfolding_event_codec(".[] | select(.keep)");
     let mut collector = IngestRouteCollector::new(
@@ -397,7 +447,12 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
 
     collector
-        .decode_payload(&codec, br#"[{"user_id":1,"keep":false}]"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":1,"keep":false}]"#,
+        )
         .await
         .expect("a payload the program selects nothing from should decode");
     accept_decoded_payloads(&mut collector, vec![payload_acks])
@@ -422,7 +477,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
 
 /// A payload that fails part-way through unfolding contributes no message, and the group keeps
 /// the messages of the payloads around it.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_unfolding() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
@@ -432,22 +487,40 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     );
 
     collector
-        .decode_payload(&codec, br#"[{"user_id":1}]"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":1}]"#,
+        )
         .await
         .expect("the first payload should unfold");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first payload should be accepted");
 
-    let error = collector
-        .decode_payload(&codec, br#"[{"user_id":2},{"user_id":"confidential"}]"#)
+    let failure = collector
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":2},{"user_id":"confidential"}]"#,
+        )
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
+    let PayloadDecodeFailure::Codec(error) = failure else {
+        panic!("a payload its codec rejects must fail as a codec failure: {failure:?}");
+    };
     let message = error.to_string();
     assert!(message.contains("(input value 0, output 1)"), "{message}");
     assert!(!message.contains("confidential"), "{message}");
 
     collector
-        .decode_payload(&codec, br#"[{"user_id":3},{"user_id":4}]"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":3},{"user_id":4}]"#,
+        )
         .await
         .expect("the payload after the rejected one should unfold");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
@@ -469,7 +542,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
 
 /// A rejected payload in an otherwise empty group releases the rows it abandoned instead of
 /// keeping them allocated until a message arrives.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty_group() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
@@ -478,10 +551,22 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
         grouped_event_ingestor_metrics(),
     );
 
-    collector
-        .decode_payload(&codec, br#"[{"user_id":1},{"user_id":"two"}]"#)
+    let rejected = collector
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":1},{"user_id":"two"}]"#,
+        )
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
+    let PayloadDecodeFailure::Codec(rejected) = rejected else {
+        panic!("a payload its codec rejects must fail as a codec failure: {rejected:?}");
+    };
+    assert!(
+        matches!(rejected.current_context(), CodecError::Unfold { .. }),
+        "the rejection must place its cause in the unfolding payload: {rejected:?}"
+    );
 
     assert!(
         collector.pending.records.is_none(),
@@ -631,9 +716,9 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     ));
 
     let mut misaligned = two_ingest_rows();
-    misaligned.record_metadata.pop();
+    misaligned.record_metadata = RecordMetadataColumns::from_rows([RuntimeRecordMetadata::test()]);
     let alignment_error = expect_failure(
-        misaligned.select(&[true, false]),
+        misaligned.select(&BooleanBuffer::collect_bool(2, |row| row == 0)),
         "selection must reject misaligned sidecars",
     );
     assert!(matches!(
@@ -647,7 +732,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     ));
 
     let selection_error = expect_failure(
-        two_ingest_rows().select(&[true]),
+        two_ingest_rows().select(&BooleanBuffer::new_set(1)),
         "selection length must match the ingest group",
     );
     assert!(matches!(
@@ -659,7 +744,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     ));
 
     let selected = two_ingest_rows()
-        .select(&[false, true])
+        .select(&BooleanBuffer::collect_bool(2, |row| row == 1))
         .expect("a row-aligned selection must succeed");
     assert_eq!(selected.len(), 1);
     assert_eq!(selected.record_metadata.len(), 1);
@@ -669,9 +754,16 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
         selected.batch.value(0, "value").expect("readable value"),
         Some(RuntimeValue::I64(2))
     );
+
+    let unchanged = two_ingest_rows();
+    let original_batch = unchanged.batch.clone();
+    let unchanged = unchanged
+        .select(&BooleanBuffer::new_set(2))
+        .expect("an all-true bitmap keeps the whole group");
+    assert!(Arc::ptr_eq(&original_batch, &unchanged.batch));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     let codec = grouped_event_codec();
     let mut undispatched = IngestRouteCollector::new(
@@ -680,7 +772,12 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         grouped_event_ingestor_metrics(),
     );
     undispatched
-        .decode_payload(&codec, br#"{"user_id":1}"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"{"user_id":1}"#,
+        )
         .await
         .expect("the fixture payload must decode");
     let undispatched_error = expect_failure(
@@ -699,24 +796,35 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         grouped_event_ingestor_metrics(),
     );
     collector
-        .decode_payload(&codec, br#"{"user_id":1}"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"{"user_id":1}"#,
+        )
         .await
         .expect("the first fixture payload must decode");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first fixture payload must be accepted");
     collector
-        .decode_payload(&codec, br#"{"user_id":2}"#)
+        .decode_payload(
+            &Executor::default(),
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"{"user_id":2}"#,
+        )
         .await
         .expect("the second fixture payload must decode");
 
     let other_domain = domain("other");
     let ingestor: IngestorName = named("grouped_event_source");
-    let routes = RelayProcessorOutputsNode { routes: Vec::new() };
+    let routes = Arc::new(BoundIngestorRoutes { routes: Vec::new() });
     let metadata = [IngestMetadataRow::Headers {
         headers: &NoIngestHeaders,
     }];
     let identity_error = expect_failure(
         collector.collect(IngestGroupContribution {
+            handles: &IngestTaskHandles::detached(&domain("default")),
             domain: &other_domain,
             ingestor: &ingestor,
             timestamp_source: None,
@@ -745,7 +853,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     assert_eq!(collector.pending.undispatched_payloads(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_collector_flush_reports_missing_route_dependencies() {
     let runtime = Runtime::default();
     let test_domain = domain("default");
@@ -874,7 +982,7 @@ fn branched_entrypoint_batch_reports_structural_input_errors() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn branched_entrypoint_batch_groups_and_filters_each_branch() {
     let batch = BranchedEntrypointBatch::from_inputs(vec![
         branched_input("acme", 1),
@@ -936,48 +1044,40 @@ async fn branched_entrypoint_batch_groups_and_filters_each_branch() {
         }
     ));
 
-    let blocking = branched_entrypoint_batch_from_inputs_blocking(vec![
-        branched_input("acme", 10),
-        branched_input("beta", 20),
-    ])
-    .await
-    .expect("blocking input construction must retain a valid batch");
-    let plan = branched_branch_plan_blocking(blocking.clone())
-        .await
-        .expect("blocking branch planning must preserve the grouped keys");
-    let (key, filtered) = branched_branch_filter_blocking(
-        blocking,
-        plan[1].clone(),
+    let executor = Executor::default();
+    let two_tenants =
+        RelayRecordBatch::concat(vec![branched_input("acme", 10), branched_input("beta", 20)])
+            .expect("the fixture inputs share one schema");
+    let prepared = prepare_branched_entrypoint_input(
+        &executor,
+        two_tenants,
         BranchInstanceAckBoundary::Preserve,
     )
     .await
-    .expect("blocking branch filtering must return its selected batch");
-    assert_eq!(key, string_branch_key("tenant", "beta"));
-    assert_eq!(filtered.message_count(), 1);
-
-    let empty_blocking = expect_failure(
-        branched_entrypoint_batch_from_inputs_blocking(Vec::new()).await,
-        "blocking construction must retain the empty-input error",
-    );
-    assert!(empty_blocking.preserved.is_empty());
-    assert!(matches!(
-        empty_blocking.error.current_context(),
-        IngestGroupError::EmptyBranchInputs
-    ));
+    .expect("an admitted input must prepare its branches");
+    let [Ok(acme), Ok(beta)] = prepared.as_slice() else {
+        panic!("the input must prepare one batch for each of its two tenants");
+    };
+    assert_eq!(acme.key, string_branch_key("tenant", "acme"));
+    assert_eq!(beta.key, string_branch_key("tenant", "beta"));
+    assert_eq!(acme.message_count(), 1);
+    assert_eq!(beta.message_count(), 1);
+    // The input's branches were built by one data-worker job, whose charge was returned with it.
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.data_cpu.completed, 1);
+    assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn branched_root_without_children_acks_success() {
     let runtime = Runtime::default();
     let root_domain = domain("default");
     install_unpaced_test_domain(&runtime, &root_domain);
     let root_relay = named("tenant_orders");
-    let root_registry = RelayRegistry::new();
     let root_services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &root_domain,
         &root_relay,
-        root_registry.clone(),
         root_services.clone(),
         RelayRetention::default(),
     );
@@ -1015,7 +1115,6 @@ async fn branched_root_without_children_acks_success() {
                 runtime,
                 domain: root_domain,
                 relay: root_relay,
-                registry: root_registry,
                 services: root_services,
                 key: root_key,
             }),
@@ -1026,6 +1125,8 @@ async fn branched_root_without_children_acks_success() {
         relay_state_epoch: None,
         processors: HashMap::default(),
         metrics: BranchRuntimeMetrics {
+            source_dirty: BranchMetricsMark::default(),
+            processor_dirty: HashMap::default(),
             source: root_metrics,
             source_input: None,
             processor_inputs: HashMap::default(),
@@ -1061,7 +1162,7 @@ async fn branched_root_without_children_acks_success() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1070,12 +1171,17 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
     let mut fan_in =
         RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-    let registry = RelayRegistry::new();
+    let services = Arc::new(RelayBoundaryServices::new(
+        fanout,
+        1,
+        0,
+        Vec::new(),
+        None,
+        Arc::new(BranchPresence::new()),
+    ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &root_relay,
-        registry.clone(),
         services.clone(),
         RelayRetention::default(),
     );
@@ -1096,7 +1202,6 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
             relays: [(
                 root_relay,
                 RelayProcessorRelayTemplate {
-                    registry,
                     services: services.clone(),
                 },
             )]
@@ -1135,7 +1240,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_branch() {
     let cases = [
         (
@@ -1150,7 +1255,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         ),
     ];
     for (source_kind, ack_boundary, source) in cases {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
@@ -1158,12 +1263,17 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
         let mut fan_in =
             RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-        let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-        let registry = RelayRegistry::new();
+        let services = Arc::new(RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+            Arc::new(BranchPresence::new()),
+        ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &root_relay,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
@@ -1205,7 +1315,6 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                     relays: [(
                         root_relay,
                         RelayProcessorRelayTemplate {
-                            registry,
                             services: services.clone(),
                         },
                     )]
@@ -1276,4 +1385,123 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             .await
             .expect("relay owner should stop");
     }
+}
+
+#[nervix_primitives::test]
+async fn a_node_without_room_for_a_branched_input_keeps_its_acknowledgements() {
+    let executor = single_worker_executor();
+    let filled = FilledCpuClass::fill(&executor, CpuClass::Data).await;
+
+    let prepared = prepare_branched_entrypoint_input(
+        &executor,
+        branched_input("acme", 10),
+        BranchInstanceAckBoundary::Preserve,
+    )
+    .await;
+
+    let Err(failure) = prepared else {
+        panic!("a full data class must refuse the input");
+    };
+    assert!(matches!(
+        failure.error.current_context(),
+        IngestGroupError::Execution {
+            operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+        }
+    ));
+    assert_eq!(failure.preserved.len(), 1);
+    assert_eq!(executor.snapshot().data_cpu.refused, 1);
+    filled.release().await;
+}
+
+#[nervix_primitives::test]
+async fn an_unfolding_payload_runs_on_the_extension_workers() {
+    let executor = Executor::default();
+    let codec = unfolding_event_codec(".[]");
+    let mut collector = IngestRouteCollector::new(
+        IngestMetadataKind::Headers,
+        8,
+        grouped_event_ingestor_metrics(),
+    );
+
+    collector
+        .decode_payload(
+            &executor,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            br#"[{"user_id":1},{"user_id":2}]"#,
+        )
+        .await
+        .expect("the extension workers unfold the payload");
+
+    assert_eq!(collector.pending.undispatched_payloads(), 1);
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.extension_cpu.admitted, 1);
+    assert_eq!(snapshot.extension_cpu.completed, 1);
+    assert_eq!(snapshot.data_cpu.admitted, 0);
+    assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+}
+
+#[test]
+fn an_unfolding_that_panicked_fails_its_payload_and_a_refused_one_judges_nothing() {
+    let codec = unfolding_event_codec(".[]");
+
+    let panicked = PayloadDecodeFailure::from_unfolding_execution(
+        &codec,
+        Report::new(ExecutionError::JobPanicked {
+            class: "extension_cpu",
+        }),
+    );
+    let PayloadDecodeFailure::Codec(panicked) = panicked else {
+        panic!("a panicked unfolding must fail its payload's decode: {panicked:?}");
+    };
+    assert!(
+        matches!(
+            panicked.downcast_ref::<CodecContractError>(),
+            Some(CodecContractError::UnfoldingPanicked)
+        ),
+        "{panicked:?}"
+    );
+    assert!(panicked.contains::<ExecutionError>(), "{panicked:?}");
+
+    let refused = PayloadDecodeFailure::from_unfolding_execution(
+        &codec,
+        Report::new(ExecutionError::QueueFull {
+            class: "extension_cpu",
+            pending: 1,
+        }),
+    );
+    assert!(
+        matches!(refused, PayloadDecodeFailure::NotAdmitted(_)),
+        "a refused unfolding must not be judged: {refused:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it() {
+    let executor = single_worker_executor();
+    let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
+    let codec = unfolding_event_codec(".[]");
+    let payload = br#"[{"user_id":1},{"user_id":2}]"#;
+    let mut collector = IngestRouteCollector::new(
+        IngestMetadataKind::Headers,
+        8,
+        grouped_event_ingestor_metrics(),
+    );
+
+    let refused = collector
+        .decode_payload(&executor, QueueAdmission::RefuseWhenFull, &codec, payload)
+        .await
+        .expect_err("a full extension class refuses the unfolding");
+
+    assert!(
+        matches!(refused, PayloadDecodeFailure::NotAdmitted(_)),
+        "a payload the node could not unfold must not be judged: {refused:?}"
+    );
+    assert_eq!(collector.pending.undispatched_payloads(), 0);
+    filled.release().await;
+    collector
+        .decode_payload(&executor, QueueAdmission::RefuseWhenFull, &codec, payload)
+        .await
+        .expect("the same payload unfolds once the class has room");
+    assert_eq!(collector.pending.undispatched_payloads(), 1);
 }

@@ -12,7 +12,8 @@
 //!   the emitter flushes.
 //!
 //! Packing is synchronous so that it runs wherever the codec's own execution policy requires: a
-//! codec with jaq transformations is driven off the reactor, and packing runs inside that same job.
+//! codec with jaq transformations is packed on the node's extension workers, inside the same job
+//! that runs its transformations.
 
 use std::num::NonZeroUsize;
 
@@ -20,7 +21,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkRecordPosition;
 use nervix_models::{EmitterBatchPolicy, RelayName};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{BranchKey, EmitterHeaders};
 use crate::runtime_schema::{
@@ -282,6 +283,13 @@ struct Subdivision<O, F> {
 /// front — and re-encoded, because a smaller candidate may encode larger. A single member that
 /// still reaches the limit ends as oversize. A candidate of `n` members therefore takes at most
 /// `⌈log2(n)⌉ + 1` encodings.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the external writer callback measures selected sub-batches; local callbacks \
+                  remain checked"
+    )
+)]
 fn subdivide<M, O, F>(
     members: &[M],
     max_messages: NonZeroUsize,

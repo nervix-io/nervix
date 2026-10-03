@@ -11,9 +11,9 @@ workspace = true
 [features]
 default = []
 shuttle = [
-  "dep:shuttle-tokio",
   "nervix-connector/shuttle",
-  "shuttle-tokio/shuttle",
+  "nervix-execution/shuttle",
+  "nervix-primitives/shuttle",
 ]
 
 [dependencies]
@@ -33,7 +33,9 @@ iceberg-catalog-rest = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 opendal = { workspace = true, features = [
   "layers-retry",
   "layers-timeout",
@@ -46,13 +48,6 @@ reqwest = { workspace = true }
 reqwest_iceberg = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "fs",
-  "macros",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tracing = { workspace = true }

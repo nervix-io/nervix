@@ -15,7 +15,7 @@
 //! into them. A snapshot larger than one section limit becomes more sections, never one larger
 //! section, so a receiver never decodes a whole snapshot as a single value.
 
-use std::{io::Write as _, ops::Range, sync::Arc as StdArc};
+use std::{io::Write as _, ops::Range};
 
 use arch_into::ArchInto as _;
 use arrow_schema::Schema as ArrowSchema;
@@ -23,9 +23,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
+use nervix_primitives::sync::{Arc, StdArc};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{BranchKey, snapshot_staging::StagedSnapshot};
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow};
@@ -81,6 +81,10 @@ pub(in crate::runtime) enum MaterializedSnapshotError {
 }
 
 impl MaterializedSnapshotError {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed snapshot error conversion")
+    )]
     fn encoding(error: impl ToString) -> Report<Self> {
         Report::new(Self::Encode {
             reason: error.to_string(),
@@ -376,7 +380,7 @@ impl MaterializedGeneration {
         let groups = self.groups(executor);
         let mut sections = Vec::new();
         for group in &groups {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             sections.push(self.seal_identities(executor, group).await?);
             sections.push(self.seal_columns(executor, group).await?);
         }
@@ -547,7 +551,7 @@ impl RestoredMaterializedSnapshot {
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
         let mut records = Vec::new();
         for _ in 0..header.groups {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let identities = cursor
                 .take_section(SealedSectionKind::RecordIdentities, identity_limit)
                 .await?;
@@ -986,7 +990,7 @@ mod tests {
         MaterializedGeneration::new(7, 3, 5, schema, records)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_snapshot_larger_than_the_transfer_budget_moves_through_bounded_chunks() {
         let executor = narrow_executor();
         let generation = wide_generation();
@@ -1070,7 +1074,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_truncated_transfer_is_refused_before_anything_reads_it() {
         let executor = narrow_executor();
         let sealed = wide_generation()
@@ -1099,7 +1103,7 @@ mod tests {
         assert!(writer.finish(sealed.descriptor.digest).await.is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_corrupted_transfer_is_refused_before_anything_reads_it() {
         let executor = narrow_executor();
         let sealed = wide_generation()

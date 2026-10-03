@@ -5,6 +5,15 @@
 //! - **Depends on.** Execution plans, branch-local state and runtime metric collectors.
 //! - **Must not know.** NSPL parsing, persistence mutations or external telemetry transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "runtime inspection reads published state and lifecycle membership for operator \
+                  reports"
+    )
+)]
+
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +82,8 @@ pub(crate) struct IngestorDescribe {
     pub(crate) reconnect_backoff: Option<String>,
     pub(crate) reconnect_wait_millis: Option<u64>,
     pub(crate) kafka_domain_offsets: Option<KafkaDomainOffsetDescribe>,
+    /// The producers attached to a client ingestor this node runs an endpoint for.
+    pub(crate) client_producers: Option<ClientIngestorGauges>,
 }
 
 impl Runtime {
@@ -91,6 +102,13 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one concrete branch lifetime registers its metric identity"
+        )
+    )]
     pub(super) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
@@ -108,6 +126,13 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one concrete branch lifetime withdraws or detaches its metric identity"
+        )
+    )]
     pub(super) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
@@ -139,10 +164,10 @@ impl Runtime {
     }
 }
 
-/// One instantiated lookup as this node sees it: the pinned model it was built from and how many
+/// One instantiated lookup as this node sees it: the pinned plan it was built from and how many
 /// entries that resource version produced.
 pub(crate) struct LocalLookupDescription {
-    pub(crate) model: CreateLookup,
+    pub(crate) plan: LookupResourcePlan,
     pub(crate) entry_count: usize,
 }
 
@@ -154,15 +179,69 @@ pub(crate) struct DataflowNodeTransientState {
     pub(crate) reconnect_wait_millis: Option<u64>,
 }
 
+/// One placement's dirty mark, retained beside the task's metric children.
+#[derive(Clone, Default)]
+pub(super) struct BranchMetricsMark(Option<Arc<ReplicatedBranchAggregatedState>>);
+
+impl BranchMetricsMark {
+    pub(super) fn mark(&self) {
+        if let Some(state) = &self.0 {
+            state.mark_metrics_updated();
+        }
+    }
+}
+
+impl DataflowNodeTransientState {
+    fn from_failure<R>(
+        failure: Option<StdArc<task_status::TaskFailure<R>>>,
+        retry_of: fn(&R) -> &RuntimeReconnectStatus,
+    ) -> Self {
+        let Some(failure) = failure else {
+            return Self::default();
+        };
+        let mut state = Self {
+            error: Some(failure.error.clone()),
+            ..Self::default()
+        };
+        if let Some(retry) = failure.retry.as_ref() {
+            let retry = retry_of(retry);
+            state.reconnect_backoff = Some(humantime::format_duration(retry.backoff).to_string());
+            state.reconnect_wait_millis = Some(
+                u64::try_from(
+                    retry
+                        .retry_at
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+            );
+        }
+        state
+    }
+}
+
 impl Runtime {
-    pub(in crate::runtime) fn mark_branch_aggregated_metrics_updated(
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed model-name conversion during \
+                                   handle installation")
+    )]
+    pub(super) fn branch_metrics_mark(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         identifier: impl Into<ModelName>,
-    ) {
+    ) -> BranchMetricsMark {
         if kind == ModelKind::Relay {
-            return;
+            return BranchMetricsMark::default();
         }
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
@@ -171,13 +250,12 @@ impl Runtime {
             identifier: identifier.into(),
             branch_key: None,
         };
-        if let Some(state) = self
-            .inner
-            .replicated_branch_aggregated_states
-            .get(&placement)
-        {
-            state.mark_metrics_updated();
-        }
+        BranchMetricsMark(
+            self.inner
+                .replicated_branch_aggregated_states
+                .get(&placement)
+                .map(|state| state.value().clone()),
+        )
     }
 
     pub(crate) fn describe_local_stream_exists(
@@ -192,17 +270,13 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        if !execution.relay_registries.contains_key(relay) {
+        let Some(services) = execution.relay_services.get(relay) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
                 relay: relay.as_str().to_string(),
             });
-        }
-        let relay_registry = execution
-            .relay_registries
-            .get(relay)
-            .verified("the missing-relay branch above already returned");
-        Ok(relay_registry.contains_key(key))
+        };
+        Ok(services.branch_presence.contains(key.as_ref()))
     }
 
     pub(crate) fn describe_metrics_for(
@@ -223,9 +297,17 @@ impl Runtime {
                 "failed to refresh branch-aggregated metrics before describe"
             );
         }
-        self.inner
+        let mut lines = self
+            .inner
             .metrics
-            .describe_global_target(domain, kind, identifier)
+            .describe_global_target(domain, kind, identifier.clone());
+        if kind.eq_ignore_ascii_case(ModelKind::Emitter.as_str()) {
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            if let Some(endpoint) = self.inner.client_emitters.get(&key) {
+                lines.extend(endpoint.metric_lines());
+            }
+        }
+        lines
     }
 
     /// Read the current generation's checkpoints without taking ownership or advancing their
@@ -240,7 +322,7 @@ impl Runtime {
             return Vec::new();
         };
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
-        let Some(scheduled) = execution.schedule.nodes.get(&entity) else {
+        let Some(scheduled) = execution.revision.nodes.get(&entity) else {
             return Vec::new();
         };
         let Some(generations) = scheduled.wasm_state_generations() else {
@@ -312,11 +394,16 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        let Some(registry) = execution.relay_registries.get(relay) else {
+        let Some(services) = execution.relay_services.get(relay) else {
             return Vec::new();
         };
-        registry
-            .keys()
+        let membership = services.branch_presence.load();
+        let mut branches = membership
+            .branches()
+            .map(|branch| branch.as_str().to_string())
+            .collect::<Vec<_>>();
+        branches.sort();
+        branches
             .into_iter()
             .map(|branch| nervix_dataflow_graph::DataflowBranchStatistics {
                 branch,
@@ -332,20 +419,11 @@ impl Runtime {
         identifier: impl Into<ModelName>,
     ) -> nervix_dataflow_graph::DataflowNodeHealth {
         let identifier = identifier.into();
-        let reconnect_wait_millis = if kind.eq_ignore_ascii_case("INGESTOR") {
-            self.ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier))
-        } else if kind.eq_ignore_ascii_case("EMITTER") {
-            self.emitter_reconnect_wait_millis(domain, &EmitterName::from(&identifier))
-        } else {
-            None
-        };
+        let transient = self.dataflow_node_transient_state(domain, kind, &identifier);
+        let reconnect_wait_millis = transient.reconnect_wait_millis;
         let detail = if kind.eq_ignore_ascii_case("INGESTOR") {
-            if let Some(error) =
-                self.ingestor_transient_error(domain, &IngestorName::from(&identifier))
-            {
-                if let Some(backoff) =
-                    self.ingestor_reconnect_backoff(domain, &IngestorName::from(&identifier))
-                {
+            if let Some(error) = transient.error {
+                if let Some(backoff) = transient.reconnect_backoff {
                     Some(format!("{error}; reconnect backoff: {backoff}"))
                 } else {
                     Some(error)
@@ -360,12 +438,8 @@ impl Runtime {
                 None
             }
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            if let Some(error) =
-                self.emitter_transient_error(domain, &EmitterName::from(&identifier))
-            {
-                if let Some(backoff) =
-                    self.emitter_reconnect_backoff(domain, &EmitterName::from(&identifier))
-                {
+            if let Some(error) = transient.error {
+                if let Some(backoff) = transient.reconnect_backoff {
                     Some(format!("{error}; reconnect backoff: {backoff}"))
                 } else {
                     Some(error)
@@ -423,21 +497,21 @@ impl Runtime {
     ) -> DataflowNodeTransientState {
         let identifier = identifier.into();
         if kind.eq_ignore_ascii_case("INGESTOR") {
-            DataflowNodeTransientState {
-                error: self.ingestor_transient_error(domain, &IngestorName::from(&identifier)),
-                reconnect_backoff: self
-                    .ingestor_reconnect_backoff(domain, &IngestorName::from(&identifier)),
-                reconnect_wait_millis: self
-                    .ingestor_reconnect_wait_millis(domain, &IngestorName::from(&identifier)),
-            }
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, identifier);
+            let failure = self
+                .inner
+                .ingestor_statuses
+                .get(&key)
+                .and_then(|status| status.snapshot());
+            DataflowNodeTransientState::from_failure(failure, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
-            DataflowNodeTransientState {
-                error: self.emitter_transient_error(domain, &EmitterName::from(&identifier)),
-                reconnect_backoff: self
-                    .emitter_reconnect_backoff(domain, &EmitterName::from(&identifier)),
-                reconnect_wait_millis: self
-                    .emitter_reconnect_wait_millis(domain, &EmitterName::from(&identifier)),
-            }
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            let failure = self
+                .inner
+                .emitter_statuses
+                .get(&key)
+                .and_then(|status| status.snapshot());
+            DataflowNodeTransientState::from_failure(failure, |retry| &retry.reconnect)
         } else {
             DataflowNodeTransientState::default()
         }
@@ -505,6 +579,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> error_stack::Result<IngestorDescribe, RuntimeObservationError> {
+        let transient = self.dataflow_node_transient_state(domain, "INGESTOR", ingestor);
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
         let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
         let quiesce_state = match quiesce_control.as_ref() {
@@ -518,7 +593,7 @@ impl Runtime {
         if !self.inner.executions.contains_key(domain) {
             let transient_error = match self.inner.domain_instantiation_errors.get(domain) {
                 Some(error) => Some(error.value().clone()),
-                None => self.ingestor_transient_error(domain, ingestor),
+                None => transient.error.clone(),
             };
             return Ok(IngestorDescribe {
                 running: false,
@@ -527,23 +602,23 @@ impl Runtime {
                 quiesce_counters,
                 memory_backpressure_paused,
                 transient_error,
-                reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-                reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+                reconnect_backoff: transient.reconnect_backoff.clone(),
+                reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
+                client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         }
 
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if !self.inner.ingestors.contains_key(&key) {
-            let transient_error =
-                if let Some(error) = self.ingestor_transient_error(domain, ingestor) {
-                    Some(error)
-                } else {
-                    self.inner
-                        .domain_instantiation_errors
-                        .get(domain)
-                        .map(|error| error.value().clone())
-                };
+            let transient_error = if let Some(error) = transient.error.clone() {
+                Some(error)
+            } else {
+                self.inner
+                    .domain_instantiation_errors
+                    .get(domain)
+                    .map(|error| error.value().clone())
+            };
             return Ok(IngestorDescribe {
                 running: false,
                 ready: false,
@@ -551,9 +626,10 @@ impl Runtime {
                 quiesce_counters,
                 memory_backpressure_paused,
                 transient_error,
-                reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-                reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+                reconnect_backoff: transient.reconnect_backoff.clone(),
+                reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
+                client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         }
         let Some(execution) = self.inner.executions.get(domain) else {
@@ -563,30 +639,29 @@ impl Runtime {
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 memory_backpressure_paused,
-                transient_error: self.ingestor_transient_error(domain, ingestor),
-                reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-                reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+                transient_error: transient.error.clone(),
+                reconnect_backoff: transient.reconnect_backoff.clone(),
+                reconnect_wait_millis: transient.reconnect_wait_millis,
                 kafka_domain_offsets: None,
+                client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         };
-        let scheduled_ingestor = execution
-            .schedule
-            .nodes
-            .get(&NodeRef::new(
+        let kafka_domain_offsets = if let Some(plan) =
+            execution.revision.entrypoints.ingestor(ingestor)
+            && let IngestorInputPlan::Transport(TransportInputPlan {
+                source:
+                    SourceStartPlan::Kafka(KafkaIngestorStartPlan {
+                        topic,
+                        offsets: KafkaOffsetPlan::Domain(_),
+                        instances,
+                        ..
+                    }),
+                ..
+            }) = &plan.input
+            && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
             ))
-            .and_then(|node| match node.config.as_ref() {
-                Model::Ingestor(ingestor) => Some((node, ingestor.clone())),
-                _ => None,
-            });
-        let kafka_domain_offsets = if let Some((node, ingestor)) = scheduled_ingestor
-            && let IngestSource::Kafka {
-                topic,
-                offset_mode: KafkaOffsetMode::Domain,
-                instances,
-                ..
-            } = &ingestor.source
             && let Some(schedule) = node.kafka_partition_schedule.as_ref()
         {
             Some(kafka_domain_offset_describe_from_schedule(
@@ -603,10 +678,11 @@ impl Runtime {
             quiesce_state,
             quiesce_counters,
             memory_backpressure_paused,
-            transient_error: self.ingestor_transient_error(domain, ingestor),
-            reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
-            reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
+            transient_error: transient.error.clone(),
+            reconnect_backoff: transient.reconnect_backoff.clone(),
+            reconnect_wait_millis: transient.reconnect_wait_millis,
             kafka_domain_offsets,
+            client_producers: self.client_ingestor_gauges(domain, ingestor),
         })
     }
 
@@ -639,7 +715,7 @@ impl Runtime {
             ));
         };
         Ok(LocalLookupDescription {
-            model: lookup.model.clone(),
+            plan: lookup.plan.clone(),
             entry_count: lookup.entries.len(),
         })
     }
@@ -674,7 +750,8 @@ impl Runtime {
             ));
         };
         lookup.metrics.observe(1, key.len().arch_into(), None);
-        self.mark_branch_aggregated_metrics_updated(domain, ModelKind::Lookup, name);
+        self.branch_metrics_mark(domain, ModelKind::Lookup, name)
+            .mark();
         lookup
             .entries
             .get(key)
@@ -692,20 +769,19 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use fjall::Database;
     use futures_util::FutureExt as _;
-    use nervix_models::{
-        ClusterNodeName, CreateLookup, IngestorName, ModelKind, ModelName, ParseAsType,
-    };
+    use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
+    use nervix_primitives::sync::Arc;
     use tempfile::tempdir;
-    use tokio::time::Duration;
-    use triomphe::Arc;
 
     use super::*;
     use crate::metrics::RuntimeMetrics;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_reported_runtime_error_reaches_every_attached_observer() {
         let events = RuntimeEvents::new();
         let mut first = events.subscribe();
@@ -714,7 +790,7 @@ mod tests {
         events.report_error("ingestor 'orders' failed to decode a message");
 
         for observer in [&mut first, &mut second] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RuntimeEvent::Error(message) = observer
                 .recv()
                 .await
@@ -732,7 +808,7 @@ mod tests {
         events.report_error("emitter 'ledger' failed to publish");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_observer_that_attaches_later_sees_only_what_follows_it() {
         let events = RuntimeEvents::new();
         events.report_error("reported before anyone was listening");
@@ -866,8 +942,6 @@ mod tests {
                 placement.clone(),
                 Some(ClusterNodeName::parse("node-3").expect("valid name")),
                 ClusterNodeName::parse("node-3").expect("valid name"),
-                Vec::new(),
-                0,
                 &RuntimeMetrics::default(),
                 store
                     .latest_snapshot(&placement)
@@ -947,8 +1021,6 @@ mod tests {
                 placement.clone(),
                 Some(ClusterNodeName::parse("node-3").expect("valid name")),
                 ClusterNodeName::parse("node-3").expect("valid name"),
-                Vec::new(),
-                0,
                 &RuntimeMetrics::default(),
                 store
                     .latest_snapshot(&placement)
@@ -1087,13 +1159,12 @@ mod tests {
             )]])
             .expect("lookup test batch should build");
         let lookup_runtime = Arc::new(LookupRuntime {
-            model: CreateLookup {
+            plan: LookupResourcePlan {
                 name: lookup.clone(),
                 key_field: named("postal_code"),
-                resource: named("postal_codes"),
-                resource_version: 7,
+                resource: ResourceId::new(domain.clone(), named("postal_codes"), 7),
                 path: "postal_codes.jsonl".to_string(),
-                decode_using_codec: named("postal_code_codec"),
+                codec: named("postal_code_codec"),
             },
             schema,
             batch: Arc::new(batch),
@@ -1123,7 +1194,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing() {
         let runtime = Runtime::new();
         let domain = domain("default");

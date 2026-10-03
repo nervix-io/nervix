@@ -23,6 +23,14 @@
 //! present. Terminal teardown negatively acknowledges whatever still waits, so a source with
 //! external acknowledgements redelivers it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "shutdown and impact inspection observe installed task and acknowledgement owners"
+    )
+)]
+
 use super::*;
 
 /// How often a draining node re-reads its work. The read is in-process, and the interval bounds
@@ -196,7 +204,7 @@ impl Runtime {
             "closed local intake; draining local graphs in place"
         );
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut outstanding = Vec::new();
             for (domain, progress) in &mut domains {
                 let status = self.local_domain_drain_status(domain);
@@ -314,8 +322,11 @@ impl Runtime {
                 LocalDomainDrainStatus::tally(&mut status.publishing_emitters, 1);
             }
         }
-        for retry in self.inner.emitter_retry_statuses.iter() {
-            if &retry.key().domain == domain {
+        for status_entry in self.inner.emitter_statuses.iter() {
+            if &status_entry.key().domain == domain
+                && let Some(failure) = status_entry.value().snapshot()
+                && failure.retry.is_some()
+            {
                 LocalDomainDrainStatus::tally(&mut status.publishing_emitters, 1);
             }
         }
@@ -379,7 +390,7 @@ mod tests {
         assert_eq!(progress.advance(&status), LocalDomainDrainStep::Done);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closing_local_intake_stops_every_registered_ingestor_admitting() {
         let runtime = Runtime::default();
         let domain = domain("default");

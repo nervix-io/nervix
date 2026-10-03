@@ -10,6 +10,7 @@ Feature: WASM guest-state checkpoint durability
   every emitted row the scenarios assert belongs to an input the branch receives only after all of
   its earlier inputs were acknowledged.
 
+  @retained_task_handles
   Scenario Outline: A WASM processor withholds source acknowledgement until its checkpoint reaches stable storage
     Given Kafka is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -206,7 +207,6 @@ Feature: WASM guest-state checkpoint durability
       key={"tenant":"beta"} | "tenant":"beta" | "value":12
       """
 
-  @exclusive
   Scenario: Guest state acknowledged through a replica survives the loss of its owner
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"

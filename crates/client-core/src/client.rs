@@ -1,44 +1,53 @@
 //! The client: one session with a server, the statements it executes, and the transaction it
 //! holds.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** Sending requests on the current exchange, the redirects, retries and reconnects a
-//!   reply calls for, the session's selected domain and transaction binding, and the statements the
-//!   client serves itself.
-//! - **Depends on.** The exchange dispatcher, the connector, the wire contract, and the language
-//!   layer for splitting and classifying statements.
+//!   reply calls for, the session's selected domain and transaction binding, the statements the
+//!   client serves itself, and installing a new exchange, on which it restores what it holds before
+//!   it attaches its transaction.
+//! - **Depends on.** The exchange dispatcher, the restoration of a new exchange, the connector, the
+//!   wire contract, and the language layer for splitting and classifying statements.
 //! - **Must not know.** How a frame is routed off an exchange.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc as SharedClientArc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    AttachDisposition, AttachTransactionRequest, ClientMessage, ClientRequest, CommandRequest,
-    DomainInfo, InspectTransactionRequest, InspectionOutcome, Leadership, ReplyBody,
-    SubscribeRequest, SubscriptionType, UnsubscribeRequest,
+    AttachDisposition, AttachDomainClockRequest, AttachTransactionRequest, ClientMessage,
+    ClientRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachOutcome,
+    DomainClockDetachOutcome, DomainInfo, InspectTransactionRequest, InspectionOutcome, Leadership,
+    ReplyBody, SubscribeRequest, SubscriptionType, UnsubscribeRequest,
 };
 use nervix_models::{
-    CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
-    SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber, TransactionPosition,
-    TransactionPreviewIdentity, TransactionStatus, UploadResource,
+    Backup, CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
+    Restore, Statement, SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber,
+    TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
-use tokio::{
-    sync::Mutex,
+use nervix_primitives::{
+    sync::{Arc, Mutex, StdArc as SharedClientArc},
     time::{Instant, sleep},
 };
 use tonic::transport::Channel;
-use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]
 use crate::events::{AutocompleteOutcome, AutocompleteSuggestion};
 use crate::{
     connection::{ConnectOptions, GrpcConnector, ServerDirectory, TlsRequirement},
+    domain_clock::{AttachedDomainClock, DomainClockEvent},
     error::{ClientError, EventStreamKind, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
     exchange::{EventQueueError, Exchange, ExchangeRequests, SESSION_LIMITS, SessionEvents},
     outcome::{CommandOutcome, Routing},
-    subscriptions::{DeleteAttempt, RestoreAttempt, SubscriptionContract, SubscriptionLifecycle},
+    restoration::Restoration,
+    subscriptions::{
+        Cancellation, DeleteAttempt, DeletionResolution, DeletionTarget, RestoreAttempt,
+        SubscriptionContract, SubscriptionLifecycle,
+    },
 };
 
 /// What a command expects of the transaction it runs against.
@@ -81,7 +90,10 @@ impl ExecutionHandle {
     }
 
     pub(crate) fn can_have_admitted_command(&self) -> bool {
-        matches!(self.route, StatementRoute::Command)
+        matches!(
+            self.route,
+            StatementRoute::Command | StatementRoute::Backup(_) | StatementRoute::Restore(_)
+        )
     }
 }
 
@@ -117,13 +129,23 @@ enum StatementRoute {
     Refused(&'static str),
     /// Statements the server executes as one command.
     Command,
+    /// A BACKUP statement: the server executes it as a command, and the client downloads the
+    /// archive it assembled to the file the statement names.
+    Backup(Backup),
+    /// A RESTORE statement: the client streams the archive its statement names to the leader,
+    /// which runs the restore as a command under the execution's reference.
+    Restore(Restore),
 }
 
-/// A statement the client serves without sending it.
+/// A statement the client serves itself, without sending it as a command.
 #[derive(Debug, Clone)]
 enum LocalStatement {
     UseDomain(DomainName),
     ListDomains,
+    /// Sent as an attach request for the active domain.
+    AttachDomainClock,
+    /// Sent as a detach request for the active domain.
+    DetachDomainClock,
     UploadResource(UploadResource),
 }
 
@@ -160,6 +182,8 @@ impl StatementRoute {
         match parsed.statement {
             ClientStatement::UseDomain(domain) => Self::Local(LocalStatement::UseDomain(domain)),
             ClientStatement::ListDomains => Self::Local(LocalStatement::ListDomains),
+            ClientStatement::AttachDomainClock => Self::Local(LocalStatement::AttachDomainClock),
+            ClientStatement::DetachDomainClock => Self::Local(LocalStatement::DetachDomainClock),
             ClientStatement::UploadResource(upload) => {
                 Self::Local(LocalStatement::UploadResource(upload))
             }
@@ -171,6 +195,11 @@ impl StatementRoute {
             ClientStatement::DeleteSubscription(subscription) => {
                 Self::Unsubscribe(subscription.name)
             }
+            ClientStatement::DescribeBackup(_) => Self::Refused(
+                "DESCRIBE BACKUP reads an archive file on this machine and is served by nervix-cli",
+            ),
+            ClientStatement::Server(Statement::Backup(backup)) => Self::Backup(backup),
+            ClientStatement::Server(Statement::Restore(restore)) => Self::Restore(restore),
             ClientStatement::BeginTransaction
             | ClientStatement::CommitTransaction
             | ClientStatement::RevertTransaction
@@ -238,23 +267,27 @@ impl Client {
             // the caller did not explicitly request TLS for every seed and redirect.
             options.tls_requirement = Some(TlsRequirement::Required);
         }
-        let connector =
+        let mut connector =
             GrpcConnector::new(options).map_err(ClientError::BuildAuthenticationMetadata)?;
         connector.validate_server(&server)?;
         for seed in connector.seed_servers() {
             connector.validate_server(seed)?;
         }
+        connector
+            .load_dns()
+            .await
+            .map_err(ClientError::LoadDnsConfiguration)?;
         let mut servers = ServerDirectory::with_seeds(server, connector.seed_servers());
         let events = SessionEvents::new();
         let mut last_error = None;
         let deadline = Instant::now() + connector.retry_timeout();
         for candidate in servers.reconnect_candidates() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let attempt = async {
                 let channel = connector.connect(&candidate).await?;
                 Exchange::open(channel, &connector, events.sinks.clone()).await
             };
-            match tokio::time::timeout_at(deadline, attempt).await {
+            match nervix_primitives::time::timeout_at(deadline, attempt).await {
                 Err(_) => return Err(last_error.unwrap_or(ClientError::RetryDeadline)),
                 Ok(Err(error)) => last_error = Some(error),
                 Ok(Ok(exchange)) => {
@@ -266,14 +299,18 @@ impl Client {
         Err(last_error.assured("the primary server is always one configured candidate"))
     }
 
-    /// A client whose session runs on `channel`. It knows no server address, so a lost session
-    /// cannot be reconnected.
+    /// A client whose session starts on `channel`. It can follow advertised redirects and later
+    /// reconnect to servers it has learned, but it has no initial server address or seed.
     pub async fn from_channel(
         channel: Channel,
         domain: Option<DomainName>,
     ) -> error_stack::Result<Self, ClientError> {
-        let connector = GrpcConnector::new(ConnectOptions::default())
+        let mut connector = GrpcConnector::new(ConnectOptions::default())
             .map_err(ClientError::BuildAuthenticationMetadata)?;
+        connector
+            .load_dns()
+            .await
+            .map_err(ClientError::LoadDnsConfiguration)?;
         let events = SessionEvents::new();
         let exchange = Exchange::open(channel, &connector, events.sinks.clone()).await?;
         Ok(Self::assemble(
@@ -350,9 +387,10 @@ impl Client {
             let execution = self.prepare_execution_with_route(query, route).await;
             return self.execute_prepared_after_lock(&execution, deadline).await;
         }
-        let _command_guard = tokio::time::timeout_at(deadline, self.inner.command_lock.lock())
-            .await
-            .map_err(|_| ClientError::RetryDeadline)?;
+        let _command_guard =
+            nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
+                .await
+                .map_err(|_| ClientError::RetryDeadline)?;
         let execution = self.prepare_execution_with_route(query, route).await;
         self.execute_prepared_after_lock(&execution, deadline).await
     }
@@ -401,9 +439,10 @@ impl Client {
         if execution.route.is_subscription() {
             return self.execute_prepared_after_lock(execution, deadline).await;
         }
-        let _command_guard = tokio::time::timeout_at(deadline, self.inner.command_lock.lock())
-            .await
-            .map_err(|_| ClientError::RetryDeadline)?;
+        let _command_guard =
+            nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
+                .await
+                .map_err(|_| ClientError::RetryDeadline)?;
         self.execute_prepared_after_lock(execution, deadline).await
     }
 
@@ -412,25 +451,79 @@ impl Client {
         execution: &ExecutionHandle,
         deadline: Instant,
     ) -> Result<CommandOutcome, ClientError> {
-        let result =
-            tokio::time::timeout_at(deadline, self.execute_prepared_within_budget(execution)).await;
-        match result {
-            Ok(Ok(outcome)) => Ok(outcome),
+        if let StatementRoute::Restore(restore) = &execution.route {
+            // A client bound to a transaction refuses a restore, as it refuses every client-local
+            // statement.
+            if self.active_transaction_status().await.is_some() {
+                return Ok(CommandOutcome::failed_locally(
+                    "client-local commands are not allowed while a transaction is active"
+                        .to_string(),
+                ));
+            }
+            // An archive may take far longer to send than the retry deadline allows a command, so
+            // a restore bounds each frame and each reply instead.
+            return self
+                .restore_with_reference(restore, &execution.reference, |_| {})
+                .await;
+        }
+        let result = nervix_primitives::time::timeout_at(
+            deadline,
+            self.execute_prepared_within_budget(execution),
+        )
+        .await;
+        let outcome = match result {
+            Ok(Ok(outcome)) => outcome,
             Ok(Err(error))
                 if execution.can_have_admitted_command() && error.can_hide_admitted_work() =>
             {
-                Err(ClientError::UncertainCommand {
+                return Err(ClientError::UncertainCommand {
                     reference: execution.reference.clone(),
                     source: Box::new(error),
-                })
+                });
             }
-            Ok(Err(error)) => Err(error),
-            Err(_) if execution.can_have_admitted_command() => Err(ClientError::UncertainCommand {
+            Ok(Err(error)) => return Err(error),
+            Err(_) if execution.can_have_admitted_command() => {
+                return Err(ClientError::UncertainCommand {
+                    reference: execution.reference.clone(),
+                    source: Box::new(ClientError::RetryDeadline),
+                });
+            }
+            Err(_) => return Err(ClientError::RetryDeadline),
+        };
+        match self.download_backup_of(execution, outcome).await {
+            Ok(outcome) => Ok(outcome),
+            Err(report) => Err(ClientError::BackupDownload {
                 reference: execution.reference.clone(),
-                source: Box::new(ClientError::RetryDeadline),
+                source: report.current_context().clone(),
             }),
-            Err(_) => Err(ClientError::RetryDeadline),
         }
+    }
+
+    /// Downloads the archive a completed BACKUP assembled to the file its statement names. The
+    /// download runs after the command's deadline has done its work, because an archive may take
+    /// far longer to transfer than a command to run; its own frames bound it instead.
+    async fn download_backup_of(
+        &self,
+        execution: &ExecutionHandle,
+        mut outcome: CommandOutcome,
+    ) -> Result<CommandOutcome, Report<crate::backup::BackupDownloadError>> {
+        let StatementRoute::Backup(backup) = &execution.route else {
+            return Ok(outcome);
+        };
+        if !outcome.succeeded() {
+            return Ok(outcome);
+        }
+        let Some(summary) = outcome.backup.as_deref() else {
+            return Ok(outcome);
+        };
+        let destination = PathBuf::from(&backup.destination);
+        self.fetch_backup(summary, &execution.reference, &destination)
+            .await?;
+        outcome.message = format!(
+            "{}; archive written to '{}'",
+            outcome.message, backup.destination
+        );
+        Ok(outcome)
     }
 
     async fn execute_prepared_within_budget(
@@ -502,7 +595,7 @@ impl Client {
         id: impl Into<String>,
     ) -> Result<CommandOutcome, ClientError> {
         let id = id.into();
-        match tokio::time::timeout(self.inner.connector.retry_timeout(), async {
+        match nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
             let _command_guard = self.inner.command_lock.lock().await;
             let outcome = self.attach_with_redirects(&id).await?;
             let outcome = CommandOutcome::from(outcome);
@@ -536,55 +629,59 @@ impl Client {
         target: TransactionInspectionTarget,
         operation: Option<TransactionOperationNumber>,
     ) -> Result<InspectionOutcome, ClientError> {
-        let inspected = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            let _command_guard = self.inner.command_lock.lock().await;
-            for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
-                let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
-                    target: target.clone(),
-                    operation,
-                });
-                let body = match self.request(request, None).await {
-                    Ok(body) => body,
-                    Err(error) if error.retryable_session_failure() => {
-                        match self.recover_session(RecoveryMode::IfClosed).await? {
-                            SessionRecovery::Ready => continue,
-                            SessionRecovery::Unavailable => return Err(error),
+        let inspected =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                let _command_guard = self.inner.command_lock.lock().await;
+                for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
+                        target: target.clone(),
+                        operation,
+                    });
+                    let body = match self.request(request, None).await {
+                        Ok(body) => body,
+                        Err(error) if error.retryable_session_failure() => {
+                            match self.recover_session(RecoveryMode::IfClosed).await? {
+                                SessionRecovery::Ready => continue,
+                                SessionRecovery::Unavailable => return Err(error),
+                            }
                         }
-                    }
-                    Err(error) => return Err(error),
-                };
-                let outcome = match body {
-                    ReplyBody::Inspection(outcome) => outcome,
-                    other => {
-                        return Err(ClientError::unexpected_reply(
-                            RequestKind::InspectTransaction,
-                            other,
-                        ));
-                    }
-                };
-                match Routing::for_inspection(&outcome) {
-                    Routing::Redirect(leader) if Self::retries_remain(attempt) => {
-                        self.follow_leader(leader).await?;
-                    }
-                    Routing::AwaitElection if Self::await_retry(attempt).await => {}
-                    _ => {
-                        if let InspectionOutcome::Inspected(inspection) = &outcome {
-                            let preview = TransactionPreviewIdentity {
-                                transaction_id: inspection.transaction.transaction_id().to_string(),
-                                position: inspection.report.position(),
-                                planning_basis: inspection.report.planning_basis(),
-                            };
-                            self.record_preview(preview).await;
+                        Err(error) => return Err(error),
+                    };
+                    let outcome = match body {
+                        ReplyBody::Inspection(outcome) => outcome,
+                        other => {
+                            return Err(ClientError::unexpected_reply(
+                                RequestKind::InspectTransaction,
+                                other,
+                            ));
                         }
-                        return Ok(outcome);
+                    };
+                    match Routing::for_inspection(&outcome) {
+                        Routing::Redirect(leader) if Self::retries_remain(attempt) => {
+                            self.follow_leader(leader).await?;
+                        }
+                        Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                        _ => {
+                            if let InspectionOutcome::Inspected(inspection) = &outcome {
+                                let preview = TransactionPreviewIdentity {
+                                    transaction_id: inspection
+                                        .transaction
+                                        .transaction_id()
+                                        .to_string(),
+                                    position: inspection.report.position(),
+                                    planning_basis: inspection.report.planning_basis(),
+                                };
+                                self.record_preview(preview).await;
+                            }
+                            return Ok(outcome);
+                        }
                     }
                 }
-            }
-            // Only a session that closed again on the last attempt leaves the loop.
-            Err(ClientError::SessionClosed)
-        })
-        .await;
+                // Only a session that closed again on the last attempt leaves the loop.
+                Err(ClientError::SessionClosed)
+            })
+            .await;
         match inspected {
             Ok(result) => result,
             Err(_) => Err(ClientError::RetryDeadline),
@@ -596,7 +693,7 @@ impl Client {
         execution: &ExecutionHandle,
     ) -> Result<CommandOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = match self.execute_once(execution).await {
                 Ok(outcome) => outcome,
                 Err(error) if error.retryable_session_failure() => {
@@ -651,6 +748,32 @@ impl Client {
                     &domains,
                 )))
             }
+            StatementRoute::Local(LocalStatement::AttachDomainClock) => {
+                let Some(domain) = execution.domain.clone() else {
+                    return Err(ClientError::NoActiveDomain);
+                };
+                let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
+                match self.request(request, None).await? {
+                    ReplyBody::DomainClockAttach(outcome) => Ok(CommandOutcome::from(outcome)),
+                    other => Err(ClientError::unexpected_reply(
+                        RequestKind::AttachDomainClock,
+                        other,
+                    )),
+                }
+            }
+            StatementRoute::Local(LocalStatement::DetachDomainClock) => {
+                let Some(domain) = execution.domain.clone() else {
+                    return Err(ClientError::NoActiveDomain);
+                };
+                let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
+                match self.request(request, None).await? {
+                    ReplyBody::DomainClockDetach(outcome) => Ok(CommandOutcome::from(outcome)),
+                    other => Err(ClientError::unexpected_reply(
+                        RequestKind::DetachDomainClock,
+                        other,
+                    )),
+                }
+            }
             StatementRoute::Local(LocalStatement::UploadResource(upload)) => {
                 let Some(domain) = execution.domain.clone() else {
                     return Err(ClientError::NoActiveDomain);
@@ -691,46 +814,54 @@ impl Client {
                 let client = self.clone();
                 let statement = statement.clone();
                 let offset = *offset;
-                let result = tokio::spawn(async move {
+                let result = nervix_primitives::task::spawn(async move {
                     client
                         .create_subscription(attempt, requests, statement, offset)
                         .await
                 })
                 .await
                 .map_err(ClientError::SubscriptionTask)?;
-                result.map_err(|report| {
-                    ClientError::SubscriptionOperation(Box::new(report.into_error()))
-                })
+                result.map_err(ClientError::subscription_operation)
             }
             StatementRoute::Unsubscribe(subscription) => {
                 let exchange = self.inner.exchange.lock().await;
                 let requests = exchange.requests();
                 let generation = exchange.generation.clone();
                 drop(exchange);
-                let Some(attempt) = self
+                let cancellation = self
                     .inner
                     .events
                     .sinks
                     .desired
-                    .cancel(subscription, generation)
-                else {
-                    return Ok(CommandOutcome::failed_locally(format!(
-                        "subscription '{}' is already being deleted",
-                        subscription.as_str()
-                    )));
+                    .cancel(subscription, generation);
+                let attempt = match cancellation {
+                    Cancellation::InFlight => {
+                        return Ok(CommandOutcome::failed_locally(format!(
+                            "subscription '{}' is already being deleted",
+                            subscription.as_str()
+                        )));
+                    }
+                    Cancellation::Closed => {
+                        return Ok(Self::held_by_no_session(subscription));
+                    }
+                    Cancellation::Ended => {
+                        return Ok(Self::ended_by_the_server(subscription));
+                    }
+                    Cancellation::Delete(attempt) => attempt,
                 };
                 let client = self.clone();
-                let result =
-                    tokio::spawn(
-                        async move { client.delete_subscription(attempt, requests).await },
-                    )
-                    .await
-                    .map_err(ClientError::SubscriptionTask)?;
-                result.map_err(|report| {
-                    ClientError::SubscriptionOperation(Box::new(report.into_error()))
+                let result = nervix_primitives::task::spawn(async move {
+                    client.delete_subscription(attempt, requests).await
                 })
+                .await
+                .map_err(ClientError::SubscriptionTask)?;
+                result.map_err(ClientError::subscription_operation)
             }
-            StatementRoute::Command => {
+            StatementRoute::Restore(restore) => {
+                self.run_restore(restore, &execution.reference, |_| {})
+                    .await
+            }
+            StatementRoute::Command | StatementRoute::Backup(_) => {
                 let request = ClientRequest::Command(CommandRequest {
                     query: query.to_string(),
                     domain: execution.domain.clone(),
@@ -752,6 +883,30 @@ impl Client {
                 }
             }
         }
+    }
+
+    /// The outcome of deleting a subscription that no open session holds.
+    fn held_by_no_session(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' deleted; no open session held it",
+            subscription.as_str()
+        ))
+    }
+
+    /// The outcome of deleting a subscription whose generation the server ended.
+    fn ended_by_the_server(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' deleted; the server had already ended it",
+            subscription.as_str()
+        ))
+    }
+
+    /// The outcome of deleting a subscription whose session ended, and the subscription with it.
+    fn closed_with_session(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' closed with its session",
+            subscription.as_str()
+        ))
     }
 
     /// Completes a registered creation even if its caller stops waiting. The contract, ticket and
@@ -795,6 +950,9 @@ impl Client {
 
     /// Completes deletion even when its caller is cancelled. Waiting for an in-flight creation
     /// keeps the exchange reader draining, and avoids deleting before a late success is known.
+    ///
+    /// A subscription whose session ends before the deletion is answered ended with it, so that
+    /// deletion is complete. A name the client never held is asked about on a new session.
     async fn delete_subscription(
         &self,
         attempt: DeleteAttempt,
@@ -803,16 +961,16 @@ impl Client {
         let desired = &self.inner.events.sinks.desired;
         let mut changed = desired.watch();
         while desired.deletion_waits(&attempt) {
-            tokio::task::consume_budget().await;
-            if changed.changed().await.is_err() {
-                return Err(error_stack::Report::new(ClientError::SessionClosed));
-            }
+            nervix_primitives::task::consume_budget().await;
+            changed
+                .changed()
+                .await
+                .assured("the client holds the sender of its own subscription notifications");
         }
-        if !desired.deletion_active(&attempt) {
-            return Ok(CommandOutcome::completed_locally(format!(
-                "subscription '{}' closed with its session",
-                attempt.name.as_str()
-            )));
+        match desired.deletion_target(&attempt) {
+            DeletionTarget::SessionEnded => return Ok(Self::closed_with_session(&attempt.name)),
+            DeletionTarget::NotOpened => return Ok(Self::held_by_no_session(&attempt.name)),
+            DeletionTarget::Server => {}
         }
         let request = ClientRequest::Unsubscribe(UnsubscribeRequest {
             subscription: attempt.name.clone(),
@@ -821,68 +979,32 @@ impl Client {
         match response {
             Ok(ReplyBody::Unsubscribe(outcome)) => {
                 let outcome = CommandOutcome::from(outcome);
-                desired.deleted(&attempt, outcome.succeeded());
+                let resolution = if outcome.succeeded() {
+                    DeletionResolution::Deleted
+                } else {
+                    DeletionResolution::Refused
+                };
+                desired.deleted(&attempt, resolution);
                 Ok(outcome)
             }
             Ok(other) => {
-                desired.deleted(&attempt, false);
+                desired.deleted(&attempt, DeletionResolution::Refused);
                 Err(error_stack::Report::new(ClientError::unexpected_reply(
                     RequestKind::Unsubscribe,
                     other,
                 )))
             }
-            Err(error) => {
-                desired.deleted(&attempt, false);
+            Err(error) if error.retryable_session_failure() => {
+                desired.deleted(&attempt, DeletionResolution::SessionEnded);
+                if attempt.tracked {
+                    return Ok(Self::closed_with_session(&attempt.name));
+                }
                 Err(error_stack::Report::new(error))
             }
-        }
-    }
-
-    pub(crate) fn restore_subscriptions(
-        &self,
-        generation: Arc<()>,
-        exchange: Arc<ExchangeRequests>,
-    ) {
-        let attempts = self.inner.events.sinks.desired.restore(generation.clone());
-        for initial in attempts {
-            let client = SharedClientArc::downgrade(&self.inner);
-            let exchange = exchange.clone();
-            let generation = generation.clone();
-            tokio::spawn(async move {
-                let name = initial.contract.create.name.clone();
-                let mut attempt = initial;
-                loop {
-                    tokio::task::consume_budget().await;
-                    let Some(inner) = client.upgrade() else {
-                        return;
-                    };
-                    let active_client = Client { inner };
-                    let statement = attempt.contract.request().statement;
-                    let outcome = active_client
-                        .create_subscription(attempt, exchange.clone(), statement, 0)
-                        .await;
-                    drop(active_client);
-                    match outcome {
-                        Ok(outcome) if outcome.succeeded() => return,
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::debug!(%error, "subscription restoration remains interrupted");
-                        }
-                    }
-                    if !exchange.pending.lock().is_open() {
-                        return;
-                    }
-                    sleep(Duration::from_secs(1)).await;
-                    let Some(inner) = client.upgrade() else {
-                        return;
-                    };
-                    let next = inner.events.sinks.desired.retry(&name, &generation);
-                    let Some(next) = next else {
-                        return;
-                    };
-                    attempt = next;
-                }
-            });
+            Err(error) => {
+                desired.deleted(&attempt, DeletionResolution::Refused);
+                Err(error_stack::Report::new(error))
+            }
         }
     }
 
@@ -891,7 +1013,7 @@ impl Client {
         transaction_id: &str,
     ) -> Result<nervix_client_wire::AttachOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::AttachTransaction(AttachTransactionRequest {
                 transaction_id: transaction_id.to_string(),
             });
@@ -965,42 +1087,43 @@ impl Client {
         );
         let deadline = Instant::now() + self.inner.connector.retry_timeout();
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let exchange = match &captured {
                 Some(exchange) => exchange.clone(),
                 None => self.inner.exchange.lock().await.requests(),
             };
-            let sent = tokio::time::timeout(self.inner.connector.request_timeout(), async {
-                // Register before sending so a prompt reply always finds its waiter.
-                let Some(mut registered) = exchange.register() else {
-                    return Err(exchange.pending.lock().failure());
-                };
-                let message = ClientMessage {
-                    request_id: registered.request_id,
-                    request: request.clone(),
-                };
-                let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
-                    ClientError::EncodeRequest {
-                        request: kind,
-                        source: report.current_context().clone(),
-                    }
-                })?;
-                if exchange.frames.send(frame).await.is_err() {
-                    exchange.pending.lock().close();
-                    return Err(exchange.pending.lock().failure());
-                }
-                match registered.receive().await {
-                    Some(body) => Ok(body),
-                    None => match exchange.pending.lock().failure() {
-                        ClientError::SessionClosed => {
-                            Err(ClientError::RequestInterrupted { request: kind })
+            let sent =
+                nervix_primitives::time::timeout(self.inner.connector.request_timeout(), async {
+                    // Register before sending so a prompt reply always finds its waiter.
+                    let Some(mut registered) = exchange.register() else {
+                        return Err(exchange.pending.lock().failure());
+                    };
+                    let message = ClientMessage {
+                        request_id: registered.request_id,
+                        request: request.clone(),
+                    };
+                    let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
+                        ClientError::EncodeRequest {
+                            request: kind,
+                            source: report.current_context().clone(),
                         }
-                        error => Err(error),
-                    },
-                }
-            });
+                    })?;
+                    if exchange.frames.send(frame).await.is_err() {
+                        exchange.pending.lock().close();
+                        return Err(exchange.pending.lock().failure());
+                    }
+                    match registered.receive().await {
+                        Some(body) => Ok(body),
+                        None => match exchange.pending.lock().failure() {
+                            ClientError::SessionClosed => {
+                                Err(ClientError::RequestInterrupted { request: kind })
+                            }
+                            error => Err(error),
+                        },
+                    }
+                });
             let sent = if read_only {
-                tokio::time::timeout_at(deadline, sent)
+                nervix_primitives::time::timeout_at(deadline, sent)
                     .await
                     .map_err(|_| ClientError::RetryDeadline)?
             } else {
@@ -1019,7 +1142,7 @@ impl Client {
             match sent {
                 Ok(body) => return Ok(body),
                 Err(error) if error.retryable_session_failure() => {
-                    let recovered = tokio::time::timeout_at(
+                    let recovered = nervix_primitives::time::timeout_at(
                         deadline,
                         Box::pin(self.recover_session(RecoveryMode::IfClosed)),
                     )
@@ -1028,9 +1151,10 @@ impl Client {
                     if let SessionRecovery::Unavailable = recovered {
                         return Err(error);
                     }
-                    let allowed = tokio::time::timeout_at(deadline, Self::await_retry(attempt))
-                        .await
-                        .map_err(|_| ClientError::RetryDeadline)?;
+                    let allowed =
+                        nervix_primitives::time::timeout_at(deadline, Self::await_retry(attempt))
+                            .await
+                            .map_err(|_| ClientError::RetryDeadline)?;
                     if !allowed {
                         return Err(error);
                     }
@@ -1053,38 +1177,47 @@ impl Client {
             .await
     }
 
-    /// The lifecycle currently retained for a desired subscription name.
+    /// The lifecycle currently retained for a desired subscription name. A subscription the server
+    /// ended reads [`SubscriptionLifecycle::Ended`] until it is subscribed again under its name or
+    /// deleted.
     pub fn subscription_lifecycle(&self, name: &SubscriptionName) -> Option<SubscriptionLifecycle> {
         self.inner.events.sinks.desired.lifecycle(name)
     }
 
+    /// Waits for the next event of a subscription the client holds.
+    ///
+    /// The stream outlives the session. When the session ends, it reports
+    /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
+    /// had not ended, opens a new session, and opens each of them again as a new generation. An
+    /// opening that session refuses or leaves unanswered is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
+    /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
+    /// once, after the events before it, even when its session ended before it was read. With
+    /// nothing to restore it waits for the next session the client opens, and delivers the events
+    /// of the subscriptions opened there. A failure to open a session is returned, and the next
+    /// call tries again; [`ClientError::SessionClosed`] means the session ended and the client
+    /// knows no server to open another on.
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
-            tokio::task::consume_budget().await;
-            if let Some(interrupted) = self.inner.events.sinks.desired.take_interruption() {
-                return Ok(SubscriptionEvent::Interrupted(interrupted));
+            nervix_primitives::task::consume_budget().await;
+            if let Some(event) = self.inner.events.sinks.desired.take_event() {
+                return Ok(event);
             }
             let desired = &self.inner.events.sinks.desired;
             let mut desired_changed = desired.watch();
-            let result = tokio::select! {
+            let result = nervix_primitives::select! {
                 result = self.inner.events.sinks.subscriptions.next() => result,
                 changed = desired_changed.changed() => {
-                    if changed.is_err() {
-                        return Err(ClientError::SessionClosed);
-                    }
+                    changed.assured(
+                        "the client holds the sender of its own subscription notifications",
+                    );
                     continue;
                 }
             };
             match result {
                 Ok(event) => {
                     let generation = self.inner.exchange.lock().await.generation.clone();
-                    if self
-                        .inner
-                        .events
-                        .sinks
-                        .desired
-                        .can_deliver(event.subscription(), &generation)
-                    {
+                    if self.inner.events.sinks.desired.admit(&event, &generation) {
                         return Ok(event);
                     }
                 }
@@ -1094,30 +1227,180 @@ impl Client {
                     });
                 }
                 Err(_) => {
-                    if let Some(interrupted) = self.inner.events.sinks.desired.take_interruption() {
-                        return Ok(SubscriptionEvent::Interrupted(interrupted));
+                    if let Some(event) = self.inner.events.sinks.desired.take_event() {
+                        return Ok(event);
                     }
-                    if !self.inner.events.sinks.desired.has_acknowledged_desired() {
+                    if self.inner.events.sinks.desired.has_acknowledged_desired() {
+                        match self.recover_session(RecoveryMode::IfClosed).await? {
+                            SessionRecovery::Ready => continue,
+                            SessionRecovery::Unavailable => {
+                                return Err(ClientError::SessionClosed);
+                            }
+                        }
+                    }
+                    // Nothing waits to be restored, so the stream follows whichever session the
+                    // client opens next.
+                    if !self.can_reconnect().await {
                         return Err(ClientError::SessionClosed);
                     }
-                    match self.recover_session(RecoveryMode::IfClosed).await? {
-                        SessionRecovery::Ready => continue,
-                        SessionRecovery::Unavailable => return Err(ClientError::SessionClosed),
+                    nervix_primitives::select! {
+                        () = self.inner.events.sinks.subscriptions.resumed() => {}
+                        changed = desired_changed.changed() => {
+                            changed.assured(
+                                "the client holds the sender of its own subscription notifications",
+                            );
+                        }
                     }
                 }
             }
         }
     }
 
+    /// Waits for the next server notice.
+    ///
+    /// The stream outlives the session. Notices end with the session that delivered them,
+    /// including the ones not read yet, and the stream continues with the notices of the next
+    /// session the client opens; reading notices never opens a session itself.
+    /// [`ClientError::EventOverflow`] reports that notices arrived faster than they were read and
+    /// the ones the client held were dropped; the next call returns the notices that arrived after
+    /// that gap. [`ClientError::SessionClosed`] means the session ended and the client knows no
+    /// server to open another on.
     pub async fn next_server_event(&self) -> Result<ServerEvent, ClientError> {
-        match self.inner.events.sinks.notices.next().await {
-            Ok(event) => Ok(event),
-            Err(error) if *error.current_context() == EventQueueError::Overflow => {
-                Err(ClientError::EventOverflow {
-                    stream: EventStreamKind::ServerNotice,
-                })
+        let notices = &self.inner.events.sinks.notices;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match notices.next().await {
+                Ok(event) => return Ok(event),
+                Err(error) if *error.current_context() == EventQueueError::Overflow => {
+                    return Err(ClientError::EventOverflow {
+                        stream: EventStreamKind::ServerNotice,
+                    });
+                }
+                Err(_) => {}
             }
-            Err(_) => Err(ClientError::SessionClosed),
+            if !self.can_reconnect().await {
+                return Err(ClientError::SessionClosed);
+            }
+            notices.resumed().await;
+        }
+    }
+
+    /// Whether the client knows a server to open a new session on.
+    async fn can_reconnect(&self) -> bool {
+        self.inner.servers.lock().await.can_reconnect()
+    }
+
+    /// Attaches the session to the clock of `domain`, which it follows until it detaches, even
+    /// across reconnects.
+    ///
+    /// An attached outcome carries the clock as the serving node has it installed.
+    /// [`Client::domain_clock`] answers from the latest clock from then on, and
+    /// [`Client::next_domain_clock_event`] reports state changes and accepted ticks after the reply.
+    pub async fn attach_domain_clock(
+        &self,
+        domain: DomainName,
+    ) -> error_stack::Result<DomainClockAttachOutcome, ClientError> {
+        let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
+        match self.clock_request(request).await? {
+            ReplyBody::DomainClockAttach(outcome) => Ok(outcome),
+            other => Err(Report::new(ClientError::unexpected_reply(
+                RequestKind::AttachDomainClock,
+                other,
+            ))),
+        }
+    }
+
+    /// Detaches the session from the clock of `domain`. Nothing about the domain's clock follows
+    /// the reply.
+    pub async fn detach_domain_clock(
+        &self,
+        domain: DomainName,
+    ) -> error_stack::Result<DomainClockDetachOutcome, ClientError> {
+        let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
+        match self.clock_request(request).await? {
+            ReplyBody::DomainClockDetach(outcome) => Ok(outcome),
+            other => Err(Report::new(ClientError::unexpected_reply(
+                RequestKind::DetachDomainClock,
+                other,
+            ))),
+        }
+    }
+
+    /// The latest clock of a domain the session follows, with the arithmetic that projects it.
+    /// `None` when the session does not follow the domain's clock.
+    pub fn domain_clock(&self, domain: &DomainName) -> Option<AttachedDomainClock> {
+        self.inner.events.sinks.clocks.latest(domain)
+    }
+
+    /// Waits for the next event about the domain clocks the session follows.
+    ///
+    /// Events are coalesced per domain, so a caller that reads late receives the newest state and
+    /// tick, with the state first, rather than every intermediate observation. When the session
+    /// holding an attachment ends, this reopens a session and attaches every followed clock again.
+    /// An attach that session refuses or leaves unanswered is reported as
+    /// [`DomainClockEvent::RestorationFailed`] and sent again after a growing wait. A failure to open
+    /// a session is returned while the clocks keep waiting to be restored, and the next call tries
+    /// again.
+    /// A client that follows no clock waits until it attaches to one.
+    pub async fn next_domain_clock_event(
+        &self,
+    ) -> error_stack::Result<DomainClockEvent, ClientError> {
+        let clocks = &self.inner.events.sinks.clocks;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let mut changed = clocks.watch();
+            if let Some(event) = clocks.take_event() {
+                return Ok(event);
+            }
+            if clocks.awaits_restoration() {
+                let exchange = self.inner.exchange.lock().await.requests();
+                let open = exchange.pending.lock().is_open();
+                if !open {
+                    let recovered = self
+                        .recover_session(RecoveryMode::IfClosed)
+                        .await
+                        .map_err(Report::new)?;
+                    if let SessionRecovery::Unavailable = recovered {
+                        return Err(Report::new(ClientError::SessionClosed));
+                    }
+                    continue;
+                }
+            }
+            changed
+                .changed()
+                .await
+                .assured("the client holds the sender of its own clock notifications");
+        }
+    }
+
+    /// Sends a domain clock request, reopening a lost session and sending the request again
+    /// within the retry deadline.
+    async fn clock_request(
+        &self,
+        request: ClientRequest,
+    ) -> error_stack::Result<ReplyBody, ClientError> {
+        let answered =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    match self.request(request.clone(), None).await {
+                        Ok(body) => return Ok(body),
+                        Err(error) if error.retryable_session_failure() => {
+                            match self.recover_session(RecoveryMode::IfClosed).await? {
+                                SessionRecovery::Ready => {}
+                                SessionRecovery::Unavailable => return Err(error),
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                // Only a session that closed again on the last attempt leaves the loop.
+                Err(ClientError::SessionClosed)
+            })
+            .await;
+        match answered {
+            Ok(result) => result.map_err(Report::new),
+            Err(_) => Err(Report::new(ClientError::RetryDeadline)),
         }
     }
 
@@ -1126,7 +1409,7 @@ impl Client {
     pub async fn next_domain_list(&self) -> Result<Vec<DomainInfo>, ClientError> {
         let mut observed = self.inner.events.domains.lock().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if observed.changed().await.is_err() {
                 return Err(ClientError::SessionClosed);
             }
@@ -1241,11 +1524,39 @@ impl Client {
         )
         .await?;
         self.inner.servers.lock().await.connected(server);
+        self.install(exchange).await;
+        Ok(())
+    }
+
+    /// Makes `exchange` the client's exchange, restores on it what the client holds, and ends
+    /// the exchange it replaces.
+    ///
+    /// Every restoration request is sent before this returns, so a transaction the caller
+    /// attaches afterwards follows them: a session that holds a transaction refuses both.
+    pub(crate) async fn install(&self, exchange: Exchange) {
+        let mut restoration = Restoration::new(&exchange, self.inner.connector.request_timeout());
+        restoration.attach_followed_clocks().await;
         let previous = std::mem::replace(&mut *self.inner.exchange.lock().await, exchange);
         previous.close().await;
-        let exchange = self.inner.exchange.lock().await;
-        self.restore_subscriptions(exchange.generation.clone(), exchange.requests());
-        Ok(())
+        restoration.attach_interrupted_clocks().await;
+        restoration.open_subscriptions().await;
+        restoration.open_producers().await;
+        restoration.open_consumers().await;
+        restoration.follow();
+    }
+
+    /// Reuses the session recovery owner when an endpoint moved while its exchange stayed open.
+    /// The reconnect lock serializes this with installing a replacement exchange; each desired
+    /// handle starts at most one open on the chosen exchange.
+    pub(crate) async fn restore_interrupted_endpoints(&self) {
+        let _reconnect_guard = self.inner.reconnect_lock.lock().await;
+        let mut restoration = {
+            let exchange = self.inner.exchange.lock().await;
+            Restoration::new(&exchange, self.inner.connector.request_timeout())
+        };
+        restoration.open_producers().await;
+        restoration.open_consumers().await;
+        restoration.follow();
     }
 
     /// Reconnects a lost session and attaches its transaction again.
@@ -1269,14 +1580,18 @@ impl Client {
             let mut delay = Self::LEADER_ELECTION_RETRY_DELAY;
             let mut last_error = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let candidates = self.inner.servers.lock().await.reconnect_candidates();
                 if candidates.is_empty() {
                     break 'recovery SessionRecovery::Unavailable;
                 }
                 for server in candidates {
-                    tokio::task::consume_budget().await;
-                    match tokio::time::timeout_at(deadline, self.reconnect_unlocked(&server)).await
+                    nervix_primitives::task::consume_budget().await;
+                    match nervix_primitives::time::timeout_at(
+                        deadline,
+                        self.reconnect_unlocked(&server),
+                    )
+                    .await
                     {
                         Ok(Ok(())) => break 'recovery SessionRecovery::Ready,
                         Ok(Err(error)) => last_error = Some(error),

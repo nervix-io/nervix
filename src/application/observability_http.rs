@@ -18,8 +18,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use nervix_consensus::Observer;
-use tokio::{net::TcpListener, task::JoinSet};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
 use tracing::warn;
 
 use super::{AppError, http_endpoint::text_response};
@@ -63,8 +62,8 @@ pub(in crate::application) async fn serve_observability_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        tokio::task::consume_budget().await;
-        let accepted = tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }

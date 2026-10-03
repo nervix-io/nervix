@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use error_stack::Report;
 use nervix_models::Timestamp;
+use nervix_primitives::time::{Instant, sleep_until};
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalDeadlineError {
@@ -76,19 +76,19 @@ pub fn actual_utc_now() -> Timestamp {
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn physical_deadline_waits_on_the_monotonic_timer() {
         let capability = PhysicalDeadlineCapability::operational();
         let deadline = capability
             .after(Duration::from_secs(2))
             .expect("the fixture timeout fits the monotonic clock");
-        let waiter = tokio::spawn(async move {
+        let waiter = nervix_primitives::task::spawn(async move {
             capability.wait_until(deadline).await;
         });
 
-        tokio::time::advance(Duration::from_secs(1)).await;
+        nervix_primitives::time::advance(Duration::from_secs(1)).await;
         assert!(!waiter.is_finished());
-        tokio::time::advance(Duration::from_secs(1)).await;
+        nervix_primitives::time::advance(Duration::from_secs(1)).await;
         waiter.await.expect("the deadline task must finish");
     }
 }
