@@ -611,9 +611,14 @@ gate is held, and its synchronous guard never crosses an await.
 
 The relay dispatch gate separates ordinary publication from a model change, ownership handoff, or
 shutdown operation that must know every earlier dispatch has left. On the open path, a publisher
-increments an atomic in-flight count and checks an atomic closed flag. An engagement closes the
-gate before inspecting the count. These operations use one total order, so either the publisher
-enters and is counted by the engagement or it observes closure, rolls back its count, and waits.
+raises an atomic in-flight count with a read-modify-write and then checks an atomic closed flag. An
+engagement closes the gate and then reads the count with a read-modify-write as well.
+Read-modify-writes of one count are totally ordered, so either the publisher's comes first and the
+engagement counts it, or the engagement's comes first and the publisher's acquires it, observes the
+gate closed, rolls its count back, and waits. A plain load of the count would not do: it may return
+a count from before an increment that preceded it, while that publisher's own load of the flag still
+finds the gate open. Leaving releases what a dispatch did under its permit to the engagement's next
+read, and the last dispatch to leave a closed gate wakes the engagements waiting for it.
 
 The engagement state is consulted only while the gate is closed. Once all earlier permits leave,
 the engagement owns a lease and the protected mutation can proceed. The acquisition deadline bounds
@@ -626,8 +631,7 @@ until fan-out has attached the consumer ACK shares and resolved the owner's shar
 cannot replace the routes while that permit is live. If the gate has closed first, fan-out fails
 the record ACKs and returns the batch for source retry. Waiting for the gate here would deadlock
 the swap, because the swap's drain counts the
-buffered batch. The same sequentially consistent gate protocol orders the nonwaiting attempt and
-the swap engagement.
+buffered batch. The same gate protocol orders the nonwaiting attempt and the swap engagement.
 
 The three-node attached-emitter move scenario injects a stale zero buffered-batch drain report
 while an owner batch is paused. That puts fan-out beside the local swap even when the coordinator's
@@ -713,8 +717,12 @@ admission returns the admitted outcome.
 
 Relay fan-out itself uses one bounded queue per consumer. Publishers share no fan-out lock;
 capacity and receiver counts are atomic, and a publisher registers for notification only when a
-consumer queue is full. Removing one consumer does not stop the others, and changing capacity does
-not discard batches already queued.
+consumer queue is full. A waiting publisher raises a waiting count before it reads a consumer's
+admission count, and a consumer lowers its admission count before it reads the waiting count. Both
+reach the admission count by read-modify-write, so either the publisher reads the room the consumer
+freed or the consumer reads the waiting count raised and wakes the publisher. Removing one consumer
+does not stop the others, and changing capacity does not discard batches already queued.
+
 
 ## Ratchet And Review
 
@@ -1334,6 +1342,18 @@ ordering it claims, rather than passing because something else synchronized its 
 weakening whose original text no longer appears exactly once fails as well, so changing an owner's
 ordering means revisiting its qualification.
 
+Loom models a `SeqCst` access as an acquire or a release, and models only `fence(SeqCst)` exactly. A
+protocol in which each side writes one location and then reads the other, such as a dispatch that
+raises the in-flight count before it reads the closed flag while a fence closes the gate before it
+reads the count, is therefore written so that its correctness follows from acquire and release
+alone. The side off the hot path reads the other side's count with a read-modify-write, which reads
+the newest value in that count's modification order: either the hot side's read-modify-write came
+first and the cold side's read sees it, or the cold side's came first and the hot side's
+read-modify-write acquires it, and with it the write the cold side made before. That is exact in the
+C11 model and checkable by Loom, and it costs the hot path nothing. The qualification of such a
+model weakens the cold side's read-modify-write to a load, which is the store-buffering fault the
+protocol rules out.
+
 Loom's own limits bound every claim. It does not model every relaxed behavior the C11 model
 permits, and an operation inside a third-party dependency, such as a `triomphe` reference count or
 an `arc-swap` publication, is invisible to it and excluded from the claim rather than given a
@@ -1351,6 +1371,11 @@ against reports and announcements.
 | `execution.cancellation.publication` | A job that observes its cancellation also observes every write its awaiting caller made before the cancellation: raising the flag releases and observing it acquires. The witness is read the moment the job observes the cancellation, before any join could order the two threads | `loom_a_job_that_observes_cancellation_observes_every_write_made_before_it` (`crates/execution/src/cancellation.rs`); fails when either the raising store or the observing load is weakened to `Relaxed` |
 | `execution.cancellation.cancel-on-drop` | Dropping an armed obligation cancels its job: once the drop is ordered before a check, every clone of the job's signal reports it, and a check never loses a cancellation an earlier check observed | `loom_dropping_the_obligation_cancels_every_later_check_of_the_job` |
 | `execution.cancellation.disarm` | A disarmed obligation never cancels its job, whether the job checks while it is disarmed or after it is dropped. Disarming writes nothing, so the model has a single schedule and fails if disarming or the drop after it ever raises the flag | `loom_a_disarmed_obligation_never_cancels_its_job` |
+| `runtime.relay-dispatch-gate.entry-fence` | A relay dispatch fence counts every dispatch that finds the gate open: a dispatch raises the in-flight count before it reads the closed flag, an engagement closes the gate before it reads the count, and both reach the count by read-modify-write, so one observes the other | `loom_a_fence_counts_every_dispatch_that_finds_the_gate_open` (`src/runtime/relay_channel_loom_models.rs`); fails when `let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);` weakened to `let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);` |
+| `runtime.relay-dispatch-gate.lease-publication` | A fence that takes its lease observes everything each dispatch it counted did under its permit: leaving releases and the fence's read of the count acquires | `loom_a_lease_follows_what_every_counted_dispatch_did_under_its_permit` (`src/runtime/relay_channel_loom_models.rs`); fails when a dispatch's leaving is weakened from `AcqRel` to `Relaxed` |
+| `runtime.relay-dispatch-gate.drain-wakeup` | The last dispatch to leave a closed gate wakes the fence waiting for it: either the fence's read of the count sees the dispatch gone, or the dispatch's leaving acquires that read and observes the gate closed | `loom_the_last_dispatch_to_leave_a_closed_gate_wakes_its_fence` (`src/runtime/relay_channel_loom_models.rs`); fails when `let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);` weakened to `let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);` |
+| `runtime.relay-dispatch-gate.reopen-publication` | A dispatch that finds the gate reopened observes what the protected mutation changed while it was closed: reopening releases and the dispatch's read of the flag acquires | `loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change` (`src/runtime/relay_channel_loom_models.rs`); fails when `.store(!state.engagements.is_empty(), Ordering::Release);` weakened to `.store(!state.engagements.is_empty(), Ordering::Relaxed);` |
+| `runtime.relay-fanout.admission-wakeup` | A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other | `loom_a_consumer_freeing_room_admits_or_wakes_the_publisher_waiting_for_it` (`src/runtime/relay_channel_loom_models.rs`); fails when `let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);` weakened to `let admitted = self.admitted.load(Ordering::Acquire);` |
 
 The cancellation protocol these models check is the bounded executor's. `Cancellation::armed`
 creates both ends of one job's cancellation: the executor keeps the obligation while its caller

@@ -894,7 +894,11 @@ build and the existing tests, and nothing in it changes behavior.
   `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
   must make the model fail. A standalone relaxed counter carries no cross-location claim, and an
   operation inside an opaque dependency is excluded from a claim rather than given a fictional
-  model.
+  model. A store-load claim, in which each side writes one location and then reads the other's,
+  holds only under sequential consistency, which acquire and release do not give and Loom cannot
+  check, because it models `SeqCst` accesses as acquire and release. The side off the hot path
+  therefore reads the other side's location by read-modify-write, so acquire and release decide the
+  claim and Loom can check it.
 - The evidence forms are complementary and none replaces another: Shuttle for interleavings of
   production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
   network claims within the supported simulation, Cucumber for public behavior, and the external

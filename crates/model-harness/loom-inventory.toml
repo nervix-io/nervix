@@ -45,3 +45,77 @@ invariant = "execution.cancellation.publication"
 original = "self.cancelled.load(Ordering::Acquire)"
 path = "crates/execution/src/cancellation.rs"
 weakened = "self.cancelled.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A relay dispatch fence counts every dispatch that finds the gate open: a dispatch raises the in-flight count before it reads the closed flag, an engagement closes the gate before it reads the count, and both reach the count by read-modify-write, so one observes the other."
+id = "runtime.relay-dispatch-gate.entry-fence"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_fence_counts_every_dispatch_that_finds_the_gate_open"
+
+[[invariant]]
+claim = "A fence that takes its lease observes everything each dispatch it counted did under its permit: leaving releases and the fence's read of the count acquires."
+id = "runtime.relay-dispatch-gate.lease-publication"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_lease_follows_what_every_counted_dispatch_did_under_its_permit"
+
+[[invariant]]
+claim = "The last dispatch to leave a closed gate wakes the fence waiting for it: either the fence's read of the count sees the dispatch gone, or the dispatch's leaving acquires that read and observes the gate closed."
+id = "runtime.relay-dispatch-gate.drain-wakeup"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_the_last_dispatch_to_leave_a_closed_gate_wakes_its_fence"
+
+[[invariant]]
+claim = "A dispatch that finds the gate reopened observes what the protected mutation changed while it was closed: reopening releases and the dispatch's read of the flag acquires."
+id = "runtime.relay-dispatch-gate.reopen-publication"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change"
+
+[[qualification]]
+failure = "the fence took its lease while a dispatch it did not count was still running"
+id = "runtime.relay-dispatch-gate.fence-loads-the-count"
+invariant = "runtime.relay-dispatch-gate.entry-fence"
+original = "let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);"
+
+[[qualification]]
+failure = "the fence took its lease without what the dispatch did under its permit"
+id = "runtime.relay-dispatch-gate.relaxed-leave"
+invariant = "runtime.relay-dispatch-gate.lease-publication"
+original = """
+            .in_flight_dispatches
+            .fetch_sub(1, Ordering::AcqRel)"""
+path = "src/runtime/relay_channel.rs"
+weakened = """
+            .in_flight_dispatches
+            .fetch_sub(1, Ordering::Relaxed)"""
+
+[[qualification]]
+failure = "the fence waits for a dispatch that left without waking it"
+id = "runtime.relay-dispatch-gate.drain-fence-loads-the-count"
+invariant = "runtime.relay-dispatch-gate.drain-wakeup"
+original = "let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);"
+
+[[qualification]]
+failure = "a dispatch entered the reopened gate without the change made while it was closed"
+id = "runtime.relay-dispatch-gate.relaxed-reopen"
+invariant = "runtime.relay-dispatch-gate.reopen-publication"
+original = ".store(!state.engagements.is_empty(), Ordering::Release);"
+path = "src/runtime/relay_channel.rs"
+weakened = ".store(!state.engagements.is_empty(), Ordering::Relaxed);"
+
+[[invariant]]
+claim = "A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other."
+id = "runtime.relay-fanout.admission-wakeup"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_consumer_freeing_room_admits_or_wakes_the_publisher_waiting_for_it"
+
+[[qualification]]
+failure = "a consumer freed room without admitting or waking the publisher waiting for it"
+id = "runtime.relay-fanout.waiting-publisher-loads-the-admissions"
+invariant = "runtime.relay-fanout.admission-wakeup"
+original = "let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "let admitted = self.admitted.load(Ordering::Acquire);"
