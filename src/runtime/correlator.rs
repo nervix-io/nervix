@@ -474,6 +474,13 @@ pub(super) async fn correlate_incoming_message(
     }))
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the VM selected-row iterator is the bounded row selection for this admitted \
+                  batch"
+    )
+)]
 pub(super) async fn evaluate_correlator_where_matches(
     executor: &Executor,
     processor: &ModelName,
@@ -710,6 +717,12 @@ pub(super) fn correlator_output_batch_errors(
         .collect()
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow row selection and the bounded executor own their generic effects"
+    )
+)]
 pub(super) async fn evaluate_correlator_output_batch(
     executor: &Executor,
     processor: &ModelName,
@@ -1305,7 +1318,7 @@ pub(super) async fn handle_correlator_timeout_action(
 mod tests {
     use ahash::HashMap;
     use nervix_models::ParseAsType;
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{

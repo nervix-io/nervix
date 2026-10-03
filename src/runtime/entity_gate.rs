@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "entity registration and transaction engagement resolve retained freeze, gate \
+                  and quiesce owners"
+    )
+)]
+
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
@@ -106,6 +115,16 @@ impl EntityGateOperationError {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "entity gate coordination identity",
+        bound = "one engagement state and one retained hold per operation; mutex guards never \
+                 cross await",
+        reason = "the transaction retains the exact engagement whose hold it observes or releases"
+    )
+)]
 pub(super) struct EntityGateOperation {
     scope: EntityGateScope,
     state: Mutex<EntityGateOperationState>,
@@ -271,6 +290,13 @@ pub(super) struct QuiescedIngestorHold {
 /// item that is between two counters at the moment they are read, and a drain that misses the last
 /// item reports a node holding no work while it still holds one.
 #[derive(Debug, Default)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained quiesce owner counts each admitted or parked unit of work"
+    )
+)]
 pub(super) struct NodeQuiesceCounters {
     /// Every work item this node holds in memory.
     outstanding: AtomicUsize,
@@ -430,6 +456,13 @@ impl NodeQuiesceCounters {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained quiesce owner counts each admitted or parked unit of work"
+    )
+)]
 pub(super) struct NodeQuiesceWorkGuard {
     pub(super) counters: Arc<NodeQuiesceCounters>,
     pub(super) required_materialized_wait: bool,
@@ -686,6 +719,13 @@ pub(in crate::runtime) struct OwnershipHandoffFreeze<'watch> {
 }
 
 impl OwnershipHandoffFreezeWatch {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "resolve the entity freeze watch before admitted execution"
+        )
+    )]
     pub(in crate::runtime) fn new(runtime: &Runtime, entity: DomainNodeRef) -> Self {
         let state = runtime
             .inner
@@ -1348,6 +1388,14 @@ impl Runtime {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(super) fn node_quiesce_counters(
         &self,
         domain: &DomainName,
@@ -1501,7 +1549,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc as StdArc, time::Duration};
+    use std::time::Duration;
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
@@ -1513,13 +1561,13 @@ mod tests {
     };
     use nervix_primitives::{
         sync::{
+            Arc, StdArc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
             watch,
         },
         time::Instant,
     };
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::emitter_execution_plan::EmitterExecutionPlans;

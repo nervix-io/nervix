@@ -358,6 +358,11 @@ impl RuntimeInputCollector {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the caller supplies deadline iteration while this retained \
+                               branch task waits on the domain clock")
+)]
 pub(super) async fn wait_for_branch_buffer_deadlines(
     clock: &DomainClock,
     deadlines: Vec<BranchBufferDeadline>,

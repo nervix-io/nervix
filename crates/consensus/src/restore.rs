@@ -804,10 +804,12 @@ mod tests {
     #[test]
     fn shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start() {
         use nervix_primitives::{
-            sync::blocking::{Mutex, RwLock},
+            sync::{
+                Arc,
+                blocking::{Mutex, RwLock},
+            },
             thread,
         };
-        use triomphe::Arc;
         let invariant = || {
             let (mut state, reference) = preparing_restore();
             let authority = begin_installation(&mut state, &reference, 3, 12);
@@ -869,28 +871,7 @@ mod tests {
                 "stale publication changed checkpoints or runtime handles after START"
             );
         };
-        let mut config = shuttle::Config::new();
-        // Applying a real consensus command exceeds Shuttle's default coroutine stack.
-        config.stack_size = 1_048_576;
-        config.max_steps = shuttle::MaxSteps::FailAfter(10_000);
-        if let Some(directory) = std::env::var_os("SHUTTLE_TRACE_DIR") {
-            let directory = std::path::PathBuf::from(directory);
-            std::fs::create_dir_all(&directory).assured("failure trace directory opens");
-            config.failure_persistence = shuttle::FailurePersistence::File(Some(directory));
-        }
-        if let Some(schedule) = std::env::var_os("SHUTTLE_TRACE_FILE") {
-            let scheduler = shuttle::scheduler::ReplayScheduler::new_from_file(schedule)
-                .assured("saved schedule opens");
-            shuttle::Runner::new(scheduler, config).run(invariant);
-            return;
-        }
-        shuttle::Runner::new(
-            shuttle::scheduler::RandomScheduler::new(1_000),
-            config.clone(),
-        )
-        .run(invariant);
-        shuttle::Runner::new(shuttle::scheduler::PctScheduler::new(3, 1_000), config)
-            .run(invariant);
+        nervix_model_harness::shuttle::check_interleavings(invariant);
     }
 
     #[test]

@@ -6523,7 +6523,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml 0.8.2",
- "triomphe",
  "upon",
  "uuid",
 ]
@@ -6549,7 +6548,6 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -6560,7 +6558,6 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -6589,7 +6586,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "triomphe",
  "url",
 ]
 
@@ -6612,6 +6608,7 @@ dependencies = [
  "meticulous",
  "nervix-client-wire",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-nspl",
  "nervix-primitives",
@@ -6625,7 +6622,6 @@ dependencies = [
  "tokio",
  "tonic 0.13.1",
  "tracing",
- "triomphe",
  "url",
  "uuid",
 ]
@@ -6635,15 +6631,22 @@ name = "nervix-client-ffi"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-schema",
+ "bolero",
+ "bytes",
  "error-stack",
  "meticulous",
  "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "serde_json",
  "strum 0.26.3",
  "tonic 0.13.1",
- "triomphe",
  "uuid",
 ]
 
@@ -6682,6 +6685,7 @@ dependencies = [
  "error-stack",
  "itoa",
  "meticulous",
+ "nervix-primitives",
  "nervix-simd-kernels",
  "ryu",
  "serde",
@@ -6711,7 +6715,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "triomphe",
  "upon",
  "url",
  "uuid",
@@ -6822,7 +6825,6 @@ dependencies = [
  "rdkafka",
  "thiserror 2.0.21",
  "tracing",
- "triomphe",
 ]
 
 [[package]]
@@ -6867,7 +6869,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "triomphe",
  "url",
 ]
 
@@ -7047,7 +7048,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
- "triomphe",
 ]
 
 [[package]]
@@ -7135,7 +7135,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.24.0",
- "triomphe",
  "url",
 ]
 
@@ -7158,20 +7157,22 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "blake3",
+ "bolero",
  "error-stack",
  "fjall",
  "futures-util",
  "imbl",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
  "openraft",
  "rkyv",
  "serde",
- "shuttle",
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
@@ -7179,7 +7180,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "triomphe",
  "ubyte",
 ]
 
@@ -7221,7 +7221,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "triomphe",
  "webpki-roots 1.0.9",
 ]
 
@@ -7236,7 +7235,6 @@ dependencies = [
  "nervix-primitives",
  "shuttle",
  "thiserror 2.0.21",
- "triomphe",
  "ubyte",
 ]
 
@@ -7248,7 +7246,6 @@ dependencies = [
  "intrusive-collections",
  "meticulous",
  "nervix-primitives",
- "triomphe",
 ]
 
 [[package]]
@@ -7271,6 +7268,7 @@ dependencies = [
  "meticulous",
  "nervix-dns",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7290,7 +7288,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "triomphe",
  "turmoil",
  "ubyte",
  "url",
@@ -7321,9 +7318,9 @@ version = "0.1.0-dev"
 dependencies = [
  "loom",
  "nervix-primitives",
+ "shuttle",
  "tracing",
  "tracing-subscriber",
- "triomphe",
 ]
 
 [[package]]
@@ -7353,7 +7350,6 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "triomphe",
  "url",
  "uuid",
 ]
@@ -7400,6 +7396,7 @@ dependencies = [
  "nervix-arbitrary",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nervix-recovery",
  "tempfile",
  "thiserror 2.0.21",
@@ -7412,6 +7409,8 @@ dependencies = [
  "arc-swap",
  "concurrent-queue",
  "dashmap 6.2.1",
+ "futures-channel",
+ "futures-util",
  "loom",
  "meticulous",
  "nervix-primitives-macros",
@@ -7425,6 +7424,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "triomphe",
  "turmoil",
 ]
 
@@ -7465,7 +7465,6 @@ dependencies = [
  "regex",
  "roto",
  "thiserror 2.0.21",
- "triomphe",
  "uuid",
 ]
 
@@ -7524,6 +7523,7 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-rest",
  "iceberg-storage-opendal",
+ "imbl",
  "indexmap 2.14.2",
  "lapin",
  "meticulous",
@@ -7531,6 +7531,7 @@ dependencies = [
  "multer",
  "mysql_async",
  "nervix-approx-into",
+ "nervix-arbitrary",
  "nervix-backup",
  "nervix-bounded-write",
  "nervix-branch-instances",
@@ -7624,8 +7625,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "triomphe",
- "trybuild",
  "typed-builder 0.20.1",
  "ubyte",
  "upon",
@@ -7715,7 +7714,6 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.21",
  "tokio",
- "triomphe",
  "unicode-normalization",
  "url",
  "uuid",
@@ -7742,7 +7740,6 @@ dependencies = [
  "nonzero_ext",
  "strum 0.26.3",
  "thiserror 2.0.21",
- "triomphe",
  "wasmtime",
 ]
 
@@ -7779,7 +7776,6 @@ dependencies = [
  "bytes",
  "console_error_panic_hook",
  "error-stack",
- "futures-channel",
  "futures-util",
  "gloo-net 0.7.0",
  "js-sys",
@@ -11972,12 +11968,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
-name = "target-tuple"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
-
-[[package]]
 name = "tcp-stream"
 version = "0.34.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12400,12 +12390,10 @@ version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
- "indexmap 2.14.2",
  "serde_core",
  "serde_spanned 1.1.1",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
- "toml_writer",
  "winnow 1.0.4",
 ]
 
@@ -12469,12 +12457,6 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.4",
 ]
-
-[[package]]
-name = "toml_writer"
-version = "1.1.2+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tonic"
@@ -12708,21 +12690,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "trybuild"
-version = "1.0.121"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0cabaa10be1917331a313866bd94526343e03c77bcf69144b62b072ad35d47c"
-dependencies = [
- "glob",
- "serde",
- "serde_derive",
- "serde_json",
- "target-tuple",
- "termcolor",
- "toml 1.1.6+spec-1.1.0",
-]
 
 [[package]]
 name = "tryhard"

@@ -2,18 +2,24 @@
 //!
 //! Layer: edges.
 //! - **Owns.** Desired emitter consumers across session exchanges, reading Arrow deliveries,
+//!   keeping a read whose caller stopped waiting for the next read of the same attachment,
 //!   settling each attempt only through the attachment that delivered it, and closing attachments.
 //! - **Depends on.** The session request exchange and typed consumer wire contract.
 //! - **Must not know.** Which node executes the emitter or how its output is produced.
+//!
+//! A read the server answers with a batch assigns that attempt to the consumer. A caller that
+//! stops waiting for a read therefore parks it with its consumer, and the next read of the same
+//! attachment takes it over instead of asking for another batch, so a cancelled wait never strands
+//! an assigned attempt until its ACK timeout.
 
 use std::{
-    collections::BTreeMap,
-    sync::{Arc as StdArc, Weak},
+    collections::{BTreeMap, VecDeque},
     time::Duration,
 };
 
 use bytes::Bytes;
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
     ClientRequest, CloseEmitterRequest, ConsumerId, EmitterBatchDecision, EmitterCloseDisposition,
     EmitterOpenRefusal, EmitterOpened, EmitterSettlement, OpenEmitterDisposition,
@@ -24,19 +30,19 @@ use nervix_models::{
     ClientConsumerLimits, DomainName, EmitterName, RelayName, SchemaField, Timestamp,
 };
 use nervix_primitives::sync::{
+    Arc, StdArc, StdWeak,
     atomic::{AtomicBool, Ordering},
     blocking::Mutex as SyncMutex,
     oneshot, watch,
 };
 use nervix_recovery::Discarded as _;
-use triomphe::Arc;
 use uuid::Uuid;
 
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
-    exchange::ExchangeRequests,
-    producer::request_on_exchange,
+    exchange::{ExchangeRequests, PendingRequest},
+    producer::{Answered, request_on_exchange, send_on_exchange},
 };
 
 struct ConsumerAttachment {
@@ -55,6 +61,22 @@ pub(crate) struct ConsumerHandle {
     registry: DesiredConsumers,
     initial_id: ConsumerId,
     lifecycle: ConsumerLifecycle,
+    /// Reads whose callers stopped waiting before their replies arrived, oldest first. Each is
+    /// taken over by a later read of its attachment; the rest end with their attachment.
+    parked: SyncMutex<VecDeque<ParkedRead>>,
+}
+
+/// A batch read sent on one attachment, whose reply nobody waits for right now.
+struct ParkedRead {
+    attachment: Arc<ConsumerAttachment>,
+    request: PendingRequest,
+}
+
+/// The wait for one read's reply. Dropping it before the reply arrives parks the read with its
+/// consumer.
+struct WaitingRead<'a> {
+    handle: &'a ConsumerHandle,
+    read: Option<ParkedRead>,
 }
 
 /// The selected primitive owner of a desired consumer's attachment and close fence. It is kept
@@ -98,7 +120,7 @@ pub enum ConsumerConnection {
 
 #[derive(Clone, Default)]
 pub(crate) struct DesiredConsumers {
-    desired: Arc<SyncMutex<BTreeMap<usize, Weak<ConsumerHandle>>>>,
+    desired: Arc<SyncMutex<BTreeMap<usize, StdWeak<ConsumerHandle>>>>,
 }
 
 /// One competing application consumer attached to an emitter on a single session exchange.
@@ -207,6 +229,7 @@ impl Client {
                                 lifecycle: ConsumerLifecycle::new(ConsumerPhase::Active(
                                     attachment.clone(),
                                 )),
+                                parked: SyncMutex::new(VecDeque::new()),
                             });
                             registry.register(&inner);
                             if !attachment.exchange.pending.lock().is_open() {
@@ -257,7 +280,7 @@ impl DesiredConsumers {
     pub(crate) fn restorable(&self) -> Vec<StdArc<ConsumerHandle>> {
         let mut desired = self.desired.lock();
         desired.retain(|_, handle| handle.strong_count() > 0);
-        desired.values().filter_map(Weak::upgrade).collect()
+        desired.values().filter_map(StdWeak::upgrade).collect()
     }
 
     pub(crate) fn exchange_ended(&self, generation: &Arc<()>) {
@@ -319,6 +342,13 @@ impl ConsumerLifecycle {
     fn current(&self) -> Option<Arc<ConsumerAttachment>> {
         match &*self.phase.lock() {
             ConsumerPhase::Active(attachment) => Some(attachment.clone()),
+            _ => None,
+        }
+    }
+
+    fn reopen_reason(&self) -> Option<ConsumerReopenReason> {
+        match &*self.phase.lock() {
+            ConsumerPhase::ReopenRequired(reason) => Some(reason.clone()),
             _ => None,
         }
     }
@@ -542,7 +572,93 @@ impl ConsumerHandle {
     fn stop(&self) -> Option<Arc<ConsumerAttachment>> {
         let attachment = self.lifecycle.close();
         self.registry.unregister(self);
+        // A closed consumer reads nothing again; the attempts its parked reads may hold are
+        // revoked with its attachment.
+        let parked = std::mem::take(&mut *self.parked.lock());
+        drop(parked);
         attachment
+    }
+
+    /// Waits for the reply of a batch read on `attachment`: one a caller stopped waiting for
+    /// earlier, or else a new one.
+    async fn read(
+        &self,
+        attachment: &Arc<ConsumerAttachment>,
+    ) -> error_stack::Result<Answered, ClientError> {
+        let request = match self.adopt(attachment) {
+            Some(request) => request,
+            None => {
+                let read = ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
+                    consumer: attachment.id,
+                });
+                send_on_exchange(&attachment.exchange, read, RequestKind::ReadEmitterBatch).await?
+            }
+        };
+        let waiting = WaitingRead {
+            handle: self,
+            read: Some(ParkedRead {
+                attachment: attachment.clone(),
+                request,
+            }),
+        };
+        waiting.reply().await
+    }
+
+    /// Takes over the oldest parked read of `attachment`. Parked reads of an earlier attachment
+    /// ended with it, and are dropped on the way.
+    fn adopt(&self, attachment: &Arc<ConsumerAttachment>) -> Option<PendingRequest> {
+        let mut stale = Vec::new();
+        let adopted = {
+            let mut parked = self.parked.lock();
+            loop {
+                let Some(read) = parked.pop_front() else {
+                    break None;
+                };
+                if Arc::ptr_eq(&read.attachment, attachment) {
+                    break Some(read.request);
+                }
+                stale.push(read);
+            }
+        };
+        drop(stale);
+        adopted
+    }
+
+    /// Keeps a read whose caller stopped waiting for a later read of its attachment. A read of an
+    /// attachment that already ended has no reply left to take over.
+    fn park(&self, read: ParkedRead) {
+        if read.attachment.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.parked.lock().push_back(read);
+    }
+}
+
+impl WaitingRead<'_> {
+    async fn reply(mut self) -> error_stack::Result<Answered, ClientError> {
+        let read = self
+            .read
+            .as_mut()
+            .verified("a waiting read holds its request until its reply arrives");
+        let request_id = read.request.request_id;
+        let body = read.request.receive().await;
+        // The reply arrived, or the exchange ended without one: either way nothing is left to
+        // take over.
+        self.read = None;
+        match body {
+            Some(body) => Ok(Answered { request_id, body }),
+            None => Err(Report::new(ClientError::RequestInterrupted {
+                request: RequestKind::ReadEmitterBatch,
+            })),
+        }
+    }
+}
+
+impl Drop for WaitingRead<'_> {
+    fn drop(&mut self) {
+        if let Some(read) = self.read.take() {
+            self.handle.park(read);
+        }
     }
 }
 
@@ -562,7 +678,15 @@ impl EmitterConsumer {
         self.inner.connection()
     }
 
+    /// Why the consumer needs an explicit new open, once it does.
+    pub fn reopen_reason(&self) -> Option<ConsumerReopenReason> {
+        self.inner.lifecycle.reopen_reason()
+    }
+
     /// Reads one attempt. An attachment gap is reported once before any restored delivery.
+    ///
+    /// A caller that stops waiting leaves the read with the consumer, and the next read of the
+    /// same attachment receives its reply, so no attempt the server assigned is stranded.
     pub async fn next_batch(&self) -> error_stack::Result<Option<EmitterDelivery>, ClientError> {
         if self
             .inner
@@ -584,11 +708,7 @@ impl EmitterConsumer {
         {
             return Err(Report::new(ClientError::ConsumerInterrupted));
         }
-        let request = ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
-            consumer: attachment.id,
-        });
-        let reply =
-            request_on_exchange(&attachment.exchange, request, RequestKind::ReadEmitterBatch).await;
+        let reply = self.inner.read(&attachment).await;
         let reply = match reply {
             Ok(reply) => reply,
             Err(report) if report.current_context().retryable_session_failure() => {
@@ -645,16 +765,26 @@ impl EmitterConsumer {
     }
 
     /// Closes the desired consumer and releases its current attachment.
-    pub async fn close(self) -> error_stack::Result<EmitterCloseDisposition, ClientError> {
+    ///
+    /// Only the first close releases the attachment; a later one, or one while the consumer waits
+    /// to be restored, finds nothing attached and returns at once. A caller that stops waiting
+    /// leaves the release running.
+    pub async fn close(&self) -> error_stack::Result<EmitterCloseDisposition, ClientError> {
         let Some(attachment) = self.inner.stop() else {
             return Ok(EmitterCloseDisposition::Closed);
         };
-        close_consumer(
-            attachment.exchange.clone(),
-            attachment.id,
-            self.inner.client.inner.connector.request_timeout(),
-        )
-        .await
+        let deadline = self.inner.client.inner.connector.request_timeout();
+        let (answer, answered) = oneshot::channel();
+        nervix_primitives::task::spawn(async move {
+            let closed = close_consumer(attachment.exchange.clone(), attachment.id, deadline).await;
+            answer
+                .send(closed)
+                .discarded("a cancelled close still releases its attachment");
+        });
+        match answered.await {
+            Ok(closed) => closed,
+            Err(_) => Err(Report::new(ClientError::SessionClosed)),
+        }
     }
 }
 
@@ -732,8 +862,9 @@ impl EmitterDelivery {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use nervix_model_harness::shuttle::check_random_and_pct;
+
     use super::*;
-    use crate::shuttle_test::check_random_and_pct;
 
     #[test]
     fn shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange() {

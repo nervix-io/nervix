@@ -1,6 +1,7 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use arrow_schema::{DataType, Schema, TimeUnit};
+use nervix_primitives::sync::StdArc;
 
 use crate::{
     json::JsonScanOutput,
@@ -319,15 +320,15 @@ pub struct InvocationBinding {
 
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
-    pub input_schema: Arc<Schema>,
-    pub output_schema: Arc<Schema>,
+    pub input_schema: StdArc<Schema>,
+    pub output_schema: StdArc<Schema>,
     pub inputs: Vec<InputBinding>,
     pub instructions: Vec<Instruction>,
     pub filter: Option<RegisterRef>,
     pub outputs: Vec<OutputBinding>,
     pub invocations: Vec<InvocationBinding>,
     pub layouts: RegisterLayouts,
-    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 /// An executable expression that can only select input rows.
@@ -357,19 +358,19 @@ pub struct CompiledProgram {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CompiledPredicate {
-    program: triomphe::Arc<CompiledProgram>,
+    program: nervix_primitives::sync::Arc<CompiledProgram>,
 }
 
 impl CompiledPredicate {
-    pub(crate) fn new(program: triomphe::Arc<CompiledProgram>) -> Self {
+    pub(crate) fn new(program: nervix_primitives::sync::Arc<CompiledProgram>) -> Self {
         Self { program }
     }
 
-    pub fn input_schema(&self) -> &Arc<Schema> {
+    pub fn input_schema(&self) -> &StdArc<Schema> {
         &self.program.input_schema
     }
 
-    pub(crate) fn program(&self) -> &triomphe::Arc<CompiledProgram> {
+    pub(crate) fn program(&self) -> &nervix_primitives::sync::Arc<CompiledProgram> {
         &self.program
     }
 }

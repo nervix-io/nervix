@@ -1,0 +1,4 @@
+//! Source-contract compiler fixture; no runtime behavior is asserted.
+
+#[cfg_attr(nervix_lint, nervix::context(recurring, reason = "the caller executes this contract"))]
+pub mod task { pub fn batch(map: &nervix_lint_fixtures::MapAlias) { drop(map.get(&1)); } }

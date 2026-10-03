@@ -7,6 +7,15 @@
 //! - **Must not know.** Archive records, how consensus grants installation authority, or client
 //!   restore options.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "backup snapshots and stopped-domain restore staging and publication run as \
+                  admitted lifecycle storage work"
+    )
+)]
+
 use nervix_interconnect::backup::RestoreStateInventory;
 use nervix_models::RestoreStateAuthority;
 

@@ -73,13 +73,13 @@ use nervix_nspl::client_statement::{
 };
 use nervix_primitives::{
     sync::{
+        Arc,
         blocking::{Mutex, RwLock},
         mpsc, watch,
     },
     task::AbortHandle,
 };
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use self::{
     admission::{CancelledBeforeAdmission, CancelledStage, RequestAdmission},

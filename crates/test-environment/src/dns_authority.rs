@@ -25,7 +25,6 @@ use std::{
     collections::BTreeMap,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::Duration,
 };
 
@@ -39,7 +38,7 @@ use hickory_proto::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     net::UdpSocket,
-    sync::{blocking::Mutex, oneshot},
+    sync::{StdArc, blocking::Mutex, oneshot},
     task::JoinHandle,
     time::timeout,
 };
@@ -77,7 +76,7 @@ pub enum DnsAnswer {
 #[derive(Debug)]
 pub struct DnsAuthority {
     address: SocketAddr,
-    state: Arc<AuthorityState>,
+    state: StdArc<AuthorityState>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -99,10 +98,10 @@ impl DnsAuthority {
     pub async fn start(bind: SocketAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(bind).await?;
         let address = socket.local_addr()?;
-        let state = Arc::new(AuthorityState::default());
+        let state = StdArc::new(AuthorityState::default());
         let (stop, stopped) = oneshot::channel();
         let task =
-            nervix_primitives::task::spawn(Self::answer(socket, Arc::clone(&state), stopped));
+            nervix_primitives::task::spawn(Self::answer(socket, StdArc::clone(&state), stopped));
         Ok(Self {
             address,
             state,
@@ -170,7 +169,7 @@ impl DnsAuthority {
 
     async fn answer(
         socket: UdpSocket,
-        state: Arc<AuthorityState>,
+        state: StdArc<AuthorityState>,
         mut stopped: oneshot::Receiver<()>,
     ) {
         let mut buffer = vec![0_u8; MAX_MESSAGE_BYTES];

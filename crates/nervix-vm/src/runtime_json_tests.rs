@@ -9,10 +9,9 @@
 //! - **Depends on.** The VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How a document is parsed or a value converted.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{Array, BooleanArray, Int64Array, ListArray, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::execute_program_sync;
 use crate::{
@@ -125,7 +124,7 @@ fn every_extraction_from_one_document_column_shares_one_scan() {
             Field::new("labelled", DataType::Boolean, true),
             Field::new(
                 "tags",
-                JsonTarget::Vec(triomphe::Arc::new(JsonTarget::Int64)).data_type(),
+                JsonTarget::Vec(nervix_primitives::sync::Arc::new(JsonTarget::Int64)).data_type(),
                 true,
             ),
         ],
@@ -182,12 +181,12 @@ fn every_extraction_from_one_document_column_shares_one_scan() {
     assert_eq!(
         json_defects(&output, 1),
         [JsonDefect::TypeMismatch {
-            path: triomphe::Arc::new(
+            path: nervix_primitives::sync::Arc::new(
                 nervix_models::JsonPath::parse("$.count").expect("the path is valid")
             ),
             place: JsonPlace::Value,
             found: JsonKind::String,
-            expected: triomphe::Arc::new(JsonTarget::Int64),
+            expected: nervix_primitives::sync::Arc::new(JsonTarget::Int64),
         }]
     );
 }

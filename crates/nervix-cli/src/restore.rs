@@ -22,10 +22,12 @@ use nervix_client_core::{
 };
 use nervix_models::{DomainName, RestoreState, Statement};
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use nervix_recovery::{Discarded as _, Reported as _};
 use serde_json::{Value, json};
-use triomphe::Arc;
 
 use super::{ClientError, backup::CliReportFormat, human_bytes};
 

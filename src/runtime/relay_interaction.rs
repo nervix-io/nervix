@@ -35,9 +35,8 @@ use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use nervix_models::RelayName;
-use nervix_primitives::sync::{mpsc, watch};
+use nervix_primitives::sync::{Arc, mpsc, watch};
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     BranchBufferTimingResult, BranchKey, DomainClock, DomainForceFlushCompletion,
@@ -77,6 +76,13 @@ impl RelayInteractionError {
 }
 
 /// Commands classify whether already accepted relay input must be handled before the command.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the installed relay loop handles each admitted command and drain transition"
+    )
+)]
 pub(super) trait RelayInteractionCommand: Send {
     fn drain_inputs_before_handling(&self) -> bool {
         false
@@ -497,6 +503,11 @@ impl RelayInteractionInputs {
             .collect()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained relay collection invokes its provided take \
+                                   callback; local callback bodies remain checked")
+    )]
     fn take_collection(
         &mut self,
         mut take: impl FnMut(
@@ -964,11 +975,11 @@ mod tests {
         runtime_schema::{CompiledSchema, RuntimeValue, compile_schema, test_runtime_row},
     };
 
-    fn schema() -> triomphe::Arc<CompiledSchema> {
-        static SCHEMA: OnceLock<triomphe::Arc<CompiledSchema>> = OnceLock::new();
+    fn schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
+        static SCHEMA: OnceLock<nervix_primitives::sync::Arc<CompiledSchema>> = OnceLock::new();
         SCHEMA
             .get_or_init(|| {
-                triomphe::Arc::new(compile_schema(&CreateSchema {
+                nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
                     name: SchemaName::from(
                         &ModelName::parse("relay_interaction_test").expect("valid schema"),
                     ),
@@ -999,7 +1010,7 @@ mod tests {
     }
 
     fn alternate_batch(acks: AckSet) -> RelayRecordBatch {
-        let alternate_schema = triomphe::Arc::new(compile_schema(&CreateSchema {
+        let alternate_schema = nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
             name: SchemaName::from(
                 &ModelName::parse("relay_interaction_alternate").expect("valid alternate schema"),
             ),
@@ -1061,8 +1072,11 @@ mod tests {
     }
 
     fn force_flush_participant(
-        counters: Option<triomphe::Arc<NodeQuiesceCounters>>,
-    ) -> (triomphe::Arc<DomainForceFlush>, DomainForceFlushParticipant) {
+        counters: Option<nervix_primitives::sync::Arc<NodeQuiesceCounters>>,
+    ) -> (
+        nervix_primitives::sync::Arc<DomainForceFlush>,
+        DomainForceFlushParticipant,
+    ) {
         let coordinator = DomainForceFlush::new();
         let participant = DomainForceFlush::subscribe(&coordinator, counters);
         (coordinator, participant)
@@ -1371,7 +1385,7 @@ mod tests {
             .await
             .expect("second batch must queue");
         let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, None, Some(counters.clone()))
                 .expect("interaction must build");
@@ -2059,7 +2073,7 @@ mod tests {
             .await
             .expect("batch must queue");
         let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let (force_flush, force_participant) = force_flush_participant(Some(counters.clone()));
         let mut interaction = RelayInteraction::new(
             vec![input],
@@ -2094,7 +2108,7 @@ mod tests {
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
@@ -2118,7 +2132,7 @@ mod tests {
             .broadcast(batch(1))
             .await
             .expect("batch must queue");
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut inputs = RelayInteractionInputs::new(vec![input], Some(counters.clone()))
             .expect("inputs must build");
 
@@ -2149,7 +2163,7 @@ mod tests {
             .await
             .expect("batch must queue");
         let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
-        let counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let mut interaction =
             RelayInteraction::new(vec![input], shutdown_rx, None, Some(counters.clone()))
                 .expect("interaction must build");

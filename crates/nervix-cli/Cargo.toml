@@ -31,7 +31,6 @@ strum = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 url = { workspace = true }

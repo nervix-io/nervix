@@ -5,6 +5,15 @@
 //! - **Depends on.** Typed schedules, runtime lifecycle handles and installed domain capabilities.
 //! - **Must not know.** NSPL parsing, registry validation or placement-policy computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "schedule publication installs one typed execution revision and its ownership \
+                  bindings"
+    )
+)]
+
 use super::*;
 
 /// What one node has applied of the cluster schedule its leader publishes.

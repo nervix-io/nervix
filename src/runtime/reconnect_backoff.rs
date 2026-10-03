@@ -2,6 +2,13 @@ use nervix_connector::ParsedRetryPolicy;
 
 use super::*;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each admitted retry renews the retained acknowledgement obligation"
+    )
+)]
 pub(in crate::runtime) trait AcknowledgementKeepalive {
     fn keep_alive(&self);
 }

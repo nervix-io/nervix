@@ -15,8 +15,8 @@ use nervix_models::{
     ProcessorOutputs, RelayBranching, SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy,
     WindowBound, ZeroMqIngestMode,
 };
+use nervix_primitives::sync::Arc;
 use nonzero_ext::nonzero;
-use triomphe::Arc;
 
 use super::*;
 

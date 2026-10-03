@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle",
   "nervix-execution/shuttle",
+  "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
 ]
 turmoil = [
@@ -52,7 +53,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 turmoil = { workspace = true, optional = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
@@ -63,6 +63,7 @@ arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 bolero = { workspace = true }
+nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

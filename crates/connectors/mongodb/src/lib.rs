@@ -169,6 +169,13 @@ fn safe_infrastructure_error(operation: &str) -> Report<SinkPublishError> {
 }
 
 impl MongoDbSink {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow column access and MongoDB driver publication own their \
+                      effects"
+        )
+    )]
     pub fn new(
         config: MongoDbSinkConfig,
         client: Box<dyn MongoDbClientSource>,
@@ -569,6 +576,13 @@ enum UnstorableDocument {
 
 impl StorableDocument {
     /// The document of `row`, or why MongoDB could never store it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow column access and MongoDB driver publication own their \
+                      effects"
+        )
+    )]
     fn new(row: WrittenRow, document: Document) -> Result<Self, UnstorableDocument> {
         let raw = RawDocumentBuf::from_document(&document)
             .map_err(|_| UnstorableDocument::InvalidFieldNames)?;
@@ -603,6 +617,13 @@ struct ConflictUpsert {
 }
 
 impl ConflictUpsert {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow column access and MongoDB driver publication own their \
+                      effects"
+        )
+    )]
     fn new(
         document: StorableDocument,
         conflict_action: &MongoDbConflictAction,
@@ -701,6 +722,13 @@ impl SinkLifecycle for MongoDbSink {}
 impl RowSink for MongoDbSink {
     /// Writes the rows of every carrier in inserts or bulk writes of at most `MAX MESSAGES`
     /// documents whose measured BSON is at most `MAX SIZE` bytes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow column access and MongoDB driver publication own their \
+                      effects"
+        )
+    )]
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let members = rows.members();
         let mut outcome = PerRecordOutcome::with_capacity(members.len());
@@ -806,6 +834,13 @@ struct MappedBsonField<'a> {
 }
 
 impl<'a> MappedBsonColumns<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow column access and MongoDB driver publication own their \
+                      effects"
+        )
+    )]
     fn new(
         batch: &'a RecordBatch,
         target_columns: &[String],
@@ -870,6 +905,13 @@ enum MappedBsonColumn<'a> {
 }
 
 impl<'a> MappedBsonColumn<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow column access and MongoDB driver publication own their \
+                      effects"
+        )
+    )]
     fn new(array: &'a ArrayRef) -> Option<Self> {
         let array = array.as_ref();
         if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
@@ -1028,11 +1070,10 @@ impl<'a> MappedBsonColumn<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::types::UInt64Type;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use nervix_models::{MessageErrorCode, MessageErrorOperation};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 

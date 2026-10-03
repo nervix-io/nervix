@@ -1,0 +1,14 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "nervix-lint-driver"
+version.workspace = true
+
+[dependencies]
+ahash.workspace = true
+anyhow.workspace = true
+error-stack.workspace = true
+meticulous.workspace = true
+nervix-lint-report = { path = "../report" }
+nervix-primitives.workspace = true
+serde_json.workspace = true

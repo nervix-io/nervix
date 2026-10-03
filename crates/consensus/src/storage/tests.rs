@@ -2486,3 +2486,27 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
     assert!(matches!(result, Err(error) if error.to_string().contains("recreate")));
     Ok(())
 }
+
+#[nervix_primitives::test]
+async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
+    let directory = TempDir::new()?;
+    let database = Database::builder(directory.path()).open()?;
+    database.keyspace("unrecognized", KeyspaceCreateOptions::default)?;
+    let result = FjallStore::from_database(database, Executor::default()).await;
+    let Err(error) = result else {
+        panic!("an unknown keyspace cannot supply the current consensus storage contract");
+    };
+    let cause = error
+        .get_ref()
+        .assured("the opening error retains its typed storage cause");
+    assert!(matches!(
+        cause.downcast_ref::<StorageFailure>(),
+        Some(StorageFailure::InvalidState)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("recreate the node's stored state")
+    );
+    Ok(())
+}

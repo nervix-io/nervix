@@ -18,7 +18,11 @@ arrow = [
 ]
 autocomplete = []
 default = []
-shuttle = ["dep:shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -54,11 +58,11 @@ tokio = { workspace = true, features = [
 ] }
 tonic = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+nervix-model-harness = { workspace = true }
 nervix-test-environment = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",

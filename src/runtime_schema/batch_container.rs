@@ -234,6 +234,11 @@ impl CompiledCodec {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the external JSON, Arrow and payload writer interfaces \
+                                   encode one admitted batch")
+    )]
     fn write_batch(
         &self,
         members: &[&BatchMember],
@@ -483,10 +488,10 @@ mod tests {
         CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ParseAsType,
         ResolvedCodecWireFormat, SchemaField, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use prost::Message as _;
     use prost_reflect::DynamicMessage;
     use serde_json::json;
-    use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{
@@ -1043,9 +1048,9 @@ mod tests {
         .expect("the SYSLOG codec should compile");
         let arrow_schema = compiled_schema.arrow_schema();
         let columns: Vec<arrow_array::ArrayRef> = vec![
-            std::sync::Arc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
-            std::sync::Arc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
-            std::sync::Arc::new(
+            nervix_primitives::sync::StdArc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
+            nervix_primitives::sync::StdArc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
+            nervix_primitives::sync::StdArc::new(
                 arrow_array::TimestampNanosecondArray::from(vec![
                     946_684_800_000_000_000,
                     946_684_801_000_000_000,
@@ -1053,8 +1058,8 @@ mod tests {
                 ])
                 .with_timezone("+00:00"),
             ),
-            std::sync::Arc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
-            std::sync::Arc::new(arrow_array::StringArray::from(vec![
+            nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
+            nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec![
                 "order accepted",
                 "say \"hi\"",
                 "order failed",

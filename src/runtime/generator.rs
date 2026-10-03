@@ -5,6 +5,15 @@
 //! - **Depends on.** Validated generator plans, bound domain clocks and Arrow construction.
 //! - **Must not know.** NSPL parsing, connector transports or placement selection.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "generator installation binds its materialized branch and retained processing \
+                  task"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_primitives::sync::CancellationToken;
 
@@ -531,7 +540,14 @@ impl Runtime {
         let runtime = self.clone();
         let task_events = self.inner.events.clone();
 
-        Ok(nervix_primitives::task::spawn(async move {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::context(
+                recurring,
+                reason = "the retained generator task consumes every domain cadence occurrence"
+            )
+        )]
+        let task = nervix_primitives::task::spawn(async move {
             let shared_routing = match runtime
                 .wait_for_domain_routing(&task_domain, &source_relay)
                 .await
@@ -1049,17 +1065,17 @@ impl Runtime {
                     &mut branch_states,
                 )
                 .await;
-        }))
+        });
+        Ok(task)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use nervix_models::{
         CreateSchema, MessageErrorPolicy, ParseAsType, ProcessorOutput, SchemaField, Timestamp,
     };
+    use nervix_primitives::sync::StdArc;
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 

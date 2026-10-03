@@ -275,6 +275,13 @@ the configured retention period, **15 minutes by default**, including after subs
 changes. Retention cleanup removes the transaction's report records and topology content no other
 retained report references. Once its tombstone is reclaimed, inspection by id returns unknown.
 
+Transaction positions and operation numbers, commit-plan step counts, accepted and applied
+operation counts, report operation and execution-step counts, and topology node and edge counts
+use fixed-width 64-bit archives with checked native decoding. Durable record replay and snapshots
+retain every bit of those counts. Their representation is owned by
+[Archived Counts](./typed-states.md#archived-counts), and their current storage namespace is defined
+in [Consensus Storage And Replication](./consensus-storage-and-replication.md).
+
 These are control-plane facts. Arrow record batches, payload attempts, relay or connector buffers,
 handoff data, ACK guards, tokens, and maps remain volatile data-plane state. Inspection cannot
 recover or reconstruct any of those payloads. Bounded Raft log reading and snapshot transfer carry

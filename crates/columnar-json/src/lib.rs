@@ -554,10 +554,9 @@ impl<'a> JsonColumn<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_array::{ArrayRef, FixedSizeListArray};
     use arrow_schema::{Field, Schema};
+    use nervix_primitives::sync::StdArc;
     use serde::Serialize;
 
     use super::*;
@@ -568,7 +567,7 @@ mod tests {
             .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
             .collect::<Vec<_>>();
         let values = columns.into_iter().map(|(_, array)| array).collect();
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), values)
+        RecordBatch::try_new(StdArc::new(Schema::new(fields)), values)
             .assured("test columns have equal row counts and matching declared types")
     }
 
@@ -612,36 +611,39 @@ mod tests {
         let batch = batch(vec![
             (
                 "odd\"key",
-                Arc::new(StringArray::from(vec!["café", "plain"])),
+                StdArc::new(StringArray::from(vec!["café", "plain"])),
             ),
             (
                 "escaped",
-                Arc::new(StringArray::from(vec![
+                StdArc::new(StringArray::from(vec![
                     "quote \" slash \\ newline \n",
                     "clean",
                 ])),
             ),
             (
                 "note",
-                Arc::new(StringArray::from(vec![None, Some("present")])),
+                StdArc::new(StringArray::from(vec![None, Some("present")])),
             ),
             (
                 "at",
-                Arc::new(TimestampNanosecondArray::from(vec![
+                StdArc::new(TimestampNanosecondArray::from(vec![
                     1_700_000_000_123_456_789,
                     1_700_000_000_000_000_000,
                 ])),
             ),
             (
                 "blob",
-                Arc::new(BinaryArray::from(vec![
+                StdArc::new(BinaryArray::from(vec![
                     Some(large_bytes.as_slice()),
                     Some(&b""[..]),
                 ])),
             ),
-            ("tags", Arc::new(tags)),
-            ("number", Arc::new(Float64Array::from(vec![-0.0, 1.25]))),
-            ("enabled", Arc::new(BooleanArray::from(vec![true, false]))),
+            ("tags", StdArc::new(tags)),
+            ("number", StdArc::new(Float64Array::from(vec![-0.0, 1.25]))),
+            (
+                "enabled",
+                StdArc::new(BooleanArray::from(vec![true, false])),
+            ),
         ]);
         let specs = [
             JsonColumnSpec::new("odd\"key", FieldNulls::Reject),
@@ -686,16 +688,16 @@ mod tests {
     #[test]
     fn every_integer_width_and_float_write_from_their_typed_columns() {
         let batch = batch(vec![
-            ("u8", Arc::new(UInt8Array::from(vec![255]))),
-            ("i8", Arc::new(Int8Array::from(vec![-128]))),
-            ("u16", Arc::new(UInt16Array::from(vec![65_535]))),
-            ("i16", Arc::new(Int16Array::from(vec![-32_768]))),
-            ("u32", Arc::new(UInt32Array::from(vec![u32::MAX]))),
-            ("i32", Arc::new(Int32Array::from(vec![i32::MIN]))),
-            ("u64", Arc::new(UInt64Array::from(vec![u64::MAX]))),
-            ("i64", Arc::new(Int64Array::from(vec![i64::MIN]))),
-            ("f32", Arc::new(Float32Array::from(vec![1.25]))),
-            ("f64", Arc::new(Float64Array::from(vec![f64::INFINITY]))),
+            ("u8", StdArc::new(UInt8Array::from(vec![255]))),
+            ("i8", StdArc::new(Int8Array::from(vec![-128]))),
+            ("u16", StdArc::new(UInt16Array::from(vec![65_535]))),
+            ("i16", StdArc::new(Int16Array::from(vec![-32_768]))),
+            ("u32", StdArc::new(UInt32Array::from(vec![u32::MAX]))),
+            ("i32", StdArc::new(Int32Array::from(vec![i32::MIN]))),
+            ("u64", StdArc::new(UInt64Array::from(vec![u64::MAX]))),
+            ("i64", StdArc::new(Int64Array::from(vec![i64::MIN]))),
+            ("f32", StdArc::new(Float32Array::from(vec![1.25]))),
+            ("f64", StdArc::new(Float64Array::from(vec![f64::INFINITY]))),
         ]);
         let specs = [
             "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "f32", "f64",
@@ -720,8 +722,8 @@ mod tests {
                 vec![Some(1.2), Some(-0.0)],
             )]);
         let batch = batch(vec![
-            ("value", Arc::new(Float32Array::from(vec![1.2]))),
-            ("nested", Arc::new(nested)),
+            ("value", StdArc::new(Float32Array::from(vec![1.2]))),
+            ("nested", StdArc::new(nested)),
         ]);
         let specs = ["value", "nested"].map(|name| {
             JsonColumnSpec::new(name, FieldNulls::Write)
@@ -746,7 +748,7 @@ mod tests {
             Some(vec![Some(1), None, Some(3)]),
             None,
         ]);
-        let batch = batch(vec![("list", Arc::new(list))]);
+        let batch = batch(vec![("list", StdArc::new(list))]);
         let specs = [JsonColumnSpec::new("list", FieldNulls::Write)];
         assert_eq!(
             encode(&batch, &specs, 0, NestedNulls::Write),
@@ -779,13 +781,13 @@ mod tests {
             ],
             2,
         );
-        let strings: ArrayRef = Arc::new(StringArray::from(vec![
+        let strings: ArrayRef = StdArc::new(StringArray::from(vec![
             "outside \"",
             "inside clean",
             "inside \\",
         ]));
         let strings = strings.slice(1, 2);
-        let fixed: ArrayRef = Arc::new(fixed);
+        let fixed: ArrayRef = StdArc::new(fixed);
         let fixed = fixed.slice(1, 2);
         let batch = batch(vec![("text", strings), ("fixed", fixed)]);
         let specs = [
@@ -812,9 +814,9 @@ mod tests {
         let batch = batch(vec![
             (
                 "raw",
-                Arc::new(BinaryArray::from(vec![b"\xff\x00\"\\\n\x1f~ok".as_slice()])),
+                StdArc::new(BinaryArray::from(vec![b"\xff\x00\"\\\n\x1f~ok".as_slice()])),
             ),
-            ("nested", Arc::new(elements.finish())),
+            ("nested", StdArc::new(elements.finish())),
         ]);
         let specs = ["raw", "nested"].map(|name| {
             JsonColumnSpec::new(name, FieldNulls::Write).with_bytes_encoding(BytesEncoding::Octets)
@@ -837,7 +839,7 @@ mod tests {
     fn invalid_row_null_and_unsupported_column_are_typed_errors() {
         let null_batch = batch(vec![(
             "text",
-            Arc::new(StringArray::from(vec![None::<&str>])),
+            StdArc::new(StringArray::from(vec![None::<&str>])),
         )]);
         let specs = [JsonColumnSpec::new("text", FieldNulls::Reject)];
         let columns = JsonColumns::new(&null_batch, &specs, NestedNulls::Reject)
@@ -859,7 +861,7 @@ mod tests {
             JsonWriteError::RequiredNull { .. }
         ));
 
-        let unsupported = batch(vec![("value", Arc::new(arrow_array::NullArray::new(1)))]);
+        let unsupported = batch(vec![("value", StdArc::new(arrow_array::NullArray::new(1)))]);
         let specs = [JsonColumnSpec::new("value", FieldNulls::Reject)];
         let unsupported = JsonColumns::new(&unsupported, &specs, NestedNulls::Reject)
             .err()

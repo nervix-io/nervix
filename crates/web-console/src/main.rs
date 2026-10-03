@@ -8,10 +8,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use error_stack::Report;
-use futures_util::{
-    FutureExt, SinkExt, StreamExt,
-    future::{AbortHandle, Abortable},
-};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
@@ -48,6 +45,7 @@ use nervix_models::{
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
+use nervix_primitives::unmodeled::futures::{AbortHandle, Abortable};
 use nervix_recovery::Discarded as _;
 use nervix_web_console::graph::{
     GraphEdgeId, GraphSearch, LiveGraphLayout, graph_layout_edge, graph_layout_item,
@@ -2163,7 +2161,7 @@ async fn credentials_invalid(auth_token: &str) -> bool {
     let response = gloo_net::http::Request::get(url.as_str()).send().fuse();
     let timeout = wait_for_browser_delay(Duration::from_secs(3)).fuse();
     futures_util::pin_mut!(response, timeout);
-    match futures_util::select! {
+    match nervix_primitives::unmodeled::futures::select! {
         result = response => Some(result),
         () = timeout => None,
     } {
@@ -2251,7 +2249,7 @@ async fn serve_connection(
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return ConnectionEnd::Dropped;
         }
-        let step = futures_util::select! {
+        let step = nervix_primitives::unmodeled::futures::select! {
             request = queued.next().fuse() => {
                 if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
                     return ConnectionEnd::Dropped;

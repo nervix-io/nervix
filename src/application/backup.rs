@@ -20,7 +20,7 @@ pub(in crate::application) mod interconnect;
 pub(in crate::application) mod retained;
 mod state_sections;
 
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc};
+use std::{collections::BTreeMap, num::NonZeroU64};
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
@@ -37,6 +37,7 @@ use nervix_models::{
     DomainStatus, IngestorName, ModelKind, NSPL_LANGUAGE_VERSION, ResourceId, ResourceName,
     Timestamp,
 };
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
 use tracing::info;
 
@@ -69,7 +70,7 @@ pub(in crate::application) struct CaptureSectionKey {
 }
 
 pub(in crate::application) struct CapturedSectionStage {
-    pub(in crate::application) artifact: StdArc<StagedArtifact>,
+    pub(in crate::application) artifact: Arc<StagedArtifact>,
     pub(in crate::application) content: SectionContent,
     pub(in crate::application) expires_at: nervix_primitives::time::Instant,
 }
@@ -169,7 +170,7 @@ struct MeasuredSection {
 enum SectionSource {
     Held(Vec<u8>),
     ResourceArchive(ResourceId),
-    Captured(StdArc<StagedArtifact>),
+    Captured(Arc<StagedArtifact>),
 }
 
 struct StateInventory {
@@ -793,7 +794,7 @@ impl SessionServiceImpl {
         Ok(MeasuredSection {
             entry,
             domain: Some(inventory.domain.clone()),
-            source: SectionSource::Captured(StdArc::new(artifact)),
+            source: SectionSource::Captured(Arc::new(artifact)),
         })
     }
 

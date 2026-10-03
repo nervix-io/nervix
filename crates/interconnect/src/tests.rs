@@ -7,7 +7,7 @@
 //! - **Depends on.** The transport and its test certificates.
 //! - **Must not know.** The runtime or control plane that uses the transport.
 
-use std::{collections::BTreeSet, path::PathBuf, process::Command, sync::Arc as StdArc};
+use std::{collections::BTreeSet, path::PathBuf, process::Command};
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -15,7 +15,7 @@ use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::RemoteAckOutcome;
 use nervix_primitives::{
     sync::{
-        Notify,
+        Notify, StdArc,
         atomic::{AtomicUsize, Ordering},
         watch,
     },

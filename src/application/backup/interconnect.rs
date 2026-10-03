@@ -7,7 +7,7 @@
 //!   typed state placements.
 //! - **Must not know.** Archive encoding, database keys, or the client's backup destination.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -21,7 +21,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{DomainName, RestoreStateAuthority};
 use nervix_primitives::{
-    sync::{Mutex as AsyncMutex, watch},
+    sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
 };
 

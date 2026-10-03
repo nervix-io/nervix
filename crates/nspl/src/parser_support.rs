@@ -11,10 +11,13 @@ use std::{
 };
 
 use chumsky::{
-    error::{RichPattern, RichReason},
+    error::{LabelError, RichPattern, RichReason},
+    input::InputRef,
     prelude::*,
+    util::MaybeRef,
 };
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
     BranchSelection, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
@@ -31,7 +34,13 @@ use nervix_models::{
 };
 use sorted_vec::SortedSet;
 
-use crate::lexer::{Identifier, SpannedToken, Token, Word, lex};
+use crate::{
+    lexer::{Identifier, SpannedToken, Token, Word, lex},
+    semantic_program::{
+        Prefix, RouteClause, read_assignments_prefix, read_expression_list_prefix,
+        read_expression_prefix, read_route_construction_prefix,
+    },
+};
 
 macro_rules! boxed_choice {
     ($($parser:expr),+ $(,)?) => {
@@ -48,7 +57,7 @@ pub(crate) use boxed_choice;
 ///
 /// The partial word under the cursor is removed first. A half-typed word is not something the
 /// grammar can make sense of, and inside a free-form expression region it is swallowed into the
-/// region and handed to the expression grammar, which fails with a custom error carrying no
+/// region and read by the expression grammar, which fails with a custom error carrying no
 /// expectations at all — so completion falls silent the moment the user starts typing.
 ///
 /// But with that word gone the statement may already be complete, and a complete statement has no
@@ -125,19 +134,6 @@ impl ParseFromSourceError {
             Self::Lex { text, .. } | Self::Parse { text, .. } => text,
         }
     }
-
-    /// The message a statement grammar reports when this error rejects an expression embedded in
-    /// the statement.
-    ///
-    /// The statement grammar locates the failure at the whole embedded region, so only the first
-    /// diagnostic's message is carried over; its span points into the embedded text, not into the
-    /// statement.
-    pub(crate) fn embedded_expression_message(&self) -> String {
-        match self.diagnostics().first() {
-            Some(diagnostic) => diagnostic.message.clone(),
-            None => "invalid expression".to_string(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,14 +178,25 @@ pub fn inspection_format<'src>()
     .boxed()
 }
 
+/// A keyword written as several words, parsed as one grammar unit and labelled with the whole
+/// phrase, so completion offers it as one item.
+pub fn kw_phrase<'src, const WORDS: usize>(
+    words: [Identifier; WORDS],
+) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    let spellings: [&'static str; WORDS] = words.map(<&'static str>::from);
+    let label = spellings.join(" ");
+    let mut phrase = empty().boxed();
+    for word in words {
+        phrase = phrase.ignore_then(kw(word)).boxed();
+    }
+    phrase.labelled(label).boxed()
+}
+
 pub fn kw_phrase2<'src>(
     first: Identifier,
     second: Identifier,
 ) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    let first_label: &'static str = first.into();
-    let second_label: &'static str = second.into();
-    let label = format!("{first_label} {second_label}");
-    kw(first).ignore_then(kw(second)).labelled(label).boxed()
+    kw_phrase([first, second])
 }
 
 pub fn kw_phrase3<'src>(
@@ -197,16 +204,18 @@ pub fn kw_phrase3<'src>(
     second: Identifier,
     third: Identifier,
 ) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    let first_label: &'static str = first.into();
-    let second_label: &'static str = second.into();
-    let third_label: &'static str = third.into();
-    let label = format!("{first_label} {second_label} {third_label}");
-    kw(first)
-        .ignore_then(kw(second))
-        .ignore_then(kw(third))
-        .labelled(label)
-        .boxed()
+    kw_phrase([first, second, third])
 }
+
+/// The keywords that head an operation of an `ALTER` statement.
+pub(crate) const ALTER_OPERATION_HEADS: [Identifier; 6] = [
+    Identifier::Add,
+    Identifier::Drop,
+    Identifier::Alter,
+    Identifier::Set,
+    Identifier::Replace,
+    Identifier::Rename,
+];
 
 /// The comma between two operations of an `ALTER` statement: one followed by the keyword that
 /// heads the next operation.
@@ -216,15 +225,7 @@ pub fn kw_phrase3<'src>(
 /// operation.
 pub fn alter_op_separator<'src>()
 -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    let operation_head = choice((
-        kw(Identifier::Add),
-        kw(Identifier::Drop),
-        kw(Identifier::Alter),
-        kw(Identifier::Set),
-        kw(Identifier::Replace),
-        kw(Identifier::Rename),
-    ))
-    .and_is(expression_term_word().not());
+    let operation_head = choice(ALTER_OPERATION_HEADS.map(kw)).and_is(expression_term_word().not());
     tok(Token::Comma)
         .and_is(tok(Token::Comma).ignore_then(operation_head))
         .labelled("alter_operation_separator")
@@ -523,34 +524,20 @@ fn materialized_default_assignments<'src>()
 {
     kw(Identifier::Default)
         .ignore_then(
-            any()
-                .filter(|token: &Token| !matches!(token, Token::RBrace))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .labelled("default_assignments")
+            embedded("default_assignments", read_assignments_prefix)
                 .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
         )
-        .try_map(|tokens, span| {
-            let source = format!("SET {}", render_expression_tokens(&tokens));
-            let construction =
-                crate::semantic_program::parse_route_construction(&source).map_err(|error| {
-                    Rich::custom(span, error.current_context().embedded_expression_message())
-                })?;
-            if construction.inherit.is_some()
-                || construction.where_clause.is_some()
-                || !construction.invocations.is_empty()
-                || construction
-                    .assignments
-                    .iter()
-                    .any(|assignment| assignment.target.scope != AssignmentTargetScope::Bare)
+        .try_map(|assignments, span| {
+            if assignments
+                .iter()
+                .any(|assignment| assignment.target.scope != AssignmentTargetScope::Bare)
             {
                 return Err(Rich::custom(
                     span,
                     "materialized-state DEFAULT requires bare constant assignments",
                 ));
             }
-            Ok(construction.assignments)
+            Ok(assignments)
         })
         .boxed()
 }
@@ -1291,7 +1278,7 @@ where
     let add_from = kw(Identifier::Add)
         .ignore_then(kw(Identifier::From))
         .ignore_then(relay_ref())
-        .then(where_expression(alter_op_separator()).or_not())
+        .then(where_expression().or_not())
         .map(|(relay, where_clause)| AlterProcessorOperation::AddFrom {
             relay,
             where_clause,
@@ -1305,7 +1292,7 @@ where
         .ignore_then(relay_ref())
         .then(choice((
             kw(Identifier::Set)
-                .ignore_then(where_expression(alter_op_separator()))
+                .ignore_then(where_expression())
                 .map(Some),
             kw(Identifier::Drop)
                 .ignore_then(kw(Identifier::Where))
@@ -1326,7 +1313,7 @@ where
         .to(AlterProcessorOperation::DropCollect);
     let set_filter = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Filter))
-        .ignore_then(where_expression(alter_op_separator()))
+        .ignore_then(where_expression())
         .map(|where_clause| AlterProcessorOperation::SetFilterWhere { where_clause });
     let drop_filter = kw(Identifier::Drop)
         .ignore_then(kw(Identifier::Filter))
@@ -1411,135 +1398,49 @@ pub fn general_error_policy<'src>()
         .boxed()
 }
 
-fn processor_output_boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::To
-                    | Identifier::Branched
-                    | Identifier::Unbranched
-                    | Identifier::Collect
-                    | Identifier::Flush
-                    | Identifier::On
-                    | Identifier::Using
-                    | Identifier::Inputs
-                    | Identifier::File
-                    | Identifier::Deduplicate
-                    | Identifier::Max
-                    | Identifier::By
-                    | Identifier::Width
-                    | Identifier::Step
-                    | Identifier::Output,
-                ..
-            })
-    )
-}
-
-fn route_boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::To
-                    | Identifier::Branched
-                    | Identifier::Unbranched
-                    | Identifier::Flush
-                    | Identifier::On,
-                ..
-            })
-    )
-}
-
-/// The three words that open an emitter's `BATCH MAX MESSAGES` clause, which ends the route
-/// construction written before it.
-///
-/// The whole phrase is the boundary rather than its first word, so a field named `batch` stays
-/// usable inside a construction.
-fn emitter_batch_clause_start<'src>()
+/// A comma inside an `ALTER` operation that does not begin the next operation, so a list the
+/// operation holds goes on past it.
+fn alter_list_separator<'src>()
 -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    let word = |expected: Identifier| {
-        any().filter(move |token: &Token| {
-            matches!(
-                token,
-                Token::Word(Word::KnownWord { iden, .. }) if *iden == expected
-            )
-        })
-    };
-    word(Identifier::Batch)
-        .then(word(Identifier::Max))
-        .then(word(Identifier::Messages))
-        .ignored()
-        .boxed()
+    tok(Token::Comma).and_is(alter_op_separator().not()).boxed()
 }
 
-pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
-    processor_output_boundary_token(token)
-        || matches!(
-            token,
-            Token::Comma
-                | Token::Word(Word::KnownWord {
-                    iden: Identifier::Filter,
-                    ..
-                })
-        )
-}
-
-/// The body of a route-construction clause: every token up to a boundary, handed to the expression
-/// grammar as one unit.
+/// The route construction a route writes from `first`'s keyword on: that clause's body, then each
+/// clause the route may write after it. A list the construction holds goes on past a comma only
+/// where `separator` accepts it.
 ///
-/// The run is labelled, and required to be non-empty, because completion is derived from what the
-/// grammar still expects. Left unlabelled and optional, a bare `SET` parses far enough to fail in
-/// the expression grammar with a custom error that carries no expectations at all, so completion
-/// falls silent exactly where the user needs it. Each clause head gets its own label so the offer
-/// names what belongs there.
-fn route_construction_body<'src>(
-    label: &'static str,
-) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    any()
-        .filter(|token: &Token| !route_boundary_token(token))
-        .and_is(emitter_batch_clause_start().not())
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .labelled(label)
-        .boxed()
-}
-
-/// One `<head> <body>` clause. Only the body carries a label: labelling the clause as a whole would
-/// replace the head keyword's own expectation, and completion would offer the body placeholder
-/// before the user has typed the keyword that introduces it.
-fn route_construction_clause<'src>(
-    head: Identifier,
-    body: impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone + 'src,
-) -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    kw(head)
-        .ignore_then(body)
-        .try_map(move |tail, span| {
-            let head: &'static str = head.into();
-            let source = format!("{head} {}", render_expression_tokens(&tail));
-            crate::semantic_program::parse_route_construction(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+/// Only the body carries a label: labelling the clause as a whole would replace the keyword's own
+/// expectation, and completion would offer the body placeholder before the user has typed the
+/// keyword that introduces it.
+fn route_construction_clause<'src, S>(
+    first: RouteClause,
+    separator: S,
+) -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    kw(first.keyword())
+        .ignore_then(embedded(first.body_label(), move |tokens| {
+            read_route_construction_prefix(tokens, first, separator.clone())
+        }))
         .boxed()
 }
 
 /// A construction limited to `SET`, for contexts that accept no other clause.
 ///
 /// Offering `INHERIT`, `WHERE` or `INVOKE` here and rejecting them afterwards makes completion
-/// propose clauses the position cannot hold. `WHERE` is still reachable inside the `SET` body,
-/// where the expression grammar handles it.
+/// propose clauses the position cannot hold. `WHERE` and `INVOKE` are still read after the `SET`
+/// body, so the caller can reject them with its own reason.
 fn set_only_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    route_construction_clause(Identifier::Set, route_construction_body("set_assignments"))
+    route_construction_clause(RouteClause::Set, tok(Token::Comma))
 }
 
 /// A construction limited to `SET` or `WHERE`, for contexts that reject `INHERIT` and `INVOKE`.
 pub fn set_or_where_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        route_construction_clause(Identifier::Set, route_construction_body("set_assignments")),
+        route_construction_clause(RouteClause::Set, tok(Token::Comma)),
         where_only_route_construction(),
     )
 }
@@ -1548,95 +1449,49 @@ pub fn set_or_where_route_construction<'src>()
 /// described by their `VALUES` mapping.
 pub fn where_only_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    route_construction_clause(
-        Identifier::Where,
-        route_construction_body("where_expression"),
-    )
+    route_construction_clause(RouteClause::Where, tok(Token::Comma))
 }
 
 /// HTTP requests without a body may filter records and set outgoing headers, but construct no
 /// output fields.
 pub fn bodyless_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        route_construction_clause(
-            Identifier::Where,
-            route_construction_body("where_expression"),
-        ),
-        route_construction_clause(Identifier::Invoke, route_construction_body("invocations")),
-    ))
-    .boxed()
+    boxed_choice!(
+        route_construction_clause(RouteClause::Where, tok(Token::Comma)),
+        route_construction_clause(RouteClause::Invoke, tok(Token::Comma)),
+    )
 }
 
 fn set_only_alter_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    route_construction_clause(
-        Identifier::Set,
-        alter_route_construction_body("set_assignments"),
-    )
+    route_construction_clause(RouteClause::Set, alter_list_separator())
 }
 
 pub fn route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        route_construction_clause(
-            Identifier::Inherit,
-            route_construction_body("inherit_targets"),
-        ),
-        route_construction_clause(Identifier::Set, route_construction_body("set_assignments"),),
-        route_construction_clause(
-            Identifier::Where,
-            route_construction_body("where_expression"),
-        ),
-        route_construction_clause(Identifier::Invoke, route_construction_body("invocations"),),
+        route_construction_clause(RouteClause::Inherit, tok(Token::Comma)),
+        route_construction_clause(RouteClause::Set, tok(Token::Comma)),
+        route_construction_clause(RouteClause::Where, tok(Token::Comma)),
+        route_construction_clause(RouteClause::Invoke, tok(Token::Comma)),
     )
 }
 
-fn alter_route_construction_body<'src>(
-    label: &'static str,
-) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    any()
-        .and_is(alter_op_separator().not())
-        .filter(|token: &Token| !route_boundary_token(token))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .labelled(label)
-        .boxed()
-}
-
+/// A route construction inside an `ALTER` operation, whose lists end where the next operation
+/// begins.
 fn alter_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        route_construction_clause(
-            Identifier::Inherit,
-            alter_route_construction_body("inherit_targets"),
-        ),
-        route_construction_clause(
-            Identifier::Set,
-            alter_route_construction_body("set_assignments"),
-        ),
-        route_construction_clause(
-            Identifier::Where,
-            alter_route_construction_body("where_expression"),
-        ),
-        route_construction_clause(
-            Identifier::Invoke,
-            alter_route_construction_body("invocations"),
-        ),
+        route_construction_clause(RouteClause::Inherit, alter_list_separator()),
+        route_construction_clause(RouteClause::Set, alter_list_separator()),
+        route_construction_clause(RouteClause::Where, alter_list_separator()),
+        route_construction_clause(RouteClause::Invoke, alter_list_separator()),
     )
 }
 
 fn explicit_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Set)
-        .ignore_then(route_construction_body("set_assignments"))
-        .try_map(|tokens, span| {
-            let source = format!("SET {}", render_expression_tokens(&tokens));
-            crate::semantic_program::parse_route_construction(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+    route_construction_clause(RouteClause::Set, tok(Token::Comma))
         .try_map(|construction, span| {
             if construction.assignments.is_empty() {
                 Err(Rich::custom(
@@ -1658,240 +1513,138 @@ fn explicit_route_construction<'src>()
 /// A word written as part of an expression term: the name of a call, followed by the `(` that opens
 /// its arguments, or the scope of a field, followed by the `.` before the field.
 ///
-/// Such a word heads no clause of the statement around the expression, whatever keyword it spells.
-/// A keyword an expression follows directly is never such a word: after `BY` or `PATH`, a `(` opens
-/// the clause's own expression. Callers read this only under `not`, which consumes nothing and
-/// discards what it expected, so completion never offers the bracket or the dot it looks for.
+/// Such a word begins no `ALTER` operation, whatever keyword it spells. Callers read this only
+/// under `not`, which consumes nothing and discards what it expected, so completion never offers
+/// the bracket or the dot it looks for.
 fn expression_term_word<'src>()
 -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
     any()
-        .filter(Token::may_name_a_term)
+        .filter(|token: &Token| matches!(token, Token::Word(_)))
         .then(any().filter(|token: &Token| matches!(token, Token::LParen | Token::Dot)))
         .ignored()
         .boxed()
 }
 
-/// A `boundary` token where the statement's next clause begins, which ends the expression region
-/// before it.
+/// Reads an embedded part, such as an expression, an expression list, a route construction or the
+/// assignments of a `DEFAULT`, from the tokens that remain in the statement, and goes on right
+/// after the tokens `read` took.
 ///
-/// A boundary word written as part of an expression term, such as the `max` of
-/// `max(input.readings)` or the `output` of `output.total`, begins no clause and ends no region.
-fn expression_region_end<'src>(
-    boundary: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    any()
-        .filter(move |token: &Token| boundary(token))
-        .and_is(expression_term_word().not())
-        .ignored()
-        .boxed()
-}
-
-/// The tokens of an expression region, up to the first `boundary` token that begins the
-/// statement's next clause outside every parenthesized or bracketed group.
+/// The part's own grammar decides where it ends: `read` takes the longest run of tokens it
+/// accepts, and the statement's next clause begins right after them. A statement keyword is an
+/// ordinary name inside an expression, so `to`, `on` or `by` written where an operand belongs is a
+/// field, and the clause it would begin starts only after a complete expression. Nothing is
+/// rendered back to text or lexed again, and a standalone entry point reads the same text with the
+/// same grammar.
 ///
-/// A comma separates the relays of a `FROM` list, but inside an `IN` set or a call's arguments it
-/// belongs to the expression, so a boundary ends the region only at nesting depth zero. A keyword
-/// written as part of a term belongs to the expression too: before `(` it names a call, before `.`
-/// the scope of a field and after `.` the field itself. `max(input.readings)`, `output.total` and
-/// `right.id` therefore stay whole in a region that ends at `MAX`, `OUTPUT` or `RIGHT`.
-pub fn nested_expression_tokens<'src>(
-    boundary: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    let group = recursive(|group| {
-        let inner = choice((
-            group,
-            any()
-                .filter(|token: &Token| {
-                    !token.is_group_delimiter() && !matches!(token, Token::Semicolon)
-                })
-                .map(|token| vec![token]),
-        ))
-        .repeated()
-        .collect::<Vec<Vec<Token>>>();
-        // The delimiters are matched without being named, like every other token of the region,
-        // so completion never offers a bracket as though it were a clause of the statement.
-        let delimiter = |expected: Token| any().filter(move |token: &Token| *token == expected);
-        choice((
-            delimiter(Token::LParen)
-                .then(inner.clone())
-                .then(delimiter(Token::RParen)),
-            delimiter(Token::LBracket)
-                .then(inner)
-                .then(delimiter(Token::RBracket)),
-        ))
-        .map(|((open, inner), close)| {
-            let mut tokens = vec![open];
-            tokens.extend(inner.into_iter().flatten());
-            tokens.push(close);
-            tokens
-        })
-        .boxed()
-    });
-    choice((
-        group,
-        any()
-            .filter(|token: &Token| matches!(token, Token::Dot))
-            .then(any().filter(|token: &Token| !token.is_group_delimiter()))
-            .map(|(dot, field)| vec![dot, field]),
-        any()
-            .filter(|token: &Token| !token.is_group_delimiter())
-            .and_is(expression_region_end(boundary).not())
-            .map(|token| vec![token]),
-    ))
-    .repeated()
-    .at_least(1)
-    .collect::<Vec<Vec<Token>>>()
-    .map(|runs| runs.into_iter().flatten().collect())
+/// Completion sees none of the part's grammar. Where the part cannot begin, the rejection expects
+/// `label`, which completion offers. Any other rejection keeps the reader's message, located at
+/// the statement's tokens where the reader failed, and expects nothing, so an unfinished
+/// expression offers nothing and a finished one offers the clauses that may follow it.
+pub fn embedded<'src, O, R>(
+    label: &'static str,
+    read: R,
+) -> impl Parser<'src, &'src [Token], O, extra::Err<ParseError<'src>>> + Clone
+where
+    O: 'src,
+    R: Fn(&'src [Token]) -> Result<Prefix<O>, Vec<ParseError<'src>>> + Clone + 'src,
+{
+    custom(
+        move |input: &mut InputRef<'src, '_, &'src [Token], extra::Err<ParseError<'src>>>| {
+            let start = input.cursor();
+            let offset = input.span_since(&start).start;
+            let remaining: &'src [Token] = input.slice_from(&start..);
+            match read(remaining) {
+                Ok(Prefix { output, length }) => {
+                    for _ in 0..length {
+                        input.skip();
+                    }
+                    Ok(output)
+                }
+                Err(errors) => Err(embedded_rejection(errors, label, offset, remaining)),
+            }
+        },
+    )
     .boxed()
 }
 
-/// The tokens of one expression written as a value in a braced list, such as a sink's
-/// `VALUES { … }` or an inferencer's `INPUTS { … }`: every token up to a comma or the list's
-/// closing brace outside every parenthesized, bracketed or braced group.
+/// The rejection a statement reports for what an embedded reader rejected, moved from the
+/// positions of the tokens the reader was handed onto those of the statement, which begin at
+/// `offset`.
 ///
-/// Brackets group like parentheses, so an array literal's commas stay inside the value that holds
-/// them rather than separating it from the next entry.
-pub fn braced_list_value_tokens<'src>()
--> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    let group = recursive(|element| {
-        let contents = element
-            .repeated()
-            .collect::<Vec<_>>()
-            .map(|parts: Vec<Vec<Token>>| parts.into_iter().flatten().collect::<Vec<_>>());
-        let parens = contents
-            .clone()
-            .delimited_by(tok(Token::LParen), tok(Token::RParen))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LParen);
-                tokens.push(Token::RParen);
-                tokens
-            });
-        let brackets = contents
-            .clone()
-            .delimited_by(tok(Token::LBracket), tok(Token::RBracket))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LBracket);
-                tokens.push(Token::RBracket);
-                tokens
-            });
-        let braces = contents
-            .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LBrace);
-                tokens.push(Token::RBrace);
-                tokens
-            });
-        let leaf = any()
-            .filter(|token: &Token| {
-                !matches!(
-                    token,
-                    Token::LParen
-                        | Token::RParen
-                        | Token::LBracket
-                        | Token::RBracket
-                        | Token::LBrace
-                        | Token::RBrace
-                )
-            })
-            .map(|token| vec![token]);
-        // Naming the slot stops the raw delimiters leaking out as suggestions: a bare "(" offered
-        // here cannot be completed into anything the expression grammar accepts.
-        choice((parens, brackets, braces, leaf)).labelled("value_expression")
-    });
-    group
-        .filter(|tokens| !matches!(tokens.as_slice(), [Token::Comma]))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|parts| parts.into_iter().flatten().collect())
-        .boxed()
-}
-
-pub fn expression_before_clause<'src>(
-    boundary: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
-    nested_expression_tokens(boundary)
-        .labelled("string_expression")
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .boxed()
-}
-
-fn source_where_clause_with_boundary<'src>(
-    boundary: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Where)
-        .ignore_then(nested_expression_tokens(boundary).labelled("where_expression"))
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .boxed()
-}
-
-pub fn where_expression<'src, P>(
-    boundary: P,
-) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone
-where
-    P: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
-{
-    kw(Identifier::Where)
-        .ignore_then(
-            any()
-                .and_is(boundary.not())
-                .filter(|token: &Token| !matches!(token, Token::Semicolon))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .labelled("where_expression"),
-        )
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .boxed()
-}
-
-pub fn alter_expression_list<'src, P>(
-    boundary: P,
+/// A reader that expected something else at its very first token found nothing of the part, so
+/// the rejection expects the part's `label` there. Any other rejection is the reader's first
+/// diagnostic, kept as its message.
+fn embedded_rejection<'src>(
+    errors: Vec<ParseError<'src>>,
     label: &'static str,
-) -> impl Parser<'src, &'src [Token], Vec<Expression>, extra::Err<ParseError<'src>>> + Clone
-where
-    P: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
-{
-    any()
-        .and_is(boundary.not())
-        .filter(|token: &Token| !matches!(token, Token::Semicolon))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .labelled(label)
+    offset: usize,
+    remaining: &'src [Token],
+) -> ParseError<'src> {
+    let error = errors
+        .into_iter()
+        .next()
+        .assured("chumsky reports at least one error for every failed parse");
+    let within = error.span().into_range();
+    let start = offset
+        .checked_add(within.start)
+        .assured("a position inside the remaining tokens is a token index of the statement");
+    let end = offset
+        .checked_add(within.end)
+        .assured("a position inside the remaining tokens is a token index of the statement");
+    let span = SimpleSpan::from(start..end);
+    if within.start == 0
+        && let RichReason::ExpectedFound { .. } = error.reason()
+    {
+        let found = remaining.first().map(MaybeRef::Ref);
+        return <ParseError<'src> as LabelError<'src, &'src [Token], &'static str>>::expected_found(
+            [label],
+            found,
+            span,
+        );
+    }
+    Rich::custom(span, format_parse_error(&error))
+}
+
+/// An expression embedded in a statement, whose body completion names `label`.
+pub fn embedded_expression<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
+    embedded(label, read_expression_prefix)
+}
+
+/// A `WHERE` clause: the keyword, then the expression that filters.
+pub fn where_expression<'src>()
+-> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Where)
+        .ignore_then(embedded_expression("where_expression"))
         .boxed()
 }
 
-pub fn from_relay_clause_with_boundary<'src>(
-    boundary: fn(&Token) -> bool,
-) -> impl Parser<
-    'src,
-    &'src [Token],
-    (RelayName, Vec<ProcessorInputWhere>),
-    extra::Err<ParseError<'src>>,
-> + Clone {
+/// The comma-separated expressions an `ALTER` operation sets, ending where the next operation
+/// begins.
+pub fn alter_expression_list<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Vec<Expression>, extra::Err<ParseError<'src>>> + Clone {
+    embedded(label, |tokens| {
+        read_expression_list_prefix(tokens, alter_list_separator())
+    })
+}
+
+/// The comma-separated expressions a statement clause holds, such as a deduplicator's keys or a
+/// reorderer's ordering.
+pub fn expression_list<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Vec<Expression>, extra::Err<ParseError<'src>>> + Clone {
+    embedded(label, |tokens| {
+        read_expression_list_prefix(tokens, tok(Token::Comma))
+    })
+}
+
+pub fn from_relay_clause<'src>()
+-> impl Parser<'src, &'src [Token], (RelayName, Vec<ProcessorInputWhere>), extra::Err<ParseError<'src>>>
++ Clone {
     relay_ref()
-        .then(source_where_clause_with_boundary(boundary).or_not())
+        .then(where_expression().or_not())
         .map(|(relay, where_clause)| {
             let from_where = where_clause
                 .map(|where_clause| ProcessorInputWhere {
@@ -1903,12 +1656,6 @@ pub fn from_relay_clause_with_boundary<'src>(
             (relay, from_where)
         })
         .boxed()
-}
-
-pub fn from_relay_clause<'src>()
--> impl Parser<'src, &'src [Token], (RelayName, Vec<ProcessorInputWhere>), extra::Err<ParseError<'src>>>
-+ Clone {
-    from_relay_clause_with_boundary(from_where_boundary_token)
 }
 
 pub fn from_relay_clauses<'src>()
@@ -1935,16 +1682,7 @@ pub fn from_relay_clauses<'src>()
 pub fn filter_where_clause<'src>()
 -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Filter)
-        .ignore_then(kw(Identifier::Where))
-        .ignore_then(
-            nested_expression_tokens(processor_output_boundary_token).labelled("where_expression"),
-        )
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+        .ignore_then(where_expression())
         .boxed()
 }
 
@@ -2242,7 +1980,7 @@ pub fn into_parse_error(
 ///
 /// The partial word is removed before parsing rather than left in place. A half-typed word is not a
 /// token the grammar can make sense of, and inside a free-form expression region it is swallowed
-/// into the region and re-parsed by the expression grammar, which fails with a custom error that
+/// into the region and read by the expression grammar, which fails with a custom error that
 /// carries no expectations — so completion falls silent the moment the user starts typing. The
 /// prefix comes back separately and only filters the result.
 pub fn completion_context(input: &str, cursor: usize) -> (String, String) {
@@ -2395,52 +2133,8 @@ fn format_found_token(token: &Token) -> String {
     match token {
         Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
         Token::Word(Word::UnknownWord(raw)) => raw.clone(),
+        Token::Word(Word::Quoted(raw)) => format!("`{raw}`"),
         Token::StringLiteral(value) => format!("\"{value}\""),
-        Token::NumberLiteral(value) => value.clone(),
-        Token::LParen => "(".to_string(),
-        Token::RParen => ")".to_string(),
-        Token::LBracket => "[".to_string(),
-        Token::RBracket => "]".to_string(),
-        Token::Comma => ",".to_string(),
-        Token::Semicolon => ";".to_string(),
-        Token::DoubleColon => "::".to_string(),
-        Token::Colon => ":".to_string(),
-        Token::Dot => ".".to_string(),
-        Token::Hyphen => "-".to_string(),
-        Token::LBrace => "{".to_string(),
-        Token::RBrace => "}".to_string(),
-        Token::Eq => "=".to_string(),
-        Token::NotEq => "!=".to_string(),
-        Token::Gt => ">".to_string(),
-        Token::Lt => "<".to_string(),
-        Token::GtEq => ">=".to_string(),
-        Token::LtEq => "<=".to_string(),
-        Token::Plus => "+".to_string(),
-        Token::Star => "*".to_string(),
-        Token::Slash => "/".to_string(),
-        Token::Percent => "%".to_string(),
-    }
-}
-
-pub fn render_expression_tokens(tokens: &[Token]) -> String {
-    let mut rendered = String::new();
-    for (index, token) in tokens.iter().enumerate() {
-        if index > 0 && !matches!(tokens[index - 1], Token::Dot) && !matches!(token, Token::Dot) {
-            rendered.push(' ');
-        }
-        rendered.push_str(&expression_token_to_source(token));
-    }
-    rendered
-}
-
-fn expression_token_to_source(token: &Token) -> String {
-    match token {
-        Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
-        Token::Word(Word::UnknownWord(raw)) => raw.clone(),
-        // The expression lexer reads a string literal as the statement lexer does, verbatim, so the
-        // value is handed over in the spelling canonical NSPL gives it, which reads back as exactly
-        // that value.
-        Token::StringLiteral(value) => nervix_models::string_literal(value),
         Token::NumberLiteral(value) => value.clone(),
         Token::LParen => "(".to_string(),
         Token::RParen => ")".to_string(),
@@ -2474,13 +2168,39 @@ mod tests {
         prelude::*,
     };
     use meticulous::OptionExt as _;
+    use nervix_models::NamePosition;
+    use strum::IntoEnumIterator as _;
 
     use super::{
-        LexedInput, ParseError, current_word_prefix, filter_where_clause, format_parse_error,
-        into_parse_error, kw, lex_input, schema_ref, suggestions_from_errors,
+        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, filter_where_clause,
+        format_parse_error, into_parse_error, kw, lex_input, schema_ref, suggestions_from_errors,
         token_span_to_source_span,
     };
     use crate::lexer::{Identifier, Token, Word};
+
+    #[test]
+    fn canonical_nspl_quotes_a_keyword_exactly_where_the_grammar_reads_it_as_one() {
+        for keyword in Identifier::iter() {
+            let spelling = <&'static str>::from(keyword).to_ascii_lowercase();
+            let quoted = format!("`{spelling}`");
+            assert_eq!(
+                NamePosition::Qualified.spell(&spelling),
+                spelling,
+                "{spelling} after a scope"
+            );
+            assert_eq!(
+                NamePosition::Called.spell(&spelling) == quoted,
+                keyword.is_expression_keyword(),
+                "{spelling} as a call"
+            );
+            let heads_an_operation = ALTER_OPERATION_HEADS.contains(&keyword);
+            assert_eq!(
+                NamePosition::Bare.spell(&spelling) == quoted,
+                keyword.is_expression_keyword() || heads_an_operation,
+                "{spelling} as a bare name"
+            );
+        }
+    }
 
     #[test]
     fn current_word_prefix_stops_at_non_identifier_boundary() {
@@ -2617,16 +2337,265 @@ mod tests {
     }
 
     #[test]
-    fn a_keyword_that_heads_a_clause_still_ends_the_filter() {
+    fn a_keyword_where_an_operand_belongs_is_a_field_and_the_filter_ends_after_it() {
+        for (source, expected) in [
+            ("FILTER WHERE input.total > max TIME", "input.total > max"),
+            (
+                "FILTER WHERE input.total > output SCHEMA",
+                "input.total > output",
+            ),
+            (
+                "FILTER WHERE by(input.total) > to BY",
+                "by(input.total) > to",
+            ),
+            (
+                "FILTER WHERE `end` > input.end UNBRANCHED",
+                "`end` > input.end",
+            ),
+        ] {
+            let filter = filter_before_the_last_word(source)
+                .unwrap_or_else(|| panic!("{source} must end its filter at the last word"));
+            let expected =
+                crate::parse_expression(expected).expect("the expected filter is an expression");
+            assert_eq!(filter, expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_filter_its_grammar_goes_on_with_and_then_rejects_is_malformed() {
         for source in [
-            "FILTER WHERE input.total > max TIME",
-            "FILTER WHERE input.total > output SCHEMA",
             "FILTER WHERE max(input.readings > 10 UNBRANCHED",
+            "FILTER WHERE input.total IS UNBRANCHED",
+            "FILTER WHERE input.status IN ('void', UNBRANCHED",
+            "FILTER WHERE end > 0 UNBRANCHED",
         ] {
             assert!(
                 filter_before_the_last_word(source).is_none(),
                 "{source} must be rejected"
             );
+        }
+    }
+
+    /// The first diagnostic of `rejection`, the message a caller reads.
+    fn first_message(rejection: &error_stack::Report<super::ParseFromSourceError>) -> String {
+        let diagnostics = rejection.current_context().diagnostics();
+        let first = diagnostics
+            .first()
+            .verified("a rejection carries at least one diagnostic");
+        first.message.clone()
+    }
+
+    /// A statement whose embedded text is rejected, the one token of the statement the rejection
+    /// points at, and the message a standalone reader gives the same embedded text where the reader
+    /// itself rejects it. Where the embedded part is complete before that token, as a key list is
+    /// before a second string written after its last key, the statement rejects the token with its
+    /// own message instead.
+    struct EmbeddedRejection {
+        statement: &'static str,
+        token: &'static str,
+        standalone: Option<String>,
+    }
+
+    #[test]
+    fn an_embedded_rejection_is_reported_at_its_token_with_the_standalone_message() {
+        let expression = |text: &str| {
+            let rejection = crate::parse_expression(text).expect_err("the text is rejected alone");
+            Some(first_message(&rejection))
+        };
+        let list = |text: &str| {
+            let rejection =
+                crate::parse_expression_list(text).expect_err("the list is rejected alone");
+            Some(first_message(&rejection))
+        };
+        let construction = |text: &str| {
+            let rejection = crate::parse_route_construction(text)
+                .expect_err("the construction is rejected alone");
+            Some(first_message(&rejection))
+        };
+        let cases = [
+            EmbeddedRejection {
+                statement: "CREATE SUBSCRIPTION s TO r WHERE input.a > * 1;",
+                token: "*",
+                standalone: expression("input.a > * 1"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE JUNCTION peaks FROM sensors WHERE input.a < 1e3 UNBRANCHED TO \
+                            alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+                token: "1e3",
+                standalone: expression("input.a < 1e3"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE JUNCTION peaks FROM sensors FILTER WHERE input.a IS NOT 'x' \
+                            UNBRANCHED TO alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+                token: "'x'",
+                standalone: expression("input.a IS NOT 'x'"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE JUNCTION j FROM r UNBRANCHED TO o SET total = input.a / * 2 \
+                            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+                token: "*",
+                standalone: construction("SET total = input.a / * 2"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE JUNCTION j FROM r UNBRANCHED TO o WHERE input.a % * 2 FLUSH \
+                            IMMEDIATE ON MESSAGE ERROR LOG;",
+                token: "*",
+                standalone: construction("WHERE input.a % * 2"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE DEDUPLICATOR d FROM sensors DEDUPLICATE ON input.id, 'a' 'b' \
+                            MAX TIME 10m UNBRANCHED TO o INHERIT ALL FLUSH IMMEDIATE ON MESSAGE \
+                            ERROR LOG;",
+                token: "'b'",
+                standalone: None,
+            },
+            EmbeddedRejection {
+                statement: "ALTER DEDUPLICATOR d SET DEDUPLICATE ON input.id, 'a' 'b';",
+                token: "'b'",
+                standalone: None,
+            },
+            EmbeddedRejection {
+                statement: "CREATE DEDUPLICATOR d FROM sensors DEDUPLICATE ON input.id, * 1 MAX \
+                            TIME 10m UNBRANCHED TO o INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR \
+                            LOG;",
+                token: "*",
+                standalone: list("input.id, * 1"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE JUNCTION apply_defaults FROM ss1 BRANCHED BY by_default_state \
+                            USING MATERIALIZED STATE default_preferences DEFAULT { theme = 'x' \
+                            'y' } TO ss10 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                            MESSAGE ERROR LOG;",
+                token: "'y'",
+                standalone: None,
+            },
+            EmbeddedRejection {
+                statement: "CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE \
+                            clickhouse_client INSERT TO TABLE my_table VALUES { 'tags' = 1e9 } \
+                            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 500 \
+                            MAX SIZE 8MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+                            LOG;",
+                token: "1e9",
+                standalone: expression("1e9"),
+            },
+            EmbeddedRejection {
+                statement: "CREATE EMITTER e FROM r TO SQS sqs_main QUEUE q.fifo FIFO GROUP \
+                            input.a + / 1 MODE SINGLE RETRY POLICY BACKOFF 1s MAX 5s ENCODE USING \
+                            c FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                token: "/",
+                standalone: expression("input.a + / 1"),
+            },
+        ];
+        for case in cases {
+            let EmbeddedRejection {
+                statement,
+                token,
+                standalone,
+            } = case;
+            let offset = statement
+                .find(token)
+                .unwrap_or_else(|| panic!("{token} must occur in {statement}"));
+            assert_eq!(
+                statement.matches(token).count(),
+                1,
+                "{token} must occur once in {statement}"
+            );
+            let rejection = crate::client_statement::parse_client_statement(statement)
+                .expect_err("the statement's embedded text is rejected");
+            let diagnostics = rejection.current_context().diagnostics();
+            let [diagnostic] = diagnostics else {
+                panic!("{statement} must be rejected once, got {diagnostics:?}");
+            };
+            assert_eq!(
+                (diagnostic.span.start, &statement[diagnostic.span.clone()]),
+                (offset, token),
+                "{statement} was rejected at another token: {}",
+                diagnostic.message
+            );
+            if let Some(standalone) = standalone {
+                assert_eq!(diagnostic.message, standalone, "{statement}");
+            }
+        }
+    }
+
+    #[test]
+    fn completion_after_an_embedded_expression_offers_the_clauses_that_follow_it() {
+        for (input, expected) in [
+            (
+                "CREATE JUNCTION j FROM r WHERE input.a BETWEEN 1 AND 2 ",
+                vec![",", "BRANCHED BY", "COLLECT FOR", "FILTER", "UNBRANCHED"],
+            ),
+            (
+                "CREATE JUNCTION j FROM r FILTER WHERE input.a IS DISTINCT FROM 1 ",
+                vec!["BRANCHED BY", "UNBRANCHED"],
+            ),
+            (
+                "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = CASE WHEN input.a THEN 1 END ",
+                vec!["FLUSH EACH", "FLUSH IMMEDIATE"],
+            ),
+            (
+                "CREATE DEDUPLICATOR d FROM r DEDUPLICATE ON TRY_CAST(input.a AS I64) ",
+                vec!["MAX"],
+            ),
+            (
+                "CREATE EMITTER e FROM r TO SQS sqs_main QUEUE q.fifo FIFO GROUP input.a ",
+                vec!["MODE"],
+            ),
+        ] {
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(input, input.len()),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_inside_an_unfinished_embedded_expression_offers_nothing() {
+        for input in [
+            "CREATE SUBSCRIPTION s TO r WHERE input.a IS ",
+            "CREATE SUBSCRIPTION s TO r WHERE CASE WHEN input.a THEN ",
+            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = ",
+            "CREATE JUNCTION j FROM r FILTER WHERE input.a NOT ",
+        ] {
+            assert_eq!(
+                crate::client_statement::suggest_client_statement(input, input.len()),
+                Vec::<String>::new(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_offers_a_keyword_only_expressions_read_at_no_statement_position() {
+        let expression_keywords = [
+            "CASE",
+            "WHEN",
+            "THEN",
+            "ELSE",
+            "END",
+            "BETWEEN",
+            "IS",
+            "DISTINCT",
+            "TRY_CAST",
+            "JSON_VALUE",
+            "TRY_JSON_VALUE",
+            "JSON_EXISTS",
+        ];
+        for input in [
+            "",
+            "CREATE ",
+            "CREATE JUNCTION j FROM r ",
+            "CREATE SUBSCRIPTION s TO r ",
+            "CREATE EMITTER e FROM r TO SQS sqs_main QUEUE q.fifo FIFO GROUP ",
+        ] {
+            let suggestions = crate::client_statement::suggest_client_statement(input, input.len());
+            for keyword in expression_keywords {
+                assert!(
+                    !suggestions.iter().any(|suggestion| suggestion == keyword),
+                    "{keyword} leaked into {input:?}: {suggestions:?}"
+                );
+            }
         }
     }
 }

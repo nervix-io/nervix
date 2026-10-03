@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The Bolero properties over canonical rendering and reparsing: expressions as a
 //!   statement embeds them, every Model family, every statement form including the session-only
-//!   ones, and text that is not canonical at all. Deterministic sweeps reach every family and form
-//!   on every run.
+//!   ones, text that is not canonical at all, and edited expression text that every entry point
+//!   must read alike. Deterministic sweeps reach every family and form on every run.
 //! - **Depends on.** The composed statement grammar, the vocabulary's canonical renderer and the
 //!   generators of `nervix-arbitrary`.
 //! - **Must not know.** Validation, persistence or runtime execution.
@@ -62,6 +62,51 @@ fn assert_every_entry_point_reads(text: &str, expression: &Expression) {
         construction.where_clause.as_ref(),
         Some(expression),
         "{text} changed when a route construction read it"
+    );
+}
+
+/// Asserts that every entry point that builds an expression reads `text` alike: a statement that
+/// embeds it and the standalone readers of an expression, an expression list and a route
+/// construction all read it as the same expression, or none of them reads it as one.
+fn assert_every_entry_point_reads_alike(text: &str) {
+    let alone = parse_expression(text).ok();
+
+    // The line break ends a comment the text closes with, so the `;` still ends the statement.
+    let statement = format!("CREATE SUBSCRIPTION literal TO events WHERE {text}\n;");
+    let embedded = match parse_client_statement(&statement) {
+        Ok(ClientStatement::CreateSubscription(subscription)) => subscription.where_clause,
+        Ok(other) => panic!("{statement:?}\nread as another statement: {other:?}"),
+        Err(_) => None,
+    };
+    assert_eq!(
+        embedded, alone,
+        "{text:?} read differently in a statement and alone"
+    );
+
+    // A list of one expression is that expression; a list of more is no single expression.
+    let listed = match parse_expression_list(text) {
+        Ok(mut list) if list.len() == 1 => list.pop(),
+        Ok(_) | Err(_) => None,
+    };
+    assert_eq!(
+        listed, alone,
+        "{text:?} read differently as a list and alone"
+    );
+
+    let route = format!("WHERE {text}");
+    let constructed = match parse_route_construction(&route) {
+        Ok(construction)
+            if construction.inherit.is_none()
+                && construction.assignments.is_empty()
+                && construction.invocations.is_empty() =>
+        {
+            construction.where_clause
+        }
+        Ok(_) | Err(_) => None,
+    };
+    assert_eq!(
+        constructed, alone,
+        "{text:?} read differently in a route construction and alone"
     );
 }
 
@@ -280,6 +325,75 @@ fn calls_and_scopes_named_like_clause_keywords_round_trip_in_every_region() {
     }
 }
 
+/// Pieces an edit of expression text inserts or substitutes: the whitespace and comments between
+/// tokens, the `.` of a float with and without spaces beside it, exponent letters, digits and a
+/// minus, the punctuation of statements that an expression never reads, and keywords only an
+/// expression reserves beside ones it reads as names.
+const EXPRESSION_EDIT_PIECES: [&str; 36] = [
+    " ",
+    "\n",
+    "\t",
+    "// note\n",
+    "//",
+    ".",
+    " .",
+    ". ",
+    " . ",
+    "e",
+    "E",
+    "e5",
+    "E-3",
+    "0",
+    "9",
+    "-",
+    "+",
+    ":",
+    "::",
+    "{",
+    "}",
+    "(",
+    ")",
+    "[",
+    "]",
+    ",",
+    ";",
+    "'",
+    "\"",
+    "$",
+    " IS ",
+    " end ",
+    " between ",
+    " TRY_CAST ",
+    " max ",
+    " first ",
+];
+
+/// Canonical expression text with a few pieces inserted, characters deleted or characters replaced
+/// by pieces, so it is sometimes still an expression and often reads differently or not at all.
+fn edited_expression_text(arbitrary: &mut Arbitrary<'_>, text: &str) -> String {
+    let mut characters = text.chars().collect::<Vec<_>>();
+    let edits = arbitrary.entropy().boundary_biased(1..=4);
+    for _ in 0..edits {
+        let length = u64::try_from(characters.len()).expect("a length fits in u64");
+        let at =
+            usize::try_from(arbitrary.entropy().up_to(length)).expect("the draw ends at a length");
+        let piece = arbitrary.entropy().pick(EXPRESSION_EDIT_PIECES);
+        match arbitrary.entropy().byte() % 3 {
+            0 if at < characters.len() => {
+                characters.remove(at);
+            }
+            1 => {
+                characters.splice(at..at, piece.chars());
+            }
+            _ if at < characters.len() => {
+                characters.splice(at..=at, piece.chars());
+            }
+            _ => characters.extend(piece.chars()),
+        }
+    }
+    characters.into_iter().collect()
+}
+
 /// Characters an edit inserts or substitutes: the delimiters, quotes and operators the grammar
 /// reads, digits, and characters outside ASCII.
 const EDIT_CHARACTERS: [char; 20] = [
@@ -308,6 +422,21 @@ fn edited_text(arbitrary: &mut Arbitrary<'_>, text: &str) -> String {
         }
     }
     characters.into_iter().collect()
+}
+
+#[test]
+fn bolero_expression_text_reads_alike_at_every_entry_point() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(512)
+        .for_each(|bytes: &[u8]| {
+            let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+            let expression = arbitrary.expression();
+            let canonical = nervix_models::expression_to_nspl(&expression)
+                .unwrap_or_else(|error| panic!("{expression:?} must render: {error:?}"));
+            let text = edited_expression_text(&mut arbitrary, &canonical);
+            assert_every_entry_point_reads_alike(&text);
+        });
 }
 
 #[test]

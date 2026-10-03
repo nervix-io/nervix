@@ -21,7 +21,7 @@ use arrow_string::like::{ilike, like};
 use error_stack::Report;
 use indexmap::{Equivalent, IndexMap};
 use meticulous::OptionExt as _;
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
@@ -574,7 +574,6 @@ mod tests {
         collections::hash_map::DefaultHasher,
         hash::{Hash, Hasher},
         num::NonZeroUsize,
-        sync::Arc as StdArc,
     };
 
     use arrow_array::{
@@ -582,6 +581,7 @@ mod tests {
         builder::{ListBuilder, StringBuilder},
     };
     use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_primitives::sync::StdArc;
 
     use super::{
         ContainsAnyCall, PatternLookup, concat_ws, contains_any, join, normalize_nfc, split,

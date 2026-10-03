@@ -197,6 +197,14 @@ where
 /// task neither names a sink crate nor learns which contract a sink implements. The task makes one
 /// call per flush, and the connector receives one virtual call per batch, never one per row.
 #[async_trait]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained sink host invokes publication, retry, acknowledgement and commit \
+                  callbacks"
+    )
+)]
 pub(super) trait EmitterSink: Send {
     /// The hooks through which the host drives the connector's lifecycle, which both sink
     /// contracts share.

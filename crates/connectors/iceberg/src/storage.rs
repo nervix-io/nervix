@@ -6,8 +6,6 @@
 //! - **Depends on.** Iceberg's storage contract, OpenDAL, and the node DNS resolver.
 //! - **Must not know.** Runtime tasks, branches, schedules, or registry state.
 
-use std::sync::Arc;
-
 use ahash::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -28,6 +26,7 @@ use iceberg::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::IcebergStorageBackend;
+use nervix_primitives::sync::StdArc;
 use opendal::{
     Operator,
     layers::{HttpClientLayer, RetryLayer, TimeoutLayer},
@@ -49,7 +48,7 @@ pub(super) struct DnsStorageFactory {
 impl DnsStorageFactory {
     pub(super) fn new(backend: IcebergStorageBackend, dns: &DnsResolver) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .dns_resolver(Arc::new(dns.clone()))
+            .dns_resolver(StdArc::new(dns.clone()))
             .build()
             .map_err(|error| {
                 Error::new(
@@ -85,7 +84,7 @@ impl<'de> Deserialize<'de> for DnsStorageFactory {
 
 #[typetag::serde]
 impl StorageFactory for DnsStorageFactory {
-    fn build(&self, config: &StorageConfig) -> Result<Arc<dyn Storage>> {
+    fn build(&self, config: &StorageConfig) -> Result<StdArc<dyn Storage>> {
         let props: HashMap<_, _> = config
             .props()
             .iter()
@@ -96,7 +95,7 @@ impl StorageFactory for DnsStorageFactory {
             IcebergStorageBackend::Gcs => Backend::Gcs(gcs_config(&props)),
             IcebergStorageBackend::AzureBlob => Backend::Azure(azure_config(&props)?),
         };
-        Ok(Arc::new(DnsStorage {
+        Ok(StdArc::new(DnsStorage {
             backend,
             client: self.client.clone(),
         }))
@@ -311,11 +310,11 @@ impl Storage for DnsStorage {
     }
 
     fn new_input(&self, path: &str) -> Result<InputFile> {
-        Ok(InputFile::new(Arc::new(self.clone()), path.to_string()))
+        Ok(InputFile::new(StdArc::new(self.clone()), path.to_string()))
     }
 
     fn new_output(&self, path: &str) -> Result<OutputFile> {
-        Ok(OutputFile::new(Arc::new(self.clone()), path.to_string()))
+        Ok(OutputFile::new(StdArc::new(self.clone()), path.to_string()))
     }
 }
 

@@ -634,6 +634,11 @@ impl ArgumentColumn {
 
     /// Visit present typed sketch keys from one run with a reusable byte buffer. A frequency
     /// sketch copies a key only if it must retain that distinct candidate.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a visitor over immutable typed column \
+                                   bytes; local visitor bodies remain analyzed")
+    )]
     pub(super) fn visit_sketch_keys(
         &self,
         rows: std::ops::Range<usize>,
@@ -731,6 +736,12 @@ pub(in crate::runtime) struct WindowArgumentColumns {
 impl WindowArgumentColumns {
     /// Share the evaluated Arrow columns as a batch for a window snapshot. This does not extract
     /// per-row scalar values or rebuild columns already held by the live argument batch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "Arrow and the retained argument demand supply selected snapshot columns"
+        )
+    )]
     pub(in crate::runtime) fn snapshot_batch(
         &self,
     ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
@@ -807,6 +818,12 @@ impl WindowArgumentColumns {
     /// Bound each demand's Arrow storage and one typed-key copy per value. Each top-k demand gets
     /// its own charge, even when demands project the same input. The row allowance also covers a
     /// snapshot rebuild as one value per retained row.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the retained argument demand supplies iteration over its selected columns"
+        )
+    )]
     pub(in crate::runtime) fn allocated_bytes(&self) -> u128 {
         let mut bytes = 0_u128;
         for demand in &self.demands {
@@ -906,6 +923,11 @@ impl WindowArgumentColumns {
 
     /// The first function refusing each row whose finite-numeric structure sees a non-finite
     /// argument. Each typed column is classified once, then its bitmap marks affected rows.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained argument demand supplies iteration over its \
+                                   selected function columns")
+    )]
     pub(in crate::runtime) fn refused_functions(
         &self,
         plan: &WindowAccumulatorPlan,

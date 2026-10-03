@@ -466,38 +466,6 @@ impl Arbitrary<'_> {
         queue
     }
 
-    /// NSPL requires a Postgres update to leave at least one mapped column outside its target.
-    /// The vocabulary domain also reaches targets that leave no column to update.
-    fn postgres_conflict_action(
-        &mut self,
-        values: &[ClickHouseValueMapping],
-    ) -> PostgresConflictAction {
-        match self.entropy.byte() % 3 {
-            0 => PostgresConflictAction::None,
-            1 => PostgresConflictAction::DoNothing {
-                target: self.conflict_target(0),
-            },
-            _ => {
-                let mut target = self.conflict_target(1);
-                if self.domain == Domain::Nspl
-                    && values
-                        .iter()
-                        .all(|mapping| target.contains(&mapping.column))
-                {
-                    let column = &values
-                        .first()
-                        .assured("the VALUES map declares at least one column")
-                        .column;
-                    target.retain(|candidate| candidate != column);
-                    if target.is_empty() {
-                        target.push(format!("{column}_conflict"));
-                    }
-                }
-                PostgresConflictAction::DoUpdate { target }
-            }
-        }
-    }
-
     /// A MongoDB conflict action. MongoDB identifies a conflicting document by fields the emitter
     /// writes, so a target names only columns the VALUES map declares, and an update leaves at
     /// least one mapped column outside the target to write.
@@ -541,6 +509,37 @@ impl Arbitrary<'_> {
                 );
                 let target = columns.into_iter().take(taken).collect();
                 MongoDbConflictAction::DoUpdate { target }
+            }
+        }
+    }
+
+    /// A Postgres conflict action. `DO NOTHING` may name no conflict target; `DO UPDATE` needs the
+    /// one it updates.
+    ///
+    /// NSPL reads a `DO UPDATE` only while a mapped column stays outside its target to be updated,
+    /// so there the target leaves the first mapped column out. The vocabulary holds any target.
+    fn postgres_conflict_action(
+        &mut self,
+        values: &[ClickHouseValueMapping],
+    ) -> PostgresConflictAction {
+        match self.entropy.byte() % 3 {
+            0 => PostgresConflictAction::None,
+            1 => PostgresConflictAction::DoNothing {
+                target: self.conflict_target(0),
+            },
+            _ => {
+                let mut target = self.conflict_target(1);
+                if self.domain == Domain::Nspl {
+                    let updated = &values
+                        .first()
+                        .assured("the VALUES map declares at least one column")
+                        .column;
+                    target.retain(|column| column != updated);
+                    if target.is_empty() {
+                        target.push(format!("{updated}_key"));
+                    }
+                }
+                PostgresConflictAction::DoUpdate { target }
             }
         }
     }

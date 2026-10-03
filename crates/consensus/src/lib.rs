@@ -10,12 +10,20 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "Raft log, snapshot and control-plane replication ownership is outside graph \
+                  processing"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -33,7 +41,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{
-        Mutex as AsyncMutex,
+        Arc, Mutex as AsyncMutex, StdArc,
         atomic::{AtomicU64, Ordering},
         blocking::Mutex,
         broadcast, watch,
@@ -72,8 +80,9 @@ use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
 use tracing::{error, info};
-use triomphe::Arc;
 
+#[cfg(test)]
+mod archive_count_tests;
 mod command_execution;
 mod connectivity_fault;
 mod domain_mutation;
@@ -483,6 +492,7 @@ pub enum ConsensusCommand {
     },
     OpenTransaction {
         transaction: Box<ReplicatedTransaction>,
+        #[rkyv(with = nervix_models::CountAsU64)]
         max_open_transactions: usize,
     },
     QueueTransactionStatement {
@@ -512,7 +522,9 @@ pub enum ConsensusCommand {
     },
     AdvanceTransactionCommit {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected_next_statement: usize,
+        #[rkyv(with = nervix_models::CountAsU64)]
         next_statement: usize,
         at: nervix_models::Timestamp,
         result: Box<TransactionStepResult>,
@@ -521,6 +533,7 @@ pub enum ConsensusCommand {
     },
     CompleteTransactionApplication {
         id: String,
+        #[rkyv(with = nervix_models::CountAsU64)]
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
         actual: Box<nervix_models::ActualExecutionStepImpact>,
@@ -4165,6 +4178,7 @@ impl SnapshotTransferIds {
 
     /// The identity of the next transfer this node sends.
     fn allocate(&self) -> io::Result<u64> {
+        #[allow(deprecated)] // until try_update is stabilized
         self.next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
@@ -6332,6 +6346,50 @@ fn read_key<T: durable_batch::StorageDecode>(
 }
 
 #[cfg(test)]
+fn assert_count_command_archives(count: usize) {
+    use archive_count_tests::assert_round_trip;
+
+    let id = "count-transaction".to_string();
+    let domain = DomainName::parse("tenant").assured("the literal follows the name rule");
+    let owner = UserName::parse("operator").assured("the literal follows the name rule");
+    let at = nervix_models::Timestamp::from_unix_nanos(1);
+    let activity = TransactionActivity::from_timeout(at, std::time::Duration::from_secs(60));
+    let transaction = ReplicatedTransaction::open(id.clone(), domain, owner, activity);
+    assert_round_trip(&ConsensusCommand::OpenTransaction {
+        transaction: Box::new(transaction),
+        max_open_transactions: count,
+    });
+    let result = TransactionStepResult {
+        impact: transaction::test_commit_plan(&id, 1).steps.remove(0).impact,
+        result: TransactionCommandResult {
+            success: true,
+            message: "applied".to_string(),
+            diagnostics: Vec::new(),
+            already_existed: false,
+            admission: None,
+        },
+    };
+    for (expected_next_statement, next_statement) in [(count, 0), (0, count)] {
+        assert_round_trip(&ConsensusCommand::AdvanceTransactionCommit {
+            id: id.clone(),
+            expected_next_statement,
+            next_statement,
+            at,
+            result: Box::new(result.clone()),
+            effect: None,
+            completion: None,
+        });
+    }
+    assert_round_trip(&ConsensusCommand::CompleteTransactionApplication {
+        id,
+        expected_next_statement: count,
+        at,
+        actual: Box::new(nervix_models::ActualExecutionStepImpact::applying()),
+        outcome: TransactionApplicationOutcome::Applied,
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -6350,7 +6408,7 @@ mod tests {
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp, TransactionPosition,
     };
-    use nervix_primitives::sync::atomic::AtomicU64;
+    use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
         entry::RaftEntry,
         storage::{RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
@@ -6358,7 +6416,6 @@ mod tests {
         vote::RaftLeaderIdExt,
     };
     use tempfile::tempdir;
-    use triomphe::Arc;
 
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
@@ -7420,7 +7477,7 @@ mod tests {
             BTreeMap::from([(node.clone(), crate::Node::new("https://node-1.invalid"))]),
         )?;
         state.last_membership =
-            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+            nervix_primitives::sync::Arc::new(openraft::StoredMembership::new(None, membership));
         let stale = captured_inputs(&state, "tenant");
         apply_consensus_command(
             &mut state,
@@ -7461,7 +7518,7 @@ mod tests {
             BTreeMap::from([(node, crate::Node::new("https://node-1.invalid"))]),
         )?;
         state.last_membership =
-            triomphe::Arc::new(openraft::StoredMembership::new(None, membership));
+            nervix_primitives::sync::Arc::new(openraft::StoredMembership::new(None, membership));
 
         let applied = apply_consensus_command(
             &mut state,

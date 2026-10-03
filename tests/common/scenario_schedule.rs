@@ -10,11 +10,10 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
-    sync::Arc,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::{blocking::Mutex, oneshot, watch};
+use nervix_primitives::sync::{StdArc, blocking::Mutex, oneshot, watch};
 
 pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 4] = [
     "Web console NSPL REPL",
@@ -79,7 +78,7 @@ impl fmt::Display for AdmissionWait {
 #[derive(Debug)]
 pub(crate) struct ScenarioAdmission {
     limit: FeatureLimit,
-    pool: Arc<AdmissionPool>,
+    pool: StdArc<AdmissionPool>,
     active: bool,
 }
 
@@ -98,7 +97,7 @@ impl Drop for ScenarioAdmission {
 }
 
 pub(crate) struct ScenarioRunSlots {
-    pool: Arc<AdmissionPool>,
+    pool: StdArc<AdmissionPool>,
 }
 
 struct Waiter {
@@ -219,7 +218,7 @@ impl fmt::Debug for AdmissionPool {
 }
 
 impl AdmissionPool {
-    fn dispatch(self: &Arc<Self>, state: &mut AdmissionState) {
+    fn dispatch(self: &StdArc<Self>, state: &mut AdmissionState) {
         while state.available_slots > 0 {
             let Some((limit, waiter)) = state.next_eligible() else {
                 break;
@@ -246,7 +245,7 @@ impl AdmissionPool {
         state.refresh_wait_reasons();
     }
 
-    fn release(self: &Arc<Self>, limit: FeatureLimit) {
+    fn release(self: &StdArc<Self>, limit: FeatureLimit) {
         let mut state = self.state.lock();
         // Give the feature capacity and its run slot back in one decision. Otherwise an ordinary
         // waiter can consume the slot before a feature waiter awakened by the release is polled.
@@ -260,7 +259,7 @@ impl ScenarioRunSlots {
     pub(crate) fn new(slots: usize) -> Self {
         assert!(slots > 0, "a scenario suite needs at least one run slot");
         Self {
-            pool: Arc::new(AdmissionPool {
+            pool: StdArc::new(AdmissionPool {
                 state: Mutex::new(AdmissionState {
                     available_slots: slots,
                     available_web_console: 2,

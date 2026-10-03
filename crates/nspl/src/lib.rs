@@ -39,7 +39,6 @@ pub mod domain;
 pub mod drop_stmt;
 pub mod emitter;
 pub mod endpoint;
-mod expression_lexer;
 pub mod generator;
 pub mod inferencer;
 pub mod ingestor;

@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "the load harness owns measurement and client coordination outside the product \
+                  graph"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,
@@ -14,6 +23,7 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_benchmark::LoadShape;
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
         blocking::Mutex,
     },
@@ -29,7 +39,6 @@ use rdkafka::{
     producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer},
 };
 use serde::{Deserialize, Serialize};
-use triomphe::Arc;
 
 const SEND_CLOCK_MESSAGES: u64 = 65_536;
 const OFFSET_POLL_INTERVAL: Duration = Duration::from_millis(100);

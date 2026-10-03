@@ -882,6 +882,10 @@ fn is_argument_output_field(field: &str) -> bool {
 }
 
 /// Run one route's argument program over every row of `carrier`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the admitted expression executor owns its generic effects")
+)]
 async fn evaluate_route_arguments(
     executor: &Executor,
     program: &CompiledWindowAggregateProgram,

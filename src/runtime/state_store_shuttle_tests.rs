@@ -3,25 +3,25 @@
 //! Layer: test harness.
 //! - **Owns.** The fence, exclusion and yield invariants the production state assignment authority
 //!   is held to across admission, rebind, exclusive installation and capture.
-//! - **Depends on.** The state assignment types and the server Shuttle runner.
+//! - **Depends on.** The state assignment types and the model harness's Shuttle runner.
 //! - **Must not know.** Which runtime state an assignment governs, or what an operation does to it.
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         blocking::mpsc,
     },
     thread,
 };
 use nervix_recovery::Discarded as _;
-use triomphe::Arc;
 
 use super::{
     StateAssignmentAuthority, StateAssignmentToken, StateCapability, StateReplicationRoles,
 };
-use crate::shuttle_test::check_interleavings;
 
 const MODEL_THREAD_JOINS: &str =
     "Shuttle fails the whole execution when a model thread panics, so no join observes one";

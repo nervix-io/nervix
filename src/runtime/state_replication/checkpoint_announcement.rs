@@ -1,10 +1,20 @@
 //! Layer: data plane.
 //! Owns: offering a placement's newest checkpoint to the replicas that lag behind it, and routing a
-//! replica's acknowledgement or an owner's announcement to the replication of the state it names.
+//! replica's acknowledgement to the replication of the state it names and an owner's announcement
+//! to the replica task that keeps the state current.
 //! May depend on: the replicated states this node holds, checkpoint replication, the committed
 //! schedule and the interconnect dispatcher.
 //! Must not know: what a checkpoint holds, how a replica installs it, NSPL parsing, or
 //! control-plane transactions.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "replica frames and steady checkpoint-announcer steps resolve placement state \
+                  repeatedly"
+    )
+)]
 
 use super::*;
 
@@ -96,7 +106,12 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         local_node_id: &ClusterNodeName,
     ) -> BTreeSet<ClusterNodeName> {
-        let Some(execution) = self.inner.executions.get(&placement.domain) else {
+        let Some(execution) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current state \
+             assignment and its replication handle",
+            self.inner.executions.get(&placement.domain)
+        ) else {
             return BTreeSet::new();
         };
         let Some(node) = execution
@@ -114,6 +129,12 @@ impl Runtime {
 
     /// Hand `use_replication` the replication of the state this node holds for `placement`, when it
     /// holds one. Each kind of state is found in the registry that keeps it; nothing is created.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies a synchronous action on its retained replication handle"
+        )
+    )]
     pub(in crate::runtime) fn with_placement_replication(
         &self,
         placement: &RuntimeStatePlacement,
@@ -121,47 +142,73 @@ impl Runtime {
     ) {
         match placement.state.kind() {
             RuntimeStateKind::BranchAggregated => {
-                if let Some(state) = self
-                    .inner
-                    .replicated_branch_aggregated_states
-                    .get(placement)
-                {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner
+                        .replicated_branch_aggregated_states
+                        .get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::BranchLru => {
-                if let Some(lifecycle) = self.inner.replicated_branch_lifecycles.get(placement) {
+                if let Some(lifecycle) = self.branch_lifecycle(placement) {
                     use_replication(lifecycle.replication());
                 }
             }
             // Correlator buffers are not replicated runtime state.
             RuntimeStateKind::Correlator => {}
             RuntimeStateKind::Deduplicator => {
-                if let Some(state) = self.inner.replicated_deduplicator_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_deduplicator_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::KafkaOffset => {
-                if let Some(state) = self.inner.replicated_kafka_offset_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_kafka_offset_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::MaterializedRelay => {
-                if let Some(state) = self
-                    .inner
-                    .replicated_materialized_stream_states
-                    .get(placement)
-                {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner
+                        .replicated_materialized_stream_states
+                        .get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::WasmProcessor => {
-                if let Some(state) = self.inner.replicated_wasm_processor_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_wasm_processor_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
             RuntimeStateKind::WindowProcessor => {
-                if let Some(state) = self.inner.replicated_window_processor_states.get(placement) {
+                if let Some(state) = nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
+                     state assignment and its replication handle",
+                    self.inner.replicated_window_processor_states.get(placement)
+                ) {
                     use_replication(state.replication());
                 }
             }
@@ -180,13 +227,24 @@ impl Runtime {
     }
 
     /// Act on `source`'s announcement that it holds a newer checkpoint of a placement this node
-    /// replicates: wake the task that keeps this node's copy current, and fetch the checkpoint of
-    /// a branch-local state or a branch lifecycle at once.
+    /// replicates.
+    ///
+    /// The branch lifecycle and the branch states of a branch-keyed entity are kept current by one
+    /// replica task for the whole entity: the announcement is left with the entity's lifecycle,
+    /// which wakes that task, and the task fetches or acknowledges the announced checkpoint in its
+    /// next round. Any other state wakes the task that keeps this node's copy of it current.
     pub(crate) fn handle_state_checkpoint_available(
         &self,
         source: &ClusterNodeName,
         checkpoint: nervix_interconnect::StateCheckpointAvailable,
     ) {
+        if self
+            .inner
+            .fault_injection
+            .state_checkpoint_announcements_are_lost()
+        {
+            return;
+        }
         let placement = match RuntimeStatePlacement::from_remote(checkpoint.placement) {
             Ok(placement) => placement,
             Err(error) => {
@@ -207,13 +265,35 @@ impl Runtime {
             lsm = checkpoint.lsm,
             "runtime state checkpoint is available"
         );
-        self.with_placement_replication(&placement, CheckpointReplication::announced);
-        if let RuntimeStateKind::Deduplicator
-        | RuntimeStateKind::WasmProcessor
-        | RuntimeStateKind::WindowProcessor
-        | RuntimeStateKind::BranchLru = placement.state.kind()
-        {
-            self.schedule_passive_state_replica_sync(placement, source.clone(), checkpoint.lsm);
+        match placement.state.kind() {
+            RuntimeStateKind::BranchLru => {
+                if let Some(lifecycle) = self.branch_lifecycle(&placement) {
+                    lifecycle.announce_lifecycle(checkpoint.lsm);
+                }
+            }
+            RuntimeStateKind::Deduplicator
+            | RuntimeStateKind::WasmProcessor
+            | RuntimeStateKind::WindowProcessor => {
+                let Some(entity) = placement.branch_lifecycle() else {
+                    return;
+                };
+                let Some(lifecycle) = self.branch_lifecycle(&entity) else {
+                    return;
+                };
+                lifecycle.announce_branch(
+                    placement.branch_key,
+                    AnnouncedCheckpoint {
+                        state: placement.state,
+                        lsm: checkpoint.lsm,
+                    },
+                );
+            }
+            RuntimeStateKind::BranchAggregated
+            | RuntimeStateKind::Correlator
+            | RuntimeStateKind::KafkaOffset
+            | RuntimeStateKind::MaterializedRelay => {
+                self.with_placement_replication(&placement, CheckpointReplication::announced);
+            }
         }
     }
 }

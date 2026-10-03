@@ -12,9 +12,8 @@ use nervix_client_wire::{
     SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionType,
 };
 use nervix_models::{CreateSubscription, DomainName, SubscriptionName};
-use nervix_primitives::sync::{blocking::Mutex, watch};
+use nervix_primitives::sync::{Arc, blocking::Mutex, watch};
 use nervix_recovery::Discarded as _;
-use triomphe::Arc;
 
 use crate::events::SubscriptionEvent;
 

@@ -214,9 +214,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   context allows, `Function Properties` and `Errors` for optional results, sensitivity, and where a
   failure goes, then the section of each operator and function the expression uses. Check that:
   - literals are `I64` and `F64`, so a narrower operand's literal is cast (`input.count > 5 AS U32`),
-    and there is no exponent, `DATETIME`, or `BYTES` literal;
+    a float is one word (`2.5`, never `2 .5`), and there is no exponent, `DATETIME`, or `BYTES`
+    literal;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
+  - a field, call, or `SET`/`INHERIT` target named like a reserved word (`end`, `from`, `in`, `all`,
+    `null`, ...) is written between backticks where it stands bare (`` `end` = input.end ``), while
+    `input.end` and `udf::case(...)` need none; a statement keyword such as `to`, `on`, or `by` is an
+    ordinary name;
   - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an
     operand that can fail, such as a division by a field that can be zero;
   - an optional result (`TRY_CAST`, JSON extraction, `nullif`, `LOOKUP_HASH_MAP`, `regexp_substr`,
@@ -293,6 +298,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
   in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
+  On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
+  creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
   including an outbound WebSocket client, is single-owner and keeps its live assignment across
   ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it

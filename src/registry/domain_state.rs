@@ -14,8 +14,8 @@ use nervix_models::{
     DomainName, EndpointType, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
     RelayName, parse_duration_text,
 };
+use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
-use triomphe::Arc;
 
 pub(in crate::registry) use crate::registry::validation::{
     processor::{

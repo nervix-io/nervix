@@ -9,8 +9,8 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2,
-        lex_input, relay_ref, render_expression_tokens, session_subscription_name,
-        session_subscription_ref, string_lit, suggest_from, tok, word_raw,
+        lex_input, relay_ref, session_subscription_name, session_subscription_ref, string_lit,
+        suggest_from, tok, where_expression, word_raw,
     },
 };
 
@@ -114,19 +114,7 @@ pub fn parse_batch_sample_rate(input: &str) -> error_stack::Result<String, Parse
 fn subscription_where_clause<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::Where)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !matches!(token, Token::Semicolon))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|tokens, span| {
-            crate::parse_expression(&render_expression_tokens(&tokens)).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+    where_expression()
 }
 
 pub fn create_subscription_parser<'src>()
@@ -246,6 +234,27 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "live_notifications");
         assert_eq!(parsed.relay.as_str(), "notifications");
         assert_eq!(parsed.where_clause, None);
+    }
+
+    #[test]
+    fn a_subscription_filter_reads_quoted_and_scoped_reserved_names() {
+        let tokens = to_tokens(
+            "CREATE SUBSCRIPTION watch TO closed WHERE `end` > 0 AND input.from = 1 AND to > 0;",
+        );
+        let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(
+            parsed.where_clause,
+            Some(
+                crate::parse_expression("`end` > 0 AND input.from = 1 AND to > 0")
+                    .expect("valid expression")
+            )
+        );
+        let tokens = to_tokens("CREATE SUBSCRIPTION watch TO closed WHERE end > 0;");
+        assert!(parse_create_subscription_tokens(&tokens).is_err());
+
+        let input = "CREATE SUBSCRIPTION watch TO closed WHERE ";
+        let suggestions = suggest_create_subscription(input, input.len());
+        assert_eq!(suggestions, vec!["where_expression".to_string()]);
     }
 
     #[test]

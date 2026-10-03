@@ -1,5 +1,7 @@
 /target
 /tests/bolero-qualification/target/
+/tools/nervix-lint/target/
+/tools/nervix-lint/fixtures/target/
 /.coverage
 **/__fuzz__/**/crashes/
 /lcov.info

@@ -22,13 +22,13 @@ use nervix_models::{
     MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
     ReingestorName, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaName,
 };
+use nervix_primitives::sync::Arc;
 use nervix_vm::{
     FrontendResult, SemanticScopePolicy, lower_branch_construction, lower_route_construction,
     lower_transforming_route,
     program::{Program, SpannedNode},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     DomainActivationPlan, domain_activation_plan::PlannedRelay, ingestor_plan::IngestorStartPlan,

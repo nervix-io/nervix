@@ -24,9 +24,8 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use nervix_models::{CommandExecutionReference, RestoreArchive, Timestamp, UserName};
-use nervix_primitives::sync::blocking::Mutex;
+use nervix_primitives::sync::{Arc, blocking::Mutex};
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::application::backup::retained::RetainedArtifact;
 
@@ -285,12 +284,13 @@ impl<A> RestoreArchives<A> {
 pub(super) mod test_staging {
     //! A staging area in memory that counts every reservation it makes and every release of one.
 
-    use std::{collections::BTreeMap, sync::Arc as StdArc};
+    use std::collections::BTreeMap;
 
     use arch_into::ArchInto as _;
     use bytes::Bytes;
     use error_stack::Report;
     use nervix_primitives::sync::{
+        StdArc,
         atomic::{AtomicUsize, Ordering},
         blocking::Mutex,
     };
@@ -404,12 +404,12 @@ pub(super) mod test_staging {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU64, sync::Arc as StdArc};
+    use std::num::NonZeroU64;
 
     use futures_util::stream;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::ArchiveDigest;
-    use nervix_primitives::sync::atomic::Ordering;
+    use nervix_primitives::sync::{StdArc, atomic::Ordering};
 
     use super::{test_staging::*, *};
 

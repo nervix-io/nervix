@@ -26,6 +26,7 @@ use nervix_connector::{
 };
 use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsResolver, HOOK_LOOKUP_BUDGET};
 use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
+use nervix_primitives::sync::Arc;
 use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
     ErrorKind as RedisErrorKind, RedisFuture, ServerErrorKind,
@@ -35,7 +36,6 @@ pub use source::{
     RedisPubSubSource, RedisPubSubSourceError, RedisPubSubSourceMessage, RedisPubSubSourcePlan,
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 const REDIS: &str = "redis";
 pub(crate) const CONNECT_BUDGET: Duration = Duration::from_secs(30);
@@ -214,6 +214,13 @@ fn invalid_client_config(reason: impl std::fmt::Display) -> Report<RedisClientEr
 ///
 /// The host owns the interest that keeps the pool open and the wait it records while a connection
 /// is handed over; this handle holds both for as long as the sink publishes through them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the retained host service is invoked by each admitted driver operation"
+    )
+)]
 pub trait RedisPoolServices: Send + Sync + 'static {
     /// The shared command pool this sink's client opened on this node.
     fn pool(&self) -> RedisCommandPool;
@@ -285,6 +292,10 @@ impl RedisSink {
 
     /// Borrow a command connection for one publish, reporting the wait until the pool hands one
     /// over. The connection returns to the pool as soon as the publish completes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the bb8 driver owns polling the pool future")
+    )]
     async fn connection<'pool>(
         pool: &'pool RedisCommandPool,
         handle: &RedisPoolHandle,
@@ -316,6 +327,13 @@ impl RedisSink {
             || detail.contains("string exceeds maximum allowed size")
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "formats the typed external Redis driver failure; no internal runtime \
+                      ownership is inferred"
+        )
+    )]
     fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
         Report::new(SinkPublishError::Publish { sink: REDIS }).attach_printable(error.to_string())
     }

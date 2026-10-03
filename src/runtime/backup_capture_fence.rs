@@ -5,11 +5,24 @@
 //! - **Depends on.** The shared atomic primitive boundary.
 //! - **Must not know.** Archive sections, domain mutation leases, or the interconnect.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one domain capture generation",
+        bound = "at most 32 bits of registered publications; each guard releases one registration",
+        reason = "checkpoint callbacks and the synchronous cut serialize publication with the \
+                  storage view through atomic registration"
+    )
+)]
+
 use nervix_primitives::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
 };
-use triomphe::Arc;
 
 // The low bits count publications that acquired the current generation. Closing a generation
 // prevents new publishers from entering; a later generation opens only after its snapshot closes.
@@ -91,14 +104,16 @@ impl Drop for BackupCut {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
+    use nervix_model_harness::shuttle::check_interleavings;
     use nervix_primitives::{
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
     };
-    use triomphe::Arc;
 
     use super::BackupCaptureFence;
-    use crate::shuttle_test::{check_pct, check_random};
 
     fn publication_and_cut() {
         let fence = Arc::new(BackupCaptureFence::default());
@@ -126,8 +141,7 @@ mod shuttle_tests {
 
     #[test]
     fn shuttle_backup_cut_includes_pre_cut_branch_publication() {
-        check_random(publication_and_cut, 1_000);
-        check_pct(publication_and_cut, 1_000, 3);
+        check_interleavings(publication_and_cut);
     }
 }
 
@@ -136,10 +150,12 @@ mod loom_models {
     use meticulous::ResultExt as _;
     use nervix_model_harness::{InvariantId, loom::explore};
     use nervix_primitives::{
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
     };
-    use triomphe::Arc;
 
     use super::BackupCaptureFence;
 

@@ -29,19 +29,18 @@
 //! connections the HTTP receiver's connection budget to end before it aborts and joins the ones that
 //! remain, within the same whole-stop budget.
 
-use std::{collections::VecDeque, fmt, io, net::SocketAddr, sync::Arc as StdArc, time::Duration};
+use std::{collections::VecDeque, fmt, io, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
-    sync::{CancellationToken, blocking::Mutex, watch},
+    sync::{Arc, CancellationToken, StdArc, blocking::Mutex, watch},
     task::{AbortOnDropHandle, JoinSet},
     time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::http_receiver::{
     AcceptLoopEnding, ConnectionSummary, MAX_CAPTURED_REQUESTS, MAX_RECORDED_FAULTS,

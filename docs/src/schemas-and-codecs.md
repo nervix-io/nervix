@@ -19,8 +19,9 @@ CREATE IF NOT EXISTS SCHEMA notification (
 
 Schemas must declare at least one field.
 
-Field names used in expressions are subject to the
-[reserved-word rule](filter-map-functions.md#reserved-words).
+A schema may name a field with any word, keywords included. An expression writes a field named like
+a [reserved word](filter-map-functions.md#reserved-words) between backticks where it stands bare,
+and as it is after a scope such as `input.`.
 
 These types are the values Nervix stores in runtime records and uses for subscription matching and processor logic. `BYTES` may be a deduplication or reordering key, ordered lexicographically by octet, but branch key schemas cannot contain `BYTES`, including nested `ARRAY` or `VEC` elements.
 
@@ -343,7 +344,7 @@ Semantics:
 - `ON INGESTION` runs on every value the parsed native or protobuf payload holds and may yield zero or more JSON objects, each of which becomes one message compatible with the internal schema ([Unfolding Payloads](#unfolding-payloads))
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
-JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them.
+JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them. A payload an ingestor's quiesce buffer retained is not refused: it waits in the buffer until the extension workers take it ([Quiesce Modes](ingestors.md#quiesce-modes)).
 JAQ JSON output intentionally preserves object member declaration order. The serde JSON
 `preserve_order` feature exists for that public JAQ behavior; schemaful `WIRE JSON` ingestion does
 not depend on serde JSON object storage.

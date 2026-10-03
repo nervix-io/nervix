@@ -7,6 +7,14 @@
 //!   primitive boundary, and physical time.
 //! - **Must not know.** Sessions, their wire format, NSPL text, or a client's transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "client emitter attachment installation resolves the concrete consumer lifetime"
+    )
+)]
+
 use std::{collections::VecDeque, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
@@ -18,7 +26,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{
-        Notify,
+        Arc, Notify,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, oneshot,
     },
@@ -26,7 +34,6 @@ use nervix_primitives::{
 };
 use nervix_recovery::NoReceiver as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 use uuid::Uuid;
 
 use super::{BranchKey, DomainNodeRef, Runtime};
@@ -885,6 +892,13 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         None
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the retained delivery owner invokes its reference allocator; local \
+                      allocator bodies remain checked"
+        )
+    )]
     fn dispatch(&mut self) {
         let rounds = self.pending.len();
         for _ in 0..rounds {

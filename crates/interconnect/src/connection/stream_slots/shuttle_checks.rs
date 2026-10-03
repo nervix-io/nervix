@@ -9,12 +9,12 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // step as the lease or drain operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_primitives::{
-    sync::Notify,
+    sync::{Arc, Notify},
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use shuttle::rand::{Rng as _, thread_rng};
-use triomphe::Arc;
 
 use super::{
     BULK_RESOURCE_STREAMS, BULK_SHARED_STREAMS, BULK_SNAPSHOT_STREAMS,
@@ -23,7 +23,7 @@ use super::{
     MANAGEMENT_TERMINAL_STREAMS, REPLICATION_APPEND_STREAMS, REPLICATION_SHARED_STREAMS,
     StreamSlotQuotas,
 };
-use crate::{PoolClass, RequestSubquota, shuttle_test::check_random_and_pct};
+use crate::{PoolClass, RequestSubquota};
 
 /// One subquota of a partition and the stream slots it reserves.
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +133,7 @@ impl DrainObservation {
             !self.has_begun(),
             "the {subquota:?} subquota leased a slot after the drain began"
         );
+        #[allow(deprecated)] // until try_update is stabilized
         let granted =
             self.outstanding
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {
@@ -142,6 +143,7 @@ impl DrainObservation {
     }
 
     fn lease_returned(&self) {
+        #[allow(deprecated)] // until try_update is stabilized
         let returned =
             self.outstanding
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |outstanding| {

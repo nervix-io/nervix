@@ -6,6 +6,15 @@
 //! - **Depends on.** Branch-local state, the runtime state store, and typed placement envelopes.
 //! - **Must not know.** Archive records, backup command execution, or restore planning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "backup capture and stopped-domain restore inspect or install one domain state \
+                  generation; checkpoint publishers override this lifecycle default"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
@@ -136,10 +145,24 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "checkpoint callbacks register before publishing their retained state"
+        )
+    )]
     pub(super) fn backup_publication(&self, domain: &DomainName) -> BackupPublication {
         BackupCaptureFence::publication(&self.backup_capture_fence(domain))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "checkpoint callbacks register before publishing their retained state"
+        )
+    )]
     fn backup_capture_fence(&self, domain: &DomainName) -> super::Arc<BackupCaptureFence> {
         if let Some(fence) = self.inner.backup_capture_fences.load().get(domain) {
             return fence.clone();

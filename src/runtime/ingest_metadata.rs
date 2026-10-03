@@ -37,6 +37,13 @@ impl<'a> IngestHeaderRow<'a> {
             .map(|index| self.values.value(index))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the synchronous header visitor; external Arrow access \
+                      owns its data effects"
+        )
+    )]
     pub(super) fn visit(&self, name: &str, mut visit: impl FnMut(&'a str)) {
         for index in self.start..self.end {
             if self.names.value(index) == name {
@@ -239,6 +246,11 @@ impl IngestMetadataBuilders {
     // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
     // doubles that per-message function's machine code and measurably reduces ingest throughput.
     #[inline(never)]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the source supplies a transport header visitor; this host \
+                                   appends the bounded row metadata")
+    )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
         let headers = match (&mut self.integration, row) {
             (
@@ -479,6 +491,13 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     /// Reads the headers of the messages the selected rows were decoded from. A conditional arm
     /// calls this for the rows it selects only, so each row's headers are looked up by the row's
     /// identity in the batch, which the selection names.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the synchronous header visitor; external Arrow access \
+                      owns its data effects"
+        )
+    )]
     fn inject_with_context(
         &self,
         function: &FunctionName,
@@ -560,8 +579,8 @@ mod tests {
         MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,
         RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::{
@@ -723,7 +742,12 @@ mod tests {
         for offset in 0..3i64 {
             let payload = format!(r#"{{"value":{offset}}}"#);
             group
-                .decode_payload(&Executor::default(), &codec, payload.as_bytes())
+                .decode_payload(
+                    &Executor::default(),
+                    QueueAdmission::RefuseWhenFull,
+                    &codec,
+                    payload.as_bytes(),
+                )
                 .await
                 .expect("each payload must decode into the group's record builder");
             group

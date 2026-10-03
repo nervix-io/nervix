@@ -1,11 +1,21 @@
+//! The expression grammar: expressions, expression lists and route constructions, read from the
+//! tokens of the one NSPL lexer.
+//!
+//! Layer: language.
+//!
+//! - **Owns.** The grammar of an expression and of the route construction around it, the readers a
+//!   statement applies to the tokens of an expression it embeds, and the standalone readers the
+//!   web console's forms, `nervix-cli subscribe --where` and the client library call.
+//! - **Depends on.** The shared lexer, its tokens and the shared grammar primitives, and the
+//!   vocabulary's expression Models.
+//! - **Must not know.** Statement grammars, VM programs, registry state or runtime execution.
+
 use std::num::NonZeroU32;
 
 use ahash_compile_time::{HashSet, HashSetExt};
-use chumsky::{
-    input::{Stream, ValueInput},
-    prelude::*,
-};
+use chumsky::{Boxed, prelude::*};
 use error_stack::Report;
+use meticulous::ResultExt as _;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, BuiltinFunctionName,
     CaseBranch, Expression, FieldName, FieldReference, FieldScope, Float64Literal, Inheritance,
@@ -14,51 +24,76 @@ use nervix_models::{
 };
 
 use crate::{
-    expression_lexer::{SpannedToken, Token, lex},
-    parser_support::{Diagnostic, ParseFromSourceError},
+    lexer::{Identifier, Token, Word},
+    parser_support::{
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, kw_phrase, lex_input,
+        tok,
+    },
 };
 
-type Span = chumsky::span::SimpleSpan<usize>;
-type ParseError<'src> = Rich<'src, Token, Span>;
+type Span = SimpleSpan<usize>;
 
-fn keyword<'src, I>(token: Token) -> impl Parser<'src, I, (), extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    just(token).ignored()
+/// A plain word an expression reads where a keyword may also stand: any word but a keyword the
+/// expression grammar reserves. It names a scope, a type, a call or a bare field.
+fn raw_identifier<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::Word(Word::UnknownWord(raw)) => raw,
+        Token::Word(Word::KnownWord { iden, raw }) if !iden.is_expression_keyword() => raw,
+    }
+    .labelled("identifier")
 }
 
-/// A keyword written as several words, parsed as one grammar unit and reported under its phrase.
-fn keyword_phrase<'src, I, const WORDS: usize>(
-    words: [Token; WORDS],
-    phrase: &'static str,
-) -> impl Parser<'src, I, (), extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    just(words).ignored().labelled(phrase)
+/// A name written between backticks, which reads as a name wherever it stands, even when it spells
+/// a reserved word or holds a character a plain word cannot.
+fn quoted_name<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::Word(Word::Quoted(raw)) => raw,
+    }
+    .labelled("identifier")
 }
 
-fn raw_identifier<'src, I>() -> impl Parser<'src, I, String, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    select! { Token::Identifier(name) => name }.labelled("identifier")
+/// The text of a name written where a keyword may also stand, as a call or a bare field is: a plain
+/// word the expression grammar does not reserve, or any name between backticks.
+fn name_word<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    choice((raw_identifier(), quoted_name()))
 }
 
-/// Parse one word as the named concept `N`, validated by the name type's own constructor.
-fn name<'src, I, N: Clone + 'static>(
+/// The text of a name written after a scope's `.` or after `udf::`, where no keyword can stand: any
+/// word, a reserved one too, or a name between backticks.
+fn qualified_name_word<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::Word(Word::UnknownWord(raw)) => raw,
+        Token::Word(Word::KnownWord { raw, .. }) => raw,
+        Token::Word(Word::Quoted(raw)) => raw,
+    }
+    .labelled("identifier")
+}
+
+/// Parse a name written where a keyword may also stand as the named concept `N`, validated by the
+/// name type's own constructor.
+fn name<'src, N: Clone + 'static>(
     parse: fn(&str) -> Result<N, Report<NameError>>,
-) -> impl Parser<'src, I, N, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    raw_identifier().try_map(move |raw: String, span| {
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+    name_word().try_map(move |raw: String, span| {
         parse(&raw).map_err(|error| Rich::custom(span, error.to_string()))
     })
 }
 
-fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, Rich<'src, Token>> {
+/// Parse a name written after a scope's `.` or after `udf::` as the named concept `N`, validated
+/// by the name type's own constructor.
+fn qualified_name<'src, N: Clone + 'static>(
+    parse: fn(&str) -> Result<N, Report<NameError>>,
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+    qualified_name_word().try_map(move |raw: String, span| {
+        parse(&raw).map_err(|error| Rich::custom(span, error.to_string()))
+    })
+}
+
+fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, ParseError<'src>> {
     match name.to_ascii_lowercase().as_str() {
         "message" => Ok(FieldScope::Message),
         "input" => Ok(FieldScope::Input),
@@ -76,17 +111,14 @@ fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, Rich<'src, To
     }
 }
 
-fn field_reference<'src, I>()
--> impl Parser<'src, I, FieldReference, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
+fn field_reference<'src>()
+-> impl Parser<'src, &'src [Token], FieldReference, extra::Err<ParseError<'src>>> + Clone {
     let scoped = raw_identifier()
-        .then_ignore(keyword(Token::Dot))
-        .then(raw_identifier())
+        .then_ignore(tok(Token::Dot))
+        .then(qualified_name_word())
         .then(
-            keyword(Token::Dot)
-                .ignore_then(name(FieldName::parse))
+            tok(Token::Dot)
+                .ignore_then(qualified_name(FieldName::parse))
                 .or_not(),
         )
         .try_map(|((scope, second), third), span| match third {
@@ -117,10 +149,8 @@ where
     choice((scoped, bare)).boxed()
 }
 
-fn cast_type<'src, I>() -> impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
+fn cast_type<'src>()
+-> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
     raw_identifier().try_map(|name, span| {
         let ty = match name.to_ascii_uppercase().as_str() {
             "UINT8" | "U8" => ParseAsType::U8,
@@ -145,11 +175,8 @@ where
 
 /// A declared result type: a scalar type as `cast_type` reads it, or a `VEC<...>` or
 /// `ARRAY<..., n>` of declared types written as a schema field declares them.
-fn declared_type<'src, I>()
--> impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
+fn declared_type<'src>()
+-> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
     recursive(|declared| {
         let collection = |spelling: &'static str| {
             raw_identifier()
@@ -164,12 +191,12 @@ where
         };
         // The label goes on the number itself, as the schema grammar does, so the checks below
         // keep their own explanation.
-        let array_len = select! { Token::Integer(value) => value }
+        let array_len = select! { Token::NumberLiteral(raw) => raw }
             .labelled("array_length")
-            .try_map(|value, span| {
+            .try_map(|raw: String, span| {
                 let not_positive =
                     || Rich::custom(span, "array length must be a positive unsigned integer");
-                let Ok(len) = u32::try_from(value) else {
+                let Ok(len) = raw.parse::<u32>() else {
                     return Err(not_positive());
                 };
                 let Some(len) = NonZeroU32::new(len) else {
@@ -187,14 +214,14 @@ where
         let array = collection("ARRAY").ignore_then(
             declared
                 .clone()
-                .then_ignore(keyword(Token::Comma))
+                .then_ignore(tok(Token::Comma))
                 .then(
                     array_len
-                        .separated_by(keyword(Token::Comma))
+                        .separated_by(tok(Token::Comma))
                         .at_least(1)
                         .collect::<Vec<_>>(),
                 )
-                .delimited_by(keyword(Token::Lt), keyword(Token::Gt))
+                .delimited_by(tok(Token::Lt), tok(Token::Gt))
                 .map(|(element, lengths)| {
                     // `ARRAY<F32, 2, 3>` is two arrays of three, so the last length is innermost.
                     let mut declared = element;
@@ -209,7 +236,7 @@ where
         );
         let vector = collection("VEC").ignore_then(
             declared
-                .delimited_by(keyword(Token::Lt), keyword(Token::Gt))
+                .delimited_by(tok(Token::Lt), tok(Token::Gt))
                 .map(|element| ParseAsType::Vec {
                     element: Box::new(element),
                 }),
@@ -219,11 +246,9 @@ where
 }
 
 /// The string literal naming a JSON path, parsed into the steps it takes.
-fn json_path<'src, I>() -> impl Parser<'src, I, JsonPath, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    select! { Token::String(text) => text }
+fn json_path<'src>()
+-> impl Parser<'src, &'src [Token], JsonPath, extra::Err<ParseError<'src>>> + Clone {
+    select! { Token::StringLiteral(text) => text }
         .labelled("json_path")
         .try_map(|text: String, span| {
             JsonPath::parse(&text).map_err(|error| {
@@ -232,6 +257,41 @@ where
                     format!("invalid JSON path '{text}': {}", error.current_context()),
                 )
             })
+        })
+}
+
+/// A number literal as an expression reads it: decimal digits are an `I64`, and digits with a
+/// fraction an `F64`.
+///
+/// The lexer reads a number with its fraction and its exponent as one token, so the `.` of a float
+/// is part of the literal only when no space separates it from the digits around it. A number with
+/// an exponent is one token too, and an expression rejects it rather than reading it as another
+/// number.
+fn number_literal<'src>()
+-> impl Parser<'src, &'src [Token], Literal, extra::Err<ParseError<'src>>> + Clone {
+    select! { Token::NumberLiteral(raw) => raw }
+        .labelled("number_literal")
+        .try_map(|raw: String, span| {
+            if raw.contains(['e', 'E']) {
+                return Err(Rich::custom(
+                    span,
+                    format!(
+                        "number literal '{raw}' has an exponent, which an expression does not \
+                         read; write '{raw}' AS F64"
+                    ),
+                ));
+            }
+            if raw.contains('.') {
+                let value = raw.parse::<f64>().assured(
+                    "the lexer writes a fraction as digits, a dot and digits, which always read \
+                     as an f64",
+                );
+                return Ok(Literal::F64(Float64Literal::new(value)));
+            }
+            let value = raw.parse::<i64>().map_err(|error| {
+                Rich::custom(span, format!("invalid integer literal '{raw}': {error}"))
+            })?;
+            Ok(Literal::I64(value))
         })
 }
 
@@ -283,21 +343,16 @@ impl ComparisonSuffix {
 }
 
 /// A postfix `AS <type>`, which converts the operand before it.
-fn cast_suffix<'src, I>() -> impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    keyword(Token::As).ignore_then(cast_type())
+fn cast_suffix<'src>()
+-> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::As).ignore_then(cast_type())
 }
 
 /// An operand followed by the postfix casts `suffix` reads, each converting everything before it.
-fn cast_chain<'src, I>(
-    operand: impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone + 'src,
-    suffix: impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone + 'src,
-) -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
+fn cast_chain<'src>(
+    operand: impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone + 'src,
+    suffix: impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     operand
         .then(suffix.repeated().collect::<Vec<_>>())
         .map(|(value, casts)| {
@@ -313,16 +368,15 @@ where
 
 /// The prefix, arithmetic, comparison and logical operators, from the tightest binding to the
 /// loosest, over the cast chains `cast_chain` reads. `set` reads the set of an `IN` test.
-fn operator_ladder<'src, I>(
-    cast_chain: impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone + 'src,
-    set: impl Parser<'src, I, Vec<Expression>, extra::Err<ParseError<'src>>> + Clone + 'src,
-) -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
+fn operator_ladder<'src>(
+    cast_chain: impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>>
+    + Clone
+    + 'src,
+    set: impl Parser<'src, &'src [Token], Vec<Expression>, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     let unary = choice((
-        keyword(Token::Minus).to(UnaryOperator::Negate),
-        keyword(Token::Not).to(UnaryOperator::Not),
+        tok(Token::Hyphen).to(UnaryOperator::Negate),
+        kw(Identifier::Not).to(UnaryOperator::Not),
     ))
     .repeated()
     .collect::<Vec<_>>()
@@ -341,9 +395,9 @@ where
         .clone()
         .foldl(
             choice((
-                keyword(Token::Star).to(BinaryOperator::Multiply),
-                keyword(Token::Slash).to(BinaryOperator::Divide),
-                keyword(Token::Percent).to(BinaryOperator::Remainder),
+                tok(Token::Star).to(BinaryOperator::Multiply),
+                tok(Token::Slash).to(BinaryOperator::Divide),
+                tok(Token::Percent).to(BinaryOperator::Remainder),
             ))
             .then(unary.clone())
             .repeated(),
@@ -358,8 +412,8 @@ where
         .clone()
         .foldl(
             choice((
-                keyword(Token::Plus).to(BinaryOperator::Add),
-                keyword(Token::Minus).to(BinaryOperator::Subtract),
+                tok(Token::Plus).to(BinaryOperator::Add),
+                tok(Token::Hyphen).to(BinaryOperator::Subtract),
             ))
             .then(multiplicative.clone())
             .repeated(),
@@ -371,30 +425,29 @@ where
         )
         .boxed();
     let comparison_operator = choice((
-        keyword(Token::Eq).to(BinaryOperator::Equal),
-        keyword(Token::NotEq).to(BinaryOperator::NotEqual),
-        keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
-        keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
-        keyword(Token::Gt).to(BinaryOperator::GreaterThan),
-        keyword(Token::Lt).to(BinaryOperator::LessThan),
-        keyword_phrase(
-            [Token::Is, Token::Distinct, Token::From],
-            "IS DISTINCT FROM",
-        )
-        .to(BinaryOperator::IsDistinctFrom),
-        keyword_phrase(
-            [Token::Is, Token::Not, Token::Distinct, Token::From],
-            "IS NOT DISTINCT FROM",
-        )
+        tok(Token::Eq).to(BinaryOperator::Equal),
+        tok(Token::NotEq).to(BinaryOperator::NotEqual),
+        tok(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
+        tok(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
+        tok(Token::Gt).to(BinaryOperator::GreaterThan),
+        tok(Token::Lt).to(BinaryOperator::LessThan),
+        kw_phrase([Identifier::Is, Identifier::Distinct, Identifier::From])
+            .to(BinaryOperator::IsDistinctFrom),
+        kw_phrase([
+            Identifier::Is,
+            Identifier::Not,
+            Identifier::Distinct,
+            Identifier::From,
+        ])
         .to(BinaryOperator::IsNotDistinctFrom),
     ));
     let membership_operator = choice((
-        keyword(Token::In).to(MembershipOperator::In),
-        keyword_phrase([Token::Not, Token::In], "NOT IN").to(MembershipOperator::NotIn),
+        kw(Identifier::In).to(MembershipOperator::In),
+        kw_phrase([Identifier::Not, Identifier::In]).to(MembershipOperator::NotIn),
     ));
     let range_operator = choice((
-        keyword(Token::Between).to(RangeOperator::Between),
-        keyword_phrase([Token::Not, Token::Between], "NOT BETWEEN").to(RangeOperator::NotBetween),
+        kw(Identifier::Between).to(RangeOperator::Between),
+        kw_phrase([Identifier::Not, Identifier::Between]).to(RangeOperator::NotBetween),
     ));
     // Both bounds are read one level tighter than a comparison, so the `AND` that closes the low
     // bound belongs to the range and a later `AND` combines the whole range test.
@@ -407,7 +460,7 @@ where
             .map(|(operator, set)| ComparisonSuffix::Membership { operator, set }),
         range_operator
             .then(additive.clone())
-            .then_ignore(keyword(Token::And))
+            .then_ignore(kw(Identifier::And))
             .then(additive.clone())
             .map(|((operator, low), high)| ComparisonSuffix::Range {
                 operator,
@@ -424,7 +477,7 @@ where
     let and = comparison
         .clone()
         .foldl(
-            keyword(Token::And)
+            kw(Identifier::And)
                 .to(BinaryOperator::And)
                 .then(comparison.clone())
                 .repeated(),
@@ -437,7 +490,7 @@ where
         .boxed();
     and.clone()
         .foldl(
-            keyword(Token::Or)
+            kw(Identifier::Or)
                 .to(BinaryOperator::Or)
                 .then(and)
                 .repeated(),
@@ -450,35 +503,33 @@ where
         .boxed()
 }
 
-fn expression<'src, I>() -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
+fn expression<'src>()
+-> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     recursive(|expression| {
         // A call's arguments and the set of an `IN` test share one written form, so a set may be
         // empty and may end with a comma.
         let arguments = expression
             .clone()
-            .separated_by(keyword(Token::Comma))
+            .separated_by(tok(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(keyword(Token::LParen), keyword(Token::RParen))
+            .delimited_by(tok(Token::LParen), tok(Token::RParen))
             .boxed();
         let set = arguments.clone();
         // A tolerant conversion is an atom whose operand is itself built from atoms, so atoms are
         // recursive in their own right.
         let atom = recursive(|atom| {
             let literal = choice((
-                select! { Token::Integer(value) => Expression::Literal(Literal::I64(value)) },
-                select! { Token::Float(value) => Expression::Literal(Literal::F64(Float64Literal::new(value))) },
-                keyword(Token::True).to(Expression::Literal(Literal::Bool(true))),
-                keyword(Token::False).to(Expression::Literal(Literal::Bool(false))),
-                keyword(Token::Null).to(Expression::Literal(Literal::Null)),
-                select! { Token::String(value) => Expression::Literal(Literal::String(value)) },
+                number_literal().map(Expression::Literal),
+                kw(Identifier::True).to(Expression::Literal(Literal::Bool(true))),
+                kw(Identifier::False).to(Expression::Literal(Literal::Bool(false))),
+                kw(Identifier::Null).to(Expression::Literal(Literal::Null)),
+                select! { Token::StringLiteral(value) => Expression::Literal(Literal::String(value)) }
+                    .labelled("string_literal"),
             ));
-            let udf_call = keyword(Token::Udf)
-                .then_ignore(keyword(Token::DoubleColon))
-                .then(name(UdfName::parse))
+            let udf_call = kw(Identifier::Udf)
+                .then_ignore(tok(Token::DoubleColon))
+                .then(qualified_name(UdfName::parse))
                 .then(arguments.clone())
                 .map(|(((), function), arguments)| Expression::UdfCall {
                     function,
@@ -492,38 +543,38 @@ where
                 });
             let array = expression
                 .clone()
-                .separated_by(keyword(Token::Comma))
+                .separated_by(tok(Token::Comma))
                 .at_least(1)
                 .allow_trailing()
                 .collect::<Vec<_>>()
-                .delimited_by(keyword(Token::LBracket), keyword(Token::RBracket))
+                .delimited_by(tok(Token::LBracket), tok(Token::RBracket))
                 .map(Expression::Array);
-            let when_clause = keyword(Token::When)
+            let when_clause = kw(Identifier::When)
                 .ignore_then(expression.clone())
-                .then_ignore(keyword(Token::Then))
+                .then_ignore(kw(Identifier::Then))
                 .then(expression.clone())
                 .map(|(when, result)| CaseBranch { when, result });
-            let case_expression = keyword(Token::Case)
+            let case_expression = kw(Identifier::Case)
                 .ignore_then(expression.clone().or_not())
                 .then(when_clause.repeated().at_least(1).collect::<Vec<_>>())
                 .then(
-                    keyword(Token::Else)
+                    kw(Identifier::Else)
                         .ignore_then(expression.clone())
                         .or_not(),
                 )
-                .then_ignore(keyword(Token::End))
+                .then_ignore(kw(Identifier::End))
                 .map(|((operand, branches), else_result)| Expression::Case {
                     operand: operand.map(Box::new),
                     branches,
                     else_result: else_result.map(Box::new),
                 });
-            let if_expression = keyword(Token::If)
+            let if_expression = kw(Identifier::If)
                 .ignore_then(expression.clone())
-                .then_ignore(keyword(Token::Then))
+                .then_ignore(kw(Identifier::Then))
                 .then(expression.clone())
-                .then_ignore(keyword(Token::Else))
+                .then_ignore(kw(Identifier::Else))
                 .then(expression.clone())
-                .then_ignore(keyword(Token::End))
+                .then_ignore(kw(Identifier::End))
                 .map(|((condition, then_result), else_result)| Expression::If {
                     condition: Box::new(condition),
                     then_result: Box::new(then_result),
@@ -532,12 +583,12 @@ where
             // `TRY_CAST(<operand> AS <type>)` converts the whole expression before its final
             // `AS`. The operand reads every other postfix cast as its own and leaves the one the
             // closing parenthesis follows to the conversion.
-            let conversion = keyword(Token::As)
+            let conversion = kw(Identifier::As)
                 .ignore_then(cast_type())
-                .then_ignore(keyword(Token::RParen));
+                .then_ignore(tok(Token::RParen));
             let operand_cast_suffix = cast_suffix().and_is(conversion.clone().not());
-            let try_cast = keyword(Token::TryCast)
-                .ignore_then(keyword(Token::LParen))
+            let try_cast = kw(Identifier::TryCast)
+                .ignore_then(tok(Token::LParen))
                 .ignore_then(operator_ladder(
                     cast_chain(atom, operand_cast_suffix),
                     arguments.clone(),
@@ -549,32 +600,32 @@ where
                 });
             // `JSON_VALUE(<document>, '<path>' AS <type>)` and its tolerant form read one value
             // of a declared type, and `JSON_EXISTS(<document>, '<path>')` tests for one.
-            let json_source = keyword(Token::LParen)
+            let json_source = tok(Token::LParen)
                 .ignore_then(expression.clone())
-                .then_ignore(keyword(Token::Comma))
+                .then_ignore(tok(Token::Comma))
                 .then(json_path());
             let json_read = json_source
                 .clone()
-                .then_ignore(keyword(Token::As))
+                .then_ignore(kw(Identifier::As))
                 .then(declared_type())
-                .then_ignore(keyword(Token::RParen));
-            let json_value = keyword(Token::JsonValue)
+                .then_ignore(tok(Token::RParen));
+            let json_value = kw(Identifier::JsonValue)
                 .ignore_then(json_read.clone())
                 .map(|((document, path), target)| Expression::JsonValue {
                     document: Box::new(document),
                     path,
                     target,
                 });
-            let try_json_value = keyword(Token::TryJsonValue).ignore_then(json_read).map(
+            let try_json_value = kw(Identifier::TryJsonValue).ignore_then(json_read).map(
                 |((document, path), target)| Expression::TryJsonValue {
                     document: Box::new(document),
                     path,
                     target,
                 },
             );
-            let json_exists = keyword(Token::JsonExists)
+            let json_exists = kw(Identifier::JsonExists)
                 .ignore_then(json_source)
-                .then_ignore(keyword(Token::RParen))
+                .then_ignore(tok(Token::RParen))
                 .map(|(document, path)| Expression::JsonExists {
                     document: Box::new(document),
                     path,
@@ -593,22 +644,27 @@ where
                 field_reference().map(Expression::Field),
                 expression
                     .clone()
-                    .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
+                    .delimited_by(tok(Token::LParen), tok(Token::RParen)),
             ))
         });
         operator_ladder(cast_chain(atom, cast_suffix()), set)
     })
 }
 
-fn assignment_target<'src, I>()
--> impl Parser<'src, I, AssignmentTarget, extra::Err<ParseError<'src>>> + Clone
-where
-    I: ValueInput<'src, Token = Token, Span = Span>,
-{
-    raw_identifier()
+/// The field a `SET` or `DEFAULT` assignment writes: a bare field, or `message.`, `output.` or
+/// `branch.` followed by the field. A scope is a plain word, so a name between backticks is always
+/// a bare target.
+fn assignment_target<'src>()
+-> impl Parser<'src, &'src [Token], AssignmentTarget, extra::Err<ParseError<'src>>> + Clone {
+    let quoted = quoted_name().try_map(|raw: String, span| {
+        FieldName::try_from(raw.as_str())
+            .map(AssignmentTarget::bare)
+            .map_err(|error| Rich::custom(span, error.to_string()))
+    });
+    let plain = raw_identifier()
         .then(
-            keyword(Token::Dot)
-                .ignore_then(name(FieldName::parse))
+            tok(Token::Dot)
+                .ignore_then(qualified_name(FieldName::parse))
                 .or_not(),
         )
         .try_map(|(first, field), span| match field {
@@ -630,19 +686,42 @@ where
                 };
                 Ok(AssignmentTarget { scope, field })
             }
-        })
+        });
+    choice((plain, quoted))
 }
 
-fn inheritance<'src, I>() -> impl Parser<'src, I, Inheritance, extra::Err<ParseError<'src>>> + Clone
+/// The `<target> = <expression>` assignments that `SET` and a materialized-state `DEFAULT` write,
+/// each after the `separator` before it.
+fn assignments<'src, S>(
+    separator: S,
+) -> impl Parser<'src, &'src [Token], Vec<Assignment>, extra::Err<ParseError<'src>>> + Clone
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    let all = keyword(Token::All)
+    assignment_target()
+        .then_ignore(tok(Token::Eq))
+        .then(expression())
+        .map(|(target, value)| Assignment { target, value })
+        .separated_by(separator)
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .boxed()
+}
+
+/// What `INHERIT` inherits, read after the keyword: `ALL`, `ALL EXCEPT` fields, or fields each
+/// optionally leaking their sensitivity. A listed field follows the `separator` before it.
+fn inheritance<'src, S>(
+    separator: S,
+) -> impl Parser<'src, &'src [Token], Inheritance, extra::Err<ParseError<'src>>> + Clone
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    let all = kw(Identifier::All)
         .ignore_then(
-            keyword(Token::Except)
+            kw(Identifier::Except)
                 .ignore_then(
                     name(FieldName::parse)
-                        .separated_by(keyword(Token::Comma))
+                        .separated_by(separator.clone())
                         .at_least(1)
                         .collect::<Vec<_>>(),
                 )
@@ -658,15 +737,15 @@ where
         });
     let explicit = name(FieldName::parse)
         .then(
-            keyword(Token::Leak)
-                .ignore_then(keyword(Token::Sensitive))
+            kw(Identifier::Leak)
+                .ignore_then(kw(Identifier::Sensitive))
                 .or_not(),
         )
         .map(|(field, leak_sensitive)| InheritedField {
             field,
             leak_sensitive: leak_sensitive.is_some(),
         })
-        .separated_by(keyword(Token::Comma))
+        .separated_by(separator)
         .at_least(1)
         .collect::<Vec<_>>()
         .try_map(|fields, span| {
@@ -679,13 +758,13 @@ where
             )?;
             Ok(Inheritance::Fields(fields))
         });
-    keyword(Token::Inherit).ignore_then(choice((all, explicit)))
+    choice((all, explicit)).boxed()
 }
 
 fn reject_duplicate_identifiers<'src>(
     fields: &[FieldName],
     span: Span,
-) -> Result<(), Rich<'src, Token>> {
+) -> Result<(), ParseError<'src>> {
     let mut seen = HashSet::new();
     for field in fields {
         if !seen.insert(field.as_str()) {
@@ -698,201 +777,310 @@ fn reject_duplicate_identifiers<'src>(
     Ok(())
 }
 
-fn parser<'src, I>() -> impl Parser<'src, I, RouteConstruction, extra::Err<ParseError<'src>>> + Clone
+/// A clause of a route construction. A route writes its clauses in this order, each at most once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteClause {
+    Inherit,
+    Set,
+    Where,
+    Invoke,
+}
+
+impl RouteClause {
+    /// Every clause, in the order a route writes them.
+    const ALL: [Self; 4] = [Self::Inherit, Self::Set, Self::Where, Self::Invoke];
+
+    /// The keyword that begins the clause.
+    pub(crate) fn keyword(self) -> Identifier {
+        match self {
+            Self::Inherit => Identifier::Inherit,
+            Self::Set => Identifier::Set,
+            Self::Where => Identifier::Where,
+            Self::Invoke => Identifier::Invoke,
+        }
+    }
+
+    /// The clauses a route may write after this one, in the order it writes them.
+    fn later(self) -> &'static [Self] {
+        match self {
+            Self::Inherit => &[Self::Set, Self::Where, Self::Invoke],
+            Self::Set => &[Self::Where, Self::Invoke],
+            Self::Where => &[Self::Invoke],
+            Self::Invoke => &[],
+        }
+    }
+
+    /// The label completion offers where the clause's body begins, right after its keyword.
+    pub(crate) fn body_label(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit_targets",
+            Self::Set => "set_assignments",
+            Self::Where => "where_expression",
+            Self::Invoke => "invocations",
+        }
+    }
+
+    /// The clause's body, read after its keyword. A list the body holds continues past a comma only
+    /// where `separator` accepts it.
+    fn body<'src, S>(
+        self,
+        separator: S,
+    ) -> Boxed<'src, 'src, &'src [Token], RoutePart, extra::Err<ParseError<'src>>>
+    where
+        S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+    {
+        match self {
+            Self::Inherit => inheritance(separator).map(RoutePart::Inherit).boxed(),
+            Self::Set => assignments(separator).map(RoutePart::Set).boxed(),
+            Self::Where => expression().map(RoutePart::Where).boxed(),
+            Self::Invoke => invocations(separator).map(RoutePart::Invoke).boxed(),
+        }
+    }
+}
+
+/// One clause of a route construction, as its body reads.
+enum RoutePart {
+    Inherit(Inheritance),
+    Set(Vec<Assignment>),
+    Where(Expression),
+    Invoke(Vec<Invocation>),
+}
+
+impl RoutePart {
+    /// Records the clause in the construction it belongs to.
+    fn apply_to(self, construction: &mut RouteConstruction) {
+        match self {
+            Self::Inherit(inherit) => construction.inherit = Some(inherit),
+            Self::Set(assignments) => construction.assignments = assignments,
+            Self::Where(where_clause) => construction.where_clause = Some(where_clause),
+            Self::Invoke(invocations) => construction.invocations = invocations,
+        }
+    }
+}
+
+/// The calls `INVOKE` makes, read after the keyword, each after the `separator` before it.
+fn invocations<'src, S>(
+    separator: S,
+) -> impl Parser<'src, &'src [Token], Vec<Invocation>, extra::Err<ParseError<'src>>> + Clone
 where
-    I: ValueInput<'src, Token = Token, Span = Span>,
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    let assignment = assignment_target()
-        .then_ignore(keyword(Token::Eq))
-        .then(expression())
-        .map(|(target, value)| Assignment { target, value });
-    let assignments = keyword(Token::Set).ignore_then(
-        assignment
-            .separated_by(keyword(Token::Comma))
-            .at_least(1)
-            .collect::<Vec<_>>(),
-    );
-    let invocation = name(BuiltinFunctionName::parse)
+    name(BuiltinFunctionName::parse)
         .then(
             expression()
-                .separated_by(keyword(Token::Comma))
+                .separated_by(tok(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
-                .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
+                .delimited_by(tok(Token::LParen), tok(Token::RParen)),
         )
         .map(|(function, arguments)| Invocation {
             function,
             arguments,
-        });
-    let invocations = keyword(Token::Invoke).ignore_then(
-        invocation
-            .separated_by(keyword(Token::Comma))
-            .at_least(1)
-            .collect::<Vec<_>>(),
-    );
-
-    inheritance()
-        .or_not()
-        .then(assignments.or_not())
-        .then(keyword(Token::Where).ignore_then(expression()).or_not())
-        .then(invocations.or_not())
-        .try_map(
-            |(((inherit, assignments), where_clause), invocations), span| {
-                if inherit.is_none()
-                    && assignments.is_none()
-                    && where_clause.is_none()
-                    && invocations.is_none()
-                {
-                    return Err(Rich::custom(
-                        span,
-                        "expected INHERIT, SET, WHERE, or INVOKE clause",
-                    ));
-                }
-                Ok(RouteConstruction {
-                    inherit,
-                    assignments: assignments.unwrap_or_default(),
-                    where_clause,
-                    invocations: invocations.unwrap_or_default(),
-                })
-            },
-        )
+        })
+        .separated_by(separator)
+        .at_least(1)
+        .collect::<Vec<_>>()
         .boxed()
 }
 
-fn parse_tokens(tokens: &[SpannedToken]) -> Result<RouteConstruction, Vec<ParseError<'_>>> {
-    let end_span = match tokens.last() {
-        Some(token) => token.span.end..token.span.end,
-        None => 0..0,
-    };
-    let input = Stream::from_iter(
-        tokens
-            .iter()
-            .cloned()
-            .map(|token| (token.token, token.span)),
-    )
-    .map(end_span.into(), |(token, span)| (token, span));
-    parser().then_ignore(end()).parse(input).into_result()
-}
-
-pub fn parse_route_construction(
-    input: &str,
-) -> error_stack::Result<RouteConstruction, ParseFromSourceError> {
-    let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| {
-        Report::new(ParseFromSourceError::Lex {
-            text: source.clone(),
-            diagnostics: errors
-                .into_iter()
-                .map(|error| Diagnostic {
-                    message: format!("{error:?}"),
-                    span: error.span().into_range(),
-                })
-                .collect(),
-        })
-    })?;
-    parse_tokens(&tokens).map_err(|errors| {
-        Report::new(ParseFromSourceError::Parse {
-            text: source,
-            diagnostics: errors
-                .into_iter()
-                .map(|error| Diagnostic {
-                    message: format!("{error:?}"),
-                    span: error.span().into_range(),
-                })
-                .collect(),
-        })
+/// A route construction whose first clause is `first`, read from just after that clause's keyword:
+/// its body, then each clause the route may write after it, in order.
+fn route_construction_after<'src, S>(
+    first: RouteClause,
+    separator: S,
+) -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    let mut parts = first.body(separator.clone()).map(|part| vec![part]).boxed();
+    for later in first.later() {
+        let clause = kw(later.keyword())
+            .ignore_then(later.body(separator.clone()))
+            .or_not();
+        parts = parts
+            .then(clause)
+            .map(|(mut parts, part)| {
+                if let Some(part) = part {
+                    parts.push(part);
+                }
+                parts
+            })
+            .boxed();
+    }
+    parts.map(|parts| {
+        let mut construction = RouteConstruction::default();
+        for part in parts {
+            part.apply_to(&mut construction);
+        }
+        construction
     })
 }
 
-pub fn parse_expression(input: &str) -> error_stack::Result<Expression, ParseFromSourceError> {
-    let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| {
-        Report::new(ParseFromSourceError::Lex {
-            text: source.clone(),
-            diagnostics: errors
-                .into_iter()
-                .map(|error| Diagnostic {
-                    message: format!("{error:?}"),
-                    span: error.span().into_range(),
-                })
-                .collect(),
-        })
-    })?;
-    let end_span = match tokens.last() {
-        Some(token) => token.span.end..token.span.end,
-        None => 0..0,
-    };
-    let input = Stream::from_iter(
-        tokens
-            .iter()
-            .cloned()
-            .map(|token| (token.token, token.span)),
-    )
-    .map(end_span.into(), |(token, span)| (token, span));
-    expression()
-        .then_ignore(end())
-        .parse(input)
-        .into_result()
-        .map_err(|errors| {
-            Report::new(ParseFromSourceError::Parse {
-                text: source,
-                diagnostics: errors
-                    .into_iter()
-                    .map(|error| Diagnostic {
-                        message: format!("{error:?}"),
-                        span: error.span().into_range(),
-                    })
-                    .collect(),
-            })
-        })
+/// A route construction: `INHERIT`, `SET`, `WHERE` and `INVOKE` clauses in that order, each
+/// optional but at least one of them written.
+fn route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    let starts = RouteClause::ALL.map(|first| {
+        kw(first.keyword())
+            .ignore_then(route_construction_after(first, tok(Token::Comma)))
+            .boxed()
+    });
+    choice(starts).boxed()
 }
 
-pub fn parse_expression_list(
-    input: &str,
-) -> error_stack::Result<Vec<Expression>, ParseFromSourceError> {
-    let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| {
-        Report::new(ParseFromSourceError::Lex {
-            text: source.clone(),
-            diagnostics: errors
-                .into_iter()
-                .map(|error| Diagnostic {
-                    message: format!("{error:?}"),
-                    span: error.span().into_range(),
-                })
-                .collect(),
+/// What a reader took from the front of the tokens a statement handed it: what it read, and how
+/// many tokens that was. The statement goes on right after them.
+pub(crate) struct Prefix<O> {
+    pub(crate) output: O,
+    pub(crate) length: usize,
+}
+
+/// Reads the longest run at the front of `tokens` that `grammar` accepts.
+///
+/// A statement hands an embedded part every token after the keyword that introduces it, so the part
+/// ends where its own grammar cannot go on, and the statement's next clause begins there. A word
+/// the expression grammar does not reserve is a name wherever a name may stand, so the next clause
+/// begins at its keyword only once the expression before it is complete.
+///
+/// The part ends before a token only when its grammar cannot go on with that token at all. Where
+/// the grammar does go on, as it does into the `(` of an `IN` set that is never closed, and then
+/// fails further along, the tokens after the run continue the part and the part is malformed: the
+/// rejection is where that continuation fails, not at the token after the run.
+fn read_prefix<'src, O>(
+    grammar: impl Parser<'src, &'src [Token], O, extra::Err<ParseError<'src>>> + Clone,
+    tokens: &'src [Token],
+) -> Result<Prefix<O>, Vec<ParseError<'src>>> {
+    let prefix = grammar
+        .clone()
+        .map_with(|output, extra| Prefix {
+            output,
+            length: extra.span().end,
         })
-    })?;
-    let end_span = match tokens.last() {
-        Some(token) => token.span.end..token.span.end,
-        None => 0..0,
+        .lazy()
+        .parse(tokens)
+        .into_result()?;
+    let Err(errors) = grammar.then_ignore(end()).parse(tokens).into_result() else {
+        return Ok(prefix);
     };
-    let input = Stream::from_iter(
-        tokens
-            .iter()
-            .cloned()
-            .map(|token| (token.token, token.span)),
-    )
-    .map(end_span.into(), |(token, span)| (token, span));
+    let mut continued = false;
+    for error in &errors {
+        if error.span().start > prefix.length {
+            continued = true;
+        }
+    }
+    if continued {
+        return Err(errors);
+    }
+    Ok(prefix)
+}
+
+/// Reads `tokens` as exactly one expression.
+pub(crate) fn read_expression(tokens: &[Token]) -> Result<Expression, Vec<ParseError<'_>>> {
+    expression().then_ignore(end()).parse(tokens).into_result()
+}
+
+/// Reads one or more comma-separated expressions from `tokens`, all of them.
+pub(crate) fn read_expression_list(
+    tokens: &[Token],
+) -> Result<Vec<Expression>, Vec<ParseError<'_>>> {
     expression()
-        .separated_by(keyword(Token::Comma))
+        .separated_by(tok(Token::Comma))
         .at_least(1)
         .collect::<Vec<_>>()
         .then_ignore(end())
-        .parse(input)
+        .parse(tokens)
         .into_result()
-        .map_err(|errors| {
-            Report::new(ParseFromSourceError::Parse {
-                text: source,
-                diagnostics: errors
-                    .into_iter()
-                    .map(|error| Diagnostic {
-                        message: format!("{error:?}"),
-                        span: error.span().into_range(),
-                    })
-                    .collect(),
-            })
-        })
+}
+
+/// Reads `tokens` as a route construction: `INHERIT`, `SET`, `WHERE` and `INVOKE` clauses in that
+/// order, each optional but at least one of them written.
+pub(crate) fn read_route_construction(
+    tokens: &[Token],
+) -> Result<RouteConstruction, Vec<ParseError<'_>>> {
+    route_construction()
+        .then_ignore(end())
+        .parse(tokens)
+        .into_result()
+}
+
+/// Reads the expression at the front of `tokens`.
+pub(crate) fn read_expression_prefix(
+    tokens: &[Token],
+) -> Result<Prefix<Expression>, Vec<ParseError<'_>>> {
+    read_prefix(expression(), tokens)
+}
+
+/// Reads the comma-separated expressions at the front of `tokens`, going on past a comma only where
+/// `separator` accepts it.
+pub(crate) fn read_expression_list_prefix<'src, S>(
+    tokens: &'src [Token],
+    separator: S,
+) -> Result<Prefix<Vec<Expression>>, Vec<ParseError<'src>>>
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    read_prefix(
+        expression()
+            .separated_by(separator)
+            .at_least(1)
+            .collect::<Vec<_>>(),
+        tokens,
+    )
+}
+
+/// Reads the route construction at the front of `tokens`, which begin just after the keyword of its
+/// first clause, `first`. A list it holds goes on past a comma only where `separator` accepts it.
+pub(crate) fn read_route_construction_prefix<'src, S>(
+    tokens: &'src [Token],
+    first: RouteClause,
+    separator: S,
+) -> Result<Prefix<RouteConstruction>, Vec<ParseError<'src>>>
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    read_prefix(route_construction_after(first, separator), tokens)
+}
+
+/// Reads the assignments of a materialized-state `DEFAULT` at the front of `tokens`.
+pub(crate) fn read_assignments_prefix(
+    tokens: &[Token],
+) -> Result<Prefix<Vec<Assignment>>, Vec<ParseError<'_>>> {
+    read_prefix(assignments(tok(Token::Comma)), tokens)
+}
+
+/// Lexes `input` on its own and reads its tokens with `read`, reporting a rejection at its place in
+/// `input`: the lexer and diagnostics of a statement, applied to text that is not one.
+fn read_standalone<O>(
+    input: &str,
+    read: for<'tokens> fn(&'tokens [Token]) -> Result<O, Vec<ParseError<'tokens>>>,
+) -> error_stack::Result<O, ParseFromSourceError> {
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
+    read(&tokens).map_err(|errors| into_parse_error(source, &spanned_tokens, input.len(), errors))
+}
+
+/// Reads `input` as one expression, lexed and parsed exactly as a statement reads an expression it
+/// embeds.
+pub fn parse_expression(input: &str) -> error_stack::Result<Expression, ParseFromSourceError> {
+    read_standalone(input, read_expression)
+}
+
+/// Reads `input` as one or more comma-separated expressions, as a statement reads an expression
+/// list it embeds.
+pub fn parse_expression_list(
+    input: &str,
+) -> error_stack::Result<Vec<Expression>, ParseFromSourceError> {
+    read_standalone(input, read_expression_list)
+}
+
+/// Reads `input` as a route construction, as a statement reads the construction of a route.
+pub fn parse_route_construction(
+    input: &str,
+) -> error_stack::Result<RouteConstruction, ParseFromSourceError> {
+    read_standalone(input, read_route_construction)
 }
 
 #[cfg(test)]
@@ -950,6 +1138,12 @@ mod tests {
     fn field(name: &str) -> Expression {
         Expression::Field(FieldReference::scoped(
             FieldScope::Input,
+            FieldName::try_from(name).expect("test field names are valid"),
+        ))
+    }
+
+    fn bare_field(name: &str) -> Expression {
+        Expression::Field(FieldReference::bare(
             FieldName::try_from(name).expect("test field names are valid"),
         ))
     }
@@ -1098,15 +1292,21 @@ mod tests {
     }
 
     #[test]
-    fn comparison_keywords_are_reserved_in_expressions() {
+    fn comparison_keywords_name_fields_only_after_a_scope_or_between_backticks() {
         for keyword in ["in", "between", "is", "distinct", "from"] {
-            assert!(
-                parse_expression(&format!("input.{keyword} = 1")).is_err(),
-                "input.{keyword} must not parse as a field"
+            assert_eq!(
+                parsed(&format!("input.{keyword} = 1")),
+                binary(BinaryOperator::Equal, field(keyword), integer(1)),
+                "input.{keyword} names a field"
             );
             assert!(
                 parse_expression(&format!("{keyword} = 1")).is_err(),
                 "{keyword} must not parse as a bare field"
+            );
+            assert_eq!(
+                parsed(&format!("`{keyword}` = 1")),
+                binary(BinaryOperator::Equal, bare_field(keyword), integer(1)),
+                "`{keyword}` names a bare field"
             );
         }
         assert!(parse_expression("input.inbound IN (input.from_unix)").is_ok());
@@ -1235,10 +1435,18 @@ mod tests {
     }
 
     #[test]
-    fn reserves_the_tolerant_conversion_keyword_in_field_references() {
-        assert!(parse_expression("input.try_cast").is_err());
+    fn the_tolerant_conversion_keyword_names_a_field_or_a_call_only_after_a_scope_or_quoted() {
+        assert_eq!(parsed("input.try_cast"), field("try_cast"));
         assert!(parse_expression("try_cast").is_err());
         assert!(parse_expression("try_cast(input.raw)").is_err());
+        assert_eq!(parsed("`try_cast`"), bare_field("try_cast"));
+        assert_eq!(
+            parsed("`try_cast`(input.raw)"),
+            Expression::Call {
+                function: BuiltinFunctionName::parse("try_cast").expect("valid function name"),
+                arguments: vec![field("raw")],
+            }
+        );
     }
 
     fn json_path(text: &str) -> JsonPath {
@@ -1363,18 +1571,16 @@ mod tests {
     }
 
     #[test]
-    fn reserves_the_json_extraction_keywords_in_field_references() {
-        for source in [
-            "input.json_value",
-            "json_exists",
-            "try_json_value(input.doc)",
-            "input.JSON_EXISTS",
-        ] {
+    fn the_json_extraction_keywords_name_fields_only_after_a_scope_or_quoted() {
+        for source in ["json_exists", "try_json_value(input.doc)"] {
             assert!(
                 parse_expression(source).is_err(),
                 "`{source}` must be rejected"
             );
         }
+        assert_eq!(parsed("input.json_value"), field("json_value"));
+        assert_eq!(parsed("input.JSON_EXISTS"), field("json_exists"));
+        assert_eq!(parsed("`json_exists`"), bare_field("json_exists"));
     }
 
     #[test]
@@ -1440,11 +1646,11 @@ mod tests {
     }
 
     /// Reads `predicate` as a statement reads an expression it embeds, here the `WHERE` clause of a
-    /// subscription.
+    /// subscription. The line break before the `;` ends a comment the predicate closes with.
     fn read_in_statement(
         predicate: &str,
     ) -> error_stack::Result<Option<Expression>, ParseFromSourceError> {
-        let statement = format!("CREATE SUBSCRIPTION literal TO events WHERE {predicate};");
+        let statement = format!("CREATE SUBSCRIPTION literal TO events WHERE {predicate}\n;");
         let parsed = crate::client_statement::parse_client_statement(&statement)?;
         let crate::client_statement::ClientStatement::CreateSubscription(subscription) = parsed
         else {
@@ -1474,6 +1680,232 @@ mod tests {
                     "`{predicate}` read another value in a statement"
                 );
             }
+        }
+    }
+
+    /// Reads `predicate` alone and as a statement's `WHERE` clause, asserts that both read it the
+    /// same way, as the same expression or not at all, and returns that reading.
+    fn read_at_every_entry_point(predicate: &str) -> Option<Expression> {
+        let alone = parse_expression(predicate).ok();
+        let embedded = read_in_statement(predicate).ok().flatten();
+        assert_eq!(
+            alone, embedded,
+            "`{predicate}` read differently alone and in a statement"
+        );
+        alone
+    }
+
+    #[test]
+    fn whitespace_and_comments_between_tokens_read_alike_at_every_entry_point() {
+        let expected = binary(BinaryOperator::Equal, field("a"), integer(1));
+        for predicate in [
+            "input.a = 1",
+            "input.a=1",
+            "input . a = 1",
+            "input.a // a comment ends at its line\n = 1",
+            "input.a\n\t=\r\n1 // a comment may end the text",
+        ] {
+            assert_eq!(
+                read_at_every_entry_point(predicate),
+                Some(expected.clone()),
+                "{predicate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keywords_of_expression_forms_read_alike_at_every_entry_point() {
+        assert_eq!(
+            read_at_every_entry_point(
+                "input.a is not distinct from 1 OR input.b IS DISTINCT FROM 2"
+            ),
+            Some(binary(
+                BinaryOperator::Or,
+                binary(BinaryOperator::IsNotDistinctFrom, field("a"), integer(1)),
+                binary(BinaryOperator::IsDistinctFrom, field("b"), integer(2)),
+            ))
+        );
+        for predicate in [
+            "input.a BETWEEN 1 AND 2 AND input.b not between -1 and 1",
+            "CASE input.a WHEN 1 THEN 'one' ELSE 'other' END = 'one'",
+            "case when input.a then 1 end > 0",
+            "if input.flag then 1 else 2 end > 0",
+            "TRY_CAST(input.raw AS I64) IN (1, 2) AND input.c NOT IN ()",
+            "JSON_EXISTS(input.doc, '$.a') AND json_value(input.doc, '$.n' AS I64) > \
+             Try_Json_Value(input.doc, '$.m' AS VEC<I64>) IS NOT DISTINCT FROM NULL",
+            "udf::mask(input.a) = input.b",
+        ] {
+            assert!(
+                read_at_every_entry_point(predicate).is_some(),
+                "`{predicate}` must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn statement_keywords_name_calls_scopes_and_fields_at_every_entry_point() {
+        let call = |function: &str, arguments: Vec<Expression>| Expression::Call {
+            function: BuiltinFunctionName::parse(function).expect("test functions are valid names"),
+            arguments,
+        };
+        assert_eq!(
+            read_at_every_entry_point("first(input.sum) > min(input.last, input.max)"),
+            Some(binary(
+                BinaryOperator::GreaterThan,
+                call("first", vec![field("sum")]),
+                call("min", vec![field("last"), field("max")]),
+            ))
+        );
+        for predicate in [
+            "output.total > 0",
+            "left.status = right.key",
+            "message.time = branch.timestamp",
+            "status = 1",
+        ] {
+            assert!(
+                read_at_every_entry_point(predicate).is_some(),
+                "`{predicate}` must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_expression_keywords_name_fields_only_after_a_scope_or_quoted_at_every_entry_point()
+    {
+        let reserved = [
+            "where",
+            "set",
+            "inherit",
+            "all",
+            "except",
+            "leak",
+            "sensitive",
+            "invoke",
+            "as",
+            "try_cast",
+            "json_value",
+            "try_json_value",
+            "json_exists",
+            "and",
+            "or",
+            "not",
+            "true",
+            "false",
+            "null",
+            "if",
+            "case",
+            "when",
+            "then",
+            "else",
+            "end",
+            "in",
+            "between",
+            "is",
+            "distinct",
+            "from",
+            "udf",
+        ];
+        for keyword in reserved {
+            let scoped = format!("input.{keyword} = 1");
+            assert_eq!(
+                read_at_every_entry_point(&scoped),
+                Some(binary(BinaryOperator::Equal, field(keyword), integer(1))),
+                "`{scoped}` names a field after the scope"
+            );
+            let quoted = format!("`{keyword}` = 1");
+            assert_eq!(
+                read_at_every_entry_point(&quoted),
+                Some(binary(
+                    BinaryOperator::Equal,
+                    bare_field(keyword),
+                    integer(1)
+                )),
+                "`{quoted}` names a bare field"
+            );
+            // A literal keyword is a value of its own rather than a name.
+            if !matches!(keyword, "true" | "false" | "null") {
+                let bare = format!("{keyword} = 1");
+                assert_eq!(
+                    read_at_every_entry_point(&bare),
+                    None,
+                    "`{bare}` must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn number_literals_read_alike_at_every_entry_point() {
+        assert_eq!(
+            read_at_every_entry_point("input.x = 1.5"),
+            Some(binary(
+                BinaryOperator::Equal,
+                field("x"),
+                Expression::Literal(Literal::F64(Float64Literal::new(1.5))),
+            ))
+        );
+        assert_eq!(
+            read_at_every_entry_point("input.x = 9223372036854775807"),
+            Some(binary(BinaryOperator::Equal, field("x"), integer(i64::MAX)))
+        );
+        assert_eq!(
+            read_at_every_entry_point("input.x = 9223372036854775808"),
+            None
+        );
+        for predicate in ["input.x = 1e5", "input.x = 1.5E+3", "input.x = 2e-1"] {
+            assert_eq!(read_at_every_entry_point(predicate), None, "{predicate}");
+            let error = parse_expression(predicate).expect_err("an exponent is rejected");
+            assert!(error.to_string().contains("has an exponent"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_minus_reads_alike_at_every_entry_point() {
+        let negated = |expression: Expression| Expression::Unary {
+            operator: UnaryOperator::Negate,
+            expression: Box::new(expression),
+        };
+        assert_eq!(
+            read_at_every_entry_point("input.a-1"),
+            Some(binary(BinaryOperator::Subtract, field("a"), integer(1)))
+        );
+        assert_eq!(
+            read_at_every_entry_point("-input.a - -1"),
+            Some(binary(
+                BinaryOperator::Subtract,
+                negated(field("a")),
+                negated(integer(1)),
+            ))
+        );
+    }
+
+    #[test]
+    fn punctuation_no_expression_reads_is_rejected_at_every_entry_point() {
+        for predicate in [
+            "input.a = {1}",
+            "input.a : 1",
+            "input.a = 1 }",
+            "input.a :: b",
+        ] {
+            assert_eq!(
+                read_at_every_entry_point(predicate),
+                None,
+                "`{predicate}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_split_at_its_dot_is_rejected_at_every_entry_point() {
+        for predicate in ["input.x = 1 .5", "input.x = 1. 5", "input.x = 1 . 5"] {
+            assert!(
+                parse_expression(predicate).is_err(),
+                "`{predicate}` must be rejected alone"
+            );
+            assert!(
+                read_in_statement(predicate).is_err(),
+                "`{predicate}` must be rejected in a statement"
+            );
         }
     }
 

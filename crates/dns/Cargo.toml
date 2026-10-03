@@ -25,7 +25,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tower-service = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

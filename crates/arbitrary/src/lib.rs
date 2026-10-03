@@ -37,6 +37,7 @@ pub use expression::{EXPRESSION_DEPTH, ExpressionForm};
 pub use model::ModelVariant;
 pub use route::{RouteBranch, RouteFlush, RouteShape};
 pub use statement::StatementVariant;
+pub use text::{GeneratedName, KEYWORDS};
 
 /// Which values a generator may produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,14 +47,17 @@ pub enum Domain {
     /// This excludes vocabulary states NSPL has no spelling for: a negative or non-finite numeric
     /// literal (a negative number is written as a negation of its magnitude), an empty array or a
     /// `CASE` without a `WHEN`, a cast to a collection type, a `DROP` of a kind NSPL cannot drop, a
-    /// batching HTTP emitter, a correlator filter, and a Postgres update whose conflict target
-    /// includes every mapped column.
+    /// batching HTTP emitter, a correlator filter, a relay named `message` or `branch`, a
+    /// placement member named like an `ALTER` operation keyword, and a Postgres update whose
+    /// conflict target includes every mapped column.
     Nspl,
     /// Every value the vocabulary types hold, including the states NSPL cannot spell. Stored and
     /// archived forms carry these, so their round trips draw from this domain.
     ///
-    /// Names are the exception: in both domains a generated name is an identifier NSPL spells. The
-    /// name properties cover the rest of the name rule on each name type directly.
+    /// In both domains a generated name is one lower-case identifier, and any NSPL keyword may be
+    /// one. Only the NSPL domain avoids the keywords NSPL refuses for a kind of name or at a
+    /// position, such as `message` for a relay. The name properties cover the rest of the name rule
+    /// on each name type directly.
     Vocabulary,
 }
 
@@ -80,19 +84,6 @@ impl<'bytes> Arbitrary<'bytes> {
     /// The byte cursor, for a property that makes a choice of its own between generated values.
     pub fn entropy(&mut self) -> &mut Entropy<'bytes> {
         &mut self.entropy
-    }
-
-    /// The largest count a `usize` field of a Model or statement holds in this domain.
-    ///
-    /// NSPL spells any 64-bit count. The archived form of a `usize` is 32 bits wide and truncates a
-    /// larger count without an error, so the vocabulary's archived round trips draw counts only
-    /// from the range that form keeps; the truncation is a recorded storage defect, not a domain
-    /// the archive claims.
-    pub(crate) fn largest_archived_count(&self) -> u64 {
-        match self.domain {
-            Domain::Nspl => u64::MAX,
-            Domain::Vocabulary => u64::from(u32::MAX),
-        }
     }
 }
 
@@ -230,10 +221,37 @@ mod tests {
     }
 
     #[test]
+    fn a_postgres_update_leaves_a_mapped_column_to_update_in_nspl() {
+        for seed in 0..=u8::MAX {
+            let bytes = seeded_bytes(seed);
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+            let emitter = arbitrary.create_emitter_to(SinkVariant::Postgres);
+            let nervix_models::EmitSink::Postgres {
+                values,
+                conflict_action,
+                ..
+            } = emitter.sink.as_ref()
+            else {
+                panic!("a Postgres sink was requested, found {:?}", emitter.sink);
+            };
+            if let nervix_models::PostgresConflictAction::DoUpdate { target } = conflict_action {
+                assert!(!target.is_empty(), "{values:?}");
+                assert!(
+                    values
+                        .iter()
+                        .any(|mapping| !target.contains(&mapping.column)),
+                    "{values:?} {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn names_reach_both_ends_of_the_name_bound() {
         let mut lengths = std::collections::BTreeSet::new();
         for seed in 0..=u8::MAX {
-            let bytes = [seed, seed.wrapping_mul(13), seed.wrapping_add(1), 0, 0];
+            // The first byte declines a keyword spelling, so the rest draws an identifier.
+            let bytes = [0, seed, seed.wrapping_mul(13), seed.wrapping_add(1), 0, 0];
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
             let name = arbitrary.name_text();
             assert!(!name.is_empty() && name.len() <= 128, "{name:?}");
@@ -241,5 +259,32 @@ mod tests {
         }
         assert!(lengths.contains(&1));
         assert!(lengths.contains(&128));
+    }
+
+    #[test]
+    fn a_name_spells_every_keyword() {
+        let mut spelled = std::collections::BTreeSet::new();
+        for high in 0..=u8::MAX {
+            for low in 0..=u8::MAX {
+                let bytes = [3, high, low];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                spelled.insert(arbitrary.name_text());
+            }
+        }
+        for keyword in super::KEYWORDS {
+            assert!(spelled.contains(keyword), "{keyword} is never drawn");
+        }
+    }
+
+    #[test]
+    fn the_nspl_domain_names_a_relay_by_no_word_nspl_reserves_for_one() {
+        for high in 0..=u8::MAX {
+            for low in 0..=u8::MAX {
+                let bytes = [3, high, low];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let relay = arbitrary.name::<nervix_models::RelayName>();
+                assert!(!matches!(relay.as_str(), "message" | "branch"), "{relay}");
+            }
+        }
     }
 }

@@ -8,11 +8,10 @@
 //! - **Must not know.** What any service task does.
 
 use nervix_primitives::{
-    sync::CancellationToken,
+    sync::{Arc, CancellationToken},
     task::{JoinHandle, TaskTracker},
 };
 use tracing::warn;
-use triomphe::Arc;
 
 use super::shutdown::{BeforeDeadline, ShutdownDeadline, ShutdownPhaseOutcome};
 

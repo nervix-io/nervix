@@ -20,12 +20,15 @@ use nervix_connector::{
 };
 use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::{net::TcpStream, sync::mpsc, time::timeout};
+use nervix_primitives::{
+    net::TcpStream,
+    sync::{Arc, mpsc},
+    time::timeout,
+};
 use thiserror::Error;
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config, tungstenite::Message,
 };
-use triomphe::Arc;
 use url::Url;
 
 use crate::{CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession};

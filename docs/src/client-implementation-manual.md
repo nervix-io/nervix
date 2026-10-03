@@ -501,7 +501,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   again only when its outcome is `NotAdmitted` with `Suspended` or `Busy`, only while admission is
   open, and only after the ingestor's declared backoff, which starts at `retry_backoff` and doubles
   up to `retry_max_backoff`. It MUST NOT send again, by itself, a batch whose outcome is
-  `ProcessingFailed` or `OutcomeUnknown`, or one refused for any other reason.
+  `ProcessingFailed` or `OutcomeUnknown`, or one refused for any other reason. A batch sent again
+  follows every batch sent since, so a client that needs submission order MUST NOT have more than
+  one batch outstanding.
 - **P-6.** A client MUST stop sending new batches while the newest `ProducerAdmissionChanged` says
   `Suspended`. Admission changes are coalesced, so it MUST NOT expect every intermediate state. It
   MUST treat `ProducerEnded` as the last frame about the producer, every batch of which has already
@@ -529,7 +531,10 @@ payload, infinity, and nullable and sensitive branch key fields.
 - **E-2.** A client MUST continue reading transport frames while an application waits for
   consumer credit or processes an output batch. A pending `ReadEmitterBatchRequest` does not
   acknowledge delivery and MUST NOT block command replies, producer outcomes, domain clock
-  frames, or `SettleEmitterBatchRequest` replies.
+  frames, or `SettleEmitterBatchRequest` replies. A client whose caller stops waiting for a read
+  SHOULD keep the read and hand its reply to the next read of the same attachment: the server may
+  already have assigned an attempt to it, and a reply nobody reads leaves that attempt unsettled
+  until the emitter's ACK timeout.
 - **E-3.** A `Batch` outcome is one Arrow IPC stream with exactly the opened schema and one batch.
   The client MUST check its row count against `members`, and treat the source relay and optional
   32-byte branch fingerprint as metadata, never as extra fields. The fingerprint does not carry
@@ -699,6 +704,33 @@ and these rules:
   `nx_domain_clock` exactly once, and MAY release it on any thread. It SHOULD project logical time,
   waits, and admission with the `nx_domain_clock` projections rather than reimplement the mapping's
   rounding.
+- **B-12.** A host MUST describe an endpoint's fields exactly with `nx_fields`: every field in
+  order, every level of a list type, and each field's nullability and sensitivity. It MUST read why
+  an open was refused with `nx_error_open_refusal`, and MUST NOT open a producer or a consumer while
+  its session holds a transaction.
+- **B-13.** A host building a batch MUST give every column the levels its type has: states for a
+  nullable column when a row is null, offsets for every `LIST` level, and the innermost values in
+  their type's exact width or as UTF-8 text. It MAY reuse or free its buffers as soon as each
+  builder call returns. A host submitting its own Arrow IPC MUST write one canonical stream of the
+  producer's schema, P-3's, and MAY reuse the buffer once `nx_producer_submit_ipc` returns.
+- **B-14.** A host MUST take every submission's outcome with `nx_producer_rejoin`, or let it go
+  with `nx_producer_release`, since a submission holds its credit until then. A
+  `nx_producer_submit` that ends with `NX_ERROR_CANCELLED` or `NX_ERROR_DEADLINE` submitted
+  nothing, and the host MAY submit the batch again. A `nx_producer_rejoin` that ends either way
+  leaves the submission with the producer, and the host MUST NOT submit its batch again. It MUST
+  NOT treat `NX_SUBMISSION_PROCESSING_FAILED` or `NX_SUBMISSION_OUTCOME_UNKNOWN` as proof that the
+  batch had no effect, and replays such a batch only when its effects are idempotent.
+- **B-15.** A host MUST settle a delivery with `nx_delivery_ack`, `nx_delivery_retry`, or
+  `nx_delivery_reject`; releasing a delivery never acknowledges it. It MUST key its effects by the
+  delivery's identity, since a retried, timed-out, or revoked attempt comes again with a new
+  reference, and after `NX_ERROR_UNCERTAIN` from a settlement it MUST treat the delivery as possibly
+  settled. It MUST release every `nx_delivery` and `nx_batch` reference exactly once, MAY release
+  one on any thread, and MUST NOT use a borrowed stream or value after the reference it was read
+  from is released.
+- **B-16.** A host MUST treat `NX_ERROR_INTERRUPTED` from `nx_consumer_next` as a gap: no delivery
+  read before it can be settled, and what they carried is delivered again. It MUST treat
+  `NX_ERROR_REOPEN_REQUIRED` as the end of the handle, read why with the handle's reopen reason,
+  and open a new one only after checking the endpoint it now expects.
 
 ## Required State Machines
 
@@ -815,13 +847,14 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
 | K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | P-1 to P-8 | Every scenario of `client_ingestors.feature` and of `client_ingestor_process_faults.feature`, including the socket loss, full restart, relocation, and forwarding node death cases retaining one producer; `a_lost_exchange_leaves_sent_batches_unknown_and_restores_the_producer`, `a_batch_waiting_for_admission_when_the_session_ends_is_definitely_unsent`, `a_new_domain_generation_requires_a_new_producer_open`, and `closing_a_producer_during_restoration_releases_its_late_open` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
-| E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
+| E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, `a_read_whose_caller_stopped_waiting_is_taken_over_by_the_next_read`, `a_close_whose_caller_stopped_waiting_still_releases_the_attachment`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 | B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
 | B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
 | B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby |
+| B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
 | P-1 to P-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
 ### Executable Examples
@@ -842,7 +875,10 @@ are not UUIDv7, which E-1 allows only for reads.
 | `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
 
 Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches,
-reads the state and the first tick of the generation the scenario starts, and detaches.
+reads the state and the first tick of the generation the scenario starts, and detaches. Run with the
+`io` argument, it opens a producer and a consumer, builds typed batches column by column, reads
+their output one level at a time, and retries, rejects, and acknowledges it across a session the
+scenario cuts.
 
 `just test-client-conformance` builds every probe and runs it against one- and three-node clusters;
 [`tests/client-conformance-ledger.md`](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
@@ -890,8 +926,10 @@ A client built on this protocol MUST NOT tell its users that:
 - a cancelled or timed-out command did nothing, unless the server reported it cancelled before
   admission;
 - an uncertain command failed, or succeeded, before its own outcome was recovered;
-- rows arrive in Arrow, or in any encoding other than typed Row frames, or that a columnar form
-  exists;
+- a subscription's rows arrive in Arrow, or in any encoding other than typed Row frames, or that a
+  columnar form of them exists;
+- releasing, reading, or decoding a delivery acknowledged it, or that an acknowledgement whose
+  answer was lost was not applied;
 - a session, its subscriptions, its clock attachments, or its producers survive the loss of its
   connection;
 - a submitted batch was delivered exactly once, or that a batch whose outcome is unknown or failed

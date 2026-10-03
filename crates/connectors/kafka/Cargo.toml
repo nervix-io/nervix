@@ -33,4 +33,3 @@ rdkafka = { workspace = true, features = [
 ] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-triomphe = { workspace = true }

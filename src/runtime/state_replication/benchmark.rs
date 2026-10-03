@@ -1,12 +1,15 @@
 //! Opaque drivers for measuring runtime-state replication: a Kafka offset commit its replica
-//! acknowledges, and the check a replica makes before it installs a branch checkpoint.
+//! acknowledges, the check a replica makes before it installs a branch checkpoint, and the round a
+//! replica makes to catch up the branch states of an entity it replicates.
 //!
 //! This module only exists with the `benchmarks` feature. Its public surface deliberately exposes
 //! benchmark operations instead of Nervix runtime carriers, placements or stores.
 
+use nervix_interconnect::BranchCheckpointCursor;
 use nervix_models::{ClusterNodeName, DomainName, DomainNodeRef, ModelKind, ModelName, Timestamp};
+use nervix_primitives::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use super::*;
+use super::{replica_catch_up::StateOwner, *};
 use crate::runtime_schema::RuntimeValue;
 
 const TOPIC: &str = "orders";
@@ -20,6 +23,7 @@ pub struct StateReplicationBenchmark {
     replica: ClusterNodeName,
     next_offset: i64,
     branch_checkpoints: Vec<RuntimeStatePlacement>,
+    lifecycle: Arc<ReplicatedBranchLifecycle>,
 }
 
 impl StateReplicationBenchmark {
@@ -106,8 +110,9 @@ impl StateReplicationBenchmark {
             payload: encode_branch_lru_snapshot(&entries)
                 .assured("the benchmark branch lifecycle encodes"),
         };
+        let replicated = runtime.replicated_branch_lifecycle(&branch_lru);
         runtime
-            .install_replica_branch_lru_snapshot(&branch_lru, lifecycle)
+            .install_replica_branch_lru_snapshot(&branch_lru, &replicated, lifecycle)
             .assured("the benchmark branch lifecycle installs");
         Self {
             runtime,
@@ -116,6 +121,7 @@ impl StateReplicationBenchmark {
             replica,
             next_offset: 1,
             branch_checkpoints,
+            lifecycle: replicated,
         }
     }
 
@@ -163,8 +169,8 @@ impl StateReplicationBenchmark {
         let mut named = 0_usize;
         for placement in &self.branch_checkpoints {
             let current = self
-                .runtime
-                .replica_branch_is_current(placement)
+                .lifecycle
+                .names(placement.branch_key.as_ref())
                 .assured("the benchmark branch lifecycle decodes");
             if current {
                 named = named
@@ -173,5 +179,163 @@ impl StateReplicationBenchmark {
             }
         }
         named
+    }
+}
+
+/// An owner and a replica of one deduplicator whose branch lifecycle names a number of branches,
+/// with the replica already holding every checkpoint the owner holds: a replica's steady state while
+/// no branch changes.
+pub struct ReplicaCatchUpBenchmark {
+    replica: Runtime,
+    owner: InProcessStateOwner,
+    branch_lru: RuntimeStatePlacement,
+    lifecycle: Arc<ReplicatedBranchLifecycle>,
+    checkpoints: ReplicaBranchCheckpoints,
+}
+
+/// An owner runtime that a replica reaches in the same process, counting the requests it answers.
+struct InProcessStateOwner {
+    runtime: Runtime,
+    node: ClusterNodeName,
+    requests: AtomicUsize,
+}
+
+impl StateOwner for InProcessStateOwner {
+    fn node(&self) -> &ClusterNodeName {
+        &self.node
+    }
+
+    async fn checkpoint_after(
+        &self,
+        placement: &RuntimeStatePlacement,
+        after_lsm: Option<u64>,
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
+        self.requests.fetch_add(1, AtomicOrdering::Relaxed);
+        self.runtime
+            .handle_state_sync_request(placement, after_lsm)
+            .await
+    }
+
+    async fn checkpoint_listing(
+        &self,
+        lifecycle: &RuntimeStatePlacement,
+        after: Option<BranchCheckpointCursor>,
+    ) -> error_stack::Result<OwnerCheckpointListing, StateReplicationError> {
+        self.requests.fetch_add(1, AtomicOrdering::Relaxed);
+        Ok(self.runtime.branch_checkpoint_listing(lifecycle, after))
+    }
+}
+
+impl ReplicaCatchUpBenchmark {
+    /// An owner holding `branches` deduplicator branch states and the lifecycle naming them, and a
+    /// replica holding that lifecycle and a copy of every one of those states.
+    pub fn new(branches: usize) -> Self {
+        let domain = DomainName::parse("benchmark").assured("the benchmark domain name is valid");
+        let owner_node =
+            ClusterNodeName::parse("node-1").assured("the benchmark node name is valid");
+        let deduplicator =
+            ModelName::parse("dedup").assured("the benchmark deduplicator name is valid");
+        let owner = Runtime::new();
+        let replica = Runtime::new();
+        let identity = DomainNodeRef::node_in(
+            domain.clone(),
+            ModelKind::Deduplicator,
+            deduplicator.clone(),
+        );
+        for runtime in [&owner, &replica] {
+            runtime.publish_state_assignment(
+                identity.clone(),
+                ScheduledStateAssignment {
+                    identity: ScheduledStateIdentity {
+                        schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                        wasm_state_generations: None,
+                    },
+                    checkpoint_owners: None,
+                },
+            );
+        }
+        let branch_lru = owner
+            .state_placement(
+                &domain,
+                RuntimeStateKind::BranchLru,
+                ModelKind::Deduplicator,
+                deduplicator.clone(),
+                None,
+            )
+            .assured("the published identity places the branch lifecycle");
+        let tenant = FieldName::parse("tenant").assured("the benchmark branch field is valid");
+        let mut entries = Vec::with_capacity(branches);
+        for branch in 0..branches {
+            let key = BranchKey::from_fields([(
+                tenant.clone(),
+                RuntimeValue::String(format!("tenant-{branch}")),
+            )])
+            .assured("a benchmark branch key names one field");
+            let placement = owner
+                .state_placement(
+                    &domain,
+                    RuntimeStateKind::Deduplicator,
+                    ModelKind::Deduplicator,
+                    deduplicator.clone(),
+                    Some(key.clone()),
+                )
+                .assured("the published identity places the branch state");
+            let state = owner
+                .replicated_deduplicator_state(placement.clone())
+                .assured("an empty deduplicator state initializes");
+            let checkpoint = state
+                .latest_snapshot()
+                .assured("an empty deduplicator state encodes");
+            replica.hold_passive_state_replica_snapshot(&placement, checkpoint);
+            entries.push(BranchInstanceSnapshotEntry {
+                key: Some(key),
+                last_ingestion: Timestamp::from_unix_nanos(1),
+                incarnation: 1,
+            });
+        }
+        let lifecycle_snapshot = PersistedRuntimeStateEntry {
+            lsm: 1,
+            payload: encode_branch_lru_snapshot(&entries)
+                .assured("the benchmark branch lifecycle encodes"),
+        };
+        owner
+            .replicated_branch_lifecycle(&branch_lru)
+            .publish(lifecycle_snapshot.clone());
+        let lifecycle = replica.replicated_branch_lifecycle(&branch_lru);
+        replica
+            .install_replica_branch_lru_snapshot(&branch_lru, &lifecycle, lifecycle_snapshot)
+            .assured("the benchmark branch lifecycle installs");
+        Self {
+            replica,
+            owner: InProcessStateOwner {
+                runtime: owner,
+                node: owner_node,
+                requests: AtomicUsize::new(0),
+            },
+            branch_lru,
+            lifecycle,
+            checkpoints: ReplicaBranchCheckpoints::default(),
+        }
+    }
+
+    /// One round in which the replica catches up the deduplicator's branch states. Returns how many
+    /// requests the round sent to the owner. The first round learns the owner's catalog and reads
+    /// what the replica holds of every branch; every later one finds that no branch changed.
+    pub async fn catch_up_once(&mut self) -> usize {
+        let before = self.owner.requests.load(AtomicOrdering::Relaxed);
+        self.replica
+            .catch_up_replica_branches(
+                &self.owner,
+                &self.branch_lru,
+                &self.lifecycle,
+                &mut self.checkpoints,
+                Some(RuntimeStateKind::Deduplicator),
+            )
+            .await;
+        self.owner
+            .requests
+            .load(AtomicOrdering::Relaxed)
+            .checked_sub(before)
+            .assured("the request count only rises")
     }
 }

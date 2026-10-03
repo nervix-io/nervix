@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 #[cfg(test)]
@@ -12,11 +12,13 @@ use nervix_models::ClusterNodeName;
 use nervix_models::KafkaPartitionSchedule;
 use nervix_primitives::{
     publication::ArcSwap,
-    sync::atomic::{AtomicI64, AtomicU64, Ordering},
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    },
     time::{Instant, timeout_at},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
@@ -647,8 +649,7 @@ mod tests {
     use ahash::HashMap;
     use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
-    use nervix_primitives::sync::oneshot;
-    use triomphe::Arc;
+    use nervix_primitives::sync::{Arc, oneshot};
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
@@ -747,10 +748,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// The owner commits a recorded partition's offset and checks its replica quorum while
         /// another thread holds the assignment barrier, which that thread releases only after both

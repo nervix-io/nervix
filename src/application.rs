@@ -18,11 +18,19 @@
 //! Separating the use cases from the adapters is a later move; every piece it is split into
 //! inherits the contract above.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "session, transaction, authentication and resource operations belong to the \
+                  control plane and its edges"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -79,7 +87,6 @@ use nervix_interconnect::{
     MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerResolver,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     RemoteOperationFailure, RemoteOperationSubject, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
-    StateSyncRequest as RemoteStateSyncRequest, StateSyncResponse as RemoteStateSyncResponse,
     StreamHandlerError, StreamingResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
@@ -89,7 +96,12 @@ use nervix_models::{
     ClusterNodeName, DomainName, DomainStatus, DurationTextError, ModelKind, NodeEndpoint,
     NodeServiceUrl, UserName, parse_duration_text,
 };
-use nervix_primitives::{collections::DashMap, net::TcpListener, sync::broadcast, time::sleep};
+use nervix_primitives::{
+    collections::DashMap,
+    net::TcpListener,
+    sync::{StdArc, broadcast},
+    time::sleep,
+};
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use scheduling::{
@@ -162,6 +174,7 @@ pub(crate) use session::{ClockDeliveryOrder, NextClockFrame};
 mod session_service;
 mod shutdown;
 mod startup;
+mod state_replication_requests;
 mod subscription;
 mod termination_signals;
 #[cfg(test)]
@@ -174,6 +187,7 @@ mod wasm_state_reset;
 mod web_console;
 
 pub use command_execution::CommandExecutionPolicy;
+use nervix_primitives::sync::Arc;
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
 pub use shutdown::{
@@ -182,7 +196,6 @@ pub use shutdown::{
 };
 use tonic::transport::Server;
 use tracing::{Instrument as _, debug, error, info, warn};
-use triomphe::Arc;
 use typed_builder::TypedBuilder;
 
 use crate::{
@@ -1985,51 +1998,7 @@ impl Application {
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let state_sync_service = service.clone();
-        interconnect
-            .register_handler::<RemoteStateSyncRequest, _, _>(move |_context, request| {
-                let service = state_sync_service.clone();
-                async move {
-                    let subject = RemoteOperationSubject::state(&request.placement);
-                    let placement =
-                        match crate::runtime::RuntimeStatePlacement::from_remote(request.placement)
-                        {
-                            Ok(placement) => placement,
-                            Err(reason) => {
-                                return RemoteStateSyncResponse {
-                                    result: Err(RemoteOperationFailure::failed(
-                                        subject,
-                                        reason.to_string(),
-                                    )),
-                                };
-                            }
-                        };
-                    if !service
-                        .inner
-                        .runtime
-                        .runtime_state_placement_is_assigned_locally(&placement)
-                    {
-                        return RemoteStateSyncResponse {
-                            result: Err(RemoteOperationFailure::rejected(subject)),
-                        };
-                    }
-                    let snapshot = service
-                        .inner
-                        .runtime
-                        .handle_state_sync_request(&placement, request.after_lsm)
-                        .await
-                        .map_err(|error| error.current_context().as_remote_failure(subject));
-                    RemoteStateSyncResponse {
-                        result: snapshot.map(|snapshot| {
-                            snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
-                                lsm: snapshot.lsm,
-                                payload: snapshot.payload,
-                            })
-                        }),
-                    }
-                }
-            })
-            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service.register_state_replication_interconnect_handlers()?;
 
         let describe_relay_service = service.clone();
         interconnect

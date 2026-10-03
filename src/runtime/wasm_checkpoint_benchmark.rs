@@ -11,8 +11,8 @@ use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
     DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
 };
+use nervix_primitives::sync::Arc;
 use tempfile::TempDir;
-use triomphe::Arc;
 
 use super::{
     BranchKey, ReplicatedWasmProcessorState, RuntimeState, RuntimeStatePlacement,
